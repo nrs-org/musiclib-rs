@@ -51,6 +51,47 @@ impl BackendMatcherEvaluator for CompositeEvaluator {
     }
 }
 
+/// Heuristic cost of evaluating a `ChildMatcherExpr` once (lower = cheaper).
+/// Used to sort `All`/`Any` sub-expressions so cheap short-circuit candidates run first.
+fn expr_cost(expr: &ChildMatcherExpr) -> u32 {
+    match expr {
+        ChildMatcherExpr::Matcher(m) => match m {
+            // No fetch, O(1)
+            ChildMatcher::Always => 0,
+            ChildMatcher::Relation(_) => 1,
+            // No fetch, cheap field access
+            ChildMatcher::EntryData(EntryDataMatcher::EntryType(_)) => 2,
+            ChildMatcher::EntryData(EntryDataMatcher::HasSource(_)) => 2,
+            // No fetch, regex match
+            ChildMatcher::EntryData(EntryDataMatcher::NameRegex(_)) => 5,
+            // Requires fetching the entry
+            ChildMatcher::EntryData(_) => 20,
+            // Requires fetching the entry AND recursively iterating its children
+            ChildMatcher::ChildrenSatisfy { .. } => 100,
+        },
+        // Propagate: Not doesn't change cost, All/Any cost is their cheapest child
+        // (because short-circuit evaluation means we may only pay that minimum cost).
+        ChildMatcherExpr::Not(inner) => expr_cost(inner),
+        ChildMatcherExpr::All(exprs) | ChildMatcherExpr::Any(exprs) => {
+            exprs.iter().map(expr_cost).min().unwrap_or(0)
+        }
+    }
+}
+
+/// Recursively sort `All`/`Any` sub-expressions by ascending cost in-place.
+fn sort_by_cost(expr: &mut ChildMatcherExpr) {
+    match expr {
+        ChildMatcherExpr::Not(inner) => sort_by_cost(inner),
+        ChildMatcherExpr::All(exprs) | ChildMatcherExpr::Any(exprs) => {
+            for e in exprs.iter_mut() {
+                sort_by_cost(e);
+            }
+            exprs.sort_by_key(expr_cost);
+        }
+        _ => {}
+    }
+}
+
 /// Returns `false` when it can prove no item at `index` or beyond can ever match `expr`.
 /// Conservative: unknown/fetch-required matchers return `true`.
 fn can_future_items_match(expr: &ChildMatcherExpr, index: usize) -> bool {
@@ -124,9 +165,13 @@ pub fn filter_children(
     provider: Arc<dyn FetchProvider>,
     backend_evaluator: Arc<dyn BackendMatcherEvaluator>,
 ) -> CachedChildSource<Arc<EntryFetchOptions>> {
+    let mut rules = options.child_rules.clone();
+    for rule in &mut rules {
+        sort_by_cost(&mut rule.matcher);
+    }
     let filtering = FilteringChildSource {
         cursor: source.owned_cursor(),
-        rules: options.child_rules.clone(),
+        rules,
         provider,
         backend_evaluator,
         index: 0,
