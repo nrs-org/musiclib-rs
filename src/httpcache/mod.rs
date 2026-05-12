@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::http::{BodyExtractor, Method, Request, Response};
 use crate::providers::types::{
-    CanonicalizeResult, EntityResult, EntryFetchOptions, EntryType, Error, ExternalSources,
+    CanonicalizeResult, EntityResult, EntryFetchOptions, EntryType, ExternalSources,
 };
 
 pub use db::DbHttpCache;
@@ -60,25 +60,3 @@ pub trait HttpCache: Send + Sync {
         self.set(key.into_owned(), res).await
     }
 }
-
-#[async_trait]
-pub trait CanonicalizeProvider: Send + Sync {
-    async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult>;
-}
-
-#[async_trait]
-pub trait FetchProvider: CanonicalizeProvider {
-    async fn fetch_entry(
-        &self,
-        identifier: &str,
-        fetch_options: EntryFetchOptions,
-    ) -> Result<EntityResult, Error>;
-    async fn resolve_external_source(
-        &self,
-        entry_type: EntryType,
-        sources: &ExternalSources,
-    ) -> Result<Option<ExternalSources>, Error>;
-}
-
-#[async_trait]
-pub trait RawFetchProvider: CanonicalizeProvider {}
