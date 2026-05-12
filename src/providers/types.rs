@@ -3,7 +3,6 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use async_trait::async_trait;
 use time::OffsetDateTime;
 
 use crate::providers::backends;
@@ -131,19 +130,4 @@ pub struct EntryFetchOptions {
     fetch_artist_discography: bool,
     youtube: backends::youtube_api::EntryFetchOptions,
     // musicbrainz: backends::musicbrainz::EntryFetchOptions,
-}
-
-#[async_trait]
-pub trait Provider: Send + Sync {
-    async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult>;
-    async fn fetch_entry(
-        &self,
-        identifier: &str,
-        fetch_options: EntryFetchOptions,
-    ) -> Result<EntityResult, Error>;
-    async fn resolve_external_source(
-        &self,
-        entry_type: EntryType,
-        sources: &ExternalSources,
-    ) -> Result<Option<ExternalSources>, Error>;
 }
