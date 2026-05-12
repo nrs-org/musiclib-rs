@@ -1,0 +1,53 @@
+{
+  "kind": "youtube#playlistListResponse",
+  "etag": "hQBWTURTy5VISdOEX2KUF0LawKo",
+  "pageInfo": {
+    "totalResults": 1,
+    "resultsPerPage": 5
+  },
+  "items": [
+    {
+      "kind": "youtube#playlist",
+      "etag": "qvZIhU31ktLm6pJxvOqBiwRpXQo",
+      "id": "PLZ34fLWik_iBK39rTWRAs_G93pnUW3K-7",
+      "snippet": {
+        "publishedAt": "2021-06-27T23:12:09.666203Z",
+        "channelId": "UCqm3BQLlJfvkTsX_hvm0UmA",
+        "title": "Original song🐏",
+        "description": "",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/2wClKY6mmyU/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/2wClKY6mmyU/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/2wClKY6mmyU/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/2wClKY6mmyU/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/2wClKY6mmyU/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "Watame Ch. 角巻わため",
+        "localized": {
+          "title": "Original song🐏",
+          "description": ""
+        }
+      }
+    }
+  ]
+}

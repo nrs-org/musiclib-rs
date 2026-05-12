@@ -1,0 +1,5 @@
+/target
+.direnv
+.envrc
+.pre-commit-config.yaml
+.env

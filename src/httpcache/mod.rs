@@ -1,0 +1,59 @@
+use std::{borrow::Cow, sync::Arc};
+
+use async_trait::async_trait;
+
+use crate::http::{BodyExtractor, Method, Request, Response};
+
+pub use db::DbHttpCache;
+pub use memory::MemoryHttpCache;
+
+mod db;
+mod memory;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Database error: {0}")]
+    Database(#[from] db::Error),
+    #[error("Error extracting response body: {0}")]
+    BodyExtract(#[from] crate::http::BodyExtractError),
+    #[error("Reserialization error: {0}")]
+    Reserialization(#[from] erased_serde::Error),
+}
+
+#[async_trait]
+pub trait HttpCache: Send + Sync {
+    async fn set(&self, key: String, value: Arc<Response>) -> Result<(), Error>;
+    async fn get(
+        &self,
+        key: &str,
+        extractor: &dyn BodyExtractor,
+    ) -> Result<Option<Arc<Response>>, Error>;
+
+    fn default_cache_key(&self, method: &Method, url: &str) -> String {
+        format!("{}:{}", method, url)
+    }
+
+    async fn get_req(
+        &self,
+        req: &Request,
+        extractor: &dyn BodyExtractor,
+    ) -> Result<Option<Arc<Response>>, Error> {
+        let key = req
+            .cache_key
+            .as_ref()
+            .map(|k| Cow::Borrowed(k.as_str()))
+            .unwrap_or_else(|| Cow::Owned(self.default_cache_key(&req.method, &req.url)));
+
+        self.get(key.as_ref(), extractor).await
+    }
+
+    async fn set_req(&self, req: &Request, res: Arc<Response>) -> Result<(), Error> {
+        let key = req
+            .cache_key
+            .as_ref()
+            .map(|k| Cow::Borrowed(k.as_str()))
+            .unwrap_or_else(|| Cow::Owned(self.default_cache_key(&req.method, &req.url)));
+
+        self.set(key.into_owned(), res).await
+    }
+}

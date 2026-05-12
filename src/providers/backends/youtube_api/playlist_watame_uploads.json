@@ -1,0 +1,54 @@
+{
+  "kind": "youtube#playlistListResponse",
+  "etag": "3koLY7UdlZMRvhoIS9lbjynTGWk",
+  "pageInfo": {
+    "totalResults": 1,
+    "resultsPerPage": 5
+  },
+  "items": [
+    {
+      "kind": "youtube#playlist",
+      "etag": "ccNNtxaufarF5mVuQxJpgw3b1Jo",
+      "id": "UUqm3BQLlJfvkTsX_hvm0UmA",
+      "snippet": {
+        "publishedAt": "2020-02-23T08:00:00Z",
+        "channelId": "UCqm3BQLlJfvkTsX_hvm0UmA",
+        "title": "Uploads from Watame Ch. 角巻わため",
+        "description": "",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/Fn1x0ifIWFU/default_live.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/Fn1x0ifIWFU/mqdefault_live.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/Fn1x0ifIWFU/hqdefault_live.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/Fn1x0ifIWFU/sddefault_live.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/Fn1x0ifIWFU/maxresdefault_live.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "Watame Ch. 角巻わため",
+        "defaultLanguage": "en",
+        "localized": {
+          "title": "Uploads from Watame Ch. 角巻わため",
+          "description": ""
+        }
+      }
+    }
+  ]
+}
