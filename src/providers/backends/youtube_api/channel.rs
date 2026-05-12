@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::future::Future;
 
 use crate::providers::{
     backends::{
@@ -37,7 +38,7 @@ struct ChannelSnippet {
     extra: ExtraJSON,
 }
 
-const PARTS: &'static str = "snippet";
+const PARTS: &str = "snippet";
 
 fn channel_endpoint_and_params(
     channel_kind: ChannelKind,
@@ -54,36 +55,57 @@ fn channel_endpoint_and_params(
 pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResult, Error> {
     let channel_match = match_channel_url(url).expect("Invalid YouTube channel URL");
     let url = channel_url(channel_match.kind, channel_match.id);
+    let result = get_channel_raw::<ChannelListResponse, _, _, Error, _>(
+        client,
+        url.as_str(),
+        move |c, kind, id| {
+            let c = &c.items[0];
+            let url = channel_url(kind, id);
+            let mut source_set = HashSet::from([url.to_string()]);
+            if let Some(custom_url) = &c.snippet.custom_url {
+                source_set.insert(channel_url(ChannelKind::Custom, custom_url));
+            }
+            let result = Ok(EntityResult {
+                release_date: None,
+                sources: [(SOURCE.into(), source_set)].into(),
+                extra: serde_json::to_value(c).unwrap_or_default(),
+                specific_data: EntrySpecificData::Artist,
+                children: Vec::new(),
+                aliases: vec![Alias {
+                    name: c.snippet.title.clone(),
+                    source: SOURCE.into(),
+                    primary: true,
+                    ..Default::default()
+                }],
+            });
+            async move { result }
+        },
+    )
+    .await?;
+    Ok(result)
+}
+
+pub async fn get_channel_raw<T, F, R, E, FR>(
+    client: &YoutubeClient,
+    url: &str,
+    callback: F,
+) -> Result<R, E>
+where
+    T: std::any::Any + Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+    F: FnOnce(&T, ChannelKind, &str) -> FR,
+    E: From<Error> + Send + 'static,
+    FR: Future<Output = Result<R, E>> + Send + 'static,
+{
+    let channel_match = match_channel_url(url).expect("Invalid YouTube channel URL");
     let (endpoint, params) = channel_endpoint_and_params(channel_match.kind, channel_match.id);
-    let result = client
-        .get::<ChannelListResponse, _, _, _>(
+    client
+        .get::<T, _, _, _, _>(
             endpoint,
             &[
                 (params[0].0, params[0].1.as_str()),
                 (params[1].0, params[1].1.as_str()),
             ],
-            move |c| {
-                let c = &c.items[0];
-                let mut source_set = HashSet::from([url.to_string()]);
-                if let Some(custom_url) = &c.snippet.custom_url {
-                    source_set.insert(channel_url(ChannelKind::Custom, custom_url));
-                }
-                let result = Ok(EntityResult {
-                    release_date: None,
-                    sources: [(SOURCE.into(), source_set)].into(),
-                    extra: serde_json::to_value(c).unwrap_or_default(),
-                    specific_data: EntrySpecificData::Artist,
-                    children: Vec::new(),
-                    aliases: vec![Alias {
-                        name: c.snippet.title.clone(),
-                        source: SOURCE.into(),
-                        primary: true,
-                        ..Default::default()
-                    }],
-                });
-                async move { result }
-            },
+            |value| callback(value, channel_match.kind, channel_match.id),
         )
-        .await?;
-    Ok(result)
+        .await
 }

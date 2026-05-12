@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 
-use crate::http::{BodyExtractor, Method, Response};
+use crate::http::{BodyExtractor, Response};
 
 #[derive(Default)]
 pub struct MemoryHttpCache {

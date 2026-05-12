@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::future::Future;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::providers::{
@@ -12,7 +13,7 @@ use crate::providers::{
             client::YoutubeClient,
         },
     },
-    std_values::{StandardProviderKeys, StandardRoleNames},
+    std_values::StandardRoleNames,
     types::{Alias, ChildRef, Contribution, EntityResult, EntrySpecificData, EntryType, Error},
 };
 
@@ -55,13 +56,10 @@ struct VideoContentDetails {
 fn parse_iso_duration_ms(duration: &str) -> Option<i64> {
     let mut total_ms = 0;
     let mut num_buf = String::new();
-    let mut in_time = false;
 
     for c in duration.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             num_buf.push(c);
-        } else if c == 'T' {
-            in_time = true;
         } else if !num_buf.is_empty() {
             let num: i64 = num_buf.parse().ok()?;
             match c {
@@ -77,51 +75,63 @@ fn parse_iso_duration_ms(duration: &str) -> Option<i64> {
     Some(total_ms)
 }
 
-const PARTS: &'static str = "snippet,contentDetails";
+const PARTS: &str = "snippet,contentDetails";
+
+pub async fn get_video_raw<T, F, R, E, FR>(
+    client: &YoutubeClient,
+    url: &str,
+    callback: F,
+) -> Result<R, E>
+where
+    T: std::any::Any + Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+    F: FnOnce(&T, &str) -> FR,
+    E: From<Error> + Send + 'static,
+    FR: Future<Output = Result<R, E>> + Send + 'static,
+{
+    let id = match_video_url(url).expect("Invalid YouTube URL");
+    client
+        .get::<T, _, _, _, _>("videos", &[("part", PARTS), ("id", id)], |value| {
+            callback(value, id)
+        })
+        .await
+}
 
 pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult, Error> {
-    let id = match_video_url(url).expect("Invalid YouTube URL");
-    let url = video_url(&id);
-    let result = client
-        .get::<VideoListResponse, _, _, _>(
-            "videos",
-            &[("part", "snippet,contentDetails"), ("id", id)],
-            move |v| {
-                let v = &v.items[0];
-                let release_date = OffsetDateTime::parse(&v.snippet.published_at, &Rfc3339).ok();
-                let duration_ms = parse_iso_duration_ms(&v.content_details.duration);
-                let result = Ok(EntityResult {
-                    release_date,
-                    sources: [(SOURCE.into(), HashSet::from([url.to_string()]))].into(),
-                    extra: serde_json::to_value(v).unwrap_or_default(),
-                    specific_data: EntrySpecificData::Track {
-                        duration_ms,
-                        positions: Default::default(),
-                    },
-                    children: vec![ChildRef {
-                        entry_type: EntryType::Artist,
-                        sources: [(SOURCE.into(), HashSet::from([v.snippet.channel_id.clone()]))]
-                            .into(),
-                        name: Some(v.snippet.channel_title.clone()),
-                        contributions: vec![Contribution {
-                            role: StandardRoleNames::UPLOADER.into(),
-                            main_artist: true,
-                            source: SOURCE.into(),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    }],
-                    aliases: vec![Alias {
-                        name: v.snippet.title.clone(),
-                        source: SOURCE.into(),
-                        primary: true,
-                        ..Default::default()
-                    }],
-                });
-                async move { result }
+    let result = get_video_raw::<VideoListResponse, _, _, Error, _>(client, url, move |v, id| {
+        let v = &v.items[0];
+        let url = video_url(id);
+        let release_date = OffsetDateTime::parse(&v.snippet.published_at, &Rfc3339).ok();
+        let duration_ms = parse_iso_duration_ms(&v.content_details.duration);
+        let result = Ok(EntityResult {
+            release_date,
+            sources: [(SOURCE.into(), HashSet::from([url]))].into(),
+            extra: serde_json::to_value(v).unwrap_or_default(),
+            specific_data: EntrySpecificData::Track {
+                duration_ms,
+                positions: Default::default(),
             },
-        )
-        .await?;
+            children: vec![ChildRef {
+                entry_type: EntryType::Artist,
+                sources: [(SOURCE.into(), HashSet::from([v.snippet.channel_id.clone()]))].into(),
+                name: Some(v.snippet.channel_title.clone()),
+                contributions: vec![Contribution {
+                    role: StandardRoleNames::UPLOADER.into(),
+                    main_artist: true,
+                    source: SOURCE.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            aliases: vec![Alias {
+                name: v.snippet.title.clone(),
+                source: SOURCE.into(),
+                primary: true,
+                ..Default::default()
+            }],
+        });
+        async move { result }
+    })
+    .await?;
     Ok(result)
 }
 
@@ -136,7 +146,7 @@ mod tests {
             backends::youtube_api::{
                 SOURCE,
                 client::YoutubeClient,
-                video::{PARTS, VideoListResponse, get_video},
+                video::{VideoListResponse, get_video},
             },
             std_values::StandardRoleNames,
             types::{EntrySpecificData, EntryType},
@@ -153,7 +163,7 @@ mod tests {
     }
 
     fn video_api_url(id: &str) -> String {
-        YoutubeClient::build_url("videos", &[("part", PARTS), ("id", id)])
+        YoutubeClient::build_url("videos", &[("part", super::PARTS), ("id", id)])
     }
 
     #[tokio::test]

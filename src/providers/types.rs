@@ -55,18 +55,13 @@ pub enum EntrySpecificData {
 }
 
 // type of entry (artist, release group, release, track)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum EntryType {
     Artist,
     ReleaseGroup,
     Release,
+    #[default]
     Track,
-}
-
-impl Default for EntryType {
-    fn default() -> Self {
-        EntryType::Track
-    }
 }
 
 // entry alias, with optional locale and extra metadata
@@ -129,6 +124,7 @@ pub enum Error {
     MissingCredentials(String),
 }
 
+#[derive(Default)]
 pub struct EntryFetchOptions {
     // To avoid infinite fetching, artist might be added to the database without their discography.
     // Users must manually trigger this to fetch the discography

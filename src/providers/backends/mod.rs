@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 pub mod youtube_api;
 
 pub fn build_url(url: String, params: &[(&str, &str)]) -> String {
@@ -12,7 +10,7 @@ pub fn build_url(url: String, params: &[(&str, &str)]) -> String {
         } else {
             url.push('&');
         }
-        url.push_str(&format!("{}={}", k, urlencoding::encode(&v)));
+        url.push_str(&format!("{}={}", k, urlencoding::encode(v)));
     }
     url
 }

@@ -1,44 +1,32 @@
 {
-  "kind": "youtube#videoListResponse",
   "etag": "f4cbIIjHAx5kw7hIdtWt-0SzIBI",
   "items": [
     {
-      "kind": "youtube#video",
+      "contentDetails": {
+        "caption": "false",
+        "contentRating": {},
+        "definition": "hd",
+        "dimension": "2d",
+        "duration": "PT2M12S",
+        "licensedContent": true,
+        "projection": "rectangular"
+      },
       "etag": "0nhG7voFnfTZaV5SVuemRDwqSYk",
       "id": "ahFZQ_lDoQ4",
+      "kind": "youtube#video",
       "snippet": {
-        "publishedAt": "2024-12-29T13:00:03Z",
+        "categoryId": "10",
         "channelId": "UCqm3BQLlJfvkTsX_hvm0UmA",
-        "title": "角巻わため 新EP『WHAT A MESS!!!』クロスフェード",
-        "description": "🎉 角巻わため 新EP『WHAT A MESS!!!』販売開始 🎉\n受注販売期間💿2025.02.10 17:59 まで！\n\n🐏円盤はこちら（特典グッズ付きCD）\nJP：https://shop.hololivepro.com/products/tsunomakiwatame_ep_whatamess\nEN：https://shop.hololivepro.com/en/products/tsunomakiwatame_ep_whatamess\n\n🐏サブスク配信はこちら\nDigital：https://cover.lnk.to/uotnFA\n※12月29日(Sun)24:00配信開始！\n\n------------------------\n『WHAT A MESS!!!』収録楽曲\n\n01. Shout now,sheep!!\n作詞：角巻わため\n作曲・編曲：ダルビッシュP\nChorus：白上フブキ、大神ミオ、獅白ぼたん、Anya Melfissa、IRyS、Hakos Baelz\n\n02. Revival\n作詞：角巻わため\n作曲・編曲：Junky\n\n03. WataAme Pop\n作詞・作曲：大槻政司\n編曲：小椋健司\n\n04. Our step\n作詞・作曲・編曲：遠藤信吾(Hifumi,inc.)\n\n#WHAT_A_MESS\n\n\nホロライブ所属、武道館を目指す怒涛の羊🐏\n角巻わため（Tsunomaki Watame）です！\n\n⇩配信情報などはXをチェック⇩\nhttps://x.com/tsunomakiwatame\n\n\n※ホロライブプロダクションから未成年の視聴者の方々へのお願い\n[カバー 未成年者の方々へ]で検索してお読みいただくか、下記リンクをご確認の上、お楽しみください。\nhttps://hololivepro.com/request-to-minors/",
-        "thumbnails": {
-          "default": {
-            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/default.jpg",
-            "width": 120,
-            "height": 90
-          },
-          "medium": {
-            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/mqdefault.jpg",
-            "width": 320,
-            "height": 180
-          },
-          "high": {
-            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/hqdefault.jpg",
-            "width": 480,
-            "height": 360
-          },
-          "standard": {
-            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/sddefault.jpg",
-            "width": 640,
-            "height": 480
-          },
-          "maxres": {
-            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/maxresdefault.jpg",
-            "width": 1280,
-            "height": 720
-          }
-        },
         "channelTitle": "Watame Ch. 角巻わため",
+        "defaultAudioLanguage": "ja",
+        "defaultLanguage": "ja",
+        "description": "🎉 角巻わため 新EP『WHAT A MESS!!!』販売開始 🎉\n受注販売期間💿2025.02.10 17:59 まで！\n\n🐏円盤はこちら（特典グッズ付きCD）\nJP：https://shop.hololivepro.com/products/tsunomakiwatame_ep_whatamess\nEN：https://shop.hololivepro.com/en/products/tsunomakiwatame_ep_whatamess\n\n🐏サブスク配信はこちら\nDigital：https://cover.lnk.to/uotnFA\n※12月29日(Sun)24:00配信開始！\n\n------------------------\n『WHAT A MESS!!!』収録楽曲\n\n01. Shout now,sheep!!\n作詞：角巻わため\n作曲・編曲：ダルビッシュP\nChorus：白上フブキ、大神ミオ、獅白ぼたん、Anya Melfissa、IRyS、Hakos Baelz\n\n02. Revival\n作詞：角巻わため\n作曲・編曲：Junky\n\n03. WataAme Pop\n作詞・作曲：大槻政司\n編曲：小椋健司\n\n04. Our step\n作詞・作曲・編曲：遠藤信吾(Hifumi,inc.)\n\n#WHAT_A_MESS\n\n\nホロライブ所属、武道館を目指す怒涛の羊🐏\n角巻わため（Tsunomaki Watame）です！\n\n⇩配信情報などはXをチェック⇩\nhttps://x.com/tsunomakiwatame\n\n\n※ホロライブプロダクションから未成年の視聴者の方々へのお願い\n[カバー 未成年者の方々へ]で検索してお読みいただくか、下記リンクをご確認の上、お楽しみください。\nhttps://hololivepro.com/request-to-minors/",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "description": "🎉 角巻わため 新EP『WHAT A MESS!!!』販売開始 🎉\n受注販売期間💿2025.02.10 17:59 まで！\n\n🐏円盤はこちら（特典グッズ付きCD）\nJP：https://shop.hololivepro.com/products/tsunomakiwatame_ep_whatamess\nEN：https://shop.hololivepro.com/en/products/tsunomakiwatame_ep_whatamess\n\n🐏サブスク配信はこちら\nDigital：https://cover.lnk.to/uotnFA\n※12月29日(Sun)24:00配信開始！\n\n------------------------\n『WHAT A MESS!!!』収録楽曲\n\n01. Shout now,sheep!!\n作詞：角巻わため\n作曲・編曲：ダルビッシュP\nChorus：白上フブキ、大神ミオ、獅白ぼたん、Anya Melfissa、IRyS、Hakos Baelz\n\n02. Revival\n作詞：角巻わため\n作曲・編曲：Junky\n\n03. WataAme Pop\n作詞・作曲：大槻政司\n編曲：小椋健司\n\n04. Our step\n作詞・作曲・編曲：遠藤信吾(Hifumi,inc.)\n\n#WHAT_A_MESS\n\n\nホロライブ所属、武道館を目指す怒涛の羊🐏\n角巻わため（Tsunomaki Watame）です！\n\n⇩配信情報などはXをチェック⇩\nhttps://x.com/tsunomakiwatame\n\n\n※ホロライブプロダクションから未成年の視聴者の方々へのお願い\n[カバー 未成年者の方々へ]で検索してお読みいただくか、下記リンクをご確認の上、お楽しみください。\nhttps://hololivepro.com/request-to-minors/",
+          "title": "角巻わため 新EP『WHAT A MESS!!!』クロスフェード"
+        },
+        "publishedAt": "2024-12-29T13:00:03Z",
         "tags": [
           "ホロライブ",
           "hololive",
@@ -86,28 +74,40 @@
           "魔乃アロエ",
           "尾丸ポルカ"
         ],
-        "categoryId": "10",
-        "liveBroadcastContent": "none",
-        "defaultLanguage": "ja",
-        "localized": {
-          "title": "角巻わため 新EP『WHAT A MESS!!!』クロスフェード",
-          "description": "🎉 角巻わため 新EP『WHAT A MESS!!!』販売開始 🎉\n受注販売期間💿2025.02.10 17:59 まで！\n\n🐏円盤はこちら（特典グッズ付きCD）\nJP：https://shop.hololivepro.com/products/tsunomakiwatame_ep_whatamess\nEN：https://shop.hololivepro.com/en/products/tsunomakiwatame_ep_whatamess\n\n🐏サブスク配信はこちら\nDigital：https://cover.lnk.to/uotnFA\n※12月29日(Sun)24:00配信開始！\n\n------------------------\n『WHAT A MESS!!!』収録楽曲\n\n01. Shout now,sheep!!\n作詞：角巻わため\n作曲・編曲：ダルビッシュP\nChorus：白上フブキ、大神ミオ、獅白ぼたん、Anya Melfissa、IRyS、Hakos Baelz\n\n02. Revival\n作詞：角巻わため\n作曲・編曲：Junky\n\n03. WataAme Pop\n作詞・作曲：大槻政司\n編曲：小椋健司\n\n04. Our step\n作詞・作曲・編曲：遠藤信吾(Hifumi,inc.)\n\n#WHAT_A_MESS\n\n\nホロライブ所属、武道館を目指す怒涛の羊🐏\n角巻わため（Tsunomaki Watame）です！\n\n⇩配信情報などはXをチェック⇩\nhttps://x.com/tsunomakiwatame\n\n\n※ホロライブプロダクションから未成年の視聴者の方々へのお願い\n[カバー 未成年者の方々へ]で検索してお読みいただくか、下記リンクをご確認の上、お楽しみください。\nhttps://hololivepro.com/request-to-minors/"
+        "thumbnails": {
+          "default": {
+            "height": 90,
+            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/default.jpg",
+            "width": 120
+          },
+          "high": {
+            "height": 360,
+            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/hqdefault.jpg",
+            "width": 480
+          },
+          "maxres": {
+            "height": 720,
+            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/maxresdefault.jpg",
+            "width": 1280
+          },
+          "medium": {
+            "height": 180,
+            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/mqdefault.jpg",
+            "width": 320
+          },
+          "standard": {
+            "height": 480,
+            "url": "https://i.ytimg.com/vi/ahFZQ_lDoQ4/sddefault.jpg",
+            "width": 640
+          }
         },
-        "defaultAudioLanguage": "ja"
-      },
-      "contentDetails": {
-        "duration": "PT2M12S",
-        "dimension": "2d",
-        "definition": "hd",
-        "caption": "false",
-        "licensedContent": true,
-        "contentRating": {},
-        "projection": "rectangular"
+        "title": "角巻わため 新EP『WHAT A MESS!!!』クロスフェード"
       }
     }
   ],
+  "kind": "youtube#videoListResponse",
   "pageInfo": {
-    "totalResults": 1,
-    "resultsPerPage": 1
+    "resultsPerPage": 1,
+    "totalResults": 1
   }
 }

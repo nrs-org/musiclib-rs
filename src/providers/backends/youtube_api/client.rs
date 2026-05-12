@@ -4,7 +4,7 @@ use http::{HeaderName, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    http::{HttpClient, Request, Response, default_http_client},
+    http::{HttpClient, Request, default_http_client},
     providers::{backends::build_url, types::Error},
 };
 
@@ -32,16 +32,17 @@ impl YoutubeClient {
         build_url(url, params)
     }
 
-    pub async fn get<T, F, R, FR>(
+    pub async fn get<T, F, R, E, FR>(
         &self,
         endpoint: &str,
         params: &[(&str, &str)],
         callback: F,
-    ) -> Result<R, Error>
+    ) -> Result<R, E>
     where
         T: Any + Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
         F: FnOnce(&T) -> FR,
-        FR: Future<Output = Result<R, Error>> + Send + 'static,
+        E: From<Error> + Send + 'static,
+        FR: Future<Output = Result<R, E>> + Send + 'static,
     {
         let url = Self::build_url(endpoint, params);
 
@@ -55,7 +56,8 @@ impl YoutubeClient {
                 )],
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(Error::from)?;
 
         let result = response.body.as_json::<T>().expect("should be T");
         callback(result).await

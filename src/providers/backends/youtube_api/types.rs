@@ -41,6 +41,7 @@ pub struct DiscographyFetchOptions {
     ytmusic: Option<YtMusicDiscographyFetchOptions>,
 }
 
+#[derive(Default)]
 pub struct EntryFetchOptions {
     discography: Option<DiscographyFetchOptions>,
 }

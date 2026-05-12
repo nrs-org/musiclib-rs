@@ -1,10 +1,3 @@
-mod http;
-mod httpcache;
-mod providers;
-
-#[cfg(test)]
-mod test_utils;
-
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::future::Future;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::providers::{
@@ -71,9 +72,53 @@ struct PlaylistItemResourceId {
     extra: ExtraJSON,
 }
 
-const PARTS: &'static str = "snippet";
-const PLAYLIST_ITEM_PARTS: &'static str = "snippet";
-const PLAYLIST_ITEMS_MAX_RESULTS: &'static str = "50";
+const PARTS: &str = "snippet";
+const PLAYLIST_ITEM_PARTS: &str = "snippet";
+const PLAYLIST_ITEMS_MAX_RESULTS: &str = "50";
+
+pub async fn get_playlist_raw<T, F, R, E, FR>(
+    client: &YoutubeClient,
+    url: &str,
+    callback: F,
+) -> Result<R, E>
+where
+    T: std::any::Any + Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+    F: FnOnce(&T, &str) -> FR,
+    E: From<Error> + Send + 'static,
+    FR: Future<Output = Result<R, E>> + Send + 'static,
+{
+    let id = match_playlist_url(url).expect("Invalid YouTube playlist URL");
+    client
+        .get::<T, _, _, _, _>("playlists", &[("part", PARTS), ("id", id)], |value| {
+            callback(value, id)
+        })
+        .await
+}
+
+pub async fn get_playlist_items_raw<T, F, R, E, FR>(
+    client: &YoutubeClient,
+    url: &str,
+    callback: F,
+) -> Result<R, E>
+where
+    T: std::any::Any + Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+    F: FnOnce(&T, &str) -> FR,
+    E: From<Error> + Send + 'static,
+    FR: Future<Output = Result<R, E>> + Send + 'static,
+{
+    let id = match_playlist_url(url).expect("Invalid YouTube playlist URL");
+    client
+        .get::<T, _, _, _, _>(
+            "playlistItems",
+            &[
+                ("part", PLAYLIST_ITEM_PARTS),
+                ("playlistId", id),
+                ("maxResults", PLAYLIST_ITEMS_MAX_RESULTS),
+            ],
+            |value| callback(value, id),
+        )
+        .await
+}
 
 async fn fetch_playlist_items(
     client: &YoutubeClient,
@@ -96,11 +141,15 @@ async fn fetch_playlist_items(
             .map(|(key, value)| (*key, value.as_str()))
             .collect();
         let (items, next_page_token) = client
-            .get::<PlaylistItemsResponse, _, _, _>("playlistItems", &params_ref, move |response| {
-                let items = response.items.clone();
-                let next_page_token = response.next_page_token.clone();
-                async move { Ok((items, next_page_token)) }
-            })
+            .get::<PlaylistItemsResponse, _, _, Error, _>(
+                "playlistItems",
+                &params_ref,
+                move |response| {
+                    let items = response.items.clone();
+                    let next_page_token = response.next_page_token.clone();
+                    async move { Ok((items, next_page_token)) }
+                },
+            )
             .await?;
 
         for item in items {
@@ -128,34 +177,34 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
     let id = match_playlist_url(url).expect("Invalid YouTube playlist URL");
     let url = playlist_url(id);
     let children = fetch_playlist_items(client, id).await?;
-    let result = client
-        .get::<PlaylistListResponse, _, _, _>(
-            "playlists",
-            &[("part", PARTS), ("id", id)],
-            move |p| {
-                let p = &p.items[0];
-                let release_date = OffsetDateTime::parse(&p.snippet.published_at, &Rfc3339).ok();
-                let result = Ok(EntityResult {
-                    release_date,
-                    sources: [(SOURCE.into(), HashSet::from([url.to_string()]))].into(),
-                    extra: serde_json::to_value(p).unwrap_or_default(),
-                    specific_data: EntrySpecificData::Release {
-                        release_type: Some("playlist".into()),
-                        num_discs: None,
-                        num_tracks: None,
-                    },
-                    children,
-                    aliases: vec![Alias {
-                        name: p.snippet.title.clone(),
-                        source: SOURCE.into(),
-                        primary: true,
-                        ..Default::default()
-                    }],
-                });
-                async move { result }
-            },
-        )
-        .await?;
+    let result = get_playlist_raw::<PlaylistListResponse, _, _, Error, _>(
+        client,
+        url.as_str(),
+        move |p, id| {
+            let p = &p.items[0];
+            let url = playlist_url(id);
+            let release_date = OffsetDateTime::parse(&p.snippet.published_at, &Rfc3339).ok();
+            let result = Ok(EntityResult {
+                release_date,
+                sources: [(SOURCE.into(), HashSet::from([url.to_string()]))].into(),
+                extra: serde_json::to_value(p).unwrap_or_default(),
+                specific_data: EntrySpecificData::Release {
+                    release_type: Some("playlist".into()),
+                    num_discs: None,
+                    num_tracks: None,
+                },
+                children,
+                aliases: vec![Alias {
+                    name: p.snippet.title.clone(),
+                    source: SOURCE.into(),
+                    primary: true,
+                    ..Default::default()
+                }],
+            });
+            async move { result }
+        },
+    )
+    .await?;
     Ok(result)
 }
 
