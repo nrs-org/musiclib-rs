@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use crate::providers::types::{
     CanonicalizeResult, EntityResult, EntryFetchOptions, EntryType, Error, ExternalSources,
@@ -18,7 +18,7 @@ pub trait CanonicalizeProvider: Send + Sync {
 #[async_trait]
 pub trait FetchProvider: CanonicalizeProvider {
     async fn fetch_entry(
-        &self,
+        self: Arc<Self>,
         identifier: &str,
         fetch_options: EntryFetchOptions,
     ) -> Result<EntityResult, Error>;

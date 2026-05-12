@@ -8,6 +8,7 @@ use crate::{
     providers::{backends::build_url, types::Error},
 };
 
+#[derive(Clone)]
 pub struct YoutubeClient {
     client: Arc<dyn HttpClient>,
     api_key: HeaderValue,

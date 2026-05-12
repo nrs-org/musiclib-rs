@@ -11,9 +11,11 @@ use crate::{
             canonicalize::{canonicalize, match_channel_url, match_playlist_url, match_video_url},
             channel::{get_channel, get_channel_raw},
             client::YoutubeClient,
+            matcher::YouTubeMatcherEvaluator,
             playlist::{get_playlist, get_playlist_items_raw, get_playlist_raw},
             video::{get_video, get_video_raw},
         },
+        matcher::filter_children,
         types::{CanonicalizeResult, EntityResult, Error},
     },
 };
@@ -71,21 +73,33 @@ impl CanonicalizeProvider for Provider {
 #[async_trait]
 impl FetchProvider for Provider {
     async fn fetch_entry(
-        &self,
+        self: Arc<Self>,
         identifier: &str,
-        _fetch_options: crate::providers::types::EntryFetchOptions,
+        fetch_options: crate::providers::types::EntryFetchOptions,
     ) -> Result<EntityResult, crate::providers::types::Error> {
-        if match_video_url(identifier).is_some() {
-            return get_video(&self.client, identifier).await;
-        }
-        if match_playlist_url(identifier).is_some() {
-            return get_playlist(&self.client, identifier).await;
-        }
-        if match_channel_url(identifier).is_some() {
-            return get_channel(&self.client, identifier).await;
-        }
+        let result = if match_video_url(identifier).is_some() {
+            get_video(&self.client, identifier).await?
+        } else if match_playlist_url(identifier).is_some() {
+            get_playlist(&self.client, identifier).await?
+        } else if match_channel_url(identifier).is_some() {
+            get_channel(&self.client, identifier).await?
+        } else {
+            return Err(Error::MissingCredentials("Invalid YouTube URL".to_string()));
+        };
 
-        Err(Error::MissingCredentials("Invalid YouTube URL".to_string()))
+        Ok(EntityResult {
+            children: Arc::new(filter_children(
+                result.children.clone(),
+                &fetch_options,
+                self,
+                Arc::new(YouTubeMatcherEvaluator),
+            )),
+            release_date: result.release_date,
+            sources: result.sources,
+            extra: result.extra,
+            specific_data: result.specific_data,
+            aliases: result.aliases,
+        })
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::future::Future;
@@ -13,7 +13,10 @@ use crate::providers::{
             client::YoutubeClient,
         },
     },
-    types::{Alias, ChildRef, EntityResult, EntrySpecificData, EntryType, Error},
+    types::{
+        Alias, CachedChildSource, ChildPage, ChildRef, EntityResult, EntrySpecificData, EntryType,
+        Error, PageFetcher, PaginatedChildSource,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,27 +123,28 @@ where
         .await
 }
 
-async fn fetch_playlist_items(
-    client: &YoutubeClient,
-    playlist_id: &str,
-) -> Result<Vec<ChildRef>, Error> {
-    let mut children = Vec::new();
-    let mut page_token: Option<String> = None;
+struct PlaylistItemsPageFetcher {
+    client: YoutubeClient,
+    playlist_id: String,
+}
 
-    loop {
+#[async_trait::async_trait]
+impl PageFetcher for PlaylistItemsPageFetcher {
+    async fn fetch_page(&mut self, page_token: Option<&str>) -> Result<ChildPage, Error> {
         let mut params = vec![
             ("part", PLAYLIST_ITEM_PARTS.to_string()),
-            ("playlistId", playlist_id.to_string()),
+            ("playlistId", self.playlist_id.clone()),
             ("maxResults", PLAYLIST_ITEMS_MAX_RESULTS.to_string()),
         ];
-        if let Some(token) = &page_token {
-            params.push(("pageToken", token.clone()));
+        if let Some(token) = page_token {
+            params.push(("pageToken", token.to_string()));
         }
         let params_ref: Vec<(&str, &str)> = params
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect();
-        let (items, next_page_token) = client
+        let (items, next_page_token) = self
+            .client
             .get::<PlaylistItemsResponse, _, _, Error, _>(
                 "playlistItems",
                 &params_ref,
@@ -152,31 +156,33 @@ async fn fetch_playlist_items(
             )
             .await?;
 
-        for item in items {
-            let Some(video_id) = item.snippet.resource_id.video_id else {
-                continue;
-            };
-            children.push(ChildRef {
-                entry_type: EntryType::Track,
-                sources: [(SOURCE.into(), HashSet::from([video_url(&video_id)]))].into(),
-                name: item.snippet.title.clone(),
-                ..Default::default()
-            });
-        }
+        let children = items
+            .into_iter()
+            .filter_map(|item| {
+                let video_id = item.snippet.resource_id.video_id?;
+                Some(ChildRef {
+                    entry_type: EntryType::Track,
+                    sources: [(SOURCE.into(), HashSet::from([video_url(&video_id)]))].into(),
+                    name: item.snippet.title.clone(),
+                    ..Default::default()
+                })
+            })
+            .collect();
 
-        if next_page_token.is_none() {
-            break;
-        }
-        page_token = next_page_token;
+        Ok(ChildPage {
+            children,
+            next_page_token,
+        })
     }
-
-    Ok(children)
 }
 
-pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityResult, Error> {
+pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityResult<()>, Error> {
     let id = match_playlist_url(url).expect("Invalid YouTube playlist URL");
     let url = playlist_url(id);
-    let children = fetch_playlist_items(client, id).await?;
+    let children_source = PaginatedChildSource::new(Box::new(PlaylistItemsPageFetcher {
+        client: client.clone(),
+        playlist_id: id.to_string(),
+    }));
     let result = get_playlist_raw::<PlaylistListResponse, _, _, Error, _>(
         client,
         url.as_str(),
@@ -193,7 +199,7 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
                     num_discs: None,
                     num_tracks: None,
                 },
-                children,
+                children: Arc::new(CachedChildSource::new(Box::new(children_source))),
                 aliases: vec![Alias {
                     name: p.snippet.title.clone(),
                     source: SOURCE.into(),
@@ -224,7 +230,7 @@ mod tests {
                     PlaylistListResponse, get_playlist,
                 },
             },
-            types::EntrySpecificData,
+            types::{ChildSource, EntrySpecificData},
         },
         test_utils::MockHttpClient,
     };
@@ -282,8 +288,13 @@ mod tests {
             playlist.specific_data,
             EntrySpecificData::Release { .. }
         ));
-        assert_eq!(playlist.children.len(), 32);
-        let child = &playlist.children[0];
+        let mut children_cursor = playlist.children.cursor();
+        let mut children_vec = Vec::new();
+        while let Some((child, _)) = children_cursor.next().await? {
+            children_vec.push(child);
+        }
+        assert_eq!(children_vec.len(), 32);
+        let child = &children_vec[0];
         assert_eq!(child.entry_type, crate::providers::types::EntryType::Track);
         assert_eq!(
             child.sources.get(SOURCE).unwrap(),

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::future::Future;
@@ -14,7 +14,10 @@ use crate::providers::{
         },
     },
     std_values::StandardRoleNames,
-    types::{Alias, ChildRef, Contribution, EntityResult, EntrySpecificData, EntryType, Error},
+    types::{
+        Alias, CachedChildSource, ChildRef, Contribution, EntityResult, EntrySpecificData,
+        EntryType, Error,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +99,7 @@ where
         .await
 }
 
-pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult, Error> {
+pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult<()>, Error> {
     let result = get_video_raw::<VideoListResponse, _, _, Error, _>(client, url, move |v, id| {
         let v = &v.items[0];
         let url = video_url(id);
@@ -110,7 +113,7 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                 duration_ms,
                 positions: Default::default(),
             },
-            children: vec![ChildRef {
+            children: Arc::new(CachedChildSource::from_children(vec![ChildRef {
                 entry_type: EntryType::Artist,
                 sources: [(SOURCE.into(), HashSet::from([v.snippet.channel_id.clone()]))].into(),
                 name: Some(v.snippet.channel_title.clone()),
@@ -121,7 +124,7 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                     ..Default::default()
                 }],
                 ..Default::default()
-            }],
+            }])),
             aliases: vec![Alias {
                 name: v.snippet.title.clone(),
                 source: SOURCE.into(),
@@ -149,7 +152,7 @@ mod tests {
                 video::{VideoListResponse, get_video},
             },
             std_values::StandardRoleNames,
-            types::{EntrySpecificData, EntryType},
+            types::{ChildSource, EntrySpecificData, EntryType},
         },
         test_utils::MockHttpClient,
     };
@@ -198,8 +201,8 @@ mod tests {
                 ..
             },
         ));
-        assert_eq!(video.children.len(), 1);
-        let child = &video.children[0];
+        let mut children_cursor = video.children.cursor();
+        let (child, _) = children_cursor.next().await?.expect("expected a child");
         assert_eq!(child.entry_type, EntryType::Artist);
         assert_eq!(
             child.sources.get(SOURCE).unwrap(),
@@ -209,6 +212,7 @@ mod tests {
         assert_eq!(child.contributions.len(), 1);
         let contribution = &child.contributions[0];
         assert_eq!(contribution.role, StandardRoleNames::UPLOADER);
+        assert!(children_cursor.next().await?.is_none());
 
         assert_eq!(video.aliases.len(), 1);
         let alias = &video.aliases[0];

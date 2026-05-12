@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::future::Future;
@@ -12,7 +12,7 @@ use crate::providers::{
             client::YoutubeClient,
         },
     },
-    types::{Alias, EntityResult, EntrySpecificData, Error},
+    types::{Alias, CachedChildSource, EntityResult, EntrySpecificData, Error},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ fn channel_endpoint_and_params(
     ("channels", [("part", PARTS.to_string()), (key, value)])
 }
 
-pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResult, Error> {
+pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResult<()>, Error> {
     let channel_match = match_channel_url(url).expect("Invalid YouTube channel URL");
     let url = channel_url(channel_match.kind, channel_match.id);
     let result = get_channel_raw::<ChannelListResponse, _, _, Error, _>(
@@ -70,7 +70,7 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
                 sources: [(SOURCE.into(), source_set)].into(),
                 extra: serde_json::to_value(c).unwrap_or_default(),
                 specific_data: EntrySpecificData::Artist,
-                children: Vec::new(),
+                children: Arc::new(CachedChildSource::from_children(Vec::new())),
                 aliases: vec![Alias {
                     name: c.snippet.title.clone(),
                     source: SOURCE.into(),
