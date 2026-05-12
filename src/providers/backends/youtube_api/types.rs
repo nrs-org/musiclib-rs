@@ -2,7 +2,6 @@ use std::{env, sync::Arc};
 
 use async_trait::async_trait;
 use http::HeaderValue;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     http::HttpClient,
@@ -18,62 +17,6 @@ use crate::{
         types::{CanonicalizeResult, EntityResult, Error},
     },
 };
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-pub enum StringFilterMode {
-    Include,
-    Exclude,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct StringFilter {
-    pattern: String,
-    priority: i32,
-    mode: StringFilterMode,
-}
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct StringFilterSet {
-    filters: Vec<StringFilter>,
-}
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct DurationRange {
-    min: Option<u64>,
-    max: Option<u64>,
-}
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct VideoDiscographyFetchOptions {
-    // true -> only fetch videos with category 10 (Music)
-    // (this is not really reliable)
-    filter_music_category: bool,
-
-    title_filters: StringFilterSet,
-    description_filters: StringFilterSet,
-    duration_range: Option<DurationRange>,
-}
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct PlaylistDiscographyFetchOptions {
-    title_filters: StringFilterSet,
-    description_filters: StringFilterSet,
-}
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct YtMusicDiscographyFetchOptions {}
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct DiscographyFetchOptions {
-    videos: Option<VideoDiscographyFetchOptions>,
-    playlists: Option<PlaylistDiscographyFetchOptions>,
-    ytmusic: Option<YtMusicDiscographyFetchOptions>,
-}
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct EntryFetchOptions {
-    discography: Option<DiscographyFetchOptions>,
-}
 
 pub struct Provider {
     client: YoutubeClient,

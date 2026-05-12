@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::providers::backends;
+use std::sync::Arc;
 
 // dict of external identifier (mostly URLs), grouped by source (e.g. "wikidata", "spotify", etc.)
 #[derive(Debug, Clone, Default)]
@@ -23,6 +23,15 @@ impl ExternalSources {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Returns the first identifier found across all sources, if any.
+    pub fn first_identifier(&self) -> Option<&str> {
+        self.0
+            .values()
+            .flat_map(|s| s.iter())
+            .next()
+            .map(|s| s.as_str())
     }
 }
 
@@ -59,7 +68,7 @@ pub enum EntrySpecificData {
 }
 
 // type of entry (artist, release group, release, track)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum EntryType {
     Artist,
     ReleaseGroup,
@@ -130,11 +139,67 @@ pub enum Error {
     MissingCredentials(String),
 }
 
+// Matchers based on entry metadata (requires fetching the entry)
+#[derive(Clone, Serialize, Deserialize)]
+pub enum EntryDataMatcher {
+    // Generic — available for all backends
+    EntryType(EntryType),
+    NameRegex(String),
+    DurationRange { min: Option<u64>, max: Option<u64> },
+    HasSource(String),
+
+    // Backend-specific
+    YouTube(YouTubeDataMatcher),
+    // MusicBrainz(MusicBrainzDataMatcher),
+    // Spotify(SpotifyDataMatcher),
+}
+
+// YouTube-specific entry data matchers
+#[derive(Clone, Serialize, Deserialize)]
+pub enum YouTubeDataMatcher {
+    DescriptionRegex(String),
+    CategoryId(String),
+}
+
+// Matchers based on parent-child relationship (no fetch needed)
+#[derive(Clone, Serialize, Deserialize)]
+pub enum RelationMatcher {
+    IndexRange { min: Option<u32>, max: Option<u32> },
+}
+
+// Matchers based on children (requires fetching children)
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum QuantifierMode {
+    Count { min: Option<u32>, max: Option<u32> },
+    Ratio { min: Option<f64>, max: Option<f64> },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub enum ChildMatcher {
+    Always,
+    EntryData(EntryDataMatcher),
+    Relation(RelationMatcher),
+    ChildrenSatisfy {
+        matcher: Box<ChildMatcherExpr>,
+        mode: QuantifierMode,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub enum ChildMatcherExpr {
+    Matcher(ChildMatcher),
+    Not(Box<ChildMatcherExpr>),
+    All(Vec<ChildMatcherExpr>),
+    Any(Vec<ChildMatcherExpr>),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChildRule {
+    pub matcher: ChildMatcherExpr,
+    pub options: Arc<EntryFetchOptions>,
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct EntryFetchOptions {
-    // To avoid infinite fetching, artist might be added to the database without their discography.
-    // Users must manually trigger this to fetch the discography
-    fetch_artist_discography: bool,
-    youtube: backends::youtube_api::EntryFetchOptions,
-    // musicbrainz: backends::musicbrainz::EntryFetchOptions,
+    pub child_rules: Vec<ChildRule>,
 }

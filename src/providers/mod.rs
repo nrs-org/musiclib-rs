@@ -6,6 +6,7 @@ use crate::providers::types::{
 };
 
 pub mod backends;
+pub mod matcher;
 pub mod std_values;
 pub mod types;
 
