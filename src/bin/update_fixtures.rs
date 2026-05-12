@@ -1,25 +1,51 @@
-use std::{env, fs, path::PathBuf};
+use std::{collections::HashMap, env, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use musiclib_rs::providers::{
-    backends::youtube_api::{
-        YoutubeClient, get_channel_raw, get_playlist_items_raw, get_playlist_raw, get_video_raw,
-        match_channel_url, match_playlist_url, match_video_url,
-    },
-    types::EntryFetchOptions,
+    RawFetchProvider, TryDefault,
+    backends::youtube_api,
+    types::{EntryFetchOptions, Error},
 };
 
 #[derive(Debug, Deserialize)]
 struct FixturesManifest {
-    fixtures: Vec<FixtureEntry>,
+    fixtures: Vec<FixtureBatch>,
 }
 
 #[derive(Debug, Deserialize)]
+struct FixtureBatch {
+    backend: BatchBackends,
+    entries: Vec<FixtureEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BatchBackends {
+    Single(String),
+    Multi(Vec<String>),
+}
+
+impl BatchBackends {
+    fn as_slice(&self) -> &[String] {
+        match self {
+            BatchBackends::Single(value) => std::slice::from_ref(value),
+            BatchBackends::Multi(values) => values.as_slice(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+enum FixturePath {
+    Single(PathBuf),
+    Multi(HashMap<String, PathBuf>),
+}
+
+#[derive(Debug, Deserialize, Clone)]
 struct FixtureEntry {
-    backend: String,
-    path: PathBuf,
+    path: FixturePath,
     url: String,
 }
 
@@ -36,18 +62,36 @@ async fn main() -> Result<()> {
     let manifest: FixturesManifest =
         serde_yaml_ng::from_str(&manifest_contents).with_context(|| "parse fixtures.yaml")?;
 
-    for fixture in manifest.fixtures {
-        if let Some(filter) = &filter
-            && !fixture.path.to_string_lossy().contains(filter)
-            && !fixture.url.contains(filter)
-            && !fixture.backend.contains(filter)
-        {
-            continue;
-        }
+    let mut by_backend: HashMap<String, Vec<FixtureEntry>> = HashMap::new();
 
-        match fixture.backend.as_str() {
+    for batch in manifest.fixtures {
+        let backends: Vec<String> = batch.backend.as_slice().to_vec();
+        for fixture in &batch.entries {
+            for backend in &backends {
+                if let Some(filter) = &filter {
+                    let path_match = match &fixture.path {
+                        FixturePath::Single(path) => path.to_string_lossy().contains(filter),
+                        FixturePath::Multi(paths) => paths
+                            .values()
+                            .any(|path| path.to_string_lossy().contains(filter)),
+                    };
+                    if !path_match && !fixture.url.contains(filter) && !backend.contains(filter) {
+                        continue;
+                    }
+                }
+                by_backend
+                    .entry(backend.clone())
+                    .or_default()
+                    .push(fixture.clone());
+            }
+        }
+    }
+
+    for (backend, fixtures) in by_backend {
+        match backend.as_str() {
             "youtube_api" => {
-                update_youtube_fixture(&fixture, EntryFetchOptions::default()).await?;
+                update_fixtures::<youtube_api::Provider>(&fixtures, EntryFetchOptions::default())
+                    .await?;
             }
             other => {
                 eprintln!("Unknown backend: {other}");
@@ -62,54 +106,48 @@ async fn promisify<T>(value: T) -> T {
     value
 }
 
-async fn update_youtube_fixture(fixture: &FixtureEntry, _options: EntryFetchOptions) -> Result<()> {
-    let api_key = env::var("YOUTUBE_API_KEY").with_context(|| "missing YOUTUBE_API_KEY in env")?;
-    let client = YoutubeClient::new(api_key)?;
+async fn update_fixtures<P>(fixtures: &[FixtureEntry], options: EntryFetchOptions) -> Result<()>
+where
+    P: RawFetchProvider + TryDefault<Error = Error> + Send + Sync,
+{
+    match P::try_default() {
+        Ok(provider) => {
+            for fixture in fixtures {
+                let paths = match fixture.path {
+                    FixturePath::Single(ref path) => {
+                        HashMap::from([("metadata".into(), path.clone())])
+                    }
+                    FixturePath::Multi(ref paths) => paths.clone(),
+                };
 
-    println!("youtube_api: {} -> {}", fixture.url, fixture.path.display());
+                for (key, path) in &paths {
+                    println!(
+                        "{}: {} -> {} ({})",
+                        P::name(),
+                        fixture.url,
+                        path.display(),
+                        key
+                    );
+                    provider
+                        .raw_fetch(&fixture.url, options.clone(), key, |value| {
+                            promisify(write_json(path, value))
+                        })
+                        .await?;
+                }
+            }
 
-    if match_video_url(&fixture.url).is_some() {
-        get_video_raw(&client, &fixture.url, |value: &serde_json::Value, _id| {
-            promisify(write_json(&fixture.path, value))
-        })
-        .await?;
-        return Ok(());
-    }
-
-    if match_playlist_url(&fixture.url).is_some() {
-        if fixture
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name.contains("_items_"))
-            .unwrap_or(false)
-        {
-            get_playlist_items_raw(&client, &fixture.url, |value: &serde_json::Value, _id| {
-                promisify(write_json(&fixture.path, value))
-            })
-            .await?;
-            return Ok(());
+            Ok(())
         }
-
-        get_playlist_raw(&client, &fixture.url, |value: &serde_json::Value, _id| {
-            let result = write_json(&fixture.path, value);
-            async { result }
-        })
-        .await?;
-        return Ok(());
+        Err(Error::MissingCredentials(msg)) => {
+            eprintln!(
+                "Skipping {} fixture due to missing credentials: {}",
+                P::name(),
+                msg
+            );
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("initialize {} provider", P::name())),
     }
-
-    if match_channel_url(&fixture.url).is_some() {
-        get_channel_raw(
-            &client,
-            &fixture.url,
-            |value: &serde_json::Value, _kind, _id| promisify(write_json(&fixture.path, value)),
-        )
-        .await?;
-        return Ok(());
-    }
-
-    anyhow::bail!("Unrecognized YouTube URL: {}", fixture.url);
 }
 
 fn write_json(path: &PathBuf, value: &serde_json::Value) -> Result<()> {

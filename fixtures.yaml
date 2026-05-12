@@ -1,16 +1,13 @@
 fixtures:
   - backend: youtube_api
-    path: src/providers/backends/youtube_api/video_whatamess_xfade.json
-    url: https://www.youtube.com/watch?v=ahFZQ_lDoQ4
-  - backend: youtube_api
-    path: src/providers/backends/youtube_api/playlist_watame_original_song.json
-    url: https://www.youtube.com/playlist?list=PLZ34fLWik_iBK39rTWRAs_G93pnUW3K-7
-  - backend: youtube_api
-    path: src/providers/backends/youtube_api/playlist_watame_original_song_items_page1.json
-    url: https://www.youtube.com/playlist?list=PLZ34fLWik_iBK39rTWRAs_G93pnUW3K-7
-  - backend: youtube_api
-    path: src/providers/backends/youtube_api/playlist_watame_uploads.json
-    url: https://www.youtube.com/playlist?list=UUqm3BQLlJfvkTsX_hvm0UmA
-  - backend: youtube_api
-    path: src/providers/backends/youtube_api/playlist_watame_uploads_items_page1.json
-    url: https://www.youtube.com/playlist?list=UUqm3BQLlJfvkTsX_hvm0UmA
+    entries:
+      - path: src/providers/backends/youtube_api/video_whatamess_xfade.json
+        url: https://www.youtube.com/watch?v=ahFZQ_lDoQ4
+      - path:
+          metadata: src/providers/backends/youtube_api/playlist_watame_original_song.json
+          items: src/providers/backends/youtube_api/playlist_watame_original_song_items_page1.json
+        url: https://www.youtube.com/playlist?list=PLZ34fLWik_iBK39rTWRAs_G93pnUW3K-7
+      - path:
+          metadata: src/providers/backends/youtube_api/playlist_watame_uploads.json
+          items: src/providers/backends/youtube_api/playlist_watame_uploads_items_page1.json
+        url: https://www.youtube.com/playlist?list=UUqm3BQLlJfvkTsX_hvm0UmA

@@ -12,8 +12,6 @@ pub use types::{
     ResponseStatus,
 };
 
-use types::AnySerializableImpl;
-
 #[async_trait]
 pub trait BodyExtractor: Send + Sync {
     async fn extract(&self, res: reqwest::Response) -> Result<ResponseBody, BodyExtractError>;
@@ -36,7 +34,7 @@ pub fn bytes_body_extractor() -> impl BodyExtractor {
     #[async_trait]
     impl BodyExtractor for BytesExtractor {
         async fn extract(&self, res: reqwest::Response) -> Result<ResponseBody, BodyExtractError> {
-            Ok(ResponseBody::Bytes(res.bytes().await?.to_vec()))
+            Ok(ResponseBody::from(res.bytes().await?.to_vec()))
         }
     }
     BytesExtractor
@@ -47,7 +45,7 @@ pub fn text_body_extractor() -> impl BodyExtractor {
     #[async_trait]
     impl BodyExtractor for TextExtractor {
         async fn extract(&self, res: reqwest::Response) -> Result<ResponseBody, BodyExtractError> {
-            Ok(ResponseBody::Text(res.text().await?))
+            Ok(ResponseBody::from(res.text().await?))
         }
     }
     TextExtractor
@@ -59,9 +57,7 @@ pub fn json_body_extractor<T: DeserializeOwned + Serialize + Send + Sync + 'stat
     #[async_trait]
     impl<T: DeserializeOwned + Serialize + Send + Sync + 'static> BodyExtractor for JsonExtractor<T> {
         async fn extract(&self, res: reqwest::Response) -> Result<ResponseBody, BodyExtractError> {
-            Ok(ResponseBody::Json(Arc::new(AnySerializableImpl(
-                res.json::<T>().await?,
-            ))))
+            Ok(ResponseBody::from_json(res.json::<T>().await?))
         }
     }
     JsonExtractor(PhantomData::<T>)

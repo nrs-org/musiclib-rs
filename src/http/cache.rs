@@ -54,10 +54,7 @@ impl HttpClient for CacheHttpClient {
 #[cfg(test)]
 mod tests {
     use crate::{
-        http::{
-            HttpClient, Method, Request, Response, ResponseBody, cache::IntoCachedHttpClient,
-            default_http_client,
-        },
+        http::{HttpClient, Request, cache::IntoCachedHttpClient, default_http_client},
         httpcache::{DbHttpCache, MemoryHttpCache},
         test_utils::{MockServer, init_test_logger},
     };

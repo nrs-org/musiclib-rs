@@ -21,8 +21,16 @@ impl YoutubeClient {
     }
 
     pub fn new_with_client(client: Arc<dyn HttpClient>, api_key: String) -> Result<Self, Error> {
-        let mut api_key = HeaderValue::from_str(&api_key)
+        let api_key = HeaderValue::from_str(&api_key)
             .map_err(|e| Error::InvalidCredentials(format!("Invalid API key: {e}")))?;
+        Self::new_with_client_and_key(client, api_key)
+    }
+
+    pub fn new_with_client_and_key(
+        client: Arc<dyn HttpClient>,
+        api_key: HeaderValue,
+    ) -> Result<Self, Error> {
+        let mut api_key = api_key;
         api_key.set_sensitive(true);
         Ok(Self { client, api_key })
     }

@@ -1,6 +1,10 @@
 use fancy_regex::Regex;
 use std::sync::LazyLock;
 
+use crate::providers::backends::youtube_api::types::{
+    EXTERNAL_TYPE_CHANNEL_ID, EXTERNAL_TYPE_CUSTOM_CHANNEL, EXTERNAL_TYPE_HANDLE,
+    EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_USER_CHANNEL, EXTERNAL_TYPE_VIDEO,
+};
 use crate::providers::types::CanonicalizeResult;
 
 // ─────────────────────────────────────────────
@@ -191,6 +195,54 @@ pub fn match_channel_url<'a>(url: &'a str) -> Option<ChannelMatch<'a>> {
     None
 }
 
+pub fn video_url(id: &str) -> String {
+    format!("https://youtu.be/{id}")
+}
+
+pub fn playlist_url(id: &str) -> String {
+    format!("https://www.youtube.com/playlist?list={id}")
+}
+
+pub fn channel_url(kind: ChannelKind, id: &str) -> String {
+    match kind {
+        ChannelKind::ChannelId => format!("https://www.youtube.com/channel/{id}"),
+        ChannelKind::Custom => format!("https://www.youtube.com/c/{id}"),
+        ChannelKind::User => format!("https://www.youtube.com/user/{id}"),
+        ChannelKind::Handle => format!("https://www.youtube.com/{id}"),
+    }
+}
+
+pub(super) fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
+    if let Some(video_id) = match_video_url(url) {
+        return Some(CanonicalizeResult {
+            canonical_identifier: video_url(video_id),
+            entry_type: crate::providers::types::EntryType::Track,
+            external_type: EXTERNAL_TYPE_VIDEO.into(),
+        });
+    }
+    if let Some(playlist_id) = match_playlist_url(url) {
+        return Some(CanonicalizeResult {
+            canonical_identifier: playlist_url(playlist_id),
+            entry_type: crate::providers::types::EntryType::Release,
+            external_type: EXTERNAL_TYPE_PLAYLIST.into(),
+        });
+    }
+    if let Some(channel_match) = match_channel_url(url) {
+        let external_type = match channel_match.kind {
+            ChannelKind::ChannelId => EXTERNAL_TYPE_CHANNEL_ID,
+            ChannelKind::Custom => EXTERNAL_TYPE_CUSTOM_CHANNEL,
+            ChannelKind::User => EXTERNAL_TYPE_USER_CHANNEL,
+            ChannelKind::Handle => EXTERNAL_TYPE_HANDLE,
+        };
+        return Some(CanonicalizeResult {
+            canonical_identifier: channel_url(channel_match.kind, channel_match.id),
+            entry_type: crate::providers::types::EntryType::Artist,
+            external_type: external_type.into(),
+        });
+    }
+    None
+}
+
 // ─────────────────────────────────────────────
 // Quick self-test (mirrors the Python __main__)
 // ─────────────────────────────────────────────
@@ -199,6 +251,7 @@ pub fn match_channel_url<'a>(url: &'a str) -> Option<ChannelMatch<'a>> {
 mod tests {
     use super::*;
 
+    #[test]
     fn test_video_urls() {
         let video_tests: &[(&str, Option<&str>)] = &[
             (
@@ -266,6 +319,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_playlist_urls() {
         let playlist_tests: &[(&str, Option<&str>)] = &[
             (
@@ -298,6 +352,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_channel_urls() {
         let channel_tests: &[(&str, Option<(ChannelKind, &str)>)] = &[
             (
@@ -335,52 +390,4 @@ mod tests {
             );
         }
     }
-}
-
-pub fn video_url(id: &str) -> String {
-    format!("https://youtu.be/{id}")
-}
-
-pub fn playlist_url(id: &str) -> String {
-    format!("https://www.youtube.com/playlist?list={id}")
-}
-
-pub fn channel_url(kind: ChannelKind, id: &str) -> String {
-    match kind {
-        ChannelKind::ChannelId => format!("https://www.youtube.com/channel/{id}"),
-        ChannelKind::Custom => format!("https://www.youtube.com/c/{id}"),
-        ChannelKind::User => format!("https://www.youtube.com/user/{id}"),
-        ChannelKind::Handle => format!("https://www.youtube.com/{id}"),
-    }
-}
-
-pub(super) fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
-    if let Some(video_id) = match_video_url(url) {
-        return Some(CanonicalizeResult {
-            canonical_identifier: video_url(video_id),
-            entry_type: crate::providers::types::EntryType::Track,
-            external_type: "youtube:video".into(),
-        });
-    }
-    if let Some(playlist_id) = match_playlist_url(url) {
-        return Some(CanonicalizeResult {
-            canonical_identifier: playlist_url(playlist_id),
-            entry_type: crate::providers::types::EntryType::Release,
-            external_type: "youtube:playlist".into(),
-        });
-    }
-    if let Some(channel_match) = match_channel_url(url) {
-        let external_type = match channel_match.kind {
-            ChannelKind::ChannelId => "youtube:channel_id",
-            ChannelKind::Custom => "youtube:custom_channel",
-            ChannelKind::User => "youtube:user_channel",
-            ChannelKind::Handle => "youtube:handle",
-        };
-        return Some(CanonicalizeResult {
-            canonical_identifier: channel_url(channel_match.kind, channel_match.id),
-            entry_type: crate::providers::types::EntryType::Artist,
-            external_type: external_type.into(),
-        });
-    }
-    None
 }

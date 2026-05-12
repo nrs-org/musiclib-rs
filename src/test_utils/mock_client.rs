@@ -52,7 +52,7 @@ impl MockHttpClient {
         Arc::new(Response {
             status: ResponseStatus::NOT_FOUND,
             headers: vec![],
-            body: ResponseBody::Bytes(vec![]),
+            body: ResponseBody::from(vec![]),
         })
     }
 }

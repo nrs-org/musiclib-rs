@@ -8,10 +8,7 @@ pub type HeaderName = reqwest::header::HeaderName;
 pub type HeaderValue = reqwest::header::HeaderValue;
 pub type ResponseStatus = reqwest::StatusCode;
 
-pub(crate) trait AnySerializable:
-    Any + Debug + erased_serde::Serialize + Send + Sync
-{
-    fn as_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
+pub(crate) trait AnySerializable: Debug + erased_serde::Serialize + Send + Sync {
     fn as_any_ref(&self) -> &dyn Any;
     fn as_serialize_ref(&self) -> &dyn erased_serde::Serialize;
 }
@@ -35,10 +32,6 @@ impl<T: Serialize + Send + Sync + 'static> Serialize for AnySerializableImpl<T> 
     }
 }
 impl<T: Serialize + Send + Sync + 'static> AnySerializable for AnySerializableImpl<T> {
-    fn as_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
-    }
-
     fn as_any_ref(&self) -> &dyn Any {
         self
     }
@@ -49,18 +42,23 @@ impl<T: Serialize + Send + Sync + 'static> AnySerializable for AnySerializableIm
 }
 
 #[derive(Debug, Clone)]
-pub enum ResponseBody {
+pub enum ResponseBodyInner {
     Bytes(Vec<u8>),
     Text(String),
     Json(Arc<dyn AnySerializable>),
 }
 
+#[derive(Debug, Clone)]
+pub struct ResponseBody {
+    inner: ResponseBodyInner,
+}
+
 impl ResponseBody {
     pub fn to_bytes(&self) -> Result<Vec<u8>, erased_serde::Error> {
-        match self {
-            ResponseBody::Bytes(bytes) => Ok(bytes.clone()),
-            ResponseBody::Text(text) => Ok(text.as_bytes().to_vec()),
-            ResponseBody::Json(json) => {
+        match &self.inner {
+            ResponseBodyInner::Bytes(bytes) => Ok(bytes.clone()),
+            ResponseBodyInner::Text(text) => Ok(text.as_bytes().to_vec()),
+            ResponseBodyInner::Json(json) => {
                 let mut output = Vec::<u8>::new();
                 let mut serializer = serde_json::Serializer::new(&mut output);
                 let mut serializer = <dyn erased_serde::Serializer>::erase(&mut serializer);
@@ -71,8 +69,8 @@ impl ResponseBody {
     }
 
     pub fn as_text(&self) -> Option<&str> {
-        match self {
-            ResponseBody::Text(text) => Some(text.as_str()),
+        match &self.inner {
+            ResponseBodyInner::Text(text) => Some(text.as_str()),
             _ => None,
         }
     }
@@ -81,8 +79,8 @@ impl ResponseBody {
     where
         T: Any + Serialize + Send + Sync + 'static,
     {
-        match self {
-            ResponseBody::Json(json) => json
+        match &self.inner {
+            ResponseBodyInner::Json(json) => json
                 .as_any_ref()
                 .downcast_ref::<AnySerializableImpl<T>>()
                 .map(|impl_| &impl_.0),
@@ -94,7 +92,9 @@ impl ResponseBody {
     where
         T: Serialize + Send + Sync + 'static,
     {
-        ResponseBody::Json(Arc::new(AnySerializableImpl(value)))
+        Self {
+            inner: ResponseBodyInner::Json(Arc::new(AnySerializableImpl(value))),
+        }
     }
 }
 
@@ -104,6 +104,22 @@ impl TryFrom<ResponseBody> for reqwest::Body {
     }
 
     type Error = erased_serde::Error;
+}
+
+impl From<Vec<u8>> for ResponseBody {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: ResponseBodyInner::Bytes(bytes),
+        }
+    }
+}
+
+impl From<String> for ResponseBody {
+    fn from(text: String) -> Self {
+        Self {
+            inner: ResponseBodyInner::Text(text),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

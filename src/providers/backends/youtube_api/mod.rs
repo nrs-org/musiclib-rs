@@ -13,5 +13,6 @@ pub use types::EntryFetchOptions;
 pub use video::get_video_raw;
 
 use crate::providers::std_values::StandardProviderKeys;
+pub use types::Provider;
 
 pub const SOURCE: &str = StandardProviderKeys::YOUTUBE;

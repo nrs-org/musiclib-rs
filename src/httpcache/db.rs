@@ -18,9 +18,9 @@ pub enum Error {
     #[error("Invalid status code in cache entry: {0}")]
     InvalidStatusCode(i32),
     #[error("Database error: {0}")]
-    DatabaseError(#[from] DbErr),
+    Database(#[from] DbErr),
     #[error("Response construction error: {0}")]
-    ResponseError(#[from] http::Error),
+    Response(#[from] http::Error),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -135,7 +135,7 @@ impl HttpCache for DbHttpCache {
             )
             .exec(&self.db)
             .await
-            .map_err(Error::DatabaseError)?;
+            .map_err(Error::Database)?;
 
         Ok(())
     }
@@ -148,7 +148,7 @@ impl HttpCache for DbHttpCache {
         match cache_entry::Entity::find_by_id(key)
             .one(&self.db)
             .await
-            .map_err(Error::DatabaseError)?
+            .map_err(Error::Database)?
         {
             None => Ok(None),
             Some(model) => {

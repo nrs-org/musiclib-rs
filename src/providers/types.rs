@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::providers::backends;
@@ -19,6 +20,10 @@ impl ExternalSources {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl<T> From<T> for ExternalSources
@@ -32,8 +37,8 @@ where
 
 // track position within a release, with optional disc number (for multi-disc releases)
 pub struct TrackPosition {
-    disc_no: Option<i32>,
-    track_no: i32,
+    pub disc_no: Option<i32>,
+    pub track_no: i32,
 }
 
 // specific data for different entry types
@@ -115,6 +120,8 @@ pub struct CanonicalizeResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(String),
     #[error("HTTP error: {0}")]
     Http(#[from] crate::http::Error),
     #[error("Invalid credentials: {0}")]
@@ -123,7 +130,7 @@ pub enum Error {
     MissingCredentials(String),
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct EntryFetchOptions {
     // To avoid infinite fetching, artist might be added to the database without their discography.
     // Users must manually trigger this to fetch the discography

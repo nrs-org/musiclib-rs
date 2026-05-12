@@ -3,9 +3,6 @@ use std::{borrow::Cow, sync::Arc};
 use async_trait::async_trait;
 
 use crate::http::{BodyExtractor, Method, Request, Response};
-use crate::providers::types::{
-    CanonicalizeResult, EntityResult, EntryFetchOptions, EntryType, ExternalSources,
-};
 
 pub use db::DbHttpCache;
 pub use memory::MemoryHttpCache;
