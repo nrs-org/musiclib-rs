@@ -11,6 +11,7 @@ use crate::providers::{
             SOURCE,
             canonicalize::{match_video_url, video_url},
             client::YoutubeClient,
+            types::EXTERNAL_TYPE_CHANNEL_ID,
         },
     },
     std_values::StandardRoleNames,
@@ -113,10 +114,11 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                 duration_ms,
                 positions: Default::default(),
             },
-            children: Arc::new(CachedChildSource::from_children(vec![ChildRef {
+            children: vec![Arc::new(CachedChildSource::from_children(vec![ChildRef {
                 entry_type: EntryType::Artist,
                 sources: [(SOURCE.into(), HashSet::from([v.snippet.channel_id.clone()]))].into(),
                 name: Some(v.snippet.channel_title.clone()),
+                external_type: EXTERNAL_TYPE_CHANNEL_ID.into(),
                 contributions: vec![Contribution {
                     role: StandardRoleNames::UPLOADER.into(),
                     main_artist: true,
@@ -124,7 +126,7 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                     ..Default::default()
                 }],
                 ..Default::default()
-            }])),
+            }]))],
             aliases: vec![Alias {
                 name: v.snippet.title.clone(),
                 source: SOURCE.into(),
@@ -201,7 +203,7 @@ mod tests {
                 ..
             },
         ));
-        let mut children_cursor = video.children.cursor();
+        let mut children_cursor = video.children[0].cursor();
         let (child, _) = children_cursor.next().await?.expect("expected a child");
         assert_eq!(child.entry_type, EntryType::Artist);
         assert_eq!(

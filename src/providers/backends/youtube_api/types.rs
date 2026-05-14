@@ -9,7 +9,9 @@ use crate::{
         CanonicalizeProvider, FetchProvider, RawFetchProvider, TryDefault,
         backends::youtube_api::{
             canonicalize::{canonicalize, match_channel_url, match_playlist_url, match_video_url},
-            channel::{get_channel, get_channel_raw},
+            channel::{
+                get_channel, get_channel_playlists_raw, get_channel_raw, get_channel_uploads_raw,
+            },
             client::YoutubeClient,
             playlist::{get_playlist, get_playlist_items_raw, get_playlist_raw},
             video::{get_video, get_video_raw},
@@ -88,12 +90,18 @@ impl FetchProvider for Provider {
         };
 
         Ok(EntityResult {
-            children: Arc::new(filter_children(
-                result.children.clone(),
-                pool,
-                root_id,
-                self,
-            )?),
+            children: result
+                .children
+                .iter()
+                .map(|s| {
+                    Ok(Arc::new(filter_children(
+                        s.clone(),
+                        pool.clone(),
+                        root_id,
+                        self.clone(),
+                    )?))
+                })
+                .collect::<Result<Vec<_>, Error>>()?,
             release_date: result.release_date,
             sources: result.sources,
             extra: result.extra,
@@ -146,6 +154,20 @@ impl RawFetchProvider for Provider {
         }
 
         if match_channel_url(url).is_some() {
+            if path_key == "playlists" {
+                return get_channel_playlists_raw(
+                    &self.client,
+                    url,
+                    |value: &serde_json::Value| callback(value),
+                )
+                .await;
+            }
+            if path_key == "uploads" {
+                return get_channel_uploads_raw(&self.client, url, |value: &serde_json::Value| {
+                    callback(value)
+                })
+                .await;
+            }
             return get_channel_raw(
                 &self.client,
                 url,

@@ -98,6 +98,9 @@ pub struct Alias {
 #[derive(Default, Clone)]
 pub struct ChildRef {
     pub entry_type: EntryType,
+    /// Backend-specific type string (e.g. `"youtube:video"`, `"youtube:playlist"`).
+    /// Empty string means unknown/unset.
+    pub external_type: Cow<'static, str>,
     pub sources: ExternalSources,
     pub name: Option<String>,
     pub position: Option<TrackPosition>,
@@ -122,7 +125,7 @@ pub struct EntityResult<T: Clone + Send + Sync + 'static = ChildFetchOptions> {
     pub sources: ExternalSources,
     pub extra: serde_json::Value,
     pub specific_data: EntrySpecificData,
-    pub children: Arc<CachedChildSource<T>>,
+    pub children: Vec<Arc<CachedChildSource<T>>>,
     pub aliases: Vec<Alias>,
 }
 
@@ -152,6 +155,7 @@ pub enum Error {
 pub enum EntryDataMatcher {
     // Generic — available for all backends
     EntryType(EntryType),
+    ExternalType(String),
     NameRegex(String),
     DurationRange { min: Option<u64>, max: Option<u64> },
     HasSource(String),
@@ -253,6 +257,7 @@ pub enum CompiledYouTubeDataMatcher {
 #[derive(Clone)]
 pub enum CompiledEntryDataMatcher {
     EntryType(EntryType),
+    ExternalType(String),
     NameRegex(Arc<Regex>),
     DurationRange { min: Option<u64>, max: Option<u64> },
     HasSource(String),
@@ -649,6 +654,9 @@ fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: u
                 } else {
                     Tribool::False
                 }
+            }
+            CompiledEntryDataMatcher::ExternalType(t) => {
+                (child.external_type.as_ref() == t.as_str()).into()
             }
             CompiledEntryDataMatcher::DurationRange { .. }
             | CompiledEntryDataMatcher::YouTube(_) => Tribool::Indeterminate,

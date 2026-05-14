@@ -11,12 +11,13 @@ use crate::providers::{
             SOURCE,
             canonicalize::{match_playlist_url, playlist_url, video_url},
             client::YoutubeClient,
+            types::EXTERNAL_TYPE_VIDEO,
         },
     },
     types::{
         Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
-        CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData, EntryType,
-        Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf, static_eval_expr,
+        CompiledEntryDataMatcher, EntityResult, EntrySpecificData, EntryType, Error, PageFetcher,
+        PaginatedChildSource, default_eval_leaf, static_eval_expr,
     },
 };
 
@@ -165,6 +166,7 @@ impl PageFetcher for PlaylistItemsPageFetcher {
                     entry_type: EntryType::Track,
                     sources: [(SOURCE.into(), HashSet::from([video_url(&video_id)]))].into(),
                     name: item.snippet.title.clone(),
+                    external_type: EXTERNAL_TYPE_VIDEO.into(),
                     ..Default::default()
                 })
             })
@@ -208,7 +210,7 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
                     num_discs: None,
                     num_tracks: None,
                 },
-                children: Arc::new(CachedChildSource::new(Box::new(children_source))),
+                children: vec![Arc::new(CachedChildSource::new(Box::new(children_source)))],
                 aliases: vec![Alias {
                     name: p.snippet.title.clone(),
                     source: SOURCE.into(),
@@ -297,7 +299,7 @@ mod tests {
             playlist.specific_data,
             EntrySpecificData::Release { .. }
         ));
-        let mut children_cursor = playlist.children.cursor();
+        let mut children_cursor = playlist.children[0].cursor();
         let mut children_vec = Vec::new();
         while let Some((child, _)) = children_cursor.next().await? {
             children_vec.push(child);

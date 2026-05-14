@@ -1,0 +1,49 @@
+{
+  "etag": "E_LnI3gBqdv3KfJVZQF1P0G8HmI",
+  "items": [
+    {
+      "contentDetails": {
+        "relatedPlaylists": {
+          "likes": "",
+          "uploads": "UUqm3BQLlJfvkTsX_hvm0UmA"
+        }
+      },
+      "etag": "ny1B6OS_98N95PpjW2tUewI2j1U",
+      "id": "UCqm3BQLlJfvkTsX_hvm0UmA",
+      "kind": "youtube#channel",
+      "snippet": {
+        "country": "JP",
+        "customUrl": "@tsunomakiwatame",
+        "description": "ホロライブ所属、角巻わためです！（Watame Tsunomaki🐏）\n吟遊詩人をしながらのんびり旅をしている羊。\n歌が大好き。もふもふ。とにかくもふもふ。\n草食系なのでポテチが好物。\n\n一番の夢は、武道館でのソロライブです！！！\n\n角巻わためのMember ship始まりました。\n『Member sheep』\n下のURLから飛べると思うので、是非応援よろしくお願い致します！\nhttps://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA/join\n\nお問い合わせ\nカバー株式会社：http://cover-corp.com/\n公式Twitter:https://twitter.com/hololivetv",
+        "localized": {
+          "description": "ホロライブ所属、角巻わためです！（Watame Tsunomaki🐏）\n吟遊詩人をしながらのんびり旅をしている羊。\n歌が大好き。もふもふ。とにかくもふもふ。\n草食系なのでポテチが好物。\n\n一番の夢は、武道館でのソロライブです！！！\n\n角巻わためのMember ship始まりました。\n『Member sheep』\n下のURLから飛べると思うので、是非応援よろしくお願い致します！\nhttps://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA/join\n\nお問い合わせ\nカバー株式会社：http://cover-corp.com/\n公式Twitter:https://twitter.com/hololivetv",
+          "title": "Watame Ch. 角巻わため"
+        },
+        "publishedAt": "2019-12-04T10:02:43.244058Z",
+        "thumbnails": {
+          "default": {
+            "height": 88,
+            "url": "https://yt3.ggpht.com/XJYar8ZAQ59ce0nFlf-Dl6V16Dwznu5xfh3XnMW_JE-nCVLHLiRTS-x1gB_eR4_CJY3KDfKxsVo=s88-c-k-c0x00ffffff-no-rj",
+            "width": 88
+          },
+          "high": {
+            "height": 800,
+            "url": "https://yt3.ggpht.com/XJYar8ZAQ59ce0nFlf-Dl6V16Dwznu5xfh3XnMW_JE-nCVLHLiRTS-x1gB_eR4_CJY3KDfKxsVo=s800-c-k-c0x00ffffff-no-rj",
+            "width": 800
+          },
+          "medium": {
+            "height": 240,
+            "url": "https://yt3.ggpht.com/XJYar8ZAQ59ce0nFlf-Dl6V16Dwznu5xfh3XnMW_JE-nCVLHLiRTS-x1gB_eR4_CJY3KDfKxsVo=s240-c-k-c0x00ffffff-no-rj",
+            "width": 240
+          }
+        },
+        "title": "Watame Ch. 角巻わため"
+      }
+    }
+  ],
+  "kind": "youtube#channelListResponse",
+  "pageInfo": {
+    "resultsPerPage": 5,
+    "totalResults": 1
+  }
+}

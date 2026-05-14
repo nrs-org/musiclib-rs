@@ -29,6 +29,7 @@ fn compiled_expr_cost(expr: &CompiledMatcherExpr) -> u32 {
             CompiledChildMatcher::Relation(_) => 1,
             CompiledChildMatcher::EntryData(d) => match d {
                 CompiledEntryDataMatcher::EntryType(_) => 2,
+                CompiledEntryDataMatcher::ExternalType(_) => 2,
                 CompiledEntryDataMatcher::HasSource(_) => 2,
                 CompiledEntryDataMatcher::NameRegex(_) => 5,
                 CompiledEntryDataMatcher::DurationRange { .. } => 20,
@@ -82,6 +83,7 @@ fn compile_matcher(m: &ChildMatcher) -> Result<CompiledChildMatcher, Error> {
 fn compile_entry_data(d: &EntryDataMatcher) -> Result<CompiledEntryDataMatcher, Error> {
     Ok(match d {
         EntryDataMatcher::EntryType(t) => CompiledEntryDataMatcher::EntryType(*t),
+        EntryDataMatcher::ExternalType(s) => CompiledEntryDataMatcher::ExternalType(s.clone()),
         EntryDataMatcher::NameRegex(p) => CompiledEntryDataMatcher::NameRegex(Arc::new(
             Regex::new(p).map_err(|e| Error::InvalidPattern(e.to_string()))?,
         )),
@@ -316,6 +318,9 @@ async fn evaluate_entry_data(
             }
             Ok(true)
         }
+        CompiledEntryDataMatcher::ExternalType(t) => {
+            Ok(ctx.child.external_type.as_ref() == t.as_str())
+        }
         CompiledEntryDataMatcher::YouTube(yt) => {
             let entity = ctx.get_entity(provider).await?;
             Ok(evaluate_youtube(yt, entity))
@@ -330,65 +335,68 @@ async fn evaluate_children_satisfy(
     provider: Arc<dyn FetchProvider>,
 ) -> Result<bool, Error> {
     let entity = ctx.get_entity(provider.clone()).await?;
-    let mut cursor = entity.children.cursor();
 
     let mut match_count: u32 = 0;
     let mut total: u32 = 0;
-    let mut i: usize = 0;
 
-    while let Some((child, _)) = cursor.next().await? {
-        total += 1;
-        let child_entity_cell = OnceCell::new();
-        let child_ctx = MatchContext {
-            child: &child,
-            child_index: i,
-            entity_cell: &child_entity_cell,
-        };
-        if evaluate_expr(matcher, &child_ctx, provider.clone()).await? {
-            match_count += 1;
-        }
-        i += 1;
+    'sources: for source in &entity.children {
+        let mut cursor = source.cursor();
+        let mut i: usize = 0;
 
-        // Early exit when outcome is already determined regardless of remaining children.
-        match mode {
-            QuantifierMode::Count { max: Some(max), .. } if match_count > *max => {
-                return Ok(false);
-            }
-            _ => {}
-        }
-
-        // Combined static check: type knowledge + count bounds.
-        let (tribool, remaining) = cursor.static_check(matcher);
-        match tribool {
-            Tribool::False => {
-                // No remaining items will match; match_count is final.
-                break;
-            }
-            Tribool::True => {
-                // All remaining items will match; drain and count them.
-                while let Some(_) = cursor.next().await? {
-                    match_count += 1;
-                    total += 1;
-                }
-                break;
-            }
-            Tribool::Indeterminate => {}
-        }
-        if let Some(remaining) = remaining {
-            let remaining = remaining as u32;
-            let early_fail = match mode {
-                QuantifierMode::Count { min, max } => {
-                    min.is_some_and(|min| match_count + remaining < min)
-                        || max.is_some_and(|max| match_count > max)
-                }
-                QuantifierMode::Ratio { min, max } => {
-                    let denom = (total + remaining) as f64;
-                    min.is_some_and(|min| (match_count + remaining) as f64 / denom < min)
-                        || max.is_some_and(|max| match_count as f64 / denom > max)
-                }
+        while let Some((child, _)) = cursor.next().await? {
+            total += 1;
+            let child_entity_cell = OnceCell::new();
+            let child_ctx = MatchContext {
+                child: &child,
+                child_index: i,
+                entity_cell: &child_entity_cell,
             };
-            if early_fail {
-                return Ok(false);
+            if evaluate_expr(matcher, &child_ctx, provider.clone()).await? {
+                match_count += 1;
+            }
+            i += 1;
+
+            // Early exit when outcome is already determined regardless of remaining children.
+            match mode {
+                QuantifierMode::Count { max: Some(max), .. } if match_count > *max => {
+                    return Ok(false);
+                }
+                _ => {}
+            }
+
+            // Combined static check: type knowledge + count bounds.
+            let (tribool, remaining) = cursor.static_check(matcher);
+            match tribool {
+                Tribool::False => {
+                    // No remaining items in this source will match; move to the next source.
+                    continue 'sources;
+                }
+                Tribool::True => {
+                    // All remaining items in this source will match; drain and count them.
+                    while let Some(_) = cursor.next().await? {
+                        match_count += 1;
+                        total += 1;
+                    }
+                    continue 'sources;
+                }
+                Tribool::Indeterminate => {}
+            }
+            if let Some(remaining) = remaining {
+                let remaining = remaining as u32;
+                let early_fail = match mode {
+                    QuantifierMode::Count { min, max } => {
+                        min.is_some_and(|min| match_count + remaining < min)
+                            || max.is_some_and(|max| match_count > max)
+                    }
+                    QuantifierMode::Ratio { min, max } => {
+                        let denom = (total + remaining) as f64;
+                        min.is_some_and(|min| (match_count + remaining) as f64 / denom < min)
+                            || max.is_some_and(|max| match_count as f64 / denom > max)
+                    }
+                };
+                if early_fail {
+                    return Ok(false);
+                }
             }
         }
     }
@@ -855,7 +863,7 @@ mod tests {
                 num_discs: None,
                 num_tracks: None,
             },
-            children: Arc::new(CachedChildSource::new(Box::new(source))),
+            children: vec![Arc::new(CachedChildSource::new(Box::new(source)))],
             aliases: vec![],
         }
     }
@@ -977,7 +985,7 @@ mod tests {
                 num_discs: None,
                 num_tracks: None,
             },
-            children: Arc::new(CachedChildSource::new(Box::new(source))),
+            children: vec![Arc::new(CachedChildSource::new(Box::new(source)))],
             aliases: vec![],
         }
     }

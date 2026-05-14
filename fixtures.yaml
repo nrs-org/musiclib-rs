@@ -11,3 +11,8 @@ fixtures:
           metadata: src/providers/backends/youtube_api/playlist_watame_uploads.json
           items: src/providers/backends/youtube_api/playlist_watame_uploads_items_page1.json
         url: https://www.youtube.com/playlist?list=UUqm3BQLlJfvkTsX_hvm0UmA
+      - path:
+          metadata: src/providers/backends/youtube_api/channel_watame.json
+          playlists: src/providers/backends/youtube_api/channel_watame_playlists_page1.json
+          uploads: src/providers/backends/youtube_api/channel_watame_uploads_page1.json
+        url: https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA
