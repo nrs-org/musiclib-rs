@@ -1,4 +1,4 @@
-use crate::providers::{matcher::CompiledYouTubeDataMatcher, types::EntityResult};
+use crate::providers::types::{CompiledYouTubeDataMatcher, EntityResult};
 
 pub fn evaluate(matcher: &CompiledYouTubeDataMatcher, entity: &EntityResult) -> bool {
     match matcher {

@@ -4,6 +4,8 @@ use std::{
     sync::Arc,
 };
 
+use regex::Regex;
+
 pub type OptionsId = u32;
 
 use serde::{Deserialize, Serialize};
@@ -199,6 +201,96 @@ pub enum ChildMatcherExpr {
     Any(Vec<ChildMatcherExpr>),
 }
 
+// --- Compiled matcher types ---
+// These mirror the config types but with regexes pre-compiled and All/Any sub-expressions
+// sorted by cost. Built once per filter_children call, evaluated on every item.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tribool {
+    True,
+    False,
+    Indeterminate,
+}
+
+impl Tribool {
+    pub fn not(self) -> Self {
+        match self {
+            Tribool::True => Tribool::False,
+            Tribool::False => Tribool::True,
+            Tribool::Indeterminate => Tribool::Indeterminate,
+        }
+    }
+
+    pub fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Tribool::False, _) | (_, Tribool::False) => Tribool::False,
+            (Tribool::True, Tribool::True) => Tribool::True,
+            _ => Tribool::Indeterminate,
+        }
+    }
+
+    pub fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Tribool::True, _) | (_, Tribool::True) => Tribool::True,
+            (Tribool::False, Tribool::False) => Tribool::False,
+            _ => Tribool::Indeterminate,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum CompiledYouTubeDataMatcher {
+    DescriptionRegex(Arc<Regex>),
+    CategoryId(String),
+}
+
+#[derive(Clone)]
+pub enum CompiledEntryDataMatcher {
+    EntryType(EntryType),
+    NameRegex(Arc<Regex>),
+    DurationRange { min: Option<u64>, max: Option<u64> },
+    HasSource(String),
+    YouTube(CompiledYouTubeDataMatcher),
+}
+
+#[derive(Clone)]
+pub enum CompiledChildMatcher {
+    Always,
+    Relation(RelationMatcher),
+    EntryData(CompiledEntryDataMatcher),
+    ChildrenSatisfy {
+        matcher: Box<CompiledMatcherExpr>,
+        mode: QuantifierMode,
+    },
+}
+
+#[derive(Clone)]
+pub enum CompiledMatcherExpr {
+    Matcher(CompiledChildMatcher),
+    Not(Box<CompiledMatcherExpr>),
+    /// Sub-expressions sorted cheapest-first; short-circuits on first `false`.
+    All(Vec<CompiledMatcherExpr>),
+    /// Sub-expressions sorted cheapest-first; short-circuits on first `true`.
+    Any(Vec<CompiledMatcherExpr>),
+}
+
+/// Propagates a per-leaf evaluator through a `CompiledMatcherExpr` using Kleene logic.
+pub fn static_eval_expr(
+    expr: &CompiledMatcherExpr,
+    eval_leaf: &impl Fn(&CompiledChildMatcher) -> Tribool,
+) -> Tribool {
+    match expr {
+        CompiledMatcherExpr::Matcher(m) => eval_leaf(m),
+        CompiledMatcherExpr::Not(inner) => static_eval_expr(inner, eval_leaf).not(),
+        CompiledMatcherExpr::All(exprs) => exprs.iter().fold(Tribool::True, |acc, e| {
+            acc.and(static_eval_expr(e, eval_leaf))
+        }),
+        CompiledMatcherExpr::Any(exprs) => exprs.iter().fold(Tribool::False, |acc, e| {
+            acc.or(static_eval_expr(e, eval_leaf))
+        }),
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChildRule {
     pub matcher: ChildMatcherExpr,
@@ -284,9 +376,22 @@ pub trait ChildSource<T: Clone + Send + Sync + 'static = ()>: Send {
     /// Return the next (child, metadata) pair, or `None` when exhausted.
     async fn next(&mut self) -> Result<Option<(ChildRef, T)>, Error>;
 
-    /// Optional size hint: (lower_bound, upper_bound).
+    /// Optional count hint for the remaining items: (lower_bound, upper_bound).
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, None)
+    }
+
+    /// Static evaluation of a matcher expression against the remaining items in this source.
+    /// Returns `True` if all remaining items will match, `False` if none will, or `Indeterminate`.
+    fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+        let _ = expr;
+        Tribool::Indeterminate
+    }
+
+    /// Combined static check using both `evaluate_expr` and `size_hint`.
+    /// Returns the tribool from `evaluate_expr` alongside the upper bound of remaining items.
+    fn static_check(&self, expr: &CompiledMatcherExpr) -> (Tribool, Option<usize>) {
+        (self.evaluate_expr(expr), self.size_hint().1)
     }
 }
 
@@ -318,6 +423,13 @@ impl ChildSource for VecChildSource {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
+    }
+
+    fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+        static_eval_expr(expr, &|matcher| match matcher {
+            CompiledChildMatcher::Always => Tribool::True,
+            _ => Tribool::Indeterminate,
+        })
     }
 }
 
@@ -458,6 +570,93 @@ fn cached_size_hint<T: Clone + Send + Sync + 'static>(
     (buffered + live_lower, live_upper.map(|u| buffered + u))
 }
 
+/// Evaluate `expr` against a single `ChildRef` at a given index, without fetching the entity.
+/// Returns `Indeterminate` for matchers that require entity data (duration, YouTube metadata, etc.).
+fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: usize) -> Tribool {
+    static_eval_expr(expr, &|matcher| match matcher {
+        CompiledChildMatcher::Always => Tribool::True,
+        CompiledChildMatcher::Relation(RelationMatcher::IndexRange { min, max }) => {
+            let idx = index as u32;
+            let in_range = min.map_or(true, |m| idx >= m) && max.map_or(true, |m| idx < m);
+            if in_range {
+                Tribool::True
+            } else {
+                Tribool::False
+            }
+        }
+        CompiledChildMatcher::EntryData(data) => match data {
+            CompiledEntryDataMatcher::EntryType(t) => {
+                if child.entry_type == *t {
+                    Tribool::True
+                } else {
+                    Tribool::False
+                }
+            }
+            CompiledEntryDataMatcher::NameRegex(regex) => match child.name.as_deref() {
+                Some(n) => {
+                    if regex.is_match(n) {
+                        Tribool::True
+                    } else {
+                        Tribool::False
+                    }
+                }
+                None => Tribool::False,
+            },
+            CompiledEntryDataMatcher::HasSource(source) => {
+                if child.sources.get(source).is_some() {
+                    Tribool::True
+                } else {
+                    Tribool::False
+                }
+            }
+            CompiledEntryDataMatcher::DurationRange { .. }
+            | CompiledEntryDataMatcher::YouTube(_) => Tribool::Indeterminate,
+        },
+        CompiledChildMatcher::ChildrenSatisfy { .. } => Tribool::Indeterminate,
+    })
+}
+
+fn cached_evaluate_expr<T: Clone + Send + Sync + 'static>(
+    cache: &CachedChildSource<T>,
+    index: usize,
+    expr: &CompiledMatcherExpr,
+) -> Tribool {
+    let Ok(state) = cache.state.try_lock() else {
+        return Tribool::Indeterminate;
+    };
+
+    let buf_start = index.min(state.buffer.len());
+    let buf_slice = &state.buffer[buf_start..];
+
+    // Check whether all / none of the buffered remaining items match.
+    // Both are vacuously true for an empty slice.
+    let buf_all_match = buf_slice
+        .iter()
+        .enumerate()
+        .all(|(i, (child, _))| eval_expr_on_child_ref(expr, child, index + i) == Tribool::True);
+    let buf_none_match = buf_slice
+        .iter()
+        .enumerate()
+        .all(|(i, (child, _))| eval_expr_on_child_ref(expr, child, index + i) == Tribool::False);
+
+    // Ask the live source for its portion.
+    let live = state
+        .live
+        .as_ref()
+        .map(|l| l.evaluate_expr(expr))
+        .unwrap_or(Tribool::True); // exhausted live source: vacuously all match
+
+    // All remaining items match iff both segments agree all match.
+    // No remaining items match iff both segments agree none match.
+    if buf_all_match && live == Tribool::True {
+        Tribool::True
+    } else if buf_none_match && live == Tribool::False {
+        Tribool::False
+    } else {
+        Tribool::Indeterminate
+    }
+}
+
 #[async_trait::async_trait]
 impl<T: Clone + Send + Sync + 'static> ChildSource<T> for CachedChildCursor<'_, T> {
     async fn next(&mut self) -> Result<Option<(ChildRef, T)>, Error> {
@@ -480,6 +679,10 @@ impl<T: Clone + Send + Sync + 'static> ChildSource<T> for CachedChildCursor<'_, 
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         cached_size_hint(self.cache, self.index)
+    }
+
+    fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+        cached_evaluate_expr(self.cache, self.index, expr)
     }
 }
 
@@ -505,5 +708,9 @@ impl<T: Clone + Send + Sync + 'static> ChildSource<T> for OwnedCachedChildCursor
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         cached_size_hint(&self.cache, self.index)
+    }
+
+    fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+        cached_evaluate_expr(&self.cache, self.index, expr)
     }
 }

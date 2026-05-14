@@ -8,51 +8,12 @@ use crate::providers::{
     backends::youtube_api::matcher::evaluate as evaluate_youtube,
     types::{
         CachedChildSource, ChildFetchOptions, ChildMatcher, ChildMatcherExpr, ChildRef,
-        ChildSource, EntityResult, EntryDataMatcher, EntryFetchOptionsPool, EntrySpecificData,
-        EntryType, Error, OptionsId, OwnedCachedChildCursor, QuantifierMode, RelationMatcher,
-        YouTubeDataMatcher,
+        ChildSource, CompiledChildMatcher, CompiledEntryDataMatcher, CompiledMatcherExpr,
+        CompiledYouTubeDataMatcher, EntityResult, EntryDataMatcher, EntryFetchOptionsPool,
+        EntrySpecificData, Error, OptionsId, OwnedCachedChildCursor, QuantifierMode,
+        RelationMatcher, Tribool, YouTubeDataMatcher,
     },
 };
-
-// --- Compiled matcher types ---
-// These mirror the config types but with regexes pre-compiled and All/Any sub-expressions
-// sorted by cost. Built once per filter_children call, evaluated on every item.
-
-#[derive(Clone)]
-pub enum CompiledYouTubeDataMatcher {
-    DescriptionRegex(Arc<Regex>),
-    CategoryId(String),
-}
-
-#[derive(Clone)]
-pub enum CompiledEntryDataMatcher {
-    EntryType(EntryType),
-    NameRegex(Arc<Regex>),
-    DurationRange { min: Option<u64>, max: Option<u64> },
-    HasSource(String),
-    YouTube(CompiledYouTubeDataMatcher),
-}
-
-#[derive(Clone)]
-pub enum CompiledChildMatcher {
-    Always,
-    Relation(RelationMatcher),
-    EntryData(CompiledEntryDataMatcher),
-    ChildrenSatisfy {
-        matcher: Box<CompiledMatcherExpr>,
-        mode: QuantifierMode,
-    },
-}
-
-#[derive(Clone)]
-pub enum CompiledMatcherExpr {
-    Matcher(CompiledChildMatcher),
-    Not(Box<CompiledMatcherExpr>),
-    /// Sub-expressions sorted cheapest-first; short-circuits on first `false`.
-    All(Vec<CompiledMatcherExpr>),
-    /// Sub-expressions sorted cheapest-first; short-circuits on first `true`.
-    Any(Vec<CompiledMatcherExpr>),
-}
 
 pub struct CompiledChildRule {
     pub matcher: CompiledMatcherExpr,
@@ -390,16 +351,30 @@ async fn evaluate_children_satisfy(
 
         // Early exit when outcome is already determined regardless of remaining children.
         match mode {
-            // Count: exceeded max — no future items can bring it back down
             QuantifierMode::Count { max: Some(max), .. } if match_count > *max => {
                 return Ok(false);
             }
             _ => {}
         }
 
-        // Size-hint-based early exit: check whether even the best remaining outcome
-        // can still satisfy min, or the worst can still satisfy max.
-        if let (_, Some(remaining)) = cursor.size_hint() {
+        // Combined static check: type knowledge + count bounds.
+        let (tribool, remaining) = cursor.static_check(matcher);
+        match tribool {
+            Tribool::False => {
+                // No remaining items will match; match_count is final.
+                break;
+            }
+            Tribool::True => {
+                // All remaining items will match; drain and count them.
+                while let Some(_) = cursor.next().await? {
+                    match_count += 1;
+                    total += 1;
+                }
+                break;
+            }
+            Tribool::Indeterminate => {}
+        }
+        if let Some(remaining) = remaining {
             let remaining = remaining as u32;
             let early_fail = match mode {
                 QuantifierMode::Count { min, max } => {
@@ -717,8 +692,23 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
+    fn generative_evaluate_expr(expr: &CompiledMatcherExpr) -> Tribool {
+        use crate::providers::types::static_eval_expr;
+        static_eval_expr(expr, &|matcher| match matcher {
+            CompiledChildMatcher::Always => Tribool::True,
+            CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
+                if *t == EntryType::Track {
+                    Tribool::True
+                } else {
+                    Tribool::False
+                }
+            }
+            _ => Tribool::Indeterminate,
+        })
+    }
+
     #[async_trait::async_trait]
-    impl ChildSource for GenerativeChildSource {
+    impl ChildSource<()> for GenerativeChildSource {
         async fn next(&mut self) -> Result<Option<(ChildRef, ())>, Error> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             if self.current >= self.total {
@@ -732,6 +722,36 @@ mod tests {
         fn size_hint(&self) -> (usize, Option<usize>) {
             let remaining = (self.total - self.current) as usize;
             (remaining, Some(remaining))
+        }
+
+        fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+            generative_evaluate_expr(expr)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChildSource<ChildFetchOptions> for GenerativeChildSource {
+        async fn next(&mut self) -> Result<Option<(ChildRef, ChildFetchOptions)>, Error> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            if self.current >= self.total {
+                return Ok(None);
+            }
+            let child = make_child(EntryType::Track, "track", "youtube");
+            self.current += 1;
+            let pool = Arc::new(EntryFetchOptionsPool::default());
+            Ok(Some((
+                child,
+                ChildFetchOptions::new(pool, EntryFetchOptionsPool::DEFAULT_ID),
+            )))
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = (self.total - self.current) as usize;
+            (remaining, Some(remaining))
+        }
+
+        fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+            generative_evaluate_expr(expr)
         }
     }
 
@@ -943,5 +963,115 @@ mod tests {
 
         // Both songs consumed lazily
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    // --- evaluate_expr / static_check early exit ---
+
+    fn make_entity_with_generative_source(n: u64, call_count: Arc<AtomicUsize>) -> EntityResult {
+        let source = GenerativeChildSource {
+            current: 0,
+            total: n,
+            call_count,
+        };
+        EntityResult {
+            release_date: None,
+            sources: Default::default(),
+            extra: Default::default(),
+            specific_data: EntrySpecificData::Release {
+                release_type: Some("playlist".into()),
+                num_discs: None,
+                num_tracks: None,
+            },
+            children: Arc::new(CachedChildSource::new(Box::new(source))),
+            aliases: vec![],
+        }
+    }
+
+    fn children_satisfy_type_rule(
+        pool: &mut EntryFetchOptionsPool,
+        t: EntryType,
+        min: u32,
+        options: EntryFetchOptions,
+    ) -> ChildRule {
+        ChildRule {
+            matcher: ChildMatcherExpr::Matcher(ChildMatcher::ChildrenSatisfy {
+                matcher: Box::new(ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                    EntryDataMatcher::EntryType(t),
+                ))),
+                mode: QuantifierMode::Count {
+                    min: Some(min),
+                    max: None,
+                },
+            }),
+            options_id: pool.insert(options),
+        }
+    }
+
+    // Source yields only tracks. Filtering for Album (min=1):
+    // evaluate_expr returns False after first item → only 1 next() call instead of N.
+    #[tokio::test]
+    async fn test_evaluate_expr_false_exits_after_first_item() {
+        const URL: &str = "https://www.youtube.com/playlist?list=EVAL_FALSE";
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let entity = make_entity_with_generative_source(5, Arc::clone(&call_count));
+        let provider = Arc::new(SingleResultProvider::new(URL, entity));
+
+        let source = Arc::new(CachedChildSource::from_children(vec![make_playlist_ref(
+            URL,
+        )]));
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = children_satisfy_type_rule(
+            &mut pool,
+            EntryType::Artist,
+            1,
+            EntryFetchOptions::default(),
+        );
+        let root_id = pool.insert(EntryFetchOptions {
+            child_rules: vec![rule],
+        });
+        let pool = Arc::new(pool);
+        let filtered = filter_children(source, pool, root_id, provider).unwrap();
+        let result = drain(filtered).await;
+
+        // Source only yields tracks → ChildrenSatisfy(Album, min=1) can never be satisfied.
+        assert_eq!(result.len(), 0);
+        // evaluate_expr returns False after the first item; remaining 4 are never fetched.
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // Source yields only tracks. Filtering for Track (min=1):
+    // evaluate_expr returns True after first item → remaining items drained without per-item
+    // evaluation, but all next() calls still happen to count them.
+    #[tokio::test]
+    async fn test_evaluate_expr_true_drains_without_per_item_eval() {
+        const URL: &str = "https://www.youtube.com/playlist?list=EVAL_TRUE";
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let entity = make_entity_with_generative_source(5, Arc::clone(&call_count));
+        let provider = Arc::new(SingleResultProvider::new(URL, entity));
+
+        let source = Arc::new(CachedChildSource::from_children(vec![make_playlist_ref(
+            URL,
+        )]));
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = children_satisfy_type_rule(
+            &mut pool,
+            EntryType::Track,
+            1,
+            EntryFetchOptions::default(),
+        );
+        let root_id = pool.insert(EntryFetchOptions {
+            child_rules: vec![rule],
+        });
+        let pool = Arc::new(pool);
+        let filtered = filter_children(source, pool, root_id, provider).unwrap();
+        let result = drain(filtered).await;
+
+        // All 5 children are tracks → ChildrenSatisfy(Track, min=1) passes.
+        assert_eq!(result.len(), 1);
+        // 6 next() calls: 1 evaluated + 4 drained + 1 None sentinel. Items 2-5 skip
+        // per-item evaluation thanks to evaluate_expr returning True.
+        assert_eq!(call_count.load(Ordering::SeqCst), 6);
     }
 }
