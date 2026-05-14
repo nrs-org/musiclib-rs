@@ -14,8 +14,9 @@ use crate::providers::{
         },
     },
     types::{
-        Alias, CachedChildSource, ChildPage, ChildRef, EntityResult, EntrySpecificData, EntryType,
-        Error, PageFetcher, PaginatedChildSource,
+        Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
+        CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData, EntryType,
+        Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf, static_eval_expr,
     },
 };
 
@@ -182,7 +183,15 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
     let children_source = PaginatedChildSource::new(Box::new(PlaylistItemsPageFetcher {
         client: client.clone(),
         playlist_id: id.to_string(),
-    }));
+    }))
+    .with_static_eval(|expr| {
+        static_eval_expr(expr, &|matcher| match matcher {
+            CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
+                (*t == EntryType::Track).into()
+            }
+            _ => default_eval_leaf(matcher),
+        })
+    });
     let result = get_playlist_raw::<PlaylistListResponse, _, _, Error, _>(
         client,
         url.as_str(),

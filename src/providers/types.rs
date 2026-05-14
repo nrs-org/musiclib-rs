@@ -212,6 +212,12 @@ pub enum Tribool {
     Indeterminate,
 }
 
+impl From<bool> for Tribool {
+    fn from(b: bool) -> Self {
+        if b { Tribool::True } else { Tribool::False }
+    }
+}
+
 impl Tribool {
     pub fn not(self) -> Self {
         match self {
@@ -272,6 +278,15 @@ pub enum CompiledMatcherExpr {
     All(Vec<CompiledMatcherExpr>),
     /// Sub-expressions sorted cheapest-first; short-circuits on first `true`.
     Any(Vec<CompiledMatcherExpr>),
+}
+
+/// Default leaf evaluator: `Always` is unconditionally `True`; everything else is `Indeterminate`.
+/// Use as a fallback arm in custom `static_eval_expr` closures.
+pub fn default_eval_leaf(matcher: &CompiledChildMatcher) -> Tribool {
+    match matcher {
+        CompiledChildMatcher::Always => Tribool::True,
+        _ => Tribool::Indeterminate,
+    }
 }
 
 /// Propagates a per-leaf evaluator through a `CompiledMatcherExpr` using Kleene logic.
@@ -426,10 +441,7 @@ impl ChildSource for VecChildSource {
     }
 
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
-        static_eval_expr(expr, &|matcher| match matcher {
-            CompiledChildMatcher::Always => Tribool::True,
-            _ => Tribool::Indeterminate,
-        })
+        static_eval_expr(expr, &default_eval_leaf)
     }
 }
 
@@ -445,12 +457,19 @@ pub trait PageFetcher: Send {
     async fn fetch_page(&mut self, page_token: Option<&str>) -> Result<ChildPage, Error>;
 }
 
+fn indeterminate_eval(_: &CompiledMatcherExpr) -> Tribool {
+    Tribool::Indeterminate
+}
+
 /// `ChildSource` that lazily paginates through children using a `PageFetcher`.
-pub struct PaginatedChildSource {
+pub struct PaginatedChildSource<
+    F: Fn(&CompiledMatcherExpr) -> Tribool + Send = fn(&CompiledMatcherExpr) -> Tribool,
+> {
     fetcher: Box<dyn PageFetcher>,
     buffer: std::vec::IntoIter<ChildRef>,
     next_page_token: Option<String>,
     exhausted: bool,
+    static_eval: F,
 }
 
 impl PaginatedChildSource {
@@ -460,12 +479,30 @@ impl PaginatedChildSource {
             buffer: Vec::new().into_iter(),
             next_page_token: None,
             exhausted: false,
+            static_eval: indeterminate_eval,
+        }
+    }
+}
+
+impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> PaginatedChildSource<F> {
+    /// Attach a static evaluator that declares what this source's items look like.
+    /// Used to enable early exit in quantifier matching without consuming items.
+    pub fn with_static_eval<G: Fn(&CompiledMatcherExpr) -> Tribool + Send>(
+        self,
+        f: G,
+    ) -> PaginatedChildSource<G> {
+        PaginatedChildSource {
+            fetcher: self.fetcher,
+            buffer: self.buffer,
+            next_page_token: self.next_page_token,
+            exhausted: self.exhausted,
+            static_eval: f,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ChildSource for PaginatedChildSource {
+impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> ChildSource for PaginatedChildSource<F> {
     async fn next(&mut self) -> Result<Option<(ChildRef, ())>, Error> {
         loop {
             if let Some(child) = self.buffer.next() {
@@ -484,6 +521,10 @@ impl ChildSource for PaginatedChildSource {
                 None => self.exhausted = true,
             }
         }
+    }
+
+    fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+        (self.static_eval)(expr)
     }
 }
 

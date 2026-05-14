@@ -693,17 +693,12 @@ mod tests {
     use tokio::sync::Mutex;
 
     fn generative_evaluate_expr(expr: &CompiledMatcherExpr) -> Tribool {
-        use crate::providers::types::static_eval_expr;
+        use crate::providers::types::{default_eval_leaf, static_eval_expr};
         static_eval_expr(expr, &|matcher| match matcher {
-            CompiledChildMatcher::Always => Tribool::True,
             CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
-                if *t == EntryType::Track {
-                    Tribool::True
-                } else {
-                    Tribool::False
-                }
+                (*t == EntryType::Track).into()
             }
-            _ => Tribool::Indeterminate,
+            _ => default_eval_leaf(matcher),
         })
     }
 
