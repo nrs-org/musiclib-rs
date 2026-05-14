@@ -3,25 +3,26 @@
 //! The internal representation uses an [`EntryFetchOptionsPool`] (flat arena of options nodes
 //! referenced by integer id) which is efficient but not human-friendly. This module provides
 //! an intermediate tree representation — [`YamlFetchDocument`] — where child options are either
-//! **inlined** or **named** (referenced by string key). Named entries live in a top-level
-//! `options:` map and may reference each other or themselves, enabling shared and recursive
-//! fetch rules without memory-leak cycles.
+//! **inlined** or **named** (referenced by string key). The document is a flat map of named
+//! entries; the reserved key `main` is the root entry point. All other keys are reusable named
+//! sets that may reference each other or themselves, enabling shared and recursive fetch rules
+//! without memory-leak cycles.
 //!
 //! # YAML shape
 //!
 //! ```yaml
 //! # Named, reusable option sets (optional)
-//! options:
-//!   mv_only:
-//!     child_rules:
-//!       - match: { name_regex: "【MV】" }
-//!         fetch: mv_only      # self-reference → recurse indefinitely
+//! mv_only:
+//!   child_rules:
+//!     - match: { name_regex: "【MV】" }
+//!       fetch: mv_only        # self-reference → recurse indefinitely
 //!
-//! # Root options
-//! child_rules:
-//!   - match: { entry_type: release }
-//!     fetch: mv_only          # reference to named set
-//!   - match: always           # fetch omitted → use default (no child rules)
+//! # Root entry point (reserved key)
+//! main:
+//!   child_rules:
+//!     - match: { entry_type: release }
+//!       fetch: mv_only        # reference to named set
+//!     - match: always         # fetch omitted → use default (no child rules)
 //! ```
 //!
 //! ## Matcher expressions
@@ -55,7 +56,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
@@ -71,17 +75,14 @@ use crate::providers::types::{
 // YAML intermediate types
 // ---------------------------------------------------------------------------
 
-/// Top-level document.
+/// Top-level document: a flat map of named option sets.
+///
+/// The reserved key `"main"` is the root entry point. All other keys are
+/// reusable named sets that may be referenced via `fetch: <name>`. Referencing
+/// `"main"` directly in a `fetch:` field is an error.
 #[derive(Serialize, Deserialize, Default)]
-pub struct YamlFetchDocument {
-    /// Named, reusable option sets. May reference each other (including cycles).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub options: HashMap<String, YamlEntryFetchOptions>,
-
-    /// Root options.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub child_rules: Vec<YamlChildRule>,
-}
+#[serde(transparent)]
+pub struct YamlFetchDocument(pub HashMap<String, YamlEntryFetchOptions>);
 
 /// An inline options block.
 #[derive(Serialize, Deserialize, Default)]
@@ -429,6 +430,20 @@ pub struct YamlChildrenSatisfy {
 pub enum YamlConversionError {
     #[error("unknown option reference: \"{0}\"")]
     UnknownRef(String),
+    #[error("I/O error reading \"{path}\": {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("YAML parse error in \"{path}\": {source}")]
+    YamlParse {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml_ng::Error,
+    },
+    #[error("cross-file ref \"{0}\" used in in-memory context (no file path available)")]
+    CrossFileRefInMemory(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -439,35 +454,30 @@ impl YamlFetchDocument {
     /// Convert into a pool + root id.
     ///
     /// Two-pass algorithm:
-    /// 1. Pre-allocate a placeholder slot for every named option so that forward and
-    ///    cyclic references resolve to a valid id before the content is known.
-    /// 2. Fill each slot with the real content, then insert the root last.
+    /// 1. Pre-allocate a placeholder slot for every entry (including `"main"`) so that forward
+    ///    and cyclic references resolve to a valid id before the content is known.
+    /// 2. Fill each slot with the real content.
     pub fn into_pool(self) -> Result<(Arc<EntryFetchOptionsPool>, OptionsId), YamlConversionError> {
         let mut pool = EntryFetchOptionsPool::default();
         let mut name_to_id: HashMap<String, OptionsId> = HashMap::new();
 
-        // Pass 1 — reserve ids for all named entries
-        for name in self.options.keys() {
+        // Pass 1 — reserve ids for all entries
+        for name in self.0.keys() {
             let id = pool.insert(EntryFetchOptions::default());
             name_to_id.insert(name.clone(), id);
         }
 
-        // Pass 2 — resolve and patch each named entry
-        for (name, yaml_opts) in &self.options {
+        // Pass 2 — resolve and patch each entry
+        for (name, yaml_opts) in &self.0 {
             let id = name_to_id[name];
             let opts = resolve_options(yaml_opts, &name_to_id, &mut pool)?;
             pool.patch(id, opts);
         }
 
-        // Insert root
-        let root_opts = resolve_options(
-            &YamlEntryFetchOptions {
-                child_rules: self.child_rules,
-            },
-            &name_to_id,
-            &mut pool,
-        )?;
-        let root_id = pool.insert(root_opts);
+        let root_id = name_to_id
+            .get("main")
+            .copied()
+            .unwrap_or(EntryFetchOptionsPool::DEFAULT_ID);
 
         Ok((Arc::new(pool), root_id))
     }
@@ -500,10 +510,15 @@ fn resolve_fetch_ref(
 ) -> Result<OptionsId, YamlConversionError> {
     match fetch {
         None => Ok(EntryFetchOptionsPool::DEFAULT_ID),
-        Some(YamlFetchRef::Ref(name)) => name_to_id
-            .get(name)
-            .copied()
-            .ok_or_else(|| YamlConversionError::UnknownRef(name.clone())),
+        Some(YamlFetchRef::Ref(name)) => {
+            if name.contains("::") {
+                return Err(YamlConversionError::CrossFileRefInMemory(name.clone()));
+            }
+            name_to_id
+                .get(name)
+                .copied()
+                .ok_or_else(|| YamlConversionError::UnknownRef(name.clone()))
+        }
         Some(YamlFetchRef::Inline(inline)) => {
             let opts = resolve_options(inline, name_to_id, pool)?;
             Ok(pool.insert(opts))
@@ -619,17 +634,14 @@ impl YamlFetchDocument {
             .map(|(i, &id)| (id, format!("opts_{i}")))
             .collect();
 
-        let options: HashMap<String, YamlEntryFetchOptions> = names
+        let mut map: HashMap<String, YamlEntryFetchOptions> = names
             .iter()
             .map(|(&id, name)| (name.clone(), emit_options(pool, id, &names)))
             .collect();
 
-        let root = emit_options(pool, root_id, &names);
+        map.insert("main".to_string(), emit_options(pool, root_id, &names));
 
-        YamlFetchDocument {
-            options,
-            child_rules: root.child_rules,
-        }
+        YamlFetchDocument(map)
     }
 }
 
@@ -758,6 +770,219 @@ fn emit_matcher_expr(expr: &ChildMatcherExpr) -> YamlMatcherExpr {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-file loading
+// ---------------------------------------------------------------------------
+
+/// Load a [`YamlFetchDocument`] from a file on disk, resolving all cross-file
+/// `./path/to/file.yaml::entry_name` references. Cross-file cycles are supported.
+///
+/// The `"main"` entry of the entry file becomes the root.
+///
+/// Returns the pool, root id, and a content hash of all loaded files combined.
+/// The hash is stable regardless of file discovery order and can be used as a
+/// cache key: if the hash matches a previously cached result, re-fetching is unnecessary.
+pub async fn load_from_file(
+    path: &Path,
+) -> Result<(Arc<EntryFetchOptionsPool>, OptionsId, [u8; 32]), YamlConversionError> {
+    let canonical = std::fs::canonicalize(path).map_err(|e| YamlConversionError::Io {
+        path: path.to_owned(),
+        source: e,
+    })?;
+
+    // Phase 1 — discover all reachable files
+    let (docs, file_hashes) = discover_files(canonical.clone()).await?;
+
+    // Phase 2 — global pass 1: pre-allocate pool slots for every entry in every file
+    let mut pool = EntryFetchOptionsPool::default();
+    let mut file_name_to_id: HashMap<PathBuf, HashMap<String, OptionsId>> = HashMap::new();
+
+    for (file_path, doc) in &docs {
+        let mut name_to_id: HashMap<String, OptionsId> = HashMap::new();
+        for name in doc.0.keys() {
+            let id = pool.insert(EntryFetchOptions::default());
+            name_to_id.insert(name.clone(), id);
+        }
+        file_name_to_id.insert(file_path.clone(), name_to_id);
+    }
+
+    // Phase 3 — global pass 2: resolve and patch every entry
+    for (file_path, doc) in &docs {
+        let name_to_id = &file_name_to_id[file_path].clone();
+        let dir = file_path.parent().unwrap_or(Path::new("."));
+        for (name, yaml_opts) in &doc.0 {
+            let id = name_to_id[name];
+            let opts =
+                resolve_options_multi(yaml_opts, name_to_id, dir, &file_name_to_id, &mut pool)?;
+            pool.patch(id, opts);
+        }
+    }
+
+    let root_id = file_name_to_id[&canonical]
+        .get("main")
+        .copied()
+        .unwrap_or(EntryFetchOptionsPool::DEFAULT_ID);
+
+    // Combine file hashes: sort by canonical path for stable ordering, then hash the hashes.
+    let mut sorted_paths: Vec<&PathBuf> = file_hashes.keys().collect();
+    sorted_paths.sort_unstable();
+    let mut combined = Sha256::new();
+    for p in sorted_paths {
+        combined.update(file_hashes[p]);
+    }
+    let hash: [u8; 32] = combined.finalize().into();
+
+    Ok((Arc::new(pool), root_id, hash))
+}
+
+/// BFS discovery: parse all reachable YAML files starting from `entry`.
+/// Already-visited files are skipped, so cycles terminate naturally.
+/// Returns the parsed documents and a per-file SHA-256 hash of each file's raw content.
+async fn discover_files(
+    entry: PathBuf,
+) -> Result<
+    (
+        HashMap<PathBuf, YamlFetchDocument>,
+        HashMap<PathBuf, [u8; 32]>,
+    ),
+    YamlConversionError,
+> {
+    let mut docs: HashMap<PathBuf, YamlFetchDocument> = HashMap::new();
+    let mut file_hashes: HashMap<PathBuf, [u8; 32]> = HashMap::new();
+    let mut queue: Vec<PathBuf> = vec![entry];
+
+    while let Some(path) = queue.pop() {
+        if docs.contains_key(&path) {
+            continue;
+        }
+
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| YamlConversionError::Io {
+                path: path.clone(),
+                source: e,
+            })?;
+
+        let hash: [u8; 32] = Sha256::digest(text.as_bytes()).into();
+        file_hashes.insert(path.clone(), hash);
+
+        let doc: YamlFetchDocument =
+            serde_yaml_ng::from_str(&text).map_err(|e| YamlConversionError::YamlParse {
+                path: path.clone(),
+                source: e,
+            })?;
+
+        let dir = path.parent().unwrap_or(Path::new("."));
+        for path_part in collect_cross_file_paths(&doc) {
+            let abs = dir.join(&path_part);
+            let canonical = std::fs::canonicalize(&abs).map_err(|e| YamlConversionError::Io {
+                path: abs.clone(),
+                source: e,
+            })?;
+            if !docs.contains_key(&canonical) {
+                queue.push(canonical);
+            }
+        }
+
+        docs.insert(path, doc);
+    }
+
+    Ok((docs, file_hashes))
+}
+
+/// Collect all file path parts (left of `::`) from cross-file refs in a document.
+fn collect_cross_file_paths(doc: &YamlFetchDocument) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in doc.0.values() {
+        collect_cross_file_paths_in_entry(entry, &mut out);
+    }
+    out
+}
+
+fn collect_cross_file_paths_in_entry(entry: &YamlEntryFetchOptions, out: &mut Vec<String>) {
+    for rule in &entry.child_rules {
+        match &rule.fetch {
+            Some(YamlFetchRef::Ref(s)) => {
+                if let Some((path_part, _)) = s.split_once("::") {
+                    out.push(path_part.to_owned());
+                }
+            }
+            Some(YamlFetchRef::Inline(inline)) => collect_cross_file_paths_in_entry(inline, out),
+            None => {}
+        }
+    }
+}
+
+fn resolve_options_multi(
+    yaml: &YamlEntryFetchOptions,
+    local_name_to_id: &HashMap<String, OptionsId>,
+    current_dir: &Path,
+    file_name_to_id: &HashMap<PathBuf, HashMap<String, OptionsId>>,
+    pool: &mut EntryFetchOptionsPool,
+) -> Result<EntryFetchOptions, YamlConversionError> {
+    let child_rules = yaml
+        .child_rules
+        .iter()
+        .map(|r| {
+            let options_id = resolve_fetch_ref_multi(
+                &r.fetch,
+                local_name_to_id,
+                current_dir,
+                file_name_to_id,
+                pool,
+            )?;
+            Ok(ChildRule {
+                matcher: convert_matcher_expr(&r.matcher)?,
+                options_id,
+            })
+        })
+        .collect::<Result<Vec<_>, YamlConversionError>>()?;
+
+    Ok(EntryFetchOptions { child_rules })
+}
+
+fn resolve_fetch_ref_multi(
+    fetch: &Option<YamlFetchRef>,
+    local_name_to_id: &HashMap<String, OptionsId>,
+    current_dir: &Path,
+    file_name_to_id: &HashMap<PathBuf, HashMap<String, OptionsId>>,
+    pool: &mut EntryFetchOptionsPool,
+) -> Result<OptionsId, YamlConversionError> {
+    match fetch {
+        None => Ok(EntryFetchOptionsPool::DEFAULT_ID),
+        Some(YamlFetchRef::Ref(s)) => {
+            if let Some((path_part, entry_name)) = s.split_once("::") {
+                let abs = current_dir.join(path_part);
+                let canonical =
+                    std::fs::canonicalize(&abs).map_err(|e| YamlConversionError::Io {
+                        path: abs.clone(),
+                        source: e,
+                    })?;
+                file_name_to_id
+                    .get(&canonical)
+                    .and_then(|m| m.get(entry_name))
+                    .copied()
+                    .ok_or_else(|| YamlConversionError::UnknownRef(s.clone()))
+            } else {
+                local_name_to_id
+                    .get(s)
+                    .copied()
+                    .ok_or_else(|| YamlConversionError::UnknownRef(s.clone()))
+            }
+        }
+        Some(YamlFetchRef::Inline(inline)) => {
+            let opts = resolve_options_multi(
+                inline,
+                local_name_to_id,
+                current_dir,
+                file_name_to_id,
+                pool,
+            )?;
+            Ok(pool.insert(opts))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -786,8 +1011,9 @@ mod tests {
     fn test_always_no_fetch() {
         let (pool, root) = parse(
             r"
-child_rules:
-  - match: always
+main:
+  child_rules:
+    - match: always
 ",
         );
         let r = rules(&pool, root);
@@ -803,13 +1029,13 @@ child_rules:
     fn test_named_ref() {
         let (pool, root) = parse(
             r"
-options:
-  tracks:
-    child_rules:
-      - match: always
-child_rules:
-  - match: { entry_type: track }
-    fetch: tracks
+tracks:
+  child_rules:
+    - match: always
+main:
+  child_rules:
+    - match: { entry_type: track }
+      fetch: tracks
 ",
         );
         let r = rules(&pool, root);
@@ -823,14 +1049,14 @@ child_rules:
     fn test_self_referential() {
         let (pool, root) = parse(
             r"
-options:
-  mv_only:
-    child_rules:
-      - match: { name_regex: '【MV】' }
-        fetch: mv_only
-child_rules:
-  - match: always
-    fetch: mv_only
+mv_only:
+  child_rules:
+    - match: { name_regex: '【MV】' }
+      fetch: mv_only
+main:
+  child_rules:
+    - match: always
+      fetch: mv_only
 ",
         );
         let mv_id = rules(&pool, root)[0].options_id;
@@ -844,15 +1070,15 @@ child_rules:
     fn test_shared_ref() {
         let (pool, root) = parse(
             r"
-options:
-  shared:
-    child_rules:
-      - match: always
-child_rules:
-  - match: { entry_type: track }
-    fetch: shared
-  - match: { entry_type: release }
-    fetch: shared
+shared:
+  child_rules:
+    - match: always
+main:
+  child_rules:
+    - match: { entry_type: track }
+      fetch: shared
+    - match: { entry_type: release }
+      fetch: shared
 ",
         );
         let r = rules(&pool, root);
@@ -865,11 +1091,12 @@ child_rules:
     fn test_inline_fetch() {
         let (pool, root) = parse(
             r"
-child_rules:
-  - match: always
-    fetch:
-      child_rules:
-        - match: { name_regex: 'MV' }
+main:
+  child_rules:
+    - match: always
+      fetch:
+        child_rules:
+          - match: { name_regex: 'MV' }
 ",
         );
         let inline_id = rules(&pool, root)[0].options_id;
@@ -879,9 +1106,10 @@ child_rules:
 
     #[test]
     fn test_unknown_ref_errors() {
-        let doc: YamlFetchDocument =
-            serde_yaml_ng::from_str("child_rules:\n  - match: always\n    fetch: nonexistent\n")
-                .unwrap();
+        let doc: YamlFetchDocument = serde_yaml_ng::from_str(
+            "main:\n  child_rules:\n    - match: always\n      fetch: nonexistent\n",
+        )
+        .unwrap();
         assert!(doc.into_pool().is_err());
     }
 
@@ -889,29 +1117,30 @@ child_rules:
     fn test_matcher_variants() {
         let (pool, root) = parse(
             r"
-child_rules:
-  - match: always
-  - match: { entry_type: track }
-  - match: { name_regex: 'MV' }
-  - match: { has_source: spotify }
-  - match: { duration_range: { min: 1000, max: 5000 } }
-  - match: { index_range: { max: 10 } }
-  - match: { youtube: { category_id: '10' } }
-  - match: { youtube: { description_regex: 'original' } }
-  - match:
-      children_satisfy:
-        matcher: always
-        mode:
-          ratio: { min: 0.5 }
-  - match: { not: { entry_type: artist } }
-  - match:
-      all:
-        - { entry_type: track }
-        - { name_regex: 'MV' }
-  - match:
-      any:
-        - { entry_type: track }
-        - { entry_type: release }
+main:
+  child_rules:
+    - match: always
+    - match: { entry_type: track }
+    - match: { name_regex: 'MV' }
+    - match: { has_source: spotify }
+    - match: { duration_range: { min: 1000, max: 5000 } }
+    - match: { index_range: { max: 10 } }
+    - match: { youtube: { category_id: '10' } }
+    - match: { youtube: { description_regex: 'original' } }
+    - match:
+        children_satisfy:
+          matcher: always
+          mode:
+            ratio: { min: 0.5 }
+    - match: { not: { entry_type: artist } }
+    - match:
+        all:
+          - { entry_type: track }
+          - { name_regex: 'MV' }
+    - match:
+        any:
+          - { entry_type: track }
+          - { entry_type: release }
 ",
         );
         assert_eq!(rules(&pool, root).len(), 12);
@@ -932,8 +1161,9 @@ child_rules:
     fn test_round_trip_simple() {
         let (pool, root) = round_trip(
             r"
-child_rules:
-  - match: always
+main:
+  child_rules:
+    - match: always
 ",
         );
         assert_eq!(rules(&pool, root).len(), 1);
@@ -943,11 +1173,12 @@ child_rules:
     fn test_round_trip_inline() {
         let (pool, root) = round_trip(
             r"
-child_rules:
-  - match: always
-    fetch:
-      child_rules:
-        - match: { name_regex: 'MV' }
+main:
+  child_rules:
+    - match: always
+      fetch:
+        child_rules:
+          - match: { name_regex: 'MV' }
 ",
         );
         let inline_id = rules(&pool, root)[0].options_id;
@@ -959,14 +1190,14 @@ child_rules:
     fn test_round_trip_self_ref() {
         let (pool, root) = round_trip(
             r"
-options:
-  mv_only:
-    child_rules:
-      - match: { name_regex: '【MV】' }
-        fetch: mv_only
-child_rules:
-  - match: always
-    fetch: mv_only
+mv_only:
+  child_rules:
+    - match: { name_regex: '【MV】' }
+      fetch: mv_only
+main:
+  child_rules:
+    - match: always
+      fetch: mv_only
 ",
         );
         let mv_id = rules(&pool, root)[0].options_id;
@@ -978,18 +1209,177 @@ child_rules:
     fn test_round_trip_shared() {
         let (pool, root) = round_trip(
             r"
-options:
-  shared:
-    child_rules:
-      - match: always
-child_rules:
-  - match: { entry_type: track }
-    fetch: shared
-  - match: { entry_type: release }
-    fetch: shared
+shared:
+  child_rules:
+    - match: always
+main:
+  child_rules:
+    - match: { entry_type: track }
+      fetch: shared
+    - match: { entry_type: release }
+      fetch: shared
 ",
         );
         let r = rules(&pool, root);
         assert_eq!(r[0].options_id, r[1].options_id);
+    }
+
+    // --- into_pool rejects cross-file refs ---
+
+    #[test]
+    fn test_into_pool_rejects_cross_file_ref() {
+        let doc: YamlFetchDocument = serde_yaml_ng::from_str(
+            "main:\n  child_rules:\n    - match: always\n      fetch: \"./other.yaml::foo\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            doc.into_pool(),
+            Err(YamlConversionError::CrossFileRefInMemory(_))
+        ));
+    }
+
+    // --- multi-file tests ---
+
+    #[tokio::test]
+    async fn test_cross_file_basic_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.yaml");
+        let b = dir.path().join("b.yaml");
+
+        tokio::fs::write(
+            &b,
+            "shared:\n  child_rules:\n    - match: { entry_type: track }\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &a,
+            "main:\n  child_rules:\n    - match: always\n      fetch: \"./b.yaml::shared\"\n",
+        )
+        .await
+        .unwrap();
+
+        let (pool, root, _hash) = load_from_file(&a).await.expect("load failed");
+        let shared_id = rules(&pool, root)[0].options_id;
+        assert_ne!(shared_id, EntryFetchOptionsPool::DEFAULT_ID);
+        assert_eq!(rules(&pool, shared_id).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cross_file_cycle_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.yaml");
+        let b = dir.path().join("b.yaml");
+
+        tokio::fs::write(
+            &a,
+            "main:\n  child_rules:\n    - match: always\n      fetch: \"./b.yaml::root\"\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &b,
+            "root:\n  child_rules:\n    - match: always\n      fetch: \"./a.yaml::main\"\n",
+        )
+        .await
+        .unwrap();
+
+        let (pool, root_id, _hash) = load_from_file(&a)
+            .await
+            .expect("cross-file cycle must not error");
+        let b_opts_id = rules(&pool, root_id)[0].options_id;
+        let back_id = rules(&pool, b_opts_id)[0].options_id;
+        assert_eq!(back_id, root_id);
+    }
+
+    #[tokio::test]
+    async fn test_cross_file_shared_loaded_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.yaml");
+        let b = dir.path().join("b.yaml");
+        let c = dir.path().join("c.yaml");
+
+        tokio::fs::write(
+            &c,
+            "entry:\n  child_rules:\n    - match: { entry_type: track }\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &b,
+            "from_c:\n  child_rules:\n    - match: always\n      fetch: \"./c.yaml::entry\"\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &a,
+            "main:\n  child_rules:\n    - match: always\n      fetch: \"./b.yaml::from_c\"\n    - match: always\n      fetch: \"./c.yaml::entry\"\n",
+        )
+        .await
+        .unwrap();
+
+        let (pool, root, _hash) = load_from_file(&a).await.expect("load failed");
+        let r = rules(&pool, root);
+        // Both rules ultimately point at c.yaml::entry — should be the same OptionsId
+        let via_b = rules(&pool, r[0].options_id)[0].options_id;
+        let direct = r[1].options_id;
+        assert_eq!(via_b, direct);
+    }
+
+    #[tokio::test]
+    async fn test_cross_file_unknown_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.yaml");
+        let b = dir.path().join("b.yaml");
+
+        tokio::fs::write(&b, "other:\n  child_rules:\n    - match: always\n")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &a,
+            "main:\n  child_rules:\n    - match: always\n      fetch: \"./b.yaml::nonexistent\"\n",
+        )
+        .await
+        .unwrap();
+
+        let result = load_from_file(&a).await;
+        assert!(matches!(result, Err(YamlConversionError::UnknownRef(_))));
+    }
+
+    #[tokio::test]
+    async fn test_load_missing_file_returns_io_error() {
+        let result = load_from_file(std::path::Path::new("/nonexistent/path/x.yaml")).await;
+        assert!(matches!(result, Err(YamlConversionError::Io { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_file_hash_is_stable_and_content_sensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.yaml");
+        let b = dir.path().join("b.yaml");
+
+        let content_a =
+            "main:\n  child_rules:\n    - match: always\n      fetch: \"./b.yaml::shared\"\n";
+        let content_b = "shared:\n  child_rules:\n    - match: { entry_type: track }\n";
+
+        tokio::fs::write(&a, content_a).await.unwrap();
+        tokio::fs::write(&b, content_b).await.unwrap();
+
+        let (_, _, hash1) = load_from_file(&a).await.unwrap();
+        let (_, _, hash2) = load_from_file(&a).await.unwrap();
+        assert_eq!(hash1, hash2, "hash must be stable across loads");
+
+        // Modify b.yaml — hash should change
+        tokio::fs::write(
+            &b,
+            "shared:\n  child_rules:\n    - match: { entry_type: release }\n",
+        )
+        .await
+        .unwrap();
+        let (_, _, hash3) = load_from_file(&a).await.unwrap();
+        assert_ne!(
+            hash1, hash3,
+            "hash must change when a referenced file changes"
+        );
     }
 }

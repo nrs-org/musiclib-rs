@@ -5,6 +5,7 @@ use tokio::sync::OnceCell;
 
 use crate::providers::{
     FetchProvider,
+    backends::youtube_api::matcher::evaluate as evaluate_youtube,
     types::{
         CachedChildSource, ChildFetchOptions, ChildMatcher, ChildMatcherExpr, ChildRef,
         ChildSource, EntityResult, EntryDataMatcher, EntryFetchOptionsPool, EntrySpecificData,
@@ -141,50 +142,6 @@ fn compile_entry_data(d: &EntryDataMatcher) -> Result<CompiledEntryDataMatcher, 
     })
 }
 
-// --- Backend evaluator ---
-
-/// Backend-specific matcher evaluation.
-/// The engine delegates backend-specific `CompiledEntryDataMatcher` variants to this trait.
-pub trait BackendMatcherEvaluator: Send + Sync {
-    /// Returns `Some(bool)` if this evaluator handles the matcher, `None` otherwise.
-    fn evaluate(&self, matcher: &CompiledEntryDataMatcher, entity: &EntityResult) -> Option<bool>;
-}
-
-/// No-op evaluator for when no backend-specific matchers are needed.
-pub struct NoOpEvaluator;
-
-impl BackendMatcherEvaluator for NoOpEvaluator {
-    fn evaluate(
-        &self,
-        _matcher: &CompiledEntryDataMatcher,
-        _entity: &EntityResult,
-    ) -> Option<bool> {
-        None
-    }
-}
-
-/// Combines multiple backend evaluators — tries each in order, first `Some` wins.
-pub struct CompositeEvaluator {
-    evaluators: Vec<Box<dyn BackendMatcherEvaluator>>,
-}
-
-impl CompositeEvaluator {
-    pub fn new(evaluators: Vec<Box<dyn BackendMatcherEvaluator>>) -> Self {
-        Self { evaluators }
-    }
-}
-
-impl BackendMatcherEvaluator for CompositeEvaluator {
-    fn evaluate(&self, matcher: &CompiledEntryDataMatcher, entity: &EntityResult) -> Option<bool> {
-        for evaluator in &self.evaluators {
-            if let Some(result) = evaluator.evaluate(matcher, entity) {
-                return Some(result);
-            }
-        }
-        None
-    }
-}
-
 // --- Future-match pruning ---
 
 /// Returns `false` when it can prove no item at `index` or beyond can ever match `expr`.
@@ -207,7 +164,6 @@ struct FilteringChildSource {
     rules: Vec<CompiledChildRule>,
     pool: Arc<EntryFetchOptionsPool>,
     provider: Arc<dyn FetchProvider>,
-    backend_evaluator: Arc<dyn BackendMatcherEvaluator>,
     index: usize,
 }
 
@@ -236,14 +192,7 @@ impl ChildSource<ChildFetchOptions> for FilteringChildSource {
             self.index += 1;
 
             for rule in &self.rules {
-                if evaluate_expr(
-                    &rule.matcher,
-                    &ctx,
-                    self.provider.clone(),
-                    self.backend_evaluator.as_ref(),
-                )
-                .await?
-                {
+                if evaluate_expr(&rule.matcher, &ctx, self.provider.clone()).await? {
                     return Ok(Some((
                         child,
                         ChildFetchOptions::new(self.pool.clone(), rule.options_id),
@@ -262,7 +211,6 @@ pub fn filter_children(
     pool: Arc<EntryFetchOptionsPool>,
     root_id: OptionsId,
     provider: Arc<dyn FetchProvider>,
-    backend_evaluator: Arc<dyn BackendMatcherEvaluator>,
 ) -> Result<CachedChildSource<ChildFetchOptions>, Error> {
     let options = pool.get(root_id);
     let rules = options
@@ -281,7 +229,6 @@ pub fn filter_children(
         rules,
         pool,
         provider,
-        backend_evaluator,
         index: 0,
     })))
 }
@@ -314,19 +261,14 @@ fn evaluate_expr<'a>(
     expr: &'a CompiledMatcherExpr,
     ctx: &'a MatchContext<'a>,
     provider: Arc<dyn FetchProvider>,
-    backend_evaluator: &'a dyn BackendMatcherEvaluator,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, Error>> + Send + 'a>> {
     Box::pin(async move {
         match expr {
-            CompiledMatcherExpr::Matcher(m) => {
-                evaluate_matcher(m, ctx, provider, backend_evaluator).await
-            }
-            CompiledMatcherExpr::Not(inner) => {
-                Ok(!evaluate_expr(inner, ctx, provider, backend_evaluator).await?)
-            }
+            CompiledMatcherExpr::Matcher(m) => evaluate_matcher(m, ctx, provider).await,
+            CompiledMatcherExpr::Not(inner) => Ok(!evaluate_expr(inner, ctx, provider).await?),
             CompiledMatcherExpr::All(exprs) => {
                 for e in exprs.iter() {
-                    if !evaluate_expr(e, ctx, provider.clone(), backend_evaluator).await? {
+                    if !evaluate_expr(e, ctx, provider.clone()).await? {
                         return Ok(false);
                     }
                 }
@@ -334,7 +276,7 @@ fn evaluate_expr<'a>(
             }
             CompiledMatcherExpr::Any(exprs) => {
                 for e in exprs.iter() {
-                    if evaluate_expr(e, ctx, provider.clone(), backend_evaluator).await? {
+                    if evaluate_expr(e, ctx, provider.clone()).await? {
                         return Ok(true);
                     }
                 }
@@ -348,16 +290,13 @@ async fn evaluate_matcher(
     matcher: &CompiledChildMatcher,
     ctx: &MatchContext<'_>,
     provider: Arc<dyn FetchProvider>,
-    backend_evaluator: &dyn BackendMatcherEvaluator,
 ) -> Result<bool, Error> {
     match matcher {
         CompiledChildMatcher::Always => Ok(true),
         CompiledChildMatcher::Relation(rel) => Ok(evaluate_relation(rel, ctx)),
-        CompiledChildMatcher::EntryData(data) => {
-            evaluate_entry_data(data, ctx, provider, backend_evaluator).await
-        }
+        CompiledChildMatcher::EntryData(data) => evaluate_entry_data(data, ctx, provider).await,
         CompiledChildMatcher::ChildrenSatisfy { matcher, mode } => {
-            evaluate_children_satisfy(matcher, mode, ctx, provider, backend_evaluator).await
+            evaluate_children_satisfy(matcher, mode, ctx, provider).await
         }
     }
 }
@@ -385,7 +324,6 @@ async fn evaluate_entry_data(
     data: &CompiledEntryDataMatcher,
     ctx: &MatchContext<'_>,
     provider: Arc<dyn FetchProvider>,
-    backend_evaluator: &dyn BackendMatcherEvaluator,
 ) -> Result<bool, Error> {
     match data {
         CompiledEntryDataMatcher::EntryType(t) => Ok(ctx.child.entry_type == *t),
@@ -417,10 +355,9 @@ async fn evaluate_entry_data(
             }
             Ok(true)
         }
-        // Backend-specific — delegate
-        _ => {
+        CompiledEntryDataMatcher::YouTube(yt) => {
             let entity = ctx.get_entity(provider).await?;
-            Ok(backend_evaluator.evaluate(data, entity).unwrap_or(false))
+            Ok(evaluate_youtube(yt, entity))
         }
     }
 }
@@ -430,7 +367,6 @@ async fn evaluate_children_satisfy(
     mode: &QuantifierMode,
     ctx: &MatchContext<'_>,
     provider: Arc<dyn FetchProvider>,
-    backend_evaluator: &dyn BackendMatcherEvaluator,
 ) -> Result<bool, Error> {
     let entity = ctx.get_entity(provider.clone()).await?;
     let mut cursor = entity.children.cursor();
@@ -447,7 +383,7 @@ async fn evaluate_children_satisfy(
             child_index: i,
             entity_cell: &child_entity_cell,
         };
-        if evaluate_expr(matcher, &child_ctx, provider.clone(), backend_evaluator).await? {
+        if evaluate_expr(matcher, &child_ctx, provider.clone()).await? {
             match_count += 1;
         }
         i += 1;
@@ -629,14 +565,7 @@ mod tests {
             child_rules: root_rules,
         });
         let pool = Arc::new(pool);
-        let filtered = filter_children(
-            source,
-            pool,
-            root_id,
-            Arc::new(PanicProvider),
-            Arc::new(NoOpEvaluator),
-        )
-        .unwrap();
+        let filtered = filter_children(source, pool, root_id, Arc::new(PanicProvider)).unwrap();
         drain(filtered)
     }
 
@@ -821,14 +750,7 @@ mod tests {
             child_rules: vec![rule],
         });
         let pool = Arc::new(pool);
-        let filtered = filter_children(
-            cached,
-            pool,
-            root_id,
-            Arc::new(PanicProvider),
-            Arc::new(NoOpEvaluator),
-        )
-        .unwrap();
+        let filtered = filter_children(cached, pool, root_id, Arc::new(PanicProvider)).unwrap();
         let result = drain(filtered).await;
 
         assert_eq!(result.len(), 100);
@@ -977,8 +899,7 @@ mod tests {
                 child_rules: vec![rule],
             });
             let pool = Arc::new(pool);
-            let filtered =
-                filter_children(source, pool, root_id, provider, Arc::new(NoOpEvaluator)).unwrap();
+            let filtered = filter_children(source, pool, root_id, provider).unwrap();
             drain(filtered).await
         };
 
@@ -1012,8 +933,7 @@ mod tests {
                 child_rules: vec![rule],
             });
             let pool = Arc::new(pool);
-            let filtered =
-                filter_children(source, pool, root_id, provider, Arc::new(NoOpEvaluator)).unwrap();
+            let filtered = filter_children(source, pool, root_id, provider).unwrap();
             drain(filtered).await
         };
 
