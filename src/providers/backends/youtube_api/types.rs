@@ -16,7 +16,7 @@ use crate::{
             video::{get_video, get_video_raw},
         },
         matcher::filter_children,
-        types::{CanonicalizeResult, EntityResult, Error},
+        types::{CanonicalizeResult, EntityResult, EntryFetchOptionsPool, Error, OptionsId},
     },
 };
 
@@ -75,7 +75,8 @@ impl FetchProvider for Provider {
     async fn fetch_entry(
         self: Arc<Self>,
         identifier: &str,
-        fetch_options: crate::providers::types::EntryFetchOptions,
+        pool: Arc<EntryFetchOptionsPool>,
+        root_id: OptionsId,
     ) -> Result<EntityResult, crate::providers::types::Error> {
         let result = if match_video_url(identifier).is_some() {
             get_video(&self.client, identifier).await?
@@ -90,10 +91,11 @@ impl FetchProvider for Provider {
         Ok(EntityResult {
             children: Arc::new(filter_children(
                 result.children.clone(),
-                &fetch_options,
+                pool,
+                root_id,
                 self,
                 Arc::new(YouTubeMatcherEvaluator),
-            )),
+            )?),
             release_date: result.release_date,
             sources: result.sources,
             extra: result.extra,

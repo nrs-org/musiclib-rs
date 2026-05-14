@@ -2,10 +2,12 @@ use async_trait::async_trait;
 use std::{future::Future, sync::Arc};
 
 use crate::providers::types::{
-    CanonicalizeResult, EntityResult, EntryFetchOptions, EntryType, Error, ExternalSources,
+    CanonicalizeResult, EntityResult, EntryFetchOptions, EntryFetchOptionsPool, EntryType, Error,
+    ExternalSources, OptionsId,
 };
 
 pub mod backends;
+pub mod fetch_options_yaml;
 pub mod matcher;
 pub mod std_values;
 pub mod types;
@@ -20,7 +22,8 @@ pub trait FetchProvider: CanonicalizeProvider {
     async fn fetch_entry(
         self: Arc<Self>,
         identifier: &str,
-        fetch_options: EntryFetchOptions,
+        pool: Arc<EntryFetchOptionsPool>,
+        root_id: OptionsId,
     ) -> Result<EntityResult, Error>;
     async fn resolve_external_source(
         &self,

@@ -1,26 +1,24 @@
-use regex::Regex;
-
 use crate::providers::{
-    matcher::BackendMatcherEvaluator,
-    types::{EntityResult, EntryDataMatcher, YouTubeDataMatcher},
+    matcher::{BackendMatcherEvaluator, CompiledEntryDataMatcher, CompiledYouTubeDataMatcher},
+    types::EntityResult,
 };
 
 pub struct YouTubeMatcherEvaluator;
 
 impl BackendMatcherEvaluator for YouTubeMatcherEvaluator {
-    fn evaluate(&self, matcher: &EntryDataMatcher, entity: &EntityResult) -> Option<bool> {
-        let EntryDataMatcher::YouTube(yt) = matcher else {
+    fn evaluate(&self, matcher: &CompiledEntryDataMatcher, entity: &EntityResult) -> Option<bool> {
+        let CompiledEntryDataMatcher::YouTube(yt) = matcher else {
             return None;
         };
         Some(match yt {
-            YouTubeDataMatcher::DescriptionRegex(pattern) => entity
+            CompiledYouTubeDataMatcher::DescriptionRegex(regex) => entity
                 .extra
                 .get("snippet")
                 .and_then(|s| s.get("description"))
                 .and_then(|d| d.as_str())
-                .map(|d| Regex::new(pattern).map(|r| r.is_match(d)).unwrap_or(false))
+                .map(|d| regex.is_match(d))
                 .unwrap_or(false),
-            YouTubeDataMatcher::CategoryId(id) => entity
+            CompiledYouTubeDataMatcher::CategoryId(id) => entity
                 .extra
                 .get("snippet")
                 .and_then(|s| s.get("categoryId"))

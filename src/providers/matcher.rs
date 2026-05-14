@@ -6,25 +6,159 @@ use tokio::sync::OnceCell;
 use crate::providers::{
     FetchProvider,
     types::{
-        CachedChildSource, ChildMatcher, ChildMatcherExpr, ChildRef, ChildRule, ChildSource,
-        EntityResult, EntryDataMatcher, EntryFetchOptions, EntrySpecificData, Error,
-        OwnedCachedChildCursor, QuantifierMode, RelationMatcher,
+        CachedChildSource, ChildFetchOptions, ChildMatcher, ChildMatcherExpr, ChildRef,
+        ChildSource, EntityResult, EntryDataMatcher, EntryFetchOptionsPool, EntrySpecificData,
+        EntryType, Error, OptionsId, OwnedCachedChildCursor, QuantifierMode, RelationMatcher,
+        YouTubeDataMatcher,
     },
 };
 
+// --- Compiled matcher types ---
+// These mirror the config types but with regexes pre-compiled and All/Any sub-expressions
+// sorted by cost. Built once per filter_children call, evaluated on every item.
+
+#[derive(Clone)]
+pub enum CompiledYouTubeDataMatcher {
+    DescriptionRegex(Arc<Regex>),
+    CategoryId(String),
+}
+
+#[derive(Clone)]
+pub enum CompiledEntryDataMatcher {
+    EntryType(EntryType),
+    NameRegex(Arc<Regex>),
+    DurationRange { min: Option<u64>, max: Option<u64> },
+    HasSource(String),
+    YouTube(CompiledYouTubeDataMatcher),
+}
+
+#[derive(Clone)]
+pub enum CompiledChildMatcher {
+    Always,
+    Relation(RelationMatcher),
+    EntryData(CompiledEntryDataMatcher),
+    ChildrenSatisfy {
+        matcher: Box<CompiledMatcherExpr>,
+        mode: QuantifierMode,
+    },
+}
+
+#[derive(Clone)]
+pub enum CompiledMatcherExpr {
+    Matcher(CompiledChildMatcher),
+    Not(Box<CompiledMatcherExpr>),
+    /// Sub-expressions sorted cheapest-first; short-circuits on first `false`.
+    All(Vec<CompiledMatcherExpr>),
+    /// Sub-expressions sorted cheapest-first; short-circuits on first `true`.
+    Any(Vec<CompiledMatcherExpr>),
+}
+
+pub struct CompiledChildRule {
+    pub matcher: CompiledMatcherExpr,
+    pub options_id: OptionsId,
+}
+
+// --- Compilation ---
+
+fn compiled_expr_cost(expr: &CompiledMatcherExpr) -> u32 {
+    match expr {
+        CompiledMatcherExpr::Matcher(m) => match m {
+            CompiledChildMatcher::Always => 0,
+            CompiledChildMatcher::Relation(_) => 1,
+            CompiledChildMatcher::EntryData(d) => match d {
+                CompiledEntryDataMatcher::EntryType(_) => 2,
+                CompiledEntryDataMatcher::HasSource(_) => 2,
+                CompiledEntryDataMatcher::NameRegex(_) => 5,
+                CompiledEntryDataMatcher::DurationRange { .. } => 20,
+                CompiledEntryDataMatcher::YouTube(_) => 20,
+            },
+            CompiledChildMatcher::ChildrenSatisfy { .. } => 100,
+        },
+        CompiledMatcherExpr::Not(inner) => compiled_expr_cost(inner),
+        // Cost of All/Any is their cheapest child — short-circuit means we may only
+        // pay that minimum.
+        CompiledMatcherExpr::All(exprs) | CompiledMatcherExpr::Any(exprs) => {
+            exprs.iter().map(compiled_expr_cost).min().unwrap_or(0)
+        }
+    }
+}
+
+/// Compile a `ChildMatcherExpr` into a `CompiledMatcherExpr`: pre-compiles regexes and
+/// sorts `All`/`Any` sub-expressions by ascending cost (post-order, so children are sorted
+/// before their cost contributes to the parent's sort key).
+pub fn compile_expr(expr: &ChildMatcherExpr) -> Result<CompiledMatcherExpr, Error> {
+    Ok(match expr {
+        ChildMatcherExpr::Matcher(m) => CompiledMatcherExpr::Matcher(compile_matcher(m)?),
+        ChildMatcherExpr::Not(inner) => CompiledMatcherExpr::Not(Box::new(compile_expr(inner)?)),
+        ChildMatcherExpr::All(exprs) => {
+            let mut compiled: Vec<CompiledMatcherExpr> =
+                exprs.iter().map(compile_expr).collect::<Result<_, _>>()?;
+            compiled.sort_by_key(compiled_expr_cost);
+            CompiledMatcherExpr::All(compiled)
+        }
+        ChildMatcherExpr::Any(exprs) => {
+            let mut compiled: Vec<CompiledMatcherExpr> =
+                exprs.iter().map(compile_expr).collect::<Result<_, _>>()?;
+            compiled.sort_by_key(compiled_expr_cost);
+            CompiledMatcherExpr::Any(compiled)
+        }
+    })
+}
+
+fn compile_matcher(m: &ChildMatcher) -> Result<CompiledChildMatcher, Error> {
+    Ok(match m {
+        ChildMatcher::Always => CompiledChildMatcher::Always,
+        ChildMatcher::Relation(r) => CompiledChildMatcher::Relation(r.clone()),
+        ChildMatcher::EntryData(d) => CompiledChildMatcher::EntryData(compile_entry_data(d)?),
+        ChildMatcher::ChildrenSatisfy { matcher, mode } => CompiledChildMatcher::ChildrenSatisfy {
+            matcher: Box::new(compile_expr(matcher)?),
+            mode: *mode,
+        },
+    })
+}
+
+fn compile_entry_data(d: &EntryDataMatcher) -> Result<CompiledEntryDataMatcher, Error> {
+    Ok(match d {
+        EntryDataMatcher::EntryType(t) => CompiledEntryDataMatcher::EntryType(*t),
+        EntryDataMatcher::NameRegex(p) => CompiledEntryDataMatcher::NameRegex(Arc::new(
+            Regex::new(p).map_err(|e| Error::InvalidPattern(e.to_string()))?,
+        )),
+        EntryDataMatcher::DurationRange { min, max } => CompiledEntryDataMatcher::DurationRange {
+            min: *min,
+            max: *max,
+        },
+        EntryDataMatcher::HasSource(s) => CompiledEntryDataMatcher::HasSource(s.clone()),
+        EntryDataMatcher::YouTube(yt) => CompiledEntryDataMatcher::YouTube(match yt {
+            YouTubeDataMatcher::DescriptionRegex(p) => {
+                CompiledYouTubeDataMatcher::DescriptionRegex(Arc::new(
+                    Regex::new(p).map_err(|e| Error::InvalidPattern(e.to_string()))?,
+                ))
+            }
+            YouTubeDataMatcher::CategoryId(id) => {
+                CompiledYouTubeDataMatcher::CategoryId(id.clone())
+            }
+        }),
+    })
+}
+
+// --- Backend evaluator ---
+
 /// Backend-specific matcher evaluation.
-/// The engine delegates backend-specific `EntryDataMatcher` variants to this trait.
+/// The engine delegates backend-specific `CompiledEntryDataMatcher` variants to this trait.
 pub trait BackendMatcherEvaluator: Send + Sync {
-    /// Evaluate a backend-specific matcher against an entity result.
     /// Returns `Some(bool)` if this evaluator handles the matcher, `None` otherwise.
-    fn evaluate(&self, matcher: &EntryDataMatcher, entity: &EntityResult) -> Option<bool>;
+    fn evaluate(&self, matcher: &CompiledEntryDataMatcher, entity: &EntityResult) -> Option<bool>;
 }
 
 /// No-op evaluator for when no backend-specific matchers are needed.
 pub struct NoOpEvaluator;
 
 impl BackendMatcherEvaluator for NoOpEvaluator {
-    fn evaluate(&self, _matcher: &EntryDataMatcher, _entity: &EntityResult) -> Option<bool> {
+    fn evaluate(
+        &self,
+        _matcher: &CompiledEntryDataMatcher,
+        _entity: &EntityResult,
+    ) -> Option<bool> {
         None
     }
 }
@@ -41,7 +175,7 @@ impl CompositeEvaluator {
 }
 
 impl BackendMatcherEvaluator for CompositeEvaluator {
-    fn evaluate(&self, matcher: &EntryDataMatcher, entity: &EntityResult) -> Option<bool> {
+    fn evaluate(&self, matcher: &CompiledEntryDataMatcher, entity: &EntityResult) -> Option<bool> {
         for evaluator in &self.evaluators {
             if let Some(result) = evaluator.evaluate(matcher, entity) {
                 return Some(result);
@@ -51,74 +185,35 @@ impl BackendMatcherEvaluator for CompositeEvaluator {
     }
 }
 
-/// Heuristic cost of evaluating a `ChildMatcherExpr` once (lower = cheaper).
-/// Used to sort `All`/`Any` sub-expressions so cheap short-circuit candidates run first.
-fn expr_cost(expr: &ChildMatcherExpr) -> u32 {
-    match expr {
-        ChildMatcherExpr::Matcher(m) => match m {
-            // No fetch, O(1)
-            ChildMatcher::Always => 0,
-            ChildMatcher::Relation(_) => 1,
-            // No fetch, cheap field access
-            ChildMatcher::EntryData(EntryDataMatcher::EntryType(_)) => 2,
-            ChildMatcher::EntryData(EntryDataMatcher::HasSource(_)) => 2,
-            // No fetch, regex match
-            ChildMatcher::EntryData(EntryDataMatcher::NameRegex(_)) => 5,
-            // Requires fetching the entry
-            ChildMatcher::EntryData(_) => 20,
-            // Requires fetching the entry AND recursively iterating its children
-            ChildMatcher::ChildrenSatisfy { .. } => 100,
-        },
-        // Propagate: Not doesn't change cost, All/Any cost is their cheapest child
-        // (because short-circuit evaluation means we may only pay that minimum cost).
-        ChildMatcherExpr::Not(inner) => expr_cost(inner),
-        ChildMatcherExpr::All(exprs) | ChildMatcherExpr::Any(exprs) => {
-            exprs.iter().map(expr_cost).min().unwrap_or(0)
-        }
-    }
-}
-
-/// Recursively sort `All`/`Any` sub-expressions by ascending cost in-place.
-fn sort_by_cost(expr: &mut ChildMatcherExpr) {
-    match expr {
-        ChildMatcherExpr::Not(inner) => sort_by_cost(inner),
-        ChildMatcherExpr::All(exprs) | ChildMatcherExpr::Any(exprs) => {
-            for e in exprs.iter_mut() {
-                sort_by_cost(e);
-            }
-            exprs.sort_by_key(expr_cost);
-        }
-        _ => {}
-    }
-}
+// --- Future-match pruning ---
 
 /// Returns `false` when it can prove no item at `index` or beyond can ever match `expr`.
 /// Conservative: unknown/fetch-required matchers return `true`.
-fn can_future_items_match(expr: &ChildMatcherExpr, index: usize) -> bool {
+fn can_future_items_match(expr: &CompiledMatcherExpr, index: usize) -> bool {
     match expr {
-        ChildMatcherExpr::Matcher(ChildMatcher::Relation(RelationMatcher::IndexRange {
-            max: Some(max),
-            ..
-        })) => index < *max as usize,
-        ChildMatcherExpr::All(exprs) => exprs.iter().all(|e| can_future_items_match(e, index)),
-        ChildMatcherExpr::Any(exprs) => exprs.iter().any(|e| can_future_items_match(e, index)),
+        CompiledMatcherExpr::Matcher(CompiledChildMatcher::Relation(
+            RelationMatcher::IndexRange { max: Some(max), .. },
+        )) => index < *max as usize,
+        CompiledMatcherExpr::All(exprs) => exprs.iter().all(|e| can_future_items_match(e, index)),
+        CompiledMatcherExpr::Any(exprs) => exprs.iter().any(|e| can_future_items_match(e, index)),
         _ => true,
     }
 }
 
-/// A lazy `ChildSource` that filters children through rules on-demand.
-/// Each call to `next()` pulls from the underlying source until a match is found.
+// --- Filtering child source ---
+
 struct FilteringChildSource {
     cursor: OwnedCachedChildCursor,
-    rules: Vec<ChildRule>,
+    rules: Vec<CompiledChildRule>,
+    pool: Arc<EntryFetchOptionsPool>,
     provider: Arc<dyn FetchProvider>,
     backend_evaluator: Arc<dyn BackendMatcherEvaluator>,
     index: usize,
 }
 
 #[async_trait::async_trait]
-impl ChildSource<Arc<EntryFetchOptions>> for FilteringChildSource {
-    async fn next(&mut self) -> Result<Option<(ChildRef, Arc<EntryFetchOptions>)>, Error> {
+impl ChildSource<ChildFetchOptions> for FilteringChildSource {
+    async fn next(&mut self) -> Result<Option<(ChildRef, ChildFetchOptions)>, Error> {
         loop {
             if !self
                 .rules
@@ -149,35 +244,49 @@ impl ChildSource<Arc<EntryFetchOptions>> for FilteringChildSource {
                 )
                 .await?
                 {
-                    return Ok(Some((child, rule.options.clone())));
+                    return Ok(Some((
+                        child,
+                        ChildFetchOptions::new(self.pool.clone(), rule.options_id),
+                    )));
                 }
             }
         }
     }
 }
 
-/// Filter a `CachedChildSource` through `EntryFetchOptions.child_rules`.
-/// Returns a `CachedChildSource<Arc<EntryFetchOptions>>` that lazily evaluates rules
-/// as children are consumed.
+/// Filter a `CachedChildSource` through the `child_rules` stored in `pool` at `root_id`.
+/// Compiles all matchers (pre-compiling regexes, sorting All/Any by cost) upfront, then
+/// returns a lazy `CachedChildSource<ChildFetchOptions>` that evaluates rules on demand.
 pub fn filter_children(
     source: Arc<CachedChildSource>,
-    options: &EntryFetchOptions,
+    pool: Arc<EntryFetchOptionsPool>,
+    root_id: OptionsId,
     provider: Arc<dyn FetchProvider>,
     backend_evaluator: Arc<dyn BackendMatcherEvaluator>,
-) -> CachedChildSource<Arc<EntryFetchOptions>> {
-    let mut rules = options.child_rules.clone();
-    for rule in &mut rules {
-        sort_by_cost(&mut rule.matcher);
-    }
-    let filtering = FilteringChildSource {
+) -> Result<CachedChildSource<ChildFetchOptions>, Error> {
+    let options = pool.get(root_id);
+    let rules = options
+        .child_rules
+        .iter()
+        .map(|r| {
+            Ok(CompiledChildRule {
+                matcher: compile_expr(&r.matcher)?,
+                options_id: r.options_id,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    Ok(CachedChildSource::new(Box::new(FilteringChildSource {
         cursor: source.owned_cursor(),
         rules,
+        pool,
         provider,
         backend_evaluator,
         index: 0,
-    };
-    CachedChildSource::new(Box::new(filtering))
+    })))
 }
+
+// --- Evaluation ---
 
 struct MatchContext<'a> {
     child: &'a ChildRef,
@@ -193,29 +302,29 @@ impl MatchContext<'_> {
                     self.child.sources.first_identifier().ok_or_else(|| {
                         Error::InvalidUrl("child has no source identifiers".into())
                     })?;
-                provider
-                    .fetch_entry(identifier, EntryFetchOptions::default())
-                    .await
+                let pool = Arc::new(EntryFetchOptionsPool::default());
+                let root_id = EntryFetchOptionsPool::DEFAULT_ID;
+                provider.fetch_entry(identifier, pool, root_id).await
             })
             .await
     }
 }
 
 fn evaluate_expr<'a>(
-    expr: &'a ChildMatcherExpr,
+    expr: &'a CompiledMatcherExpr,
     ctx: &'a MatchContext<'a>,
     provider: Arc<dyn FetchProvider>,
     backend_evaluator: &'a dyn BackendMatcherEvaluator,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, Error>> + Send + 'a>> {
     Box::pin(async move {
         match expr {
-            ChildMatcherExpr::Matcher(m) => {
+            CompiledMatcherExpr::Matcher(m) => {
                 evaluate_matcher(m, ctx, provider, backend_evaluator).await
             }
-            ChildMatcherExpr::Not(inner) => {
+            CompiledMatcherExpr::Not(inner) => {
                 Ok(!evaluate_expr(inner, ctx, provider, backend_evaluator).await?)
             }
-            ChildMatcherExpr::All(exprs) => {
+            CompiledMatcherExpr::All(exprs) => {
                 for e in exprs.iter() {
                     if !evaluate_expr(e, ctx, provider.clone(), backend_evaluator).await? {
                         return Ok(false);
@@ -223,7 +332,7 @@ fn evaluate_expr<'a>(
                 }
                 Ok(true)
             }
-            ChildMatcherExpr::Any(exprs) => {
+            CompiledMatcherExpr::Any(exprs) => {
                 for e in exprs.iter() {
                     if evaluate_expr(e, ctx, provider.clone(), backend_evaluator).await? {
                         return Ok(true);
@@ -236,18 +345,18 @@ fn evaluate_expr<'a>(
 }
 
 async fn evaluate_matcher(
-    matcher: &ChildMatcher,
+    matcher: &CompiledChildMatcher,
     ctx: &MatchContext<'_>,
     provider: Arc<dyn FetchProvider>,
     backend_evaluator: &dyn BackendMatcherEvaluator,
 ) -> Result<bool, Error> {
     match matcher {
-        ChildMatcher::Always => Ok(true),
-        ChildMatcher::Relation(rel) => Ok(evaluate_relation(rel, ctx)),
-        ChildMatcher::EntryData(data) => {
+        CompiledChildMatcher::Always => Ok(true),
+        CompiledChildMatcher::Relation(rel) => Ok(evaluate_relation(rel, ctx)),
+        CompiledChildMatcher::EntryData(data) => {
             evaluate_entry_data(data, ctx, provider, backend_evaluator).await
         }
-        ChildMatcher::ChildrenSatisfy { matcher, mode } => {
+        CompiledChildMatcher::ChildrenSatisfy { matcher, mode } => {
             evaluate_children_satisfy(matcher, mode, ctx, provider, backend_evaluator).await
         }
     }
@@ -273,26 +382,21 @@ fn evaluate_relation(rel: &RelationMatcher, ctx: &MatchContext<'_>) -> bool {
 }
 
 async fn evaluate_entry_data(
-    data: &EntryDataMatcher,
+    data: &CompiledEntryDataMatcher,
     ctx: &MatchContext<'_>,
     provider: Arc<dyn FetchProvider>,
     backend_evaluator: &dyn BackendMatcherEvaluator,
 ) -> Result<bool, Error> {
     match data {
-        // These can be evaluated from ChildRef alone — no fetch needed
-        EntryDataMatcher::EntryType(t) => Ok(ctx.child.entry_type == *t),
-        EntryDataMatcher::NameRegex(pattern) => {
-            let Some(name) = &ctx.child.name else {
-                return Ok(false);
-            };
-            Ok(Regex::new(pattern)
-                .map(|r| r.is_match(name))
-                .unwrap_or(false))
-        }
-        EntryDataMatcher::HasSource(source) => Ok(ctx.child.sources.get(source).is_some()),
-
-        // These need the full entity
-        EntryDataMatcher::DurationRange { min, max } => {
+        CompiledEntryDataMatcher::EntryType(t) => Ok(ctx.child.entry_type == *t),
+        CompiledEntryDataMatcher::NameRegex(regex) => Ok(ctx
+            .child
+            .name
+            .as_deref()
+            .map(|n| regex.is_match(n))
+            .unwrap_or(false)),
+        CompiledEntryDataMatcher::HasSource(source) => Ok(ctx.child.sources.get(source).is_some()),
+        CompiledEntryDataMatcher::DurationRange { min, max } => {
             let entity = ctx.get_entity(provider).await?;
             let duration = match &entity.specific_data {
                 EntrySpecificData::Track { duration_ms, .. } => duration_ms.map(|d| d as u64),
@@ -313,7 +417,6 @@ async fn evaluate_entry_data(
             }
             Ok(true)
         }
-
         // Backend-specific — delegate
         _ => {
             let entity = ctx.get_entity(provider).await?;
@@ -323,7 +426,7 @@ async fn evaluate_entry_data(
 }
 
 async fn evaluate_children_satisfy(
-    matcher: &ChildMatcherExpr,
+    matcher: &CompiledMatcherExpr,
     mode: &QuantifierMode,
     ctx: &MatchContext<'_>,
     provider: Arc<dyn FetchProvider>,
@@ -434,32 +537,41 @@ mod tests {
         }
     }
 
-    fn always_rule(options: EntryFetchOptions) -> ChildRule {
+    fn always_rule(pool: &mut EntryFetchOptionsPool, options: EntryFetchOptions) -> ChildRule {
         ChildRule {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::Always),
-            options: Arc::new(options),
+            options_id: pool.insert(options),
         }
     }
 
-    fn entry_type_rule(t: EntryType, options: EntryFetchOptions) -> ChildRule {
+    fn entry_type_rule(
+        pool: &mut EntryFetchOptionsPool,
+        t: EntryType,
+        options: EntryFetchOptions,
+    ) -> ChildRule {
         ChildRule {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
                 EntryDataMatcher::EntryType(t),
             )),
-            options: Arc::new(options),
+            options_id: pool.insert(options),
         }
     }
 
-    fn name_regex_rule(pattern: &str, options: EntryFetchOptions) -> ChildRule {
+    fn name_regex_rule(
+        pool: &mut EntryFetchOptionsPool,
+        pattern: &str,
+        options: EntryFetchOptions,
+    ) -> ChildRule {
         ChildRule {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
                 EntryDataMatcher::NameRegex(pattern.to_string()),
             )),
-            options: Arc::new(options),
+            options_id: pool.insert(options),
         }
     }
 
     fn index_range_rule(
+        pool: &mut EntryFetchOptionsPool,
         min: Option<u32>,
         max: Option<u32>,
         options: EntryFetchOptions,
@@ -468,7 +580,7 @@ mod tests {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::Relation(
                 RelationMatcher::IndexRange { min, max },
             )),
-            options: Arc::new(options),
+            options_id: pool.insert(options),
         }
     }
 
@@ -487,16 +599,17 @@ mod tests {
         async fn fetch_entry(
             self: Arc<Self>,
             _identifier: &str,
-            _fetch_options: EntryFetchOptions,
+            _pool: Arc<EntryFetchOptionsPool>,
+            _root_id: OptionsId,
         ) -> Result<EntityResult, Error> {
             panic!("should not be called — test only uses ChildRef-level matchers")
         }
     }
 
-    /// Drain a `CachedChildSource<Arc<EntryFetchOptions>>` into a vec of `(ChildRef, Arc<EntryFetchOptions>)`.
+    /// Drain a `CachedChildSource<ChildFetchOptions>` into a vec of `(ChildRef, ChildFetchOptions)`.
     async fn drain(
-        source: CachedChildSource<Arc<EntryFetchOptions>>,
-    ) -> Vec<(ChildRef, Arc<EntryFetchOptions>)> {
+        source: CachedChildSource<ChildFetchOptions>,
+    ) -> Vec<(ChildRef, ChildFetchOptions)> {
         let mut cursor = source.cursor();
         let mut out = Vec::new();
         while let Some(item) = cursor.next().await.unwrap() {
@@ -507,16 +620,23 @@ mod tests {
 
     fn run_filter(
         children: Vec<ChildRef>,
-        rules: Vec<ChildRule>,
-    ) -> impl std::future::Future<Output = Vec<(ChildRef, Arc<EntryFetchOptions>)>> {
+        pool: EntryFetchOptionsPool,
+        root_rules: Vec<ChildRule>,
+    ) -> impl std::future::Future<Output = Vec<(ChildRef, ChildFetchOptions)>> {
         let source = Arc::new(CachedChildSource::from_children(children));
-        let options = EntryFetchOptions { child_rules: rules };
+        let mut pool = pool;
+        let root_id = pool.insert(EntryFetchOptions {
+            child_rules: root_rules,
+        });
+        let pool = Arc::new(pool);
         let filtered = filter_children(
             source,
-            &options,
+            pool,
+            root_id,
             Arc::new(PanicProvider),
             Arc::new(NoOpEvaluator),
-        );
+        )
+        .unwrap();
         drain(filtered)
     }
 
@@ -526,7 +646,9 @@ mod tests {
             make_child(EntryType::Track, "Song A", "youtube"),
             make_child(EntryType::Artist, "Artist B", "spotify"),
         ];
-        let result = run_filter(children, vec![always_rule(EntryFetchOptions::default())]).await;
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = always_rule(&mut pool, EntryFetchOptions::default());
+        let result = run_filter(children, pool, vec![rule]).await;
         assert_eq!(result.len(), 2);
     }
 
@@ -537,14 +659,9 @@ mod tests {
             make_child(EntryType::Artist, "Artist", "youtube"),
             make_child(EntryType::Track, "Another Song", "youtube"),
         ];
-        let result = run_filter(
-            children,
-            vec![entry_type_rule(
-                EntryType::Track,
-                EntryFetchOptions::default(),
-            )],
-        )
-        .await;
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = entry_type_rule(&mut pool, EntryType::Track, EntryFetchOptions::default());
+        let result = run_filter(children, pool, vec![rule]).await;
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0.name.as_deref(), Some("Song"));
         assert_eq!(result[1].0.name.as_deref(), Some("Another Song"));
@@ -557,11 +674,9 @@ mod tests {
             make_child(EntryType::Track, "Cover Song", "youtube"),
             make_child(EntryType::Track, "Another Original【MV】", "youtube"),
         ];
-        let result = run_filter(
-            children,
-            vec![name_regex_rule("【MV】", EntryFetchOptions::default())],
-        )
-        .await;
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = name_regex_rule(&mut pool, "【MV】", EntryFetchOptions::default());
+        let result = run_filter(children, pool, vec![rule]).await;
         assert_eq!(result.len(), 2);
     }
 
@@ -574,15 +689,9 @@ mod tests {
             make_child(EntryType::Track, "D", "yt"),
         ];
         // Only match children at index 1..3 (B and C)
-        let result = run_filter(
-            children,
-            vec![index_range_rule(
-                Some(1),
-                Some(3),
-                EntryFetchOptions::default(),
-            )],
-        )
-        .await;
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = index_range_rule(&mut pool, Some(1), Some(3), EntryFetchOptions::default());
+        let result = run_filter(children, pool, vec![rule]).await;
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].0.name.as_deref(), Some("B"));
         assert_eq!(result[1].0.name.as_deref(), Some("C"));
@@ -591,31 +700,26 @@ mod tests {
     #[tokio::test]
     async fn test_first_match_wins() {
         let children = vec![make_child(EntryType::Track, "Original Song", "youtube")];
+        let mut pool = EntryFetchOptionsPool::default();
+        // opts_a has one child rule (always); opts_b is empty
+        let inner_rule = always_rule(&mut pool, EntryFetchOptions::default());
         let opts_a = EntryFetchOptions {
-            child_rules: vec![always_rule(EntryFetchOptions::default())],
+            child_rules: vec![inner_rule],
         };
-        let opts_b = EntryFetchOptions::default();
-        let result = run_filter(
-            children,
-            vec![name_regex_rule("Original", opts_a), always_rule(opts_b)],
-        )
-        .await;
+        let rule_a = name_regex_rule(&mut pool, "Original", opts_a);
+        let rule_b = always_rule(&mut pool, EntryFetchOptions::default());
+        let result = run_filter(children, pool, vec![rule_a, rule_b]).await;
         assert_eq!(result.len(), 1);
-        // Should match the first rule (has child_rules) not the second (empty)
-        assert_eq!(result[0].1.child_rules.len(), 1);
+        // Should match the first rule (opts_a, which has child_rules) not the second (empty)
+        assert_eq!(result[0].1.get().child_rules.len(), 1);
     }
 
     #[tokio::test]
     async fn test_no_match_excluded() {
         let children = vec![make_child(EntryType::Artist, "Artist", "youtube")];
-        let result = run_filter(
-            children,
-            vec![entry_type_rule(
-                EntryType::Track,
-                EntryFetchOptions::default(),
-            )],
-        )
-        .await;
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = entry_type_rule(&mut pool, EntryType::Track, EntryFetchOptions::default());
+        let result = run_filter(children, pool, vec![rule]).await;
         assert_eq!(result.len(), 0);
     }
 
@@ -625,13 +729,16 @@ mod tests {
             make_child(EntryType::Track, "Song", "youtube"),
             make_child(EntryType::Artist, "Artist", "youtube"),
         ];
+        let mut pool = EntryFetchOptionsPool::default();
+        let options_id = pool.insert(EntryFetchOptions::default());
         let result = run_filter(
             children,
+            pool,
             vec![ChildRule {
                 matcher: ChildMatcherExpr::Not(Box::new(ChildMatcherExpr::Matcher(
                     ChildMatcher::EntryData(EntryDataMatcher::EntryType(EntryType::Artist)),
                 ))),
-                options: Arc::new(EntryFetchOptions::default()),
+                options_id,
             }],
         )
         .await;
@@ -647,8 +754,11 @@ mod tests {
             make_child(EntryType::Artist, "Original Artist", "youtube"),
         ];
         // Track AND name contains "Original"
+        let mut pool = EntryFetchOptionsPool::default();
+        let options_id = pool.insert(EntryFetchOptions::default());
         let result = run_filter(
             children,
+            pool,
             vec![ChildRule {
                 matcher: ChildMatcherExpr::All(vec![
                     ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
@@ -658,7 +768,7 @@ mod tests {
                         EntryDataMatcher::NameRegex("Original".to_string()),
                     )),
                 ]),
-                options: Arc::new(EntryFetchOptions::default()),
+                options_id,
             }],
         )
         .await;
@@ -666,7 +776,7 @@ mod tests {
         assert_eq!(result[0].0.name.as_deref(), Some("Original Song"));
     }
 
-    // --- IndexRange: no early exit without optimization ---
+    // --- IndexRange: early exit without over-consuming ---
 
     /// Lazy source that generates `total` items on demand, counting every `next()` call.
     struct GenerativeChildSource {
@@ -674,6 +784,9 @@ mod tests {
         total: u64,
         call_count: Arc<AtomicUsize>,
     }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
 
     #[async_trait::async_trait]
     impl ChildSource for GenerativeChildSource {
@@ -693,11 +806,6 @@ mod tests {
         }
     }
 
-    // IndexRange { max: 100 } on a 200_000-item source.
-    // Without an optimization that detects "no further items can match after index 99",
-    // the filter exhausts all 200_000 items looking for more matches.
-    // This test demonstrates the gap: it asserts only 101 source calls (100 matches + 1
-    // trailing None), but currently makes 200_001.
     #[tokio::test]
     async fn test_index_range_does_not_over_consume() {
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -707,19 +815,20 @@ mod tests {
             call_count: Arc::clone(&call_count),
         };
         let cached = Arc::new(CachedChildSource::new(Box::new(source)));
-        let options = EntryFetchOptions {
-            child_rules: vec![index_range_rule(
-                None,
-                Some(100),
-                EntryFetchOptions::default(),
-            )],
-        };
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = index_range_rule(&mut pool, None, Some(100), EntryFetchOptions::default());
+        let root_id = pool.insert(EntryFetchOptions {
+            child_rules: vec![rule],
+        });
+        let pool = Arc::new(pool);
         let filtered = filter_children(
             cached,
-            &options,
+            pool,
+            root_id,
             Arc::new(PanicProvider),
             Arc::new(NoOpEvaluator),
-        );
+        )
+        .unwrap();
         let result = drain(filtered).await;
 
         assert_eq!(result.len(), 100);
@@ -729,23 +838,23 @@ mod tests {
 
     // --- ChildrenSatisfy with lazy source ---
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Mutex;
-
-    /// A lazy `ChildSource<Arc<EntryFetchOptions>>` that counts every `next()` call.
+    /// A lazy `ChildSource<ChildFetchOptions>` that counts every `next()` call.
     struct CountingSource {
         items: std::vec::IntoIter<ChildRef>,
         call_count: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
-    impl ChildSource<Arc<EntryFetchOptions>> for CountingSource {
-        async fn next(&mut self) -> Result<Option<(ChildRef, Arc<EntryFetchOptions>)>, Error> {
+    impl ChildSource<ChildFetchOptions> for CountingSource {
+        async fn next(&mut self) -> Result<Option<(ChildRef, ChildFetchOptions)>, Error> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            Ok(self
-                .items
-                .next()
-                .map(|c| (c, Arc::new(EntryFetchOptions::default()))))
+            let pool = Arc::new(EntryFetchOptionsPool::default());
+            Ok(self.items.next().map(|c| {
+                (
+                    c,
+                    ChildFetchOptions::new(pool, EntryFetchOptionsPool::DEFAULT_ID),
+                )
+            }))
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
@@ -780,7 +889,8 @@ mod tests {
         async fn fetch_entry(
             self: Arc<Self>,
             identifier: &str,
-            _fetch_options: EntryFetchOptions,
+            _pool: Arc<EntryFetchOptionsPool>,
+            _root_id: OptionsId,
         ) -> Result<EntityResult, Error> {
             assert_eq!(
                 identifier, self.identifier,
@@ -823,6 +933,7 @@ mod tests {
     }
 
     fn children_satisfy_rule(
+        pool: &mut EntryFetchOptionsPool,
         pattern: &str,
         min_ratio: f64,
         options: EntryFetchOptions,
@@ -837,7 +948,7 @@ mod tests {
                     max: None,
                 },
             }),
-            options: Arc::new(options),
+            options_id: pool.insert(options),
         }
     }
 
@@ -860,14 +971,14 @@ mod tests {
             let source = Arc::new(CachedChildSource::from_children(vec![make_playlist_ref(
                 PLAYLIST_URL,
             )]));
-            let options = EntryFetchOptions {
-                child_rules: vec![children_satisfy_rule(
-                    "MV",
-                    0.75,
-                    EntryFetchOptions::default(),
-                )],
-            };
-            let filtered = filter_children(source, &options, provider, Arc::new(NoOpEvaluator));
+            let mut pool = EntryFetchOptionsPool::default();
+            let rule = children_satisfy_rule(&mut pool, "MV", 0.75, EntryFetchOptions::default());
+            let root_id = pool.insert(EntryFetchOptions {
+                child_rules: vec![rule],
+            });
+            let pool = Arc::new(pool);
+            let filtered =
+                filter_children(source, pool, root_id, provider, Arc::new(NoOpEvaluator)).unwrap();
             drain(filtered).await
         };
 
@@ -895,14 +1006,14 @@ mod tests {
             let source = Arc::new(CachedChildSource::from_children(vec![make_playlist_ref(
                 PLAYLIST_URL,
             )]));
-            let options = EntryFetchOptions {
-                child_rules: vec![children_satisfy_rule(
-                    "MV",
-                    0.75,
-                    EntryFetchOptions::default(),
-                )],
-            };
-            let filtered = filter_children(source, &options, provider, Arc::new(NoOpEvaluator));
+            let mut pool = EntryFetchOptionsPool::default();
+            let rule = children_satisfy_rule(&mut pool, "MV", 0.75, EntryFetchOptions::default());
+            let root_id = pool.insert(EntryFetchOptions {
+                child_rules: vec![rule],
+            });
+            let pool = Arc::new(pool);
+            let filtered =
+                filter_children(source, pool, root_id, provider, Arc::new(NoOpEvaluator)).unwrap();
             drain(filtered).await
         };
 

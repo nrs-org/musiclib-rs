@@ -4,6 +4,8 @@ use std::{
     sync::Arc,
 };
 
+pub type OptionsId = u32;
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -70,6 +72,7 @@ pub enum EntrySpecificData {
 
 // type of entry (artist, release group, release, track)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EntryType {
     Artist,
     ReleaseGroup,
@@ -112,7 +115,7 @@ pub struct Contribution {
 // result of fetching an entry, with optional release date, external sources, extra metadata,
 // specific data for the entry type, child entries (e.g. tracks within a release), contributions
 // (e.g. artists on a track), and aliases
-pub struct EntityResult<T: Clone + Send + Sync + 'static = Arc<EntryFetchOptions>> {
+pub struct EntityResult<T: Clone + Send + Sync + 'static = ChildFetchOptions> {
     pub release_date: Option<OffsetDateTime>,
     pub sources: ExternalSources,
     pub extra: serde_json::Value,
@@ -138,6 +141,8 @@ pub enum Error {
     InvalidCredentials(String),
     #[error("Missing credentials: {0}")]
     MissingCredentials(String),
+    #[error("Invalid pattern: {0}")]
+    InvalidPattern(String),
 }
 
 // Matchers based on entry metadata (requires fetching the entry)
@@ -197,12 +202,80 @@ pub enum ChildMatcherExpr {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChildRule {
     pub matcher: ChildMatcherExpr,
-    pub options: Arc<EntryFetchOptions>,
+    /// Index into the accompanying `EntryFetchOptionsPool`.
+    pub options_id: OptionsId,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct EntryFetchOptions {
     pub child_rules: Vec<ChildRule>,
+}
+
+/// Flat arena of `EntryFetchOptions` nodes. `ChildRule.options_id` indexes into this vec,
+/// breaking the reference cycle that `Arc<EntryFetchOptions>` inside `ChildRule` would create.
+///
+/// Entry 0 is always `EntryFetchOptions::default()` and serves as the sentinel for "no rules".
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EntryFetchOptionsPool {
+    entries: Vec<EntryFetchOptions>,
+}
+
+impl Default for EntryFetchOptionsPool {
+    fn default() -> Self {
+        Self {
+            entries: vec![EntryFetchOptions::default()],
+        }
+    }
+}
+
+impl EntryFetchOptionsPool {
+    pub const DEFAULT_ID: OptionsId = 0;
+
+    pub fn insert(&mut self, opts: EntryFetchOptions) -> OptionsId {
+        let id = self.entries.len() as OptionsId;
+        self.entries.push(opts);
+        id
+    }
+
+    pub fn get(&self, id: OptionsId) -> &EntryFetchOptions {
+        &self.entries[id as usize]
+    }
+
+    /// Overwrite an existing entry. Used by the YAML deserializer's two-pass algorithm:
+    /// pre-allocate a slot (to get the id for self-referential named options), then patch
+    /// it with the real content once all ids are known.
+    pub fn patch(&mut self, id: OptionsId, opts: EntryFetchOptions) {
+        self.entries[id as usize] = opts;
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (OptionsId, &EntryFetchOptions)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (i as OptionsId, e))
+    }
+}
+
+/// The per-child metadata yielded by a filtered `CachedChildSource`. Bundles the pool (shared)
+/// with the `OptionsId` that selects which `EntryFetchOptions` to use when fetching that child.
+#[derive(Clone)]
+pub struct ChildFetchOptions {
+    pub pool: Arc<EntryFetchOptionsPool>,
+    pub id: OptionsId,
+}
+
+impl ChildFetchOptions {
+    pub fn new(pool: Arc<EntryFetchOptionsPool>, id: OptionsId) -> Self {
+        Self { pool, id }
+    }
+
+    pub fn get(&self) -> &EntryFetchOptions {
+        self.pool.get(self.id)
+    }
 }
 
 /// Async source of children, optionally annotated with metadata `T` per child.
