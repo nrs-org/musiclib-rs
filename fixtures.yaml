@@ -1,4 +1,30 @@
 fixtures:
+  - backend: musicbrainz
+    entries:
+      # 角巻わため (Tsunomaki Watame)
+      - path:
+          metadata: src/providers/backends/musicbrainz/artist_watame.json
+          release_groups: src/providers/backends/musicbrainz/artist_watame_release_groups.json
+          releases: src/providers/backends/musicbrainz/artist_watame_releases.json
+          recordings: src/providers/backends/musicbrainz/artist_watame_recordings.json
+        url: https://musicbrainz.org/artist/201500bb-d0b7-49bf-9869-50e6496350b8
+      # わためのうた vol.2.5 (EP)
+      - path: src/providers/backends/musicbrainz/release_group_watame_no_uta.json
+        url: https://musicbrainz.org/release-group/7cd8d693-ec09-4b33-ad93-f1137ff77e81
+      # Watame Lullaby (single release)
+      - path: src/providers/backends/musicbrainz/release_watame_lullaby.json
+        url: https://musicbrainz.org/release/87865438-2b9b-4462-bb9e-73ea1873108e
+      # Watame Lullaby (recording)
+      - path: src/providers/backends/musicbrainz/recording_watame_lullaby.json
+        url: https://musicbrainz.org/recording/1c75e623-32dc-4e2d-82d2-72d966cbe82b
+      # Beautiful Circle (recording, track 1 of Hop Step Sheep)
+      - path: src/providers/backends/musicbrainz/recording_beautiful_circle.json
+        url: https://musicbrainz.org/recording/d70b0d40-1dac-4703-a025-39073ead3e08
+      # Hop Step Sheep (album)
+      - path:
+          metadata: src/providers/backends/musicbrainz/release_watame_hop_step_sheep.json
+          recordings: src/providers/backends/musicbrainz/release_watame_hop_step_sheep_recordings.json
+        url: https://musicbrainz.org/release/c9496f63-4978-4008-b069-953e8fb1f8a6
   - backend: youtube_api
     entries:
       - path: src/providers/backends/youtube_api/video_whatamess_xfade.json

@@ -67,8 +67,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::providers::types::{
     ChildMatcher, ChildMatcherExpr, ChildRule, EntryDataMatcher, EntryFetchOptions,
-    EntryFetchOptionsPool, EntryType, OptionsId, QuantifierMode, RelationMatcher,
-    YouTubeDataMatcher,
+    EntryFetchOptionsPool, EntryType, MusicBrainzDataMatcher, OptionsId, QuantifierMode,
+    RelationMatcher, YouTubeDataMatcher,
 };
 
 // ---------------------------------------------------------------------------
@@ -131,6 +131,7 @@ pub enum YamlMatcherExpr {
     DurationRange { min: Option<u64>, max: Option<u64> },
     IndexRange { min: Option<u32>, max: Option<u32> },
     YouTube(YamlYouTubeMatcher),
+    MusicBrainz(YamlMusicBrainzMatcher),
     ChildrenSatisfy(YamlChildrenSatisfy),
     Not(Box<YamlMatcherExpr>),
     All(Vec<YamlMatcherExpr>),
@@ -199,6 +200,7 @@ impl Serialize for YamlMatcherExpr {
                 },
             ),
             Self::YouTube(yt) => serialize_single_map(s, "youtube", yt),
+            Self::MusicBrainz(mb) => serialize_single_map(s, "musicbrainz", mb),
             Self::ChildrenSatisfy(cs) => serialize_single_map(s, "children_satisfy", cs),
             Self::Not(inner) => serialize_single_map(s, "not", inner),
             Self::All(exprs) => serialize_single_map(s, "all", exprs),
@@ -250,6 +252,7 @@ impl<'de> Deserialize<'de> for YamlMatcherExpr {
                         }
                     }
                     "youtube" => YamlMatcherExpr::YouTube(map.next_value()?),
+                    "musicbrainz" => YamlMatcherExpr::MusicBrainz(map.next_value()?),
                     "children_satisfy" => YamlMatcherExpr::ChildrenSatisfy(map.next_value()?),
                     "not" => YamlMatcherExpr::Not(map.next_value()?),
                     "all" => YamlMatcherExpr::All(map.next_value()?),
@@ -265,6 +268,7 @@ impl<'de> Deserialize<'de> for YamlMatcherExpr {
                                 "duration_range",
                                 "index_range",
                                 "youtube",
+                                "musicbrainz",
                                 "children_satisfy",
                                 "not",
                                 "all",
@@ -338,6 +342,88 @@ impl<'de> Deserialize<'de> for YamlYouTubeMatcher {
         }
 
         d.deserialize_map(YouTubeVisitor)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// YamlMusicBrainzMatcher — custom serde
+// ---------------------------------------------------------------------------
+
+pub enum YamlMusicBrainzMatcher {
+    ReleaseGroupPrimaryType(String),
+    ReleaseGroupHasSecondaryType(String),
+    ReleaseStatus(String),
+    ReleaseCountry(String),
+    RecordingIsVideo,
+}
+
+impl Serialize for YamlMusicBrainzMatcher {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::ReleaseGroupPrimaryType(t) => {
+                serialize_single_map(s, "release_group_primary_type", t)
+            }
+            Self::ReleaseGroupHasSecondaryType(t) => {
+                serialize_single_map(s, "release_group_has_secondary_type", t)
+            }
+            Self::ReleaseStatus(st) => serialize_single_map(s, "release_status", st),
+            Self::ReleaseCountry(c) => serialize_single_map(s, "release_country", c),
+            Self::RecordingIsVideo => s.serialize_str("recording_is_video"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for YamlMusicBrainzMatcher {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct MbVisitor;
+
+        impl<'de> Visitor<'de> for MbVisitor {
+            type Value = YamlMusicBrainzMatcher;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a MusicBrainz matcher string or map")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "recording_is_video" => Ok(YamlMusicBrainzMatcher::RecordingIsVideo),
+                    other => Err(E::unknown_variant(other, &["recording_is_video"])),
+                }
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let key: String = map
+                    .next_key()?
+                    .ok_or_else(|| de::Error::custom("expected a MusicBrainz matcher key"))?;
+                let m = match key.as_str() {
+                    "release_group_primary_type" => {
+                        YamlMusicBrainzMatcher::ReleaseGroupPrimaryType(map.next_value()?)
+                    }
+                    "release_group_has_secondary_type" => {
+                        YamlMusicBrainzMatcher::ReleaseGroupHasSecondaryType(map.next_value()?)
+                    }
+                    "release_status" => YamlMusicBrainzMatcher::ReleaseStatus(map.next_value()?),
+                    "release_country" => YamlMusicBrainzMatcher::ReleaseCountry(map.next_value()?),
+                    other => {
+                        return Err(de::Error::unknown_field(
+                            other,
+                            &[
+                                "release_group_primary_type",
+                                "release_group_has_secondary_type",
+                                "release_status",
+                                "release_country",
+                            ],
+                        ));
+                    }
+                };
+                while map.next_key::<String>()?.is_some() {
+                    map.next_value::<de::IgnoredAny>()?;
+                }
+                Ok(m)
+            }
+        }
+
+        d.deserialize_any(MbVisitor)
     }
 }
 
@@ -573,6 +659,26 @@ fn convert_matcher_expr(expr: &YamlMatcherExpr) -> Result<ChildMatcherExpr, Yaml
             }),
         )),
 
+        YamlMatcherExpr::MusicBrainz(mb) => ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+            EntryDataMatcher::MusicBrainz(match mb {
+                YamlMusicBrainzMatcher::ReleaseGroupPrimaryType(t) => {
+                    MusicBrainzDataMatcher::ReleaseGroupPrimaryType(t.clone())
+                }
+                YamlMusicBrainzMatcher::ReleaseGroupHasSecondaryType(t) => {
+                    MusicBrainzDataMatcher::ReleaseGroupHasSecondaryType(t.clone())
+                }
+                YamlMusicBrainzMatcher::ReleaseStatus(s) => {
+                    MusicBrainzDataMatcher::ReleaseStatus(s.clone())
+                }
+                YamlMusicBrainzMatcher::ReleaseCountry(c) => {
+                    MusicBrainzDataMatcher::ReleaseCountry(c.clone())
+                }
+                YamlMusicBrainzMatcher::RecordingIsVideo => {
+                    MusicBrainzDataMatcher::RecordingIsVideo
+                }
+            }),
+        )),
+
         YamlMatcherExpr::ChildrenSatisfy(cs) => {
             ChildMatcherExpr::Matcher(ChildMatcher::ChildrenSatisfy {
                 matcher: Box::new(convert_matcher_expr(&cs.matcher)?),
@@ -745,6 +851,23 @@ fn emit_matcher_expr(expr: &ChildMatcherExpr) -> YamlMatcherExpr {
                     }
                     YouTubeDataMatcher::CategoryId(id) => {
                         YamlYouTubeMatcher::CategoryId(id.clone())
+                    }
+                }),
+                EntryDataMatcher::MusicBrainz(mb) => YamlMatcherExpr::MusicBrainz(match mb {
+                    MusicBrainzDataMatcher::ReleaseGroupPrimaryType(t) => {
+                        YamlMusicBrainzMatcher::ReleaseGroupPrimaryType(t.clone())
+                    }
+                    MusicBrainzDataMatcher::ReleaseGroupHasSecondaryType(t) => {
+                        YamlMusicBrainzMatcher::ReleaseGroupHasSecondaryType(t.clone())
+                    }
+                    MusicBrainzDataMatcher::ReleaseStatus(s) => {
+                        YamlMusicBrainzMatcher::ReleaseStatus(s.clone())
+                    }
+                    MusicBrainzDataMatcher::ReleaseCountry(c) => {
+                        YamlMusicBrainzMatcher::ReleaseCountry(c.clone())
+                    }
+                    MusicBrainzDataMatcher::RecordingIsVideo => {
+                        YamlMusicBrainzMatcher::RecordingIsVideo
                     }
                 }),
             },

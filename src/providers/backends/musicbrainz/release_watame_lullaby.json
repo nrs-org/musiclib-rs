@@ -1,0 +1,138 @@
+{
+  "artist-credit": [
+    {
+      "artist": {
+        "country": "CA",
+        "disambiguation": "",
+        "id": "b7905b77-bb43-47f4-987f-15927df89b6b",
+        "name": "Haruka Karibu",
+        "sort-name": "Karibu, Haruka",
+        "type": "Character",
+        "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+      },
+      "joinphrase": "",
+      "name": "Haruka Karibu"
+    }
+  ],
+  "asin": null,
+  "barcode": null,
+  "country": "XW",
+  "cover-art-archive": {
+    "artwork": true,
+    "back": false,
+    "count": 1,
+    "darkened": false,
+    "front": true
+  },
+  "date": "2021-03-07",
+  "disambiguation": "",
+  "id": "87865438-2b9b-4462-bb9e-73ea1873108e",
+  "media": [
+    {
+      "format": "Digital Media",
+      "format-id": "907a28d9-b3b2-3ef6-89a8-7b18d91d4794",
+      "id": "9257f325-9bb1-3724-baf1-5b43b694dbcb",
+      "position": 1,
+      "title": "",
+      "track-count": 1,
+      "track-offset": 0,
+      "tracks": [
+        {
+          "artist-credit": [
+            {
+              "artist": {
+                "country": "CA",
+                "disambiguation": "",
+                "id": "b7905b77-bb43-47f4-987f-15927df89b6b",
+                "name": "Haruka Karibu",
+                "sort-name": "Karibu, Haruka",
+                "type": "Character",
+                "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+              },
+              "joinphrase": "",
+              "name": "Haruka Karibu"
+            }
+          ],
+          "id": "df5904ec-2fe0-419e-8229-7239fed3091f",
+          "length": 79000,
+          "number": "1",
+          "position": 1,
+          "recording": {
+            "artist-credit": [
+              {
+                "artist": {
+                  "country": "CA",
+                  "disambiguation": "",
+                  "id": "b7905b77-bb43-47f4-987f-15927df89b6b",
+                  "name": "Haruka Karibu",
+                  "sort-name": "Karibu, Haruka",
+                  "type": "Character",
+                  "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+                },
+                "joinphrase": "",
+                "name": "Haruka Karibu"
+              }
+            ],
+            "disambiguation": "",
+            "first-release-date": "2021-03-07",
+            "id": "1c75e623-32dc-4e2d-82d2-72d966cbe82b",
+            "length": 79000,
+            "title": "Watame Lullaby",
+            "video": true
+          },
+          "title": "Watame Lullaby"
+        }
+      ]
+    }
+  ],
+  "packaging": null,
+  "packaging-id": null,
+  "quality": "normal",
+  "relations": [
+    {
+      "attribute-ids": {
+        "video": "112054d5-e706-4dd8-99ea-09aabee36cd6"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "video"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "free streaming",
+      "type-id": "08445ccf-7b99-4438-9f9a-fb9ac18099ee",
+      "url": {
+        "id": "9a1838d3-0ca6-4d5e-8e72-c93264961322",
+        "resource": "https://www.youtube.com/watch?v=JQ_VZFzT4kE"
+      }
+    }
+  ],
+  "release-events": [
+    {
+      "area": {
+        "disambiguation": "",
+        "id": "525d4e18-3d00-31b9-a58b-a146a916de8f",
+        "iso-3166-1-codes": [
+          "XW"
+        ],
+        "name": "[Worldwide]",
+        "sort-name": "[Worldwide]",
+        "type": null,
+        "type-id": null
+      },
+      "date": "2021-03-07"
+    }
+  ],
+  "status": "Official",
+  "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+  "text-representation": {
+    "language": "jpn",
+    "script": "Latn"
+  },
+  "title": "Watame Lullaby"
+}

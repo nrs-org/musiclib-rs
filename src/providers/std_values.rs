@@ -9,4 +9,5 @@ pub struct StandardRoleNames;
 
 impl StandardRoleNames {
     pub const UPLOADER: &'static str = "uploader";
+    pub const LISTED_ARTIST: &'static str = "listed_artist";
 }

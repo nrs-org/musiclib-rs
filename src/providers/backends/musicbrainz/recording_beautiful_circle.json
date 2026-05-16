@@ -1,0 +1,435 @@
+{
+  "artist-credit": [
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "201500bb-d0b7-49bf-9869-50e6496350b8",
+        "name": "角巻わため",
+        "sort-name": "Tsunomaki, Watame",
+        "type": "Character",
+        "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+      },
+      "joinphrase": "",
+      "name": "角巻わため"
+    }
+  ],
+  "disambiguation": "",
+  "first-release-date": "2024-01-10",
+  "id": "d70b0d40-1dac-4703-a025-39073ead3e08",
+  "length": 229000,
+  "relations": [
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "fhána",
+        "id": "cf1d1cbc-db14-43f4-aeb1-4e9eb8787ab0",
+        "name": "佐藤純一",
+        "sort-name": "Sato, Junichi",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "arranger",
+      "type-id": "22661fb8-cdb7-4f67-8385-b2a8be6c9f0d"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "cf9705d4-9398-4aeb-a444-1d15f2d74d3d",
+        "name": "後藤天太",
+        "sort-name": "Gotō, Tenta",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "alto saxophone": "9c977091-b27a-4a0e-b54e-b5ab89420e22"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "alto saxophone"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": null,
+        "disambiguation": "trombonist",
+        "id": "455a3a53-5b65-4644-90de-6267859e9f43",
+        "name": "半田信英",
+        "sort-name": "Handa, Nobuhide",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "trombone": "f6100277-c7b8-4c8d-aa26-d8cd014b6761"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "trombone"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "93d62f43-6594-4693-bdee-34abed2027cf",
+        "name": "河村吉宏",
+        "sort-name": "Kawamura, Yoshihiro",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "drums (drum set)": "12092505-6ee1-46af-a15a-b5b468b6b155"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "drums (drum set)"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": null,
+        "disambiguation": "",
+        "id": "d56cf25c-cdd5-4efc-b2c1-9eb06f76ba66",
+        "name": "金孝珍",
+        "sort-name": "Kim, Hyojin",
+        "type": null,
+        "type-id": null
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "viola": "377e007a-33fe-4825-9bef-136cf5cf581a"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "viola"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "金 孝珍",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "533ae81f-e53a-4e2a-9538-b9f3970fe5c6",
+        "name": "真部裕",
+        "sort-name": "Manabe, Yū",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {
+        "violin": "1st violin"
+      },
+      "attribute-ids": {
+        "violin": "089f123c-0f7d-4105-a64e-49de81ca8fa4"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "violin"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "真部 裕",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "0b6dd032-9753-49b4-b6b2-15b3f10da8b5",
+        "name": "真部裕カルテット",
+        "sort-name": "Manabe, Yu, Quartet",
+        "type": "Group",
+        "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "strings": "32eca297-dde6-45d0-9305-ae479947c2a8"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "strings"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "真部 裕カルテット",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "49c842cc-9c28-4426-890f-1596bff6aa53",
+        "name": "松江潤",
+        "sort-name": "Matsue, Jun",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "guitar": "63021302-86cd-4aee-80df-2270d54f4978"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "guitar"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "松江 潤",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "cellist",
+        "id": "67957aa5-67bb-4763-8f06-77b9f6ccce55",
+        "name": "村中俊之",
+        "sort-name": "Muranaka, Toshiyuki",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "cello": "0db03a60-1142-4b25-ab1b-72027d0dc357"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "cello"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "fhána",
+        "id": "cf1d1cbc-db14-43f4-aeb1-4e9eb8787ab0",
+        "name": "佐藤純一",
+        "sort-name": "Sato, Junichi",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "violinist",
+        "id": "7b80e3cd-d92e-499c-a317-c0e26d51eb73",
+        "name": "執行恒宏",
+        "sort-name": "Shigyo, Tsunehiro",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {
+        "violin": "2nd violin"
+      },
+      "attribute-ids": {
+        "violin": "089f123c-0f7d-4105-a64e-49de81ca8fa4"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "violin"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "c845d2c8-2e9b-447b-814d-191c0653bf3b",
+        "name": "須藤優",
+        "sort-name": "Sutō, Yū",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "bass guitar": "17f9f065-2312-4a24-8309-6f6dd63e2e33"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "bass guitar"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "須藤 優",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "a7f5db87-ead9-4443-9eb4-0d18ae0a1c84",
+        "name": "吉澤達彦",
+        "sort-name": "Yoshizawa, Tatsuhiko",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-credits": {},
+      "attribute-ids": {
+        "trumpet": "1c8f9780-2f16-4891-b66d-bb7aa0820dbd"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "trumpet"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "instrument",
+      "type-id": "59054b12-01ac-43ee-a618-285fd397e461"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "35e031bd-4e1c-4f03-9b74-f7f09976d9b9",
+        "name": "木戸文祥",
+        "sort-name": "Kido, Bunsho",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-ids": {
+        "task": "39867b3b-0f1e-40d5-b602-4f3936b7f486"
+      },
+      "attribute-values": {
+        "task": "production coordinator"
+      },
+      "attributes": [
+        "task"
+      ],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "misc",
+      "type-id": "68330a36-44cf-4fa2-84e8-533c6fe3fc23"
+    },
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "engineer",
+        "id": "f969ebf6-f8dd-47fa-9c0d-50769a14cb8c",
+        "name": "高須寛光",
+        "sort-name": "Takasu, Hiromitsu",
+        "type": "Person",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df"
+      },
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "backward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "artist",
+      "type": "mix",
+      "type-id": "3e3102e1-1896-4f50-b5b2-dd9824e46efe"
+    }
+  ],
+  "title": "Beautiful Circle",
+  "video": false
+}

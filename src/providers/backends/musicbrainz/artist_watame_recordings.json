@@ -1,0 +1,800 @@
+{
+  "recording-count": 123,
+  "recording-offset": 0,
+  "recordings": [
+    {
+      "disambiguation": "",
+      "id": "003f6cbe-50cf-4ce6-bbe5-db5777a4aed8",
+      "length": 154000,
+      "title": "Surges",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-06-07",
+      "id": "0220023d-b5c4-44d6-87c6-45f990faf882",
+      "length": 258631,
+      "title": "mayday,mayday",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-12-30",
+      "id": "057a938c-7b1b-4770-8d92-cac3954d8026",
+      "length": 272720,
+      "title": "ぼくらのなぞなぞ (instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-12-29",
+      "id": "09458c51-83c6-49e5-97b2-b5c5d8be21db",
+      "length": 227706,
+      "title": "sweet night, sweet time…",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-01-10",
+      "id": "0c91b7fd-c3d4-4e66-91ba-30000d1067c1",
+      "length": 217000,
+      "title": "きっと",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "10d94923-3876-4ef0-b844-8d0e19448a1f",
+      "length": 206000,
+      "title": "Reaper vs. Sheep -Ouen Ver.-",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "129c1c74-4989-48b4-84e6-bb63c32888c3",
+      "length": 238000,
+      "title": "Mind as Judgment",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2023-11-06",
+      "id": "146aabfe-69c4-4860-b3a8-93b5ccf6f55f",
+      "length": 183360,
+      "title": "What an amazing swing (Instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-12-29",
+      "id": "1f5dfc7e-ce3c-4896-a06d-fa75585a043e",
+      "length": 43819,
+      "title": "てぇてぇのうた",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-12-30",
+      "id": "2225362c-7114-4dfc-8e44-33e57b2f71ea",
+      "length": 272707,
+      "title": "ぼくらのなぞなぞ",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-07-03",
+      "id": "240c9e74-205d-4c0f-9bfa-06bbde8c5e68",
+      "length": 162000,
+      "title": "はいよろこんで",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-05-26",
+      "id": "249952c2-bd94-4457-99c2-5c8dd5e8cab6",
+      "length": 205371,
+      "title": "ウィーゴー！ - ～hololive ver.～",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-02-29",
+      "id": "2881433d-610f-4a43-9b37-f5de29ea609e",
+      "length": 260466,
+      "title": "COLOUR",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "2887fc42-1cd3-48de-b395-26a4e0ccb080",
+      "length": 221000,
+      "title": "ジャンキー",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-07-01",
+      "id": "28e1e039-228d-4032-b441-039c93880a95",
+      "length": 215111,
+      "title": "キミだけのメロディ (Instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-12-29",
+      "id": "2a02386e-b08c-4143-97e0-0b4c000452bb",
+      "length": 259573,
+      "title": "ししわたクッキング",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-09-10",
+      "id": "2ac42ebb-9212-447d-8f51-6b01bb158514",
+      "length": 231000,
+      "title": "Everlasting Soul(Instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2026-02-21",
+      "id": "2b52f84a-c4c4-41a8-bc41-d84d0d6b0c01",
+      "length": 211000,
+      "title": "Vivid Stampede!!!! (instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "31926f9f-fa11-40da-ac53-f5aa9b8f96f8",
+      "length": 255000,
+      "title": "Habit",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-12-29",
+      "id": "36e21e35-929f-410d-a13d-eb7948a4e0f7",
+      "length": 204000,
+      "title": "RAINBOW",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "374c9da4-a0b2-4b29-9f72-62149e9be194",
+      "length": 204000,
+      "title": "チキチキバンバン",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2023-12-30",
+      "id": "39d59c61-63a1-4e2e-8b82-64b72639ac01",
+      "length": 243200,
+      "title": "Now on step (Instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "3c0cc34a-494e-49a7-91be-9152d48e5724",
+      "length": 248000,
+      "title": "Dawn",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-01-10",
+      "id": "3cd3eaa6-522c-44e5-96f4-5037aa01fadf",
+      "length": 253000,
+      "title": "WataMeister",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-04-24",
+      "id": "3de4113a-811f-495c-8803-908efdb83cab",
+      "length": 180000,
+      "title": "コぇちっちゃ＜てゴ×ンネ",
+      "video": true
+    },
+    {
+      "disambiguation": "MV",
+      "first-release-date": "2021-07-09",
+      "id": "40537b74-3d22-49d6-9b1b-c9b18f531948",
+      "length": 228000,
+      "title": "sweet night, sweet time…",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2023-06-07",
+      "id": "48cb6738-588b-464f-a4c9-a66f84e63d03",
+      "length": 277000,
+      "title": "Fins",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-12-30",
+      "id": "492a56dd-7b55-4832-a172-3a58ead5604d",
+      "length": 227786,
+      "title": "Our step",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-06-27",
+      "id": "4e23d9e5-77ba-4472-a359-9e58b9072075",
+      "length": 194000,
+      "title": "ファイアダンス",
+      "video": true
+    },
+    {
+      "disambiguation": "MV",
+      "first-release-date": "2021-08-19",
+      "id": "4ee92aa2-6cff-489f-8fd8-47161f8e9b54",
+      "length": 273000,
+      "title": "mayday、mayday",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-12-29",
+      "id": "519d694e-7f0a-4d43-8898-f9bd7c9d7ae4",
+      "length": 203733,
+      "title": "My song",
+      "video": false
+    },
+    {
+      "disambiguation": "MV",
+      "first-release-date": "2021-06-30",
+      "id": "52268107-8604-459a-ab0d-2dbc9079ea0c",
+      "length": 216000,
+      "title": "キミだけのメロディ",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-06-27",
+      "id": "529c45af-7360-426b-a450-ff3d8e1e0d1e",
+      "length": 209000,
+      "title": "FAKE LAND",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2023-06-07",
+      "id": "534cad1b-72bf-4393-b3d3-62d9395388b2",
+      "length": 275639,
+      "title": "Fins (Instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-09-10",
+      "id": "596f63f0-d42a-4280-afbb-4cae49e2811b",
+      "length": 231000,
+      "title": "Everlasting Soul",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-12-29",
+      "id": "5a036dd2-a4af-4f89-bcc6-3d4e53276472",
+      "length": 304786,
+      "title": "Holidays!",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2026-03-12",
+      "id": "5c72125d-1651-4877-b543-8e474e3c7553",
+      "length": 195507,
+      "title": "ディーヴァフィーバー (instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "music video",
+      "first-release-date": "2023-03-09",
+      "id": "5f3a7246-b2f0-436b-b421-d36ba2810b0d",
+      "length": 163000,
+      "title": "デビルじゃないもん",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-02-27",
+      "id": "6317f054-ba00-4c81-87fe-24ae4bc4874b",
+      "length": 304920,
+      "title": "イノコリ先生",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-06-25",
+      "id": "66ac06aa-9bd7-4f82-b897-c33a39e982cb",
+      "length": 260210,
+      "title": "キセキ結び",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2026-02-21",
+      "id": "69270ece-23dc-47f0-8206-0ee775f44a84",
+      "length": 211000,
+      "title": "Vivid Stampede!!!!",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "6928004d-f51d-4580-9b32-f8f2904593cf",
+      "length": 227000,
+      "title": "My Song",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "id": "6ab21c2d-24fb-4f0d-aeae-a9706fd91a9f",
+      "length": 166000,
+      "title": "シャンティ",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "id": "6e44e0cb-e532-4436-8cf6-2b12dc1b4991",
+      "length": 285000,
+      "title": "ハロ／ハワユ",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-04-02",
+      "id": "6ec9e39c-036b-4e06-b348-b9d26b8a81f3",
+      "length": 167987,
+      "title": "ラムダック (instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-06-07",
+      "id": "70d43b10-4c78-44f1-a087-926c6c1abcef",
+      "length": 223800,
+      "title": "ビリ (instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-09-24",
+      "id": "715de38b-85e7-43d8-83b3-305e16918092",
+      "length": 200333,
+      "title": "Reaper vs. Sheep -Ouen Ver.- (Instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-04-28",
+      "id": "71e08dab-4f6e-4819-80d2-641e4b98cb49",
+      "length": 286000,
+      "title": "ハロ／ハワユ",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-03-23",
+      "id": "71e41bf7-97ba-445e-91c6-84a1c3ab0c64",
+      "length": 264000,
+      "title": "ココロのちず",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-12-29",
+      "id": "73e2a8fc-388e-4cc4-9b1e-58263debb3c5",
+      "length": 245000,
+      "title": "おはようのうた",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-02-14",
+      "id": "74303cca-feba-4971-abd5-c9491f639bd4",
+      "length": 182000,
+      "title": "ハオ",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-12-30",
+      "id": "76072a72-42bb-4a57-a378-ed1718559f20",
+      "length": 261253,
+      "title": "Shout now, sheep!!",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-08-28",
+      "id": "7c6c7a9f-927c-45ad-83a0-8e4b0a2d62e8",
+      "length": 116000,
+      "title": "わためラップ (loud ver.)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-06-07",
+      "id": "816fa27a-a35e-4b7f-8ca5-f2691f9cf2f4",
+      "length": 249453,
+      "title": "Revival",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-11-27",
+      "id": "88b2a9b2-109a-4d59-887d-da6d45010c21",
+      "length": 437045,
+      "title": "mayday,mayday (Twilight ver.)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-01-10",
+      "id": "8b17cf02-0cd7-489b-b012-5756066258fd",
+      "length": 231586,
+      "title": "Go my way",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-12-29",
+      "id": "8bb1b6eb-1a21-48ba-9c9e-9f65e32e1436",
+      "length": 120889,
+      "title": "ホロライブ言えるかな?",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2023-08-21",
+      "id": "9430fabd-734d-404a-af26-aa9aa92d2008",
+      "length": 131000,
+      "title": "PAKU",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-09-24",
+      "id": "94acd766-d29e-486b-8487-163db20d9fe2",
+      "length": 200333,
+      "title": "Reaper vs. Sheep -Kenko Ver.-",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "94dd6200-de53-4d2b-bca0-ae93cba955e2",
+      "length": 59000,
+      "title": "ジンギス団ラップ",
+      "video": false
+    },
+    {
+      "disambiguation": "MV",
+      "first-release-date": "2021-09-09",
+      "id": "976fb404-b5bf-47be-a391-403718809281",
+      "length": 243000,
+      "title": "Everlasting Soul",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-08-20",
+      "id": "9829efd7-57c3-4af3-b6de-bbc092528e90",
+      "length": 258631,
+      "title": "mayday、mayday",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-06-07",
+      "id": "99337fc6-98ec-48e0-ad0e-ed9bd0e695a6",
+      "length": 225300,
+      "title": "ビリ",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-12-29",
+      "id": "9ac907e5-4c0a-482a-a3c0-ce4ce386d8a3",
+      "length": 258000,
+      "title": "ゼロの足跡",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "id": "9b223730-f890-4cfc-bdf6-0cf6d4fe8dab",
+      "length": 199000,
+      "title": "What an Amazing Swing (animation MV)",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-07-19",
+      "id": "9bbaa76c-61e2-4cf6-8e1b-1ca784b4d762",
+      "length": 208000,
+      "title": "チキチキバンバン",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "id": "9d1007b4-3e8b-4abc-b02b-6e271819a680",
+      "length": 223000,
+      "title": "HOLLOW HUNGER",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-12-29",
+      "id": "9d218054-52a0-4bd0-8f3c-52c282cf3771",
+      "length": 67742,
+      "title": "わためラップ",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-09-02",
+      "id": "9d7b47f8-f61a-40ea-a4b9-7cdb6f6ed4e9",
+      "length": 184000,
+      "title": "ひつじがいっぴき",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-12-29",
+      "id": "9fc5f043-cfa9-41e0-bf1e-b754d02ab3b4",
+      "length": 81273,
+      "title": "わための子守唄",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2023-11-06",
+      "id": "a2b3d0e8-8f06-4782-981d-f5601320a3fa",
+      "length": 184000,
+      "title": "What an amazing swing",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-12-30",
+      "id": "a6f45f66-549f-4dcc-ad6b-e7afd8f455f9",
+      "length": 192706,
+      "title": "WataAme Pop",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-04-12",
+      "id": "afd4e663-f083-463e-b7f4-09e1103b8beb",
+      "length": 219000,
+      "title": "インキャのキャキャキャ",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-02-03",
+      "id": "b00f2c1b-4d6a-488a-872a-77786e899d9c",
+      "length": 225341,
+      "title": "ウィーゴー！～白上フブキ、宝鐘マリン、角巻わため with 大槻マキ Ver.～",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-09-16",
+      "id": "b327cb53-6f6f-483d-9d73-09a4ad6c2732",
+      "length": 316000,
+      "title": "Holidays!",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-01-14",
+      "id": "bbb097a4-3bc5-47e2-8ef6-f9bba21b82f2",
+      "length": 92000,
+      "title": "わための子守唄 (Electro Pop arrange)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-08-20",
+      "id": "bc5d0ea5-a2af-4a8c-95ce-b0a016debc89",
+      "length": 258631,
+      "title": "mayday、mayday（Instrumental）",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "be3aed90-0f2d-4cc7-a3f3-1eb1f29fe95f",
+      "length": 244000,
+      "title": "のびしろ",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-09-25",
+      "id": "bf81218d-1cf2-4246-bd60-e7e66eb4709a",
+      "length": 217000,
+      "title": "RAINBOW",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-06-07",
+      "id": "c1e27c27-f59f-4f31-b8c0-fb5ba2cd129a",
+      "length": 254400,
+      "title": "Revival (instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "c8346f69-d682-4725-ba64-40b055152c01",
+      "length": 187000,
+      "title": "Happy day to you!",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-01-31",
+      "id": "c9aadf8d-8456-42e9-9b3a-bda528414fdf",
+      "length": null,
+      "title": "2024-01-31: わためぇ Night Fever!! in TOKYO GARDEN THEATER",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-12-29",
+      "id": "cbd47509-4be8-44b6-b422-8e5509a5417c",
+      "length": 27360,
+      "title": "クソザコ回線卒業!のうた",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-09-24",
+      "id": "cdef388c-38c1-4d72-a5c4-286533c14070",
+      "length": 200333,
+      "title": "Reaper vs. Sheep -Kenko Ver.- (Instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "id": "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391",
+      "length": 134000,
+      "title": "KING",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-12-29",
+      "id": "d0a7fcc9-5809-40d5-804e-044c32a310fd",
+      "length": 181000,
+      "title": "Happy day to you!",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-01-10",
+      "id": "d70b0d40-1dac-4703-a025-39073ead3e08",
+      "length": 229000,
+      "title": "Beautiful Circle",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2026-03-12",
+      "id": "dd9d849f-948f-40e0-b5e9-7bae00b64b33",
+      "length": 195507,
+      "title": "ディーヴァフィーバー",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2023-01-09",
+      "id": "deb6770e-faa0-4bf3-9810-645d7153a465",
+      "length": 5400000,
+      "title": "2023-01-09: ぶいあーる! ～VTuberの音楽Radio～ #2",
+      "video": false
+    },
+    {
+      "disambiguation": "MV",
+      "first-release-date": "2021-08-11",
+      "id": "e61bdd0d-fcb2-4045-bed0-905d7833a4cf",
+      "length": 255000,
+      "title": "おはようのうた",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2024-11-08",
+      "id": "e898eabf-4f90-42fa-92d0-3f3d6ce1db9d",
+      "length": 210000,
+      "title": "ねぇねぇねぇ。",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-09-02",
+      "id": "e984c822-767b-4fad-b6a2-9b314d935cc9",
+      "length": 276000,
+      "title": "ゼロの足跡",
+      "video": true
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-09-24",
+      "id": "ee6b2338-09d2-4c3f-af3f-f4b116431f40",
+      "length": 200333,
+      "title": "Reaper vs. Sheep -Ouen Ver.-",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-06-25",
+      "id": "f7bbd11e-1ca6-4db2-8ae3-cc3843495a41",
+      "length": 260210,
+      "title": "キセキ結び (instrumental)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-08-17",
+      "id": "f823b4db-1dca-4da3-b0fe-44662e4f6f65",
+      "length": 122000,
+      "title": "Watame-lon Head Rap (long ver.)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2025-04-02",
+      "id": "f8e83c62-d33a-453e-a674-f20bfc5f44ff",
+      "length": 167983,
+      "title": "ラムダック",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2020-12-29",
+      "id": "fb7783be-78bc-48c8-96c1-bd092e6b6a2c",
+      "length": 75840,
+      "title": "はらぺこのうた",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2022-02-11",
+      "id": "fe64b581-2613-42fc-a7a6-d34615304355",
+      "length": 400000,
+      "title": "キミだけのメロディ (Daybreak ver.)",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2021-07-01",
+      "id": "fe8ea4f9-8874-4986-a52d-7f9bc4115e7a",
+      "length": 212000,
+      "title": "キミだけのメロディ",
+      "video": false
+    },
+    {
+      "disambiguation": "",
+      "first-release-date": "2023-12-30",
+      "id": "ff52bc02-09ff-4a28-b03a-efbe7c6a9e46",
+      "length": 243133,
+      "title": "Now on step",
+      "video": false
+    }
+  ]
+}

@@ -134,5 +134,7 @@ pub fn default_http_client() -> Arc<dyn HttpClient> {
 }
 
 pub fn cache_http_client() -> Arc<dyn HttpClient> {
-    unimplemented!()
+    use crate::httpcache::MemoryHttpCache;
+    use cache::IntoCachedHttpClient;
+    Arc::new(default_http_client().into_cached::<MemoryHttpCache>())
 }

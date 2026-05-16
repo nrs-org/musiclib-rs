@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use musiclib_rs::providers::{
     RawFetchProvider, TryDefault,
-    backends::youtube_api,
+    backends::{musicbrainz, youtube_api},
     types::{EntryFetchOptions, Error},
 };
 
@@ -92,6 +92,13 @@ async fn main() -> Result<()> {
             "youtube_api" => {
                 update_fixtures::<youtube_api::Provider>(&fixtures, EntryFetchOptions::default())
                     .await?;
+            }
+            "musicbrainz" => {
+                update_fixtures::<musicbrainz::types::Provider>(
+                    &fixtures,
+                    EntryFetchOptions::default(),
+                )
+                .await?;
             }
             other => {
                 eprintln!("Unknown backend: {other}");

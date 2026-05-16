@@ -1,0 +1,1974 @@
+{
+  "aliases": [
+    {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "en",
+      "name": "Tsunomaki Watame",
+      "primary": true,
+      "sort-name": "Tsunomaki, Watame",
+      "type": "Artist name",
+      "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+    },
+    {
+      "begin": null,
+      "end": null,
+      "ended": false,
+      "locale": "ja",
+      "name": "角巻わため",
+      "primary": false,
+      "sort-name": "角巻わため",
+      "type": "Artist name",
+      "type-id": "894afba6-2816-3c24-8072-eadb66bd04bc"
+    }
+  ],
+  "area": {
+    "disambiguation": "",
+    "id": "2db42837-c832-3c27-b4a3-08198f75693c",
+    "iso-3166-1-codes": [
+      "JP"
+    ],
+    "name": "Japan",
+    "sort-name": "Japan",
+    "type": null,
+    "type-id": null
+  },
+  "begin-area": null,
+  "country": "JP",
+  "disambiguation": "",
+  "end-area": null,
+  "gender": "Female",
+  "gender-id": "93452b5a-a947-30c8-934f-6a4056b151c2",
+  "id": "201500bb-d0b7-49bf-9869-50e6496350b8",
+  "ipis": [],
+  "isnis": [],
+  "life-span": {
+    "begin": "2019-12-29",
+    "end": null,
+    "ended": false
+  },
+  "name": "角巻わため",
+  "relations": [
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "MV",
+        "id": "976fb404-b5bf-47be-a391-403718809281",
+        "length": 243000,
+        "title": "Everlasting Soul",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "performer",
+      "type-id": "628a9658-f54c-4142-b0c0-95f031b544da"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "MV",
+        "id": "4ee92aa2-6cff-489f-8fd8-47161f8e9b54",
+        "length": 273000,
+        "title": "mayday、mayday",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "performer",
+      "type-id": "628a9658-f54c-4142-b0c0-95f031b544da"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "e984c822-767b-4fad-b6a2-9b314d935cc9",
+        "length": 276000,
+        "title": "ゼロの足跡",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "performer",
+      "type-id": "628a9658-f54c-4142-b0c0-95f031b544da"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "5e4c173b-cda9-426c-a563-20a6c2f01eb7",
+        "length": 245000,
+        "title": "曇天羊",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "performer",
+      "type-id": "628a9658-f54c-4142-b0c0-95f031b544da"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "e1506846-96f2-45a2-8008-aa574b940c43",
+        "length": 262000,
+        "title": "おちゃめ機能",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "video appearance",
+      "type-id": "601fc03e-1058-4ee6-a546-b914d55aa6ba"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "2881433d-610f-4a43-9b37-f5de29ea609e",
+        "length": 260466,
+        "title": "COLOUR",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "596f63f0-d42a-4280-afbb-4cae49e2811b",
+        "length": 231000,
+        "title": "Everlasting Soul",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "529c45af-7360-426b-a450-ff3d8e1e0d1e",
+        "length": 209000,
+        "title": "FAKE LAND",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "b327cb53-6f6f-483d-9d73-09a4ad6c2732",
+        "length": 316000,
+        "title": "Holidays!",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "0220023d-b5c4-44d6-87c6-45f990faf882",
+        "length": 258631,
+        "title": "mayday,mayday",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "9829efd7-57c3-4af3-b6de-bbc092528e90",
+        "length": 258631,
+        "title": "mayday、mayday",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "MV",
+        "id": "4ee92aa2-6cff-489f-8fd8-47161f8e9b54",
+        "length": 273000,
+        "title": "mayday、mayday",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "492a56dd-7b55-4832-a172-3a58ead5604d",
+        "length": 227786,
+        "title": "Our step",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "9430fabd-734d-404a-af26-aa9aa92d2008",
+        "length": 131000,
+        "title": "PAKU",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "bf81218d-1cf2-4246-bd60-e7e66eb4709a",
+        "length": 217000,
+        "title": "RAINBOW",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "816fa27a-a35e-4b7f-8ca5-f2691f9cf2f4",
+        "length": 249453,
+        "title": "Revival",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "dac8286e-c1ea-4b6b-8fad-d310a5691399",
+        "length": 266000,
+        "title": "Ridin' on Dreams",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "bcb2dc4c-b363-4694-b5ed-a50b0cf94895",
+        "length": 263693,
+        "title": "Shiny Smily Story (2022 4期生 ver.)",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "a56cc21d-0d19-4873-b15c-b2e8bebbb9ed",
+        "length": 265680,
+        "title": "Shiny Smily Story (2022 ver.)",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "76072a72-42bb-4a57-a378-ed1718559f20",
+        "length": 261253,
+        "title": "Shout now, sheep!!",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "MV",
+        "id": "40537b74-3d22-49d6-9b1b-c9b18f531948",
+        "length": 228000,
+        "title": "sweet night, sweet time…",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "69270ece-23dc-47f0-8206-0ee775f44a84",
+        "length": 211000,
+        "title": "Vivid Stampede!!!!",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "a6f45f66-549f-4dcc-ad6b-e7afd8f455f9",
+        "length": 192706,
+        "title": "WataAme Pop",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "afd4e663-f083-463e-b7f4-09e1103b8beb",
+        "length": 219000,
+        "title": "インキャのキャキャキャ",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "choir vocals": "43427f08-837b-46b8-bc77-483453af6a7b"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "choir vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "e1506846-96f2-45a2-8008-aa574b940c43",
+        "length": 262000,
+        "title": "おちゃめ機能",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "e1506846-96f2-45a2-8008-aa574b940c43",
+        "length": 262000,
+        "title": "おちゃめ機能",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "MV",
+        "id": "e61bdd0d-fcb2-4045-bed0-905d7833a4cf",
+        "length": 255000,
+        "title": "おはようのうた",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "66ac06aa-9bd7-4f82-b897-c33a39e982cb",
+        "length": 260210,
+        "title": "キセキ結び",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "MV",
+        "id": "52268107-8604-459a-ab0d-2dbc9079ea0c",
+        "length": 216000,
+        "title": "キミだけのメロディ",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "cbd47509-4be8-44b6-b422-8e5509a5417c",
+        "length": 27360,
+        "title": "クソザコ回線卒業!のうた",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "3de4113a-811f-495c-8803-908efdb83cab",
+        "length": 180000,
+        "title": "コぇちっちゃ＜てゴ×ンネ",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "71e41bf7-97ba-445e-91c6-84a1c3ab0c64",
+        "length": 264000,
+        "title": "ココロのちず",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "2a02386e-b08c-4143-97e0-0b4c000452bb",
+        "length": 259573,
+        "title": "ししわたクッキング",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "6ab21c2d-24fb-4f0d-aeae-a9706fd91a9f",
+        "length": 166000,
+        "title": "シャンティ",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {
+        "choir vocals": "Chorus"
+      },
+      "attribute-ids": {
+        "choir vocals": "43427f08-837b-46b8-bc77-483453af6a7b"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "choir vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "0faeba84-9590-4d81-a0f5-9bd7cfe59b98",
+        "length": 240000,
+        "title": "ストーリーテラー",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "choir vocals": "43427f08-837b-46b8-bc77-483453af6a7b"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "choir vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "927be3f9-a204-478f-8746-d2913cd72f6c",
+        "length": 233700,
+        "title": "ストーリーテラー",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "e984c822-767b-4fad-b6a2-9b314d935cc9",
+        "length": 276000,
+        "title": "ゼロの足跡",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "9bbaa76c-61e2-4cf6-8e1b-1ca784b4d762",
+        "length": 208000,
+        "title": "チキチキバンバン",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "bcbc8f7d-1dc8-4082-9c69-65feb64bc814",
+        "length": 226266,
+        "title": "ツキノナミダ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "dd9d849f-948f-40e0-b5e9-7bae00b64b33",
+        "length": 195507,
+        "title": "ディーヴァフィーバー",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "1f5dfc7e-ce3c-4896-a06d-fa75585a043e",
+        "length": 43819,
+        "title": "てぇてぇのうた",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "music video",
+        "id": "5f3a7246-b2f0-436b-b421-d36ba2810b0d",
+        "length": 163000,
+        "title": "デビルじゃないもん",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "e898eabf-4f90-42fa-92d0-3f3d6ce1db9d",
+        "length": 210000,
+        "title": "ねぇねぇねぇ。",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "240c9e74-205d-4c0f-9bfa-06bbde8c5e68",
+        "length": 162000,
+        "title": "はいよろこんで",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "74303cca-feba-4971-abd5-c9491f639bd4",
+        "length": 182000,
+        "title": "ハオ",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "fb7783be-78bc-48c8-96c1-bd092e6b6a2c",
+        "length": 75840,
+        "title": "はらぺこのうた",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "71e08dab-4f6e-4819-80d2-641e4b98cb49",
+        "length": 286000,
+        "title": "ハロ／ハワユ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "99337fc6-98ec-48e0-ad0e-ed9bd0e695a6",
+        "length": 225300,
+        "title": "ビリ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "4e23d9e5-77ba-4472-a359-9e58b9072075",
+        "length": 194000,
+        "title": "ファイアダンス",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "2225362c-7114-4dfc-8e44-33e57b2f71ea",
+        "length": 272707,
+        "title": "ぼくらのなぞなぞ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "11f51e10-e951-43f0-ac5d-c910541eaa27",
+        "length": 236373,
+        "title": "ホロメン音頭",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "8bb1b6eb-1a21-48ba-9c9e-9f65e32e1436",
+        "length": 120889,
+        "title": "ホロライブ言えるかな?",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "f8e83c62-d33a-453e-a674-f20bfc5f44ff",
+        "length": 167983,
+        "title": "ラムダック",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "9fc5f043-cfa9-41e0-bf1e-b754d02ab3b4",
+        "length": 81273,
+        "title": "わための子守唄",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "9d218054-52a0-4bd0-8f3c-52c282cf3771",
+        "length": 67742,
+        "title": "わためラップ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "7c6c7a9f-927c-45ad-83a0-8e4b0a2d62e8",
+        "length": 116000,
+        "title": "わためラップ (loud ver.)",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "16f48f61-9018-4922-85a5-f1486cbbdd21",
+        "length": 209333,
+        "title": "僕は独りだ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "1aa6240d-cf92-4fa0-8b2d-34984c965d22",
+        "length": 27000,
+        "title": "僕は独りだNG",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "1d2cd10f-26ec-4377-9144-0285947e1cec",
+        "length": 233000,
+        "title": "君色ハナミズキ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "c68bf5a8-630e-4e35-95a5-3194fcb3b3fb",
+        "length": 207000,
+        "title": "夢見る羊",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "MV",
+        "id": "ab4266ab-b5d2-48d9-9621-b23f75f6b93d",
+        "length": 324000,
+        "title": "御伽の詩と永久なるミライ",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "ee09875b-a815-4c21-81ec-f225c1e05193",
+        "length": 324000,
+        "title": "御伽の詩と永久なるミライ",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "0abd13be-f2a4-4ede-9259-940b8220b050",
+        "length": 251000,
+        "title": "恋のつぼみ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "2b5dc9ba-0054-4d24-bc21-9ba8cf7a6b0d",
+        "length": 284000,
+        "title": "愛昧ショコラーテ",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "MV",
+        "id": "993a962d-d8e5-4755-b7c0-40c879d0f840",
+        "length": 283000,
+        "title": "愛昧ショコラーテ",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "e1b89d3d-7bec-48d0-be38-493fe73b78a0",
+        "length": 251294,
+        "title": "愛昧ショコラーテ -PandaBoYremix-",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "5e4c173b-cda9-426c-a563-20a6c2f01eb7",
+        "length": 245000,
+        "title": "曇天羊",
+        "video": true
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "e93d291f-ce75-46bd-88d0-9c13509e011c",
+        "length": 234500,
+        "title": "曇天羊",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-credits": {},
+      "attribute-ids": {
+        "lead vocals": "8e2a3255-87c2-4809-a174-98cb3704f1a5"
+      },
+      "attribute-values": {},
+      "attributes": [
+        "lead vocals"
+      ],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "59a55cc9-9b7f-4714-a000-9ab4e32f50b5",
+        "length": 234500,
+        "title": "曇天羊",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "recording": {
+        "disambiguation": "",
+        "id": "54e23556-e896-4c88-96dd-bc8de429ab3b",
+        "length": 301800,
+        "title": "飛んでK！ホロライブサマー",
+        "video": false
+      },
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "recording",
+      "type": "vocal",
+      "type-id": "0fdbe3c6-7700-4a31-ae54-b53f06ae1cfa"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "discogs",
+      "type-id": "04a5b104-a4c2-4bac-99a1-7b837c37d9e4",
+      "url": {
+        "id": "eee725f1-cdf5-4fa6-af29-06c850a0f8c2",
+        "resource": "https://www.discogs.com/artist/11811530"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "free streaming",
+      "type-id": "769085a1-c2f7-4c24-a532-2375a77693bd",
+      "url": {
+        "id": "47adaa6a-1870-4489-a8ca-44f45796778e",
+        "resource": "https://music.youtube.com/channel/UCX2NCyh8ipCoydn1iKWyM_Q"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "free streaming",
+      "type-id": "769085a1-c2f7-4c24-a532-2375a77693bd",
+      "url": {
+        "id": "547b7703-849a-4c7f-9942-21867fc758e5",
+        "resource": "https://open.spotify.com/artist/68609MOnEU86kVyMf26JnM"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "free streaming",
+      "type-id": "769085a1-c2f7-4c24-a532-2375a77693bd",
+      "url": {
+        "id": "e3cf080b-4423-4213-9c3d-4171e3b8d9d2",
+        "resource": "https://www.deezer.com/artist/110211102"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "free streaming",
+      "type-id": "769085a1-c2f7-4c24-a532-2375a77693bd",
+      "url": {
+        "id": "bed839e0-0d87-407d-b20c-7802d7224ea8",
+        "resource": "https://www.deezer.com/artist/194351347"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "image",
+      "type-id": "221132e9-e30e-43f2-a741-15afc4c5fa7c",
+      "url": {
+        "id": "247c51a9-420c-4d67-96b3-d2abd14365e4",
+        "resource": "https://web.archive.org/web/0/https://i.scdn.co/image/ab6761610000e5eb18e9b4ec414a2d78bd25270a"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "last.fm",
+      "type-id": "08db8098-c0df-4b78-82c3-c8697b4bba7f",
+      "url": {
+        "id": "a9cdcc5c-16db-457d-873d-76b997b23f81",
+        "resource": "https://www.last.fm/music/%E8%A7%92%E5%B7%BB%E3%82%8F%E3%81%9F%E3%82%81"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "lyrics",
+      "type-id": "e4d73442-3762-45a8-905c-401da65544ed",
+      "url": {
+        "id": "59d210ed-4c1e-466f-807b-0f763db52769",
+        "resource": "https://genius.com/artists/Tsunomaki-watame"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "lyrics",
+      "type-id": "e4d73442-3762-45a8-905c-401da65544ed",
+      "url": {
+        "id": "0e2e7f48-a681-4c66-92a3-ab42eb2d6444",
+        "resource": "https://www.uta-net.com/artist/32961/"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "other databases",
+      "type-id": "d94fb61c-fa20-4e3c-a19a-71a949fb2c55",
+      "url": {
+        "id": "46c3ddc6-7b2f-49d1-9cd7-949c31934604",
+        "resource": "https://rateyourmusic.com/artist/%E8%A7%92%E5%B7%BB%E3%82%8F%E3%81%9F%E3%82%81"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "purchase for download",
+      "type-id": "f8319a2f-f824-4617-81c8-be6560b3b203",
+      "url": {
+        "id": "9ccf313b-5889-4f1b-b319-30ab08302c03",
+        "resource": "https://itunes.apple.com/us/artist/id1535893459"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "purchase for download",
+      "type-id": "f8319a2f-f824-4617-81c8-be6560b3b203",
+      "url": {
+        "id": "84574aec-c349-4d83-8c48-5068508c1618",
+        "resource": "https://mora.jp/artist/1338790/all"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "purchase for download",
+      "type-id": "f8319a2f-f824-4617-81c8-be6560b3b203",
+      "url": {
+        "id": "f242b9fb-87d4-41ef-89eb-a2ced3d8bd1f",
+        "resource": "https://ototoy.jp/_/default/a/817277"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "purchase for download",
+      "type-id": "f8319a2f-f824-4617-81c8-be6560b3b203",
+      "url": {
+        "id": "aa191c71-c193-4aaf-9d76-dcce996f78cb",
+        "resource": "https://recochoku.jp/artist/2001404642/"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "social network",
+      "type-id": "99429741-f3f6-484b-84f8-23af51991770",
+      "url": {
+        "id": "f88ca1c5-a5ff-4611-91c3-c8f05eea3890",
+        "resource": "https://twitter.com/tsunomakiwatame"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "streaming",
+      "type-id": "63cc5d1f-f096-4c94-a43f-ecb32ea94161",
+      "url": {
+        "id": "86789280-ac18-47e4-9244-e37cc81586f2",
+        "resource": "https://music.amazon.co.jp/artists/B08QTSHX29"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "streaming",
+      "type-id": "63cc5d1f-f096-4c94-a43f-ecb32ea94161",
+      "url": {
+        "id": "60c77cb8-2314-4e87-9687-189d06f76109",
+        "resource": "https://music.amazon.com/artists/B08L7LRCHQ"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "streaming",
+      "type-id": "63cc5d1f-f096-4c94-a43f-ecb32ea94161",
+      "url": {
+        "id": "b241adcd-d65a-4252-9a4f-2a68df0d6680",
+        "resource": "https://music.apple.com/jp/artist/1535893459"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "wikidata",
+      "type-id": "689870a4-a1e4-4912-b17f-7b2664215698",
+      "url": {
+        "id": "1c232faf-bff0-45db-ac6c-93afbfa3eb1b",
+        "resource": "https://www.wikidata.org/wiki/Q98101193"
+      }
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "url",
+      "type": "youtube",
+      "type-id": "6a540e5b-58c6-4192-b6ba-dbc71ec8fcf0",
+      "url": {
+        "id": "a5413b2c-2040-4ba7-b0cf-1250901c4336",
+        "resource": "https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA"
+      }
+    }
+  ],
+  "sort-name": "Tsunomaki, Watame",
+  "type": "Character",
+  "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+}

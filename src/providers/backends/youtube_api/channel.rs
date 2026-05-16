@@ -553,11 +553,11 @@ mod tests {
         assert_eq!(first_upload.entry_type, EntryType::Track);
         assert_eq!(
             first_upload.sources.get(SOURCE).unwrap(),
-            &HashSet::from(["https://youtu.be/4O3vYSUjCFQ".to_string()])
+            &HashSet::from(["https://youtu.be/3MrxDLj2fOw".to_string()])
         );
         assert_eq!(
             first_upload.name.as_deref().unwrap(),
-            "「絶賛」の対義語はなんでしょう？【 #今日のわため 】 #shorts #hololive  #vtuber"
+            "【雑談＆お礼】新衣装だったりガンダムだったり嬉しいね！【角巻わため/ホロライブ４期生】"
         );
 
         Ok(())

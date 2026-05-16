@@ -1,0 +1,152 @@
+{
+  "artist-credit": [
+    {
+      "artist": {
+        "country": "JP",
+        "disambiguation": "",
+        "id": "201500bb-d0b7-49bf-9869-50e6496350b8",
+        "name": "角巻わため",
+        "sort-name": "Tsunomaki, Watame",
+        "type": "Character",
+        "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+      },
+      "joinphrase": "",
+      "name": "角巻わため"
+    }
+  ],
+  "disambiguation": "",
+  "first-release-date": "2022-12-29",
+  "id": "7cd8d693-ec09-4b33-ad93-f1137ff77e81",
+  "primary-type": "EP",
+  "primary-type-id": "6d0c5bf6-7a33-3420-a519-44fc63eedebf",
+  "relations": [],
+  "releases": [
+    {
+      "artist-credit": [
+        {
+          "artist": {
+            "country": "JP",
+            "disambiguation": "",
+            "id": "201500bb-d0b7-49bf-9869-50e6496350b8",
+            "name": "角巻わため",
+            "sort-name": "Tsunomaki, Watame",
+            "type": "Character",
+            "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+          },
+          "joinphrase": "",
+          "name": "角巻わため"
+        }
+      ],
+      "barcode": "4582622507601",
+      "country": null,
+      "date": "2022-12-29",
+      "disambiguation": "",
+      "id": "7b2484b3-4fa8-4b07-a100-88fd7cdc2071",
+      "packaging": "Jewel Case",
+      "packaging-id": "ec27701a-4a22-37f4-bfac-6616e0f9750a",
+      "quality": "normal",
+      "release-events": [
+        {
+          "area": null,
+          "date": "2022-12-29"
+        }
+      ],
+      "status": "Official",
+      "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+      "text-representation": {
+        "language": null,
+        "script": null
+      },
+      "title": "わためのうた vol.2.5"
+    },
+    {
+      "artist-credit": [
+        {
+          "artist": {
+            "country": "JP",
+            "disambiguation": "",
+            "id": "201500bb-d0b7-49bf-9869-50e6496350b8",
+            "name": "角巻わため",
+            "sort-name": "Tsunomaki, Watame",
+            "type": "Character",
+            "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+          },
+          "joinphrase": "",
+          "name": "Tsunomaki Watame"
+        }
+      ],
+      "barcode": "4582622507601",
+      "country": "GB",
+      "date": "2022-12-30",
+      "disambiguation": "",
+      "id": "9ed9ffaa-b118-481f-a23b-bd6e45dff48c",
+      "packaging": "None",
+      "packaging-id": "119eba76-b343-3e02-a292-f0f00644bb9b",
+      "quality": "normal",
+      "release-events": [
+        {
+          "area": {
+            "disambiguation": "",
+            "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+            "iso-3166-1-codes": [
+              "GB"
+            ],
+            "name": "United Kingdom",
+            "sort-name": "United Kingdom",
+            "type": null,
+            "type-id": null
+          },
+          "date": "2022-12-30"
+        }
+      ],
+      "status": "Official",
+      "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+      "text-representation": {
+        "language": "mul",
+        "script": "Latn"
+      },
+      "title": "WATAME NO UTA vol.2.5"
+    },
+    {
+      "artist-credit": [
+        {
+          "artist": {
+            "country": "JP",
+            "disambiguation": "",
+            "id": "201500bb-d0b7-49bf-9869-50e6496350b8",
+            "name": "角巻わため",
+            "sort-name": "Tsunomaki, Watame",
+            "type": "Character",
+            "type-id": "5c1375b0-f18d-3db7-a164-a49d7a63773f"
+          },
+          "joinphrase": "",
+          "name": "角巻わため"
+        }
+      ],
+      "barcode": "4582622507601",
+      "country": null,
+      "date": "2022-12-30",
+      "disambiguation": "",
+      "id": "8eb1c460-1f05-4fcf-9dd0-66211d1e5ae1",
+      "packaging": "None",
+      "packaging-id": "119eba76-b343-3e02-a292-f0f00644bb9b",
+      "quality": "normal",
+      "release-events": [
+        {
+          "area": null,
+          "date": "2022-12-30"
+        }
+      ],
+      "status": "Official",
+      "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+      "text-representation": {
+        "language": "mul",
+        "script": "Qaaa"
+      },
+      "title": "わためのうた vol.2.5"
+    }
+  ],
+  "secondary-type-ids": [],
+  "secondary-types": [],
+  "title": "わためのうた vol.2.5"
+}

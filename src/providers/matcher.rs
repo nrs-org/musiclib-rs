@@ -5,13 +5,16 @@ use tokio::sync::OnceCell;
 
 use crate::providers::{
     FetchProvider,
-    backends::youtube_api::matcher::evaluate as evaluate_youtube,
+    backends::{
+        musicbrainz::matcher::evaluate as evaluate_musicbrainz,
+        youtube_api::matcher::evaluate as evaluate_youtube,
+    },
     types::{
         CachedChildSource, ChildFetchOptions, ChildMatcher, ChildMatcherExpr, ChildRef,
         ChildSource, CompiledChildMatcher, CompiledEntryDataMatcher, CompiledMatcherExpr,
-        CompiledYouTubeDataMatcher, EntityResult, EntryDataMatcher, EntryFetchOptionsPool,
-        EntrySpecificData, Error, OptionsId, OwnedCachedChildCursor, QuantifierMode,
-        RelationMatcher, Tribool, YouTubeDataMatcher,
+        CompiledMusicBrainzDataMatcher, CompiledYouTubeDataMatcher, EntityResult, EntryDataMatcher,
+        EntryFetchOptionsPool, EntrySpecificData, Error, MusicBrainzDataMatcher, OptionsId,
+        OwnedCachedChildCursor, QuantifierMode, RelationMatcher, Tribool, YouTubeDataMatcher,
     },
 };
 
@@ -34,6 +37,7 @@ fn compiled_expr_cost(expr: &CompiledMatcherExpr) -> u32 {
                 CompiledEntryDataMatcher::NameRegex(_) => 5,
                 CompiledEntryDataMatcher::DurationRange { .. } => 20,
                 CompiledEntryDataMatcher::YouTube(_) => 20,
+                CompiledEntryDataMatcher::MusicBrainz(_) => 20,
             },
             CompiledChildMatcher::ChildrenSatisfy { .. } => 100,
         },
@@ -100,6 +104,23 @@ fn compile_entry_data(d: &EntryDataMatcher) -> Result<CompiledEntryDataMatcher, 
             }
             YouTubeDataMatcher::CategoryId(id) => {
                 CompiledYouTubeDataMatcher::CategoryId(id.clone())
+            }
+        }),
+        EntryDataMatcher::MusicBrainz(mb) => CompiledEntryDataMatcher::MusicBrainz(match mb {
+            MusicBrainzDataMatcher::ReleaseGroupPrimaryType(t) => {
+                CompiledMusicBrainzDataMatcher::ReleaseGroupPrimaryType(t.clone())
+            }
+            MusicBrainzDataMatcher::ReleaseGroupHasSecondaryType(t) => {
+                CompiledMusicBrainzDataMatcher::ReleaseGroupHasSecondaryType(t.clone())
+            }
+            MusicBrainzDataMatcher::ReleaseStatus(s) => {
+                CompiledMusicBrainzDataMatcher::ReleaseStatus(s.clone())
+            }
+            MusicBrainzDataMatcher::ReleaseCountry(c) => {
+                CompiledMusicBrainzDataMatcher::ReleaseCountry(c.clone())
+            }
+            MusicBrainzDataMatcher::RecordingIsVideo => {
+                CompiledMusicBrainzDataMatcher::RecordingIsVideo
             }
         }),
     })
@@ -325,6 +346,10 @@ async fn evaluate_entry_data(
             let entity = ctx.get_entity(provider).await?;
             Ok(evaluate_youtube(yt, entity))
         }
+        CompiledEntryDataMatcher::MusicBrainz(mb) => {
+            let entity = ctx.get_entity(provider).await?;
+            Ok(evaluate_musicbrainz(mb, entity))
+        }
     }
 }
 
@@ -373,7 +398,7 @@ async fn evaluate_children_satisfy(
                 }
                 Tribool::True => {
                     // All remaining items in this source will match; drain and count them.
-                    while let Some(_) = cursor.next().await? {
+                    while cursor.next().await?.is_some() {
                         match_count += 1;
                         total += 1;
                     }

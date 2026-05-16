@@ -1,3 +1,4 @@
+pub mod musicbrainz;
 pub mod youtube_api;
 
 pub fn build_url(url: String, params: &[(&str, &str)]) -> String {

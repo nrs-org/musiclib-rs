@@ -162,7 +162,7 @@ pub enum EntryDataMatcher {
 
     // Backend-specific
     YouTube(YouTubeDataMatcher),
-    // MusicBrainz(MusicBrainzDataMatcher),
+    MusicBrainz(MusicBrainzDataMatcher),
     // Spotify(SpotifyDataMatcher),
 }
 
@@ -171,6 +171,21 @@ pub enum EntryDataMatcher {
 pub enum YouTubeDataMatcher {
     DescriptionRegex(String),
     CategoryId(String),
+}
+
+// MusicBrainz-specific entry data matchers
+#[derive(Clone, Serialize, Deserialize)]
+pub enum MusicBrainzDataMatcher {
+    /// release-group `primary-type`: "Album", "Single", "EP", "Broadcast", "Other"
+    ReleaseGroupPrimaryType(String),
+    /// release-group `secondary-types` contains the given value: "Live", "Compilation", "Remix", etc.
+    ReleaseGroupHasSecondaryType(String),
+    /// release `status`: "Official", "Promotional", "Bootleg", "Pseudo-Release"
+    ReleaseStatus(String),
+    /// release `country`: ISO 3166-1 alpha-2 code
+    ReleaseCountry(String),
+    /// recording `video` is true
+    RecordingIsVideo,
 }
 
 // Matchers based on parent-child relationship (no fetch needed)
@@ -222,15 +237,19 @@ impl From<bool> for Tribool {
     }
 }
 
-impl Tribool {
-    pub fn not(self) -> Self {
+impl std::ops::Not for Tribool {
+    type Output = Self;
+
+    fn not(self) -> Self {
         match self {
             Tribool::True => Tribool::False,
             Tribool::False => Tribool::True,
             Tribool::Indeterminate => Tribool::Indeterminate,
         }
     }
+}
 
+impl Tribool {
     pub fn and(self, other: Self) -> Self {
         match (self, other) {
             (Tribool::False, _) | (_, Tribool::False) => Tribool::False,
@@ -262,6 +281,16 @@ pub enum CompiledEntryDataMatcher {
     DurationRange { min: Option<u64>, max: Option<u64> },
     HasSource(String),
     YouTube(CompiledYouTubeDataMatcher),
+    MusicBrainz(CompiledMusicBrainzDataMatcher),
+}
+
+#[derive(Clone)]
+pub enum CompiledMusicBrainzDataMatcher {
+    ReleaseGroupPrimaryType(String),
+    ReleaseGroupHasSecondaryType(String),
+    ReleaseStatus(String),
+    ReleaseCountry(String),
+    RecordingIsVideo,
 }
 
 #[derive(Clone)]
@@ -301,7 +330,7 @@ pub fn static_eval_expr(
 ) -> Tribool {
     match expr {
         CompiledMatcherExpr::Matcher(m) => eval_leaf(m),
-        CompiledMatcherExpr::Not(inner) => static_eval_expr(inner, eval_leaf).not(),
+        CompiledMatcherExpr::Not(inner) => !static_eval_expr(inner, eval_leaf),
         CompiledMatcherExpr::All(exprs) => exprs.iter().fold(Tribool::True, |acc, e| {
             acc.and(static_eval_expr(e, eval_leaf))
         }),
@@ -358,6 +387,10 @@ impl EntryFetchOptionsPool {
     /// it with the real content once all ids are known.
     pub fn patch(&mut self, id: OptionsId, opts: EntryFetchOptions) {
         self.entries[id as usize] = opts;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     pub fn len(&self) -> usize {
@@ -623,7 +656,7 @@ fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: u
         CompiledChildMatcher::Always => Tribool::True,
         CompiledChildMatcher::Relation(RelationMatcher::IndexRange { min, max }) => {
             let idx = index as u32;
-            let in_range = min.map_or(true, |m| idx >= m) && max.map_or(true, |m| idx < m);
+            let in_range = min.is_none_or(|m| idx >= m) && max.is_none_or(|m| idx < m);
             if in_range {
                 Tribool::True
             } else {
@@ -659,7 +692,8 @@ fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: u
                 (child.external_type.as_ref() == t.as_str()).into()
             }
             CompiledEntryDataMatcher::DurationRange { .. }
-            | CompiledEntryDataMatcher::YouTube(_) => Tribool::Indeterminate,
+            | CompiledEntryDataMatcher::YouTube(_)
+            | CompiledEntryDataMatcher::MusicBrainz(_) => Tribool::Indeterminate,
         },
         CompiledChildMatcher::ChildrenSatisfy { .. } => Tribool::Indeterminate,
     })
