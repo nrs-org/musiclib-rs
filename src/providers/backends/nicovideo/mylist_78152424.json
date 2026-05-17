@@ -1,0 +1,86 @@
+{
+  "__files_to_move": {},
+  "_type": "playlist",
+  "_version": {
+    "current_git_head": null,
+    "release_git_head": "04d6974f502bbdfaed72c624344f262e30ad9708",
+    "repository": "yt-dlp/yt-dlp",
+    "version": "2026.03.17"
+  },
+  "description": "",
+  "entries": [
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "comment_count": 1,
+      "description": "2025.7.25 (Fri.) Release ⸝⋆Streaming＆Download ▷ ht",
+      "duration": 235,
+      "id": "sm45233284",
+      "ie_key": "Niconico",
+      "thumbnail": [
+        "https://img.cdn.nimg.jp/s/nicovideo/thumbnails/45233284/45233284.79678098.original/r640x360l?key=b8cfbbc3690d3884c36dd99c1d23035a73333d3a7f83800a5e7b59bfd0e09aed",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45233284/45233284.79678098.L",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45233284/45233284.79678098.M",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45233284/45233284.79678098"
+      ],
+      "title": "しほ - ルミナスブルー 〖Official Music Video〗",
+      "uploader": "しほ",
+      "uploader_id": "67047227",
+      "url": "https://www.nicovideo.jp/watch/sm45233284",
+      "view_count": 1695
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "comment_count": 5,
+      "description": "2025.6.25 (Wed.) Release ⸝⋆Streaming＆Download ▷ ht",
+      "duration": 203,
+      "id": "sm45119009",
+      "ie_key": "Niconico",
+      "thumbnail": [
+        "https://img.cdn.nimg.jp/s/nicovideo/thumbnails/45119009/45119009.48035505.original/r640x360l?key=c1b60f3b1e79013544805a151c8d67c1b46c68e18e633303b4fda37cc69dd6c8",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45119009/45119009.48035505.L",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45119009/45119009.48035505.M",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45119009/45119009.48035505"
+      ],
+      "title": "しほ - 相愛傘 〖Official Music Video〗",
+      "uploader": "しほ",
+      "uploader_id": "67047227",
+      "url": "https://www.nicovideo.jp/watch/sm45119009",
+      "view_count": 1037
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "comment_count": 10,
+      "description": "2025.5.25 (Sun.) Release ⸝⋆ Streaming＆Download ▷ h",
+      "duration": 323,
+      "id": "sm45011164",
+      "ie_key": "Niconico",
+      "thumbnail": [
+        "https://img.cdn.nimg.jp/s/nicovideo/thumbnails/45011164/45011164.96039538.original/r640x360l?key=a4cf57ab0c2c2e77fe8c919a2b9b8acf267407c0fc7f932c23287e31f76e1d7b",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45011164/45011164.96039538.L",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45011164/45011164.96039538.M",
+        "https://nicovideo.cdn.nimg.jp/thumbnails/45011164/45011164.96039538"
+      ],
+      "title": "しほ - 雫の歌 〖Official Music Video〗",
+      "uploader": "しほ",
+      "uploader_id": "67047227",
+      "url": "https://www.nicovideo.jp/watch/sm45011164",
+      "view_count": 5616
+    }
+  ],
+  "epoch": 1779013252,
+  "extractor": "niconico:playlist",
+  "extractor_key": "NiconicoPlaylist",
+  "id": "78152424",
+  "original_url": "https://www.nicovideo.jp/user/67047227/mylist/78152424",
+  "playlist_count": 3,
+  "release_year": null,
+  "title": "Original Song",
+  "uploader": "しほ",
+  "uploader_id": "67047227",
+  "webpage_url": "https://www.nicovideo.jp/user/67047227/mylist/78152424",
+  "webpage_url_basename": "78152424",
+  "webpage_url_domain": "nicovideo.jp"
+}

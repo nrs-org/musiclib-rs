@@ -1,0 +1,16 @@
+type: track
+aliases:
+  - name: My Song
+    primary: true
+release_date: "2024-01-01"
+duration_ms: 240000
+sources:
+  spotify: ["https://open.spotify.com/track/example"]
+children:
+  - type: artist
+    name: Local Artist
+    sources:
+      local: ["./artist.yaml"]
+    contributions:
+      - role: main
+        main_artist: true

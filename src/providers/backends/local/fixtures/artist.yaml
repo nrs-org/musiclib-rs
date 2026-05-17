@@ -1,0 +1,6 @@
+type: artist
+aliases:
+  - name: Local Artist
+    primary: true
+sources:
+  musicbrainz: ["https://musicbrainz.org/artist/some-uuid"]

@@ -47,9 +47,11 @@ impl Provider {
     pub fn new() -> Result<Self, Error> {
         let api_key = env::var("YOUTUBE_API_KEY")
             .map_err(|e| Error::MissingCredentials(format!("Missing YOUTUBE_API_KEY: {e}")))?;
-        Ok(Self {
-            client: YoutubeClient::new(api_key)?,
-        })
+        let mut client = YoutubeClient::new(api_key)?;
+        if let Ok(url) = env::var("YTMUSICAPI_SERVER_URL") {
+            client = client.with_ytmusicapi_url(url);
+        }
+        Ok(Self { client })
     }
 }
 

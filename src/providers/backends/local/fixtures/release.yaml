@@ -1,0 +1,29 @@
+type: release
+aliases:
+  - name: Local Album
+    primary: true
+release_date: "2024-03-01"
+release_type: album
+num_tracks: 2
+sources:
+  spotify: ["https://open.spotify.com/album/example"]
+children:
+  - type: artist
+    name: Local Artist
+    sources:
+      local: ["./artist.yaml"]
+    contributions:
+      - role: main
+        main_artist: true
+  - type: track
+    name: My Song
+    sources:
+      local: ["./track.yaml"]
+    position:
+      track_no: 1
+  - type: track
+    name: Another Song
+    sources:
+      local: ["./track2.yaml"]
+    position:
+      track_no: 2

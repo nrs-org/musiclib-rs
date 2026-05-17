@@ -53,6 +53,7 @@
                 cargo
                 clippy
                 nixfmt
+                uv
               ]);
           };
         }

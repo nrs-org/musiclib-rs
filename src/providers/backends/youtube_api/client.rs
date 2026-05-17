@@ -10,8 +10,11 @@ use crate::{
 
 #[derive(Clone)]
 pub struct YoutubeClient {
-    client: Arc<dyn HttpClient>,
+    pub(crate) client: Arc<dyn HttpClient>,
     api_key: HeaderValue,
+    /// Base URL of the optional ytmusicapi server (e.g. `http://localhost:9001`).
+    /// When present, `get_channel` will add a third child source with YTMusic discography.
+    pub ytmusicapi_url: Option<String>,
 }
 
 impl YoutubeClient {
@@ -33,7 +36,16 @@ impl YoutubeClient {
     ) -> Result<Self, Error> {
         let mut api_key = api_key;
         api_key.set_sensitive(true);
-        Ok(Self { client, api_key })
+        Ok(Self {
+            client,
+            api_key,
+            ytmusicapi_url: None,
+        })
+    }
+
+    pub fn with_ytmusicapi_url(mut self, url: String) -> Self {
+        self.ytmusicapi_url = Some(url);
+        self
     }
 
     pub fn build_url(endpoint: &str, params: &[(&str, &str)]) -> String {

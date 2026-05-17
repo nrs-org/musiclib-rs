@@ -1,0 +1,670 @@
+{
+  "__files_to_move": {},
+  "_type": "playlist",
+  "_version": {
+    "current_git_head": null,
+    "release_git_head": "04d6974f502bbdfaed72c624344f262e30ad9708",
+    "repository": "yt-dlp/yt-dlp",
+    "version": "2026.03.17"
+  },
+  "entries": [
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm46158033"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm46083732"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm46030823"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45961228"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45878167"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45820393"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45767113"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45711300"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45711294"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45626932"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45574209"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45513505"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45479314"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45419257"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45392239"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45334926"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45334916"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45334974"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45334906"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45233284"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45119009"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm45011164"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44913555"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44786465"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44786421"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44776090"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44776064"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44776060"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44776046"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44776040"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44776033"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44776023"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44776016"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44775988"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm44775980"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43809233"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43635274"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43635265"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43635258"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43635261"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43635246"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43386439"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43097483"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43036021"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032956"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032927"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032932"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032919"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032902"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032888"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032882"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032872"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm43032863"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm42521859"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm42191692"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm42175996"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm41796934"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm41665325"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm41665312"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm41421067"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm41337613"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm41133030"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm41016522"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm40887972"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm40811444"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm40647813"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm40568715"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm40535675"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm40374012"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm39568063"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm39560884"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm39297050"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm38964121"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm38637399"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm38347238"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm38325965"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm38135262"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm37871118"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm37576218"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm37251666"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm36994348"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm36917116"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm36742091"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm36415268"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm36351473"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm36123824"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm35608806"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm35528451"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm35023716"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm34994064"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm34604901"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm34394885"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm34255747"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm33732393"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm33562841"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm33107386"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm33035986"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm32906119"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm32846006"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm32778712"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm32460303"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm32320292"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm32178966"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm32107879"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm32022015"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm31861653"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm31556919"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "ie_key": "Niconico",
+      "url": "https://www.nicovideo.jp/watch/sm31094215"
+    }
+  ],
+  "epoch": 1779013006,
+  "extractor": "NiconicoUser",
+  "extractor_key": "NiconicoUser",
+  "id": "67047227",
+  "original_url": "https://www.nicovideo.jp/user/67047227",
+  "playlist_count": 108,
+  "release_year": null,
+  "webpage_url": "https://www.nicovideo.jp/user/67047227",
+  "webpage_url_basename": "67047227",
+  "webpage_url_domain": "nicovideo.jp"
+}

@@ -74,6 +74,21 @@ fixtures:
       # Triangular Double Bond (album)
       - path: src/providers/backends/soundcloud/album_triangular_double_bond.json
         url: https://soundcloud.com/katagiri/sets/triangular-double-bond
+  - backend: nicovideo
+    entries:
+      # しほ (user/67047227)
+      - path:
+          metadata: src/providers/backends/nicovideo/user_67047227.json
+        url: https://www.nicovideo.jp/user/67047227
+      # 惑星ループ　歌ってみた / しほ (video)
+      - path: src/providers/backends/nicovideo/video_sm46158033.json
+        url: https://www.nicovideo.jp/watch/sm46158033
+      # Original Song (mylist)
+      - path: src/providers/backends/nicovideo/mylist_78152424.json
+        url: https://www.nicovideo.jp/user/67047227/mylist/78152424
+      # ヒカル＆店長シリーズ2018 (series)
+      - path: src/providers/backends/nicovideo/series_396348.json
+        url: https://www.nicovideo.jp/series/396348
   - backend: youtube_api
     entries:
       - path: src/providers/backends/youtube_api/video_whatamess_xfade.json
@@ -90,4 +105,11 @@ fixtures:
           metadata: src/providers/backends/youtube_api/channel_watame.json
           playlists: src/providers/backends/youtube_api/channel_watame_playlists_page1.json
           uploads: src/providers/backends/youtube_api/channel_watame_uploads_page1.json
+        url: https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA
+  - backend: ytmusicapi
+    entries:
+      # 角巻わため (Tsunomaki Watame)
+      - path:
+          metadata: src/providers/backends/youtube_api/ytmusic_watame_artist.json
+          discography: src/providers/backends/youtube_api/ytmusic_watame_discography.json
         url: https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA

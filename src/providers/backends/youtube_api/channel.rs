@@ -3,20 +3,26 @@ use std::{collections::HashSet, sync::Arc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::future::Future;
 
-use crate::providers::{
-    backends::{
-        ExtraJSON,
-        youtube_api::{
-            SOURCE,
-            canonicalize::{ChannelKind, channel_url, match_channel_url, playlist_url, video_url},
-            client::YoutubeClient,
-            types::{EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_VIDEO},
+use crate::{
+    http::{HttpClient, Request, json_body_extractor},
+    providers::{
+        backends::{
+            ExtraJSON,
+            youtube_api::{
+                SOURCE,
+                canonicalize::{
+                    ChannelKind, channel_url, match_channel_url, playlist_url, video_url,
+                },
+                client::YoutubeClient,
+                types::{EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_VIDEO},
+            },
         },
-    },
-    types::{
-        Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
-        CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData, EntryType,
-        Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf, static_eval_expr,
+        types::{
+            Alias, CachedChildSource, ChildPage, ChildRef, ChildSource, CompiledChildMatcher,
+            CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData,
+            EntryType, Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf,
+            static_eval_expr,
+        },
     },
 };
 
@@ -117,6 +123,23 @@ struct UploadsPlaylistItemResourceId {
     video_id: Option<String>,
     #[serde(flatten)]
     extra: ExtraJSON,
+}
+
+// --- ytmusicapi response types ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct YtmusicRelease {
+    title: Option<String>,
+    #[serde(rename = "audioPlaylistId")]
+    audio_playlist_id: Option<String>,
+    #[serde(rename = "browseId")]
+    browse_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct YtmusicAlbumResponse {
+    #[serde(rename = "audioPlaylistId")]
+    audio_playlist_id: Option<String>,
 }
 
 // --- Constants ---
@@ -228,6 +251,141 @@ impl PageFetcher for ChannelUploadsPageFetcher {
     }
 }
 
+/// Fetches the full YTMusic discography list upfront, then yields one entry at a time.
+/// For entries missing `audioPlaylistId`, resolves it lazily via `GET /albums/{browseId}`.
+struct YtmusicDiscographySource {
+    http: Arc<dyn HttpClient>,
+    server_url: String,
+    channel_id: String,
+    /// `None` means the list hasn't been fetched yet.
+    releases: Option<std::vec::IntoIter<YtmusicRelease>>,
+    remaining: Option<usize>,
+}
+
+impl YtmusicDiscographySource {
+    fn new(http: Arc<dyn HttpClient>, server_url: String, channel_id: String) -> Self {
+        Self {
+            http,
+            server_url,
+            channel_id,
+            releases: None,
+            remaining: None,
+        }
+    }
+
+    async fn ensure_fetched(&mut self) -> Result<(), Error> {
+        if self.releases.is_some() {
+            return Ok(());
+        }
+        let url = format!(
+            "{}/artists/{}/discography",
+            self.server_url.trim_end_matches('/'),
+            urlencoding::encode(&self.channel_id)
+        );
+        let response = self
+            .http
+            .make_request(
+                Request {
+                    url,
+                    ..Default::default()
+                },
+                &json_body_extractor::<Vec<YtmusicRelease>>(),
+            )
+            .await?;
+        if !response.status.is_success() {
+            return Err(Error::InvalidUrl(format!(
+                "ytmusicapi server returned {} for channel {}",
+                response.status, self.channel_id
+            )));
+        }
+        let releases = response
+            .body
+            .as_json::<Vec<YtmusicRelease>>()
+            .cloned()
+            .ok_or_else(|| Error::InvalidUrl("ytmusicapi server returned non-JSON body".into()))?;
+        self.remaining = Some(releases.len());
+        self.releases = Some(releases.into_iter());
+        Ok(())
+    }
+
+    async fn resolve_playlist_id(&self, browse_id: &str) -> Result<String, Error> {
+        let url = format!(
+            "{}/albums/{}",
+            self.server_url.trim_end_matches('/'),
+            urlencoding::encode(browse_id)
+        );
+        let response = self
+            .http
+            .make_request(
+                Request {
+                    url,
+                    ..Default::default()
+                },
+                &json_body_extractor::<YtmusicAlbumResponse>(),
+            )
+            .await?;
+        if !response.status.is_success() {
+            return Err(Error::InvalidUrl(format!(
+                "ytmusicapi server returned {} for album {browse_id}",
+                response.status
+            )));
+        }
+        response
+            .body
+            .as_json::<YtmusicAlbumResponse>()
+            .and_then(|a| a.audio_playlist_id.clone())
+            .ok_or_else(|| Error::InvalidUrl(format!("no audioPlaylistId for album {browse_id}")))
+    }
+}
+
+#[async_trait::async_trait]
+impl ChildSource for YtmusicDiscographySource {
+    async fn next(&mut self) -> Result<Option<(ChildRef, ())>, Error> {
+        self.ensure_fetched().await?;
+        loop {
+            let release = {
+                let iter = self.releases.as_mut().unwrap();
+                let r = iter.next();
+                r
+            };
+            let Some(release) = release else {
+                return Ok(None);
+            };
+            self.remaining = self.remaining.map(|n| n.saturating_sub(1));
+
+            let playlist_id = match release.audio_playlist_id {
+                Some(id) => id,
+                None => match release.browse_id {
+                    Some(bid) => self.resolve_playlist_id(&bid).await?,
+                    None => continue,
+                },
+            };
+
+            return Ok(Some((
+                ChildRef {
+                    entry_type: EntryType::Release,
+                    sources: [(SOURCE.into(), HashSet::from([playlist_url(&playlist_id)]))].into(),
+                    name: release.title,
+                    external_type: EXTERNAL_TYPE_PLAYLIST.into(),
+                    ..Default::default()
+                },
+                (),
+            )));
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self.remaining {
+            Some(n) => (n, Some(n)),
+            None => (0, None),
+        }
+    }
+
+    fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+        release_eval(expr)
+    }
+}
+
 // --- Static eval helpers ---
 
 fn release_eval(expr: &CompiledMatcherExpr) -> Tribool {
@@ -282,6 +440,7 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
             }
 
             // Source 1: playlists owned by the channel (Release)
+            let channel_id_for_ytmusic = channel_id.clone();
             let playlists_source =
                 PaginatedChildSource::new(Box::new(ChannelPlaylistsPageFetcher {
                     client: client.clone(),
@@ -296,18 +455,27 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
             }))
             .with_static_eval(track_eval);
 
-            // TODO: Source 3: YouTube Music releases — requires the ytmusicapi Python library
-            // (no official Data API v3 support). Placeholder for future implementation.
+            // Source 3 (optional): YouTube Music discography via ytmusicapi server.
+            // Only added when YTMUSICAPI_SERVER_URL is configured on the client.
+            let mut children: Vec<Arc<CachedChildSource>> = vec![
+                Arc::new(CachedChildSource::new(Box::new(playlists_source))),
+                Arc::new(CachedChildSource::new(Box::new(uploads_source))),
+            ];
+            if let Some(ytmusicapi_url) = &client.ytmusicapi_url {
+                let ytmusic_source = YtmusicDiscographySource::new(
+                    client.client.clone(),
+                    ytmusicapi_url.clone(),
+                    channel_id_for_ytmusic,
+                );
+                children.push(Arc::new(CachedChildSource::new(Box::new(ytmusic_source))));
+            }
 
             let result = Ok(EntityResult {
                 release_date: None,
                 sources: [(SOURCE.into(), source_set)].into(),
                 extra: serde_json::to_value(c).unwrap_or_default(),
                 specific_data: EntrySpecificData::Artist,
-                children: vec![
-                    Arc::new(CachedChildSource::new(Box::new(playlists_source))),
-                    Arc::new(CachedChildSource::new(Box::new(uploads_source))),
-                ],
+                children,
                 aliases: vec![Alias {
                     name: c.snippet.title.clone(),
                     source: SOURCE.into(),
@@ -439,13 +607,14 @@ mod tests {
     use http::Method;
 
     use crate::{
+        http::ResponseStatus,
         providers::{
             backends::youtube_api::{
                 SOURCE,
                 channel::{
                     CHANNEL_PARTS, ChannelListResponse, ChannelPlaylistsResponse,
                     PLAYLISTS_MAX_RESULTS, PLAYLISTS_PARTS, UPLOADS_MAX_RESULTS, UPLOADS_PARTS,
-                    UploadsPlaylistItemsResponse, get_channel,
+                    UploadsPlaylistItemsResponse, YtmusicAlbumResponse, get_channel,
                 },
                 client::YoutubeClient,
             },
@@ -558,6 +727,121 @@ mod tests {
         assert_eq!(
             first_upload.name.as_deref().unwrap(),
             "【雑談＆お礼】新衣装だったりガンダムだったり嬉しいね！【角巻わため/ホロライブ４期生】"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_with_ytmusicapi() -> anyhow::Result<()> {
+        let channel_id = "UCqm3BQLlJfvkTsX_hvm0UmA";
+        let uploads_playlist_id = "UUqm3BQLlJfvkTsX_hvm0UmA";
+        let api_key = "doesnotmatter";
+        let ytmusicapi_url = "http://localhost:9001";
+
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route_json::<ChannelListResponse>(
+            Method::GET,
+            &channel_api_url(channel_id),
+            include_str!("./channel_watame.json"),
+        );
+        http_client.add_route_json::<ChannelPlaylistsResponse>(
+            Method::GET,
+            &channel_playlists_api_url(channel_id),
+            include_str!("./channel_watame_playlists_page1.json"),
+        );
+        http_client.add_route_json::<UploadsPlaylistItemsResponse>(
+            Method::GET,
+            &channel_uploads_api_url(uploads_playlist_id),
+            include_str!("./channel_watame_uploads_page1.json"),
+        );
+        // ytmusicapi server route — artist overview
+        let ytmusic_url = format!(
+            "{}/artists/{}",
+            ytmusicapi_url,
+            urlencoding::encode(channel_id)
+        );
+        http_client.add_route(
+            Method::GET,
+            &ytmusic_url,
+            ResponseStatus::OK,
+            include_bytes!("./ytmusic_watame_artist.json").to_vec(),
+        );
+        // discography route
+        let ytmusic_discography_url = format!(
+            "{}/artists/{}/discography",
+            ytmusicapi_url,
+            urlencoding::encode(channel_id),
+        );
+        http_client.add_route(
+            Method::GET,
+            &ytmusic_discography_url,
+            ResponseStatus::OK,
+            include_bytes!("./ytmusic_watame_discography.json").to_vec(),
+        );
+        // one single album resolution route (DivaFever)
+        let divafever_browse_id = "MPREb_Rd27MfU0AZG";
+        http_client.add_route_json::<YtmusicAlbumResponse>(
+            Method::GET,
+            &format!(
+                "{}/albums/{}",
+                ytmusicapi_url,
+                urlencoding::encode(divafever_browse_id)
+            ),
+            include_str!("./ytmusic_divafever_album.json"),
+        );
+
+        let client = YoutubeClient::new_with_client(Arc::new(http_client), api_key.to_string())?
+            .with_ytmusicapi_url(ytmusicapi_url.to_string());
+
+        let channel = get_channel(
+            &client,
+            &format!("https://www.youtube.com/channel/{channel_id}"),
+        )
+        .await?;
+
+        // Three child sources when ytmusicapi is configured
+        assert_eq!(channel.children.len(), 3);
+
+        // Source 2: ytmusicapi discography
+        let mut ytmusic_cursor = channel.children[2].cursor();
+        // First next() triggers the fetch (22 entries in the discography list).
+        let first = ytmusic_cursor
+            .next()
+            .await?
+            .expect("expected first release");
+        // After fetch, a fresh cursor reports the full raw count via size_hint.
+        assert_eq!(channel.children[2].cursor().size_hint(), (22, Some(22)));
+        // Spot-check first release (Hop Step Sheep — has audioPlaylistId directly)
+        assert_eq!(first.0.entry_type, EntryType::Release);
+        assert_eq!(first.0.name.as_deref().unwrap(), "Hop Step Sheep");
+        assert_eq!(
+            first.0.sources.get(SOURCE).unwrap(),
+            &HashSet::from([
+                "https://www.youtube.com/playlist?list=OLAK5uy_kZg-epuqXBYiWa_PrltWZXm7OtfRdiUgE"
+                    .to_string()
+            ])
+        );
+        // Second and third albums
+        let second = ytmusic_cursor
+            .next()
+            .await?
+            .expect("expected second release");
+        assert_eq!(second.0.name.as_deref().unwrap(), "わためのうた vol.２");
+        let third = ytmusic_cursor
+            .next()
+            .await?
+            .expect("expected third release");
+        assert_eq!(third.0.name.as_deref().unwrap(), "WATAME NO UTA vol.1");
+        // Fourth: DivaFever — resolved lazily via /albums/{browseId}
+        let fourth = ytmusic_cursor.next().await?.expect("expected DivaFever");
+        assert_eq!(fourth.0.name.as_deref().unwrap(), "DivaFever");
+        assert_eq!(
+            fourth.0.sources.get(SOURCE).unwrap(),
+            &HashSet::from([
+                "https://www.youtube.com/playlist?list=OLAK5uy_kUTSWTOJ17BRGsluouawuOnmnJFRRSK2o"
+                    .to_string()
+            ])
         );
 
         Ok(())

@@ -3,3 +3,4 @@
 .envrc
 .pre-commit-config.yaml
 .env
+.temp

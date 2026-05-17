@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use musiclib_rs::providers::{
     RawFetchProvider, TryDefault,
-    backends::{discogs, musicbrainz, soundcloud, spotify, youtube_api},
+    backends::{discogs, musicbrainz, nicovideo, soundcloud, spotify, youtube_api, ytmusicapi},
     types::{EntryFetchOptions, Error},
 };
 
@@ -110,6 +110,14 @@ async fn main() -> Result<()> {
             }
             "soundcloud" => {
                 update_fixtures::<soundcloud::Provider>(&fixtures, EntryFetchOptions::default())
+                    .await?;
+            }
+            "nicovideo" => {
+                update_fixtures::<nicovideo::Provider>(&fixtures, EntryFetchOptions::default())
+                    .await?;
+            }
+            "ytmusicapi" => {
+                update_fixtures::<ytmusicapi::Provider>(&fixtures, EntryFetchOptions::default())
                     .await?;
             }
             other => {
