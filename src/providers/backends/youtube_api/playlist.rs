@@ -200,7 +200,19 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
         move |p, id| {
             let p = &p.items[0];
             let url = playlist_url(id);
-            let release_date = OffsetDateTime::parse(&p.snippet.published_at, &Rfc3339).ok();
+            let release_date = OffsetDateTime::parse(&p.snippet.published_at, &Rfc3339)
+                .ok()
+                .map(|dt| {
+                    format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                        dt.year(),
+                        dt.month() as u8,
+                        dt.day(),
+                        dt.hour(),
+                        dt.minute(),
+                        dt.second(),
+                    )
+                });
             let result = Ok(EntityResult {
                 release_date,
                 sources: [(SOURCE.into(), HashSet::from([url.to_string()]))].into(),
@@ -286,10 +298,10 @@ mod tests {
         )
         .await?;
 
-        assert!(playlist.release_date.is_some());
-        assert_eq!(playlist.release_date.unwrap().year(), 2021);
-        assert_eq!(playlist.release_date.unwrap().month(), time::Month::June);
-        assert_eq!(playlist.release_date.unwrap().day(), 27);
+        assert_eq!(
+            playlist.release_date.as_deref(),
+            Some("2021-06-27 23:12:09")
+        );
         assert_eq!(playlist.sources.len(), 1);
         assert_eq!(
             playlist.sources.get(SOURCE).unwrap(),

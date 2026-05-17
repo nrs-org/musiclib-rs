@@ -1,5 +1,9 @@
+pub mod discogs;
 pub mod musicbrainz;
+pub mod soundcloud;
+pub mod spotify;
 pub mod youtube_api;
+pub mod ytdlp;
 
 pub fn build_url(url: String, params: &[(&str, &str)]) -> String {
     let mut url = url;

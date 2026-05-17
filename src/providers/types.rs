@@ -9,7 +9,6 @@ use regex::Regex;
 pub type OptionsId = u32;
 
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
 // dict of external identifier (mostly URLs), grouped by source (e.g. "wikidata", "spotify", etc.)
@@ -104,6 +103,10 @@ pub struct ChildRef {
     pub sources: ExternalSources,
     pub name: Option<String>,
     pub position: Option<TrackPosition>,
+    /// Contributions here represent the child's relationship to its parent
+    /// (e.g. an artist's role on a release they contributed to).
+    /// Note: there is no such contribution relationship from a track to its album/release,
+    /// so this field is typically empty for track children.
     pub contributions: Vec<Contribution>,
 }
 
@@ -121,7 +124,7 @@ pub struct Contribution {
 // specific data for the entry type, child entries (e.g. tracks within a release), contributions
 // (e.g. artists on a track), and aliases
 pub struct EntityResult<T: Clone + Send + Sync + 'static = ChildFetchOptions> {
-    pub release_date: Option<OffsetDateTime>,
+    pub release_date: Option<String>,
     pub sources: ExternalSources,
     pub extra: serde_json::Value,
     pub specific_data: EntrySpecificData,
@@ -144,6 +147,8 @@ pub enum Error {
     Http(#[from] crate::http::Error),
     #[error("Invalid credentials: {0}")]
     InvalidCredentials(String),
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
     #[error("Missing credentials: {0}")]
     MissingCredentials(String),
     #[error("Invalid pattern: {0}")]

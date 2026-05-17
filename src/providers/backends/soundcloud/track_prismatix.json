@@ -1,0 +1,288 @@
+{
+  "_has_drm": null,
+  "_type": "video",
+  "_version": {
+    "current_git_head": null,
+    "release_git_head": "04d6974f502bbdfaed72c624344f262e30ad9708",
+    "repository": "yt-dlp/yt-dlp",
+    "version": "2026.03.17"
+  },
+  "abr": 160,
+  "acodec": "mp4a.40.2",
+  "artist": "Laser Imouto",
+  "artists": [
+    "Laser Imouto"
+  ],
+  "aspect_ratio": null,
+  "audio_ext": "m4a",
+  "comment_count": 54,
+  "container": "m4a_dash",
+  "description": "Fate/kaleid Liner OP1 bootleg :｡･:*:･ﾟ’★,｡･:*:･ﾟ’☆\n\nSay hi on Twitter: twitter.com/laserimouto",
+  "display_id": "879556552",
+  "duration": 254.446,
+  "duration_string": "4:14",
+  "epoch": 1779010612,
+  "ext": "m4a",
+  "extractor": "soundcloud",
+  "extractor_key": "Soundcloud",
+  "filesize_approx": 5088920,
+  "format": "hls_aac_160k - audio only",
+  "format_id": "hls_aac_160k",
+  "format_note": null,
+  "formats": [
+    {
+      "abr": 128,
+      "acodec": "mp3",
+      "aspect_ratio": null,
+      "audio_ext": "mp3",
+      "container": null,
+      "ext": "mp3",
+      "filesize_approx": 4071136,
+      "format": "hls_mp3_0_1 - audio only",
+      "format_id": "hls_mp3_0_1",
+      "format_note": null,
+      "http_headers": {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-us,en;q=0.5",
+        "Sec-Fetch-Mode": "navigate",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+      },
+      "preference": null,
+      "protocol": "m3u8_native",
+      "quality": -1,
+      "resolution": "audio only",
+      "tbr": 128,
+      "url": "https://cf-hls-media.sndcdn.com/playlist/yuHCk7LjkHWI.128.mp3/playlist.m3u8?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLWhscy1tZWRpYS5zbmRjZG4uY29tL3BsYXlsaXN0L3l1SENrN0xqa0hXSS4xMjgubXAzL3BsYXlsaXN0Lm0zdTgqIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzc5MDEwOTg2fX19XX0_&Signature=TcGkYMWMXW1R8mm-XayLIVETJVYNLkMaVO~YDvXejXnmkaPABkEc14CvGUMcoOxyO3RD8-2rjdOfHSkYW7Db2OPxGrMN6q6GOpS4wfEfw89FUMq3gxr6Gzw3l0izqMHadh-djHIlsxMPmw-MSgf24qp6S9hoYH4KMF3glBg4XlzLCEMMDnGeSG91w2kQHDt2xdNboLfILwz5F-LCSTlxoLpXvUFpLi4CEiF8Bb8NA9q9R7XUo-PEvVArzYWXVso6tNuZpHF8HPON-whHg5wXhNGMg8~dajPoi5xjQcbyTT6lvnINba6h3VKRewD5QV~Xp-qGREaYco42dplSqZ0ZMg__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
+      "vbr": 0,
+      "vcodec": "none",
+      "video_ext": "none"
+    },
+    {
+      "abr": 128,
+      "acodec": "mp3",
+      "aspect_ratio": null,
+      "audio_ext": "mp3",
+      "container": null,
+      "ext": "mp3",
+      "filesize_approx": 4071136,
+      "format": "http_mp3_0_1 - audio only",
+      "format_id": "http_mp3_0_1",
+      "format_note": null,
+      "http_headers": {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-us,en;q=0.5",
+        "Sec-Fetch-Mode": "navigate",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+      },
+      "preference": null,
+      "protocol": "http",
+      "quality": -1,
+      "resolution": "audio only",
+      "tbr": 128,
+      "url": "https://cf-media.sndcdn.com/yuHCk7LjkHWI.128.mp3?Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiKjovL2NmLW1lZGlhLnNuZGNkbi5jb20veXVIQ2s3TGprSFdJLjEyOC5tcDMqIiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzc5MDEwOTg2fX19XX0_&Signature=fEncX~5YbXd9zK9vfJcPzj~3Jn3TeJ1SJyG8BBD1kqk5T~hVeyJ2-d7L68rVGMfrpv5LV6swkeEgSG6nmtqM5WLxlXLomLF-AcAe3ydPjHMjM2THRQYg4K9mKEWeYU2zh-2bahXPKNnbL-UXJRoB1pvLgknOYrbPnOuYvGzRL6h-Jl~esRSvBuw7AwpaL5Grx-PISsP6miZTKyno0EetIut0bVN0S~2e7YAogsAZxW7hUK6JPUwLjeG3eQLecdIcMmzAgcgfKaeKoX3jhZEoA2m9Jjrl74-5Y8QUk5JclP4bEeuf1y6mYgoZyFWmvox1WqxGIWu4G-D4xXp4uiS9hg__&Key-Pair-Id=APKAI6TU7MMXM5DG6EPQ",
+      "vbr": 0,
+      "vcodec": "none",
+      "video_ext": "none"
+    },
+    {
+      "abr": 96,
+      "acodec": "mp4a.40.2",
+      "aspect_ratio": null,
+      "audio_ext": "m4a",
+      "container": "m4a_dash",
+      "ext": "m4a",
+      "filesize_approx": 3053352,
+      "format": "hls_aac_96k - audio only",
+      "format_id": "hls_aac_96k",
+      "format_note": null,
+      "http_headers": {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-us,en;q=0.5",
+        "Sec-Fetch-Mode": "navigate",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+      },
+      "preference": null,
+      "protocol": "m3u8_native",
+      "quality": -1,
+      "resolution": "audio only",
+      "tbr": 96,
+      "url": "https://playback.media-streaming.soundcloud.cloud/yuHCk7LjkHWI/aac_96k/8720167d-c0c9-463f-a1ef-2ad59c1e8d91/playlist.m3u8?expires=1779018066&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly9wbGF5YmFjay5tZWRpYS1zdHJlYW1pbmcuc291bmRjbG91ZC5jbG91ZC95dUhDazdMamtIV0kvYWFjXzk2ay84NzIwMTY3ZC1jMGM5LTQ2M2YtYTFlZi0yYWQ1OWMxZThkOTEvcGxheWxpc3QubTN1OD9leHBpcmVzPTE3NzkwMTgwNjYiLCJDb25kaXRpb24iOnsiRGF0ZUxlc3NUaGFuIjp7IkFXUzpFcG9jaFRpbWUiOjE3NzkwMTA5ODZ9fX1dfQ__&Signature=24p-CzunStAMZfPDHjbFMwQ-fafazW6MSblsaQLLsKEi8GZCCIVU9WB3JhtdBCRI5kth1HdBjj0tDU72Nq~GFzitaBA~l2PURPgomYwlC2Lo0kvrB2SP6NnKQoCbL3H~sOtEUBl0Hz3AKfKlUqlZRDEB~nePT9Y9m26f3CEhJEffuu6Ax04cmZW~Bi4xciQ0MRTxGQcCulESv9daHOxCrURv9Asg4RZ6gU8HmTQ9Z5GyUBZvaPHLXvYrUCPVKE6u62seYhWAcgWr~GaovGaxz6J3oOlfmbbWlf0-8ciAbeY9ap9vmE3Zg-HL6MsIlSzCwy3Lfw-oWw3us-ymM8zmqA__&Key-Pair-Id=K34606QXLEIRF3",
+      "vbr": 0,
+      "vcodec": "none",
+      "video_ext": "none"
+    },
+    {
+      "abr": 160,
+      "acodec": "mp4a.40.2",
+      "aspect_ratio": null,
+      "audio_ext": "m4a",
+      "container": "m4a_dash",
+      "ext": "m4a",
+      "filesize_approx": 5088920,
+      "format": "hls_aac_160k - audio only",
+      "format_id": "hls_aac_160k",
+      "format_note": null,
+      "http_headers": {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-us,en;q=0.5",
+        "Sec-Fetch-Mode": "navigate",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+      },
+      "preference": null,
+      "protocol": "m3u8_native",
+      "quality": 0,
+      "resolution": "audio only",
+      "tbr": 160,
+      "url": "https://playback.media-streaming.soundcloud.cloud/yuHCk7LjkHWI/aac_160k/cbc7c734-cf42-45a5-b732-e76fe9c3f3b5/playlist.m3u8?expires=1779018065&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly9wbGF5YmFjay5tZWRpYS1zdHJlYW1pbmcuc291bmRjbG91ZC5jbG91ZC95dUhDazdMamtIV0kvYWFjXzE2MGsvY2JjN2M3MzQtY2Y0Mi00NWE1LWI3MzItZTc2ZmU5YzNmM2I1L3BsYXlsaXN0Lm0zdTg~ZXhwaXJlcz0xNzc5MDE4MDY1IiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzc5MDEwOTg1fX19XX0_&Signature=W4KY53yvL5HarOjWKGDhqGNknjWvcjE-1siZNcZt46ubfLIHjhnM2JMqQhgEDhop8qdbJXq0LNxpEqWANS~gJAoZC7ncMkvA9xbW3DjASjQEZhIO-MdTyZiJ-oJVTkBVtgw8iFd6QTKCFNPssdqLjlOyLJ5ROcu6q9wIJbblwwxYl9YmfBIvNpvGxH20ftcTrGfvEuzPCcGo7~HyrlS23QPVvhIM5NU1m5fcSCP1X0jZ~hdZTr5MJDpnI9RAbK-bHqaXtSjzVtE4V-5X9O3VDpBi3PNtJW66ZoUkPeZaFGAJ1ennySdCi90qwkXa1juW6lQX8CM1YJhM-QFs8iiNIA__&Key-Pair-Id=K34606QXLEIRF3",
+      "vbr": 0,
+      "vcodec": "none",
+      "video_ext": "none"
+    }
+  ],
+  "fulltitle": "Prismatix",
+  "genre": "Prisma☆Illya",
+  "genres": [
+    "Prisma☆Illya"
+  ],
+  "http_headers": {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-us,en;q=0.5",
+    "Sec-Fetch-Mode": "navigate",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+  },
+  "id": "879556552",
+  "license": "all-rights-reserved",
+  "like_count": 2467,
+  "original_url": "https://soundcloud.com/laserimouto/prismatix",
+  "playlist": null,
+  "playlist_index": null,
+  "preference": null,
+  "protocol": "m3u8_native",
+  "quality": 0,
+  "release_year": null,
+  "repost_count": 137,
+  "requested_downloads": [
+    {
+      "__write_download_archive": false,
+      "_filename": "Prismatix [879556552].m4a",
+      "abr": 160,
+      "acodec": "mp4a.40.2",
+      "audio_ext": "m4a",
+      "container": "m4a_dash",
+      "ext": "m4a",
+      "filename": "Prismatix [879556552].m4a",
+      "filesize_approx": 5088920,
+      "format": "hls_aac_160k - audio only",
+      "format_id": "hls_aac_160k",
+      "http_headers": {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-us,en;q=0.5",
+        "Sec-Fetch-Mode": "navigate",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+      },
+      "protocol": "m3u8_native",
+      "quality": 0,
+      "resolution": "audio only",
+      "tbr": 160,
+      "url": "https://playback.media-streaming.soundcloud.cloud/yuHCk7LjkHWI/aac_160k/cbc7c734-cf42-45a5-b732-e76fe9c3f3b5/playlist.m3u8?expires=1779018065&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly9wbGF5YmFjay5tZWRpYS1zdHJlYW1pbmcuc291bmRjbG91ZC5jbG91ZC95dUhDazdMamtIV0kvYWFjXzE2MGsvY2JjN2M3MzQtY2Y0Mi00NWE1LWI3MzItZTc2ZmU5YzNmM2I1L3BsYXlsaXN0Lm0zdTg~ZXhwaXJlcz0xNzc5MDE4MDY1IiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzc5MDEwOTg1fX19XX0_&Signature=W4KY53yvL5HarOjWKGDhqGNknjWvcjE-1siZNcZt46ubfLIHjhnM2JMqQhgEDhop8qdbJXq0LNxpEqWANS~gJAoZC7ncMkvA9xbW3DjASjQEZhIO-MdTyZiJ-oJVTkBVtgw8iFd6QTKCFNPssdqLjlOyLJ5ROcu6q9wIJbblwwxYl9YmfBIvNpvGxH20ftcTrGfvEuzPCcGo7~HyrlS23QPVvhIM5NU1m5fcSCP1X0jZ~hdZTr5MJDpnI9RAbK-bHqaXtSjzVtE4V-5X9O3VDpBi3PNtJW66ZoUkPeZaFGAJ1ennySdCi90qwkXa1juW6lQX8CM1YJhM-QFs8iiNIA__&Key-Pair-Id=K34606QXLEIRF3",
+      "vbr": 0,
+      "vcodec": "none",
+      "video_ext": "none"
+    }
+  ],
+  "requested_subtitles": null,
+  "resolution": "audio only",
+  "tags": [
+    "J-Core",
+    "Fate/kaleid Liner プリズマ☆イリヤ ",
+    "200",
+    "New Era is Anime"
+  ],
+  "tbr": 160,
+  "thumbnail": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-original.jpg",
+  "thumbnails": [
+    {
+      "height": 16,
+      "id": "mini",
+      "resolution": "16x16",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-mini.jpg",
+      "width": 16
+    },
+    {
+      "height": 20,
+      "id": "tiny",
+      "resolution": "20x20",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-tiny.jpg",
+      "width": 20
+    },
+    {
+      "height": 32,
+      "id": "small",
+      "resolution": "32x32",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-small.jpg",
+      "width": 32
+    },
+    {
+      "height": 47,
+      "id": "badge",
+      "resolution": "47x47",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-badge.jpg",
+      "width": 47
+    },
+    {
+      "height": 67,
+      "id": "t67x67",
+      "resolution": "67x67",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-t67x67.jpg",
+      "width": 67
+    },
+    {
+      "height": 100,
+      "id": "large",
+      "resolution": "100x100",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-large.jpg",
+      "width": 100
+    },
+    {
+      "height": 300,
+      "id": "t300x300",
+      "resolution": "300x300",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-t300x300.jpg",
+      "width": 300
+    },
+    {
+      "height": 400,
+      "id": "crop",
+      "resolution": "400x400",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-crop.jpg",
+      "width": 400
+    },
+    {
+      "height": 500,
+      "id": "t500x500",
+      "resolution": "500x500",
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-t500x500.jpg",
+      "width": 500
+    },
+    {
+      "id": "original",
+      "preference": 10,
+      "url": "https://i1.sndcdn.com/artworks-8HqCNYqyv6zGUgx4-FWCMxg-original.jpg"
+    }
+  ],
+  "timestamp": 1598006186,
+  "title": "Prismatix",
+  "track": "Prismatix",
+  "upload_date": "20200821",
+  "uploader": "Laser Imouto",
+  "uploader_id": "442835",
+  "uploader_url": "https://soundcloud.com/laserimouto",
+  "url": "https://playback.media-streaming.soundcloud.cloud/yuHCk7LjkHWI/aac_160k/cbc7c734-cf42-45a5-b732-e76fe9c3f3b5/playlist.m3u8?expires=1779018065&Policy=eyJTdGF0ZW1lbnQiOlt7IlJlc291cmNlIjoiaHR0cHM6Ly9wbGF5YmFjay5tZWRpYS1zdHJlYW1pbmcuc291bmRjbG91ZC5jbG91ZC95dUhDazdMamtIV0kvYWFjXzE2MGsvY2JjN2M3MzQtY2Y0Mi00NWE1LWI3MzItZTc2ZmU5YzNmM2I1L3BsYXlsaXN0Lm0zdTg~ZXhwaXJlcz0xNzc5MDE4MDY1IiwiQ29uZGl0aW9uIjp7IkRhdGVMZXNzVGhhbiI6eyJBV1M6RXBvY2hUaW1lIjoxNzc5MDEwOTg1fX19XX0_&Signature=W4KY53yvL5HarOjWKGDhqGNknjWvcjE-1siZNcZt46ubfLIHjhnM2JMqQhgEDhop8qdbJXq0LNxpEqWANS~gJAoZC7ncMkvA9xbW3DjASjQEZhIO-MdTyZiJ-oJVTkBVtgw8iFd6QTKCFNPssdqLjlOyLJ5ROcu6q9wIJbblwwxYl9YmfBIvNpvGxH20ftcTrGfvEuzPCcGo7~HyrlS23QPVvhIM5NU1m5fcSCP1X0jZ~hdZTr5MJDpnI9RAbK-bHqaXtSjzVtE4V-5X9O3VDpBi3PNtJW66ZoUkPeZaFGAJ1ennySdCi90qwkXa1juW6lQX8CM1YJhM-QFs8iiNIA__&Key-Pair-Id=K34606QXLEIRF3",
+  "vbr": 0,
+  "vcodec": "none",
+  "video_ext": "none",
+  "view_count": 95098,
+  "webpage_url": "https://soundcloud.com/laserimouto/prismatix",
+  "webpage_url_basename": "prismatix",
+  "webpage_url_domain": "soundcloud.com"
+}

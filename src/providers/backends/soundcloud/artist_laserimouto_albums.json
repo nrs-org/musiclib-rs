@@ -1,0 +1,22 @@
+{
+  "__files_to_move": {},
+  "_type": "playlist",
+  "_version": {
+    "current_git_head": null,
+    "release_git_head": "04d6974f502bbdfaed72c624344f262e30ad9708",
+    "repository": "yt-dlp/yt-dlp",
+    "version": "2026.03.17"
+  },
+  "entries": [],
+  "epoch": 1779010607,
+  "extractor": "soundcloud:user",
+  "extractor_key": "SoundcloudUser",
+  "id": "442835",
+  "original_url": "https://soundcloud.com/laserimouto/albums",
+  "playlist_count": 0,
+  "release_year": null,
+  "title": "Laser Imouto (Albums)",
+  "webpage_url": "https://soundcloud.com/laserimouto/albums",
+  "webpage_url_basename": "albums",
+  "webpage_url_domain": "soundcloud.com"
+}

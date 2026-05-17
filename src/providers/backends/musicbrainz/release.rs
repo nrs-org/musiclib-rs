@@ -79,19 +79,14 @@ pub(crate) const PARTS: &str = "recordings+artist-credits+url-rels";
 
 // --- Helpers ---
 
-fn parse_release_date(date_str: &str) -> Option<time::OffsetDateTime> {
+fn parse_release_date(date_str: &str) -> Option<String> {
     // MB dates can be "YYYY", "YYYY-MM", or "YYYY-MM-DD".
-    let padded = match date_str.len() {
-        4 => format!("{date_str}-01-01"),
-        7 => format!("{date_str}-01"),
-        _ => date_str.to_string(),
-    };
-    time::Date::parse(
-        &padded,
-        &time::macros::format_description!("[year]-[month]-[day]"),
-    )
-    .ok()
-    .map(|d| d.with_time(time::Time::MIDNIGHT).assume_utc())
+    Some(match date_str.len() {
+        4 => format!("{date_str}-XX-XX XX:XX:XX"),
+        7 => format!("{date_str}-XX XX:XX:XX"),
+        10 => format!("{date_str} XX:XX:XX"),
+        _ => return None,
+    })
 }
 
 // --- Public API ---
@@ -265,11 +260,7 @@ mod tests {
         let rel = get_release(&client, &format!("https://musicbrainz.org/release/{mbid}")).await?;
 
         // Date
-        assert!(rel.release_date.is_some());
-        let d = rel.release_date.unwrap();
-        assert_eq!(d.year(), 2021);
-        assert_eq!(d.month(), time::Month::March);
-        assert_eq!(d.day(), 7);
+        assert_eq!(rel.release_date.as_deref(), Some("2021-03-07 XX:XX:XX"));
 
         // Sources
         assert_eq!(
@@ -334,11 +325,7 @@ mod tests {
         let rel = get_release(&client, &format!("https://musicbrainz.org/release/{mbid}")).await?;
 
         // Date
-        assert!(rel.release_date.is_some());
-        let d = rel.release_date.unwrap();
-        assert_eq!(d.year(), 2024);
-        assert_eq!(d.month(), time::Month::January);
-        assert_eq!(d.day(), 10);
+        assert_eq!(rel.release_date.as_deref(), Some("2024-01-10 XX:XX:XX"));
 
         // Sources
         assert_eq!(

@@ -1,0 +1,44 @@
+{
+  "__files_to_move": {},
+  "_type": "playlist",
+  "_version": {
+    "current_git_head": null,
+    "release_git_head": "04d6974f502bbdfaed72c624344f262e30ad9708",
+    "repository": "yt-dlp/yt-dlp",
+    "version": "2026.03.17"
+  },
+  "entries": [
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "id": "1458339631",
+      "title": "Compilation Works",
+      "url": "https://soundcloud.com/laserimouto/sets/compilation-works"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "id": "1191342361",
+      "title": "DJ Mixes",
+      "url": "https://soundcloud.com/laserimouto/sets/dj-mixes"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "id": "1138977469",
+      "title": "Otaku Hardcore Bootlegs",
+      "url": "https://soundcloud.com/laserimouto/sets/anime-hardcore-bootleg"
+    }
+  ],
+  "epoch": 1779010610,
+  "extractor": "soundcloud:user",
+  "extractor_key": "SoundcloudUser",
+  "id": "442835",
+  "original_url": "https://soundcloud.com/laserimouto/sets",
+  "playlist_count": 3,
+  "release_year": null,
+  "title": "Laser Imouto (Sets)",
+  "webpage_url": "https://soundcloud.com/laserimouto/sets",
+  "webpage_url_basename": "sets",
+  "webpage_url_domain": "soundcloud.com"
+}

@@ -1,0 +1,257 @@
+{
+  "pagination": {
+    "items": 13,
+    "page": 1,
+    "pages": 1,
+    "per_page": 100,
+    "urls": {}
+  },
+  "releases": [
+    {
+      "artist": "角巻わため",
+      "format": "2xFile, AAC, Single",
+      "id": 24550217,
+      "label": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/releases/24550217",
+      "role": "Main",
+      "stats": {
+        "community": {
+          "in_collection": 1,
+          "in_wantlist": 0
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "愛昧ショコラーテ",
+      "type": "release",
+      "year": 2020
+    },
+    {
+      "artist": "角巻わため",
+      "format": "CD, Album",
+      "id": 36612577,
+      "label": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/releases/36612577",
+      "role": "Main",
+      "stats": {
+        "community": {
+          "in_collection": 0,
+          "in_wantlist": 0
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "わためのうた vol. 1",
+      "type": "release",
+      "year": 2021
+    },
+    {
+      "artist": "Tsunomaki Watame*",
+      "format": "CD, EP, Ltd",
+      "id": 33880668,
+      "label": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/releases/33880668",
+      "role": "Main",
+      "stats": {
+        "community": {
+          "in_collection": 10,
+          "in_wantlist": 0
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "What A Mess!!!",
+      "type": "release",
+      "year": 2024
+    },
+    {
+      "artist": "Tsunomaki Watame*",
+      "format": "CD, Album",
+      "id": 34963553,
+      "label": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/releases/34963553",
+      "role": "Main",
+      "stats": {
+        "community": {
+          "in_collection": 13,
+          "in_wantlist": 0
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "Hop Step Sheep",
+      "type": "release",
+      "year": 2024
+    },
+    {
+      "artist": "AZKi & 角巻わため",
+      "format": "2xFile, AAC, Single",
+      "id": 36743659,
+      "label": "hololive RECORDS",
+      "resource_url": "https://api.discogs.com/releases/36743659",
+      "role": "Main",
+      "stats": {
+        "community": {
+          "in_collection": 0,
+          "in_wantlist": 0
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "ディーヴァフィーバー",
+      "type": "release",
+      "year": 2026
+    },
+    {
+      "artist": "ホロライブ4期生",
+      "format": "2xFile, AAC, Single",
+      "id": 24523301,
+      "label": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/releases/24523301",
+      "role": "Appearance",
+      "stats": {
+        "community": {
+          "in_collection": 2,
+          "in_wantlist": 0
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "キセキ結び",
+      "type": "release",
+      "year": 2021
+    },
+    {
+      "artist": "Hololive Idol Project",
+      "format": "2xFile, MP3, Single",
+      "id": 31386956,
+      "label": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/releases/31386956",
+      "role": "Appearance",
+      "stats": {
+        "community": {
+          "in_collection": 1,
+          "in_wantlist": 0
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "Prism Melody",
+      "type": "release",
+      "year": 2022
+    },
+    {
+      "artist": "Hololive Idol Project",
+      "id": 3004283,
+      "main_release": 26309057,
+      "resource_url": "https://api.discogs.com/masters/3004283",
+      "role": "Appearance",
+      "stats": {
+        "community": {
+          "in_collection": 1,
+          "in_wantlist": 2
+        }
+      },
+      "thumb": "",
+      "title": "Hololive Summer 2022",
+      "type": "master",
+      "year": 2022
+    },
+    {
+      "artist": "Blue Journey",
+      "format": "CD, Album, Ltd, Kee",
+      "id": 29016925,
+      "label": "Holo-n, Universal Music Group",
+      "resource_url": "https://api.discogs.com/releases/29016925",
+      "role": "Appearance",
+      "stats": {
+        "community": {
+          "in_collection": 8,
+          "in_wantlist": 1
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "夜明けのうた",
+      "trackinfo": "ツキノナミダ , 僕は独りだ",
+      "type": "release",
+      "year": 2023
+    },
+    {
+      "artist": "Hakos Baelz",
+      "format": "CD, Album, Kee",
+      "id": 31594036,
+      "label": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/releases/31594036",
+      "role": "Appearance",
+      "stats": {
+        "community": {
+          "in_collection": 13,
+          "in_wantlist": 12
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "Zodiac",
+      "trackinfo": "Colour",
+      "type": "release",
+      "year": 2024
+    },
+    {
+      "artist": "hololive × HoneyWorks",
+      "format": "CD",
+      "id": 31619548,
+      "label": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/releases/31619548",
+      "role": "Appearance",
+      "stats": {
+        "community": {
+          "in_collection": 11,
+          "in_wantlist": 5
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "Holohoneygaoka High School -Covers-",
+      "trackinfo": "イノコリ先生",
+      "type": "release",
+      "year": 2024
+    },
+    {
+      "artist": "Hololive Idol Project",
+      "format": "2xFile, AAC, Single",
+      "id": 36542275,
+      "label": "hololive RECORDS",
+      "resource_url": "https://api.discogs.com/releases/36542275",
+      "role": "Appearance",
+      "stats": {
+        "community": {
+          "in_collection": 0,
+          "in_wantlist": 0
+        }
+      },
+      "status": "Accepted",
+      "thumb": "",
+      "title": "Ridin' On Dreams",
+      "type": "release",
+      "year": 2026
+    },
+    {
+      "artist": "Various",
+      "id": 4177524,
+      "main_release": 35957860,
+      "resource_url": "https://api.discogs.com/masters/4177524",
+      "role": "TrackAppearance",
+      "stats": {
+        "community": {
+          "in_collection": 3,
+          "in_wantlist": 0
+        }
+      },
+      "thumb": "",
+      "title": "Hololive 6th Fes. Color Rise Harmony",
+      "type": "master",
+      "year": 2025
+    }
+  ]
+}

@@ -1,0 +1,172 @@
+{
+  "__files_to_move": {},
+  "_type": "playlist",
+  "_version": {
+    "current_git_head": null,
+    "release_git_head": "04d6974f502bbdfaed72c624344f262e30ad9708",
+    "repository": "yt-dlp/yt-dlp",
+    "version": "2026.03.17"
+  },
+  "album": "Otaku Hardcore Bootlegs",
+  "album_artist": "Laser Imouto",
+  "album_artists": [
+    "Laser Imouto"
+  ],
+  "album_type": "playlist",
+  "description": "",
+  "entries": [
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "1395787654",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/laserimouto/city-of-gold"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "1380043309",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/laserimouto/alive"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "1336245922",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/laserimouto/wonderful-world-order"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "1250095666",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/laserimouto/radio-happy-bootleg"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "1163976370",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/laserimouto/ravinpose"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "879556552",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/879556552"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "1043830081",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/1043830081"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "41870043",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/41870043"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "34888019",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/34888019"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "975603484",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/975603484"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "892476664",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/892476664"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "909787750",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/909787750"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "866480422",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/866480422"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "Otaku Hardcore Bootlegs",
+      "album_artist": "Laser Imouto",
+      "album_type": "playlist",
+      "id": "1738024323",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/1738024323"
+    }
+  ],
+  "epoch": 1779010613,
+  "extractor": "soundcloud:set",
+  "extractor_key": "SoundcloudSet",
+  "id": "1138977469",
+  "original_url": "https://soundcloud.com/laserimouto/sets/anime-hardcore-bootleg",
+  "playlist_count": 14,
+  "release_year": null,
+  "title": "Otaku Hardcore Bootlegs",
+  "uploader": "Laser Imouto",
+  "uploader_id": "442835",
+  "webpage_url": "https://soundcloud.com/laserimouto/sets/anime-hardcore-bootleg",
+  "webpage_url_basename": "anime-hardcore-bootleg",
+  "webpage_url_domain": "soundcloud.com"
+}

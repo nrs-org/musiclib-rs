@@ -1,0 +1,30 @@
+{
+  "__files_to_move": {},
+  "_type": "playlist",
+  "_version": {
+    "current_git_head": null,
+    "release_git_head": "04d6974f502bbdfaed72c624344f262e30ad9708",
+    "repository": "yt-dlp/yt-dlp",
+    "version": "2026.03.17"
+  },
+  "entries": [
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url",
+      "id": "1433930380",
+      "title": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+      "url": "https://soundcloud.com/katagiri/sets/triangular-double-bond"
+    }
+  ],
+  "epoch": 1779010616,
+  "extractor": "soundcloud:user",
+  "extractor_key": "SoundcloudUser",
+  "id": "71173148",
+  "original_url": "https://soundcloud.com/katagiri/albums",
+  "playlist_count": 1,
+  "release_year": null,
+  "title": "katagiri (Albums)",
+  "webpage_url": "https://soundcloud.com/katagiri/albums",
+  "webpage_url_basename": "albums",
+  "webpage_url_domain": "soundcloud.com"
+}

@@ -1,0 +1,537 @@
+{
+  "artists": [
+    {
+      "anv": "Tsunomaki Watame",
+      "id": 11811530,
+      "join": "",
+      "name": "角巻わため",
+      "resource_url": "https://api.discogs.com/artists/11811530",
+      "role": "",
+      "thumbnail_url": "https://i.discogs.com/tqEgzdFPbxf_Oin-I6axOC62TVTFdMgWi_f_OaB1VSQ/rs:fit/g:sm/q:90/h:500/w:500/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9BLTExODEx/NTMwLTE2NjMyNTkw/NTctMTc2MC5wbmc.jpeg",
+      "tracks": ""
+    }
+  ],
+  "artists_sort": "角巻わため",
+  "blocked_from_sale": false,
+  "community": {
+    "contributors": [
+      {
+        "resource_url": "https://api.discogs.com/users/Weebazaki",
+        "username": "Weebazaki"
+      },
+      {
+        "resource_url": "https://api.discogs.com/users/Despair357",
+        "username": "Despair357"
+      },
+      {
+        "resource_url": "https://api.discogs.com/users/Minazuki",
+        "username": "Minazuki"
+      }
+    ],
+    "data_quality": "Needs Vote",
+    "have": 14,
+    "rating": {
+      "average": 0.0,
+      "count": 0
+    },
+    "status": "Accepted",
+    "submitter": {
+      "resource_url": "https://api.discogs.com/users/Weebazaki",
+      "username": "Weebazaki"
+    },
+    "want": 1
+  },
+  "companies": [],
+  "country": "Japan",
+  "data_quality": "Needs Vote",
+  "date_added": "2025-08-30T07:25:41-07:00",
+  "date_changed": "2026-01-10T07:49:17-08:00",
+  "estimated_weight": 85,
+  "format_quantity": 1,
+  "formats": [
+    {
+      "descriptions": [
+        "Album",
+        "Stereo"
+      ],
+      "name": "CD",
+      "qty": "1"
+    }
+  ],
+  "genres": [
+    "Pop"
+  ],
+  "id": 34963553,
+  "identifiers": [
+    {
+      "type": "Barcode",
+      "value": "4582729911714"
+    },
+    {
+      "type": "Matrix / Runout",
+      "value": "HOLO-010 MT L61"
+    },
+    {
+      "type": "Mastering SID Code",
+      "value": "IFPI L160"
+    },
+    {
+      "description": "Variant 1",
+      "type": "Mould SID Code",
+      "value": "IFPI 442A"
+    },
+    {
+      "description": "Variant 2",
+      "type": "Mould SID Code",
+      "value": "IFPI 448G"
+    }
+  ],
+  "images": [
+    {
+      "height": 530,
+      "resource_url": "https://i.discogs.com/7lpbDEydCa_eaOeHtE_A1VbVCUP12nx0r4P2CTkCnvM/rs:fit/g:sm/q:90/h:530/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NjgwNTk0/NTctNzAwOS5qcGVn.jpeg",
+      "type": "primary",
+      "uri": "https://i.discogs.com/7lpbDEydCa_eaOeHtE_A1VbVCUP12nx0r4P2CTkCnvM/rs:fit/g:sm/q:90/h:530/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NjgwNTk0/NTctNzAwOS5qcGVn.jpeg",
+      "uri150": "https://i.discogs.com/WLlN7vRRSg3W7P6OYcwqo99MedmXwAdlkjVsRMf0Ujc/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NjgwNTk0/NTctNzAwOS5qcGVn.jpeg",
+      "width": 600
+    },
+    {
+      "height": 586,
+      "resource_url": "https://i.discogs.com/0iNjYQMfHKd97zhF_Ib9r18nJ0Q6hgfIe3s4Z3CYUz4/rs:fit/g:sm/q:90/h:586/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/MzctMzU1My5wbmc.jpeg",
+      "type": "secondary",
+      "uri": "https://i.discogs.com/0iNjYQMfHKd97zhF_Ib9r18nJ0Q6hgfIe3s4Z3CYUz4/rs:fit/g:sm/q:90/h:586/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/MzctMzU1My5wbmc.jpeg",
+      "uri150": "https://i.discogs.com/4Nsiy-eGvS4_uOd7bOxj-1O7hsKvR3QVqhuTtcFAvgo/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/MzctMzU1My5wbmc.jpeg",
+      "width": 600
+    },
+    {
+      "height": 523,
+      "resource_url": "https://i.discogs.com/nI-Y4VvMyDWQXL8Bl_meNwoe8WbGHxkCa_LysCzjCiA/rs:fit/g:sm/q:90/h:523/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NDMtMTk1MC5wbmc.jpeg",
+      "type": "secondary",
+      "uri": "https://i.discogs.com/nI-Y4VvMyDWQXL8Bl_meNwoe8WbGHxkCa_LysCzjCiA/rs:fit/g:sm/q:90/h:523/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NDMtMTk1MC5wbmc.jpeg",
+      "uri150": "https://i.discogs.com/S87vAbHEVFcVSZ61YaE_KPq6sTbLcFy9af0r5oHYL2o/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NDMtMTk1MC5wbmc.jpeg",
+      "width": 600
+    },
+    {
+      "height": 523,
+      "resource_url": "https://i.discogs.com/7RHWF-lNCKxEOsbOe0flo3VdpQrG5YllDFqR9LNkZLQ/rs:fit/g:sm/q:90/h:523/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NDctODgwMS5wbmc.jpeg",
+      "type": "secondary",
+      "uri": "https://i.discogs.com/7RHWF-lNCKxEOsbOe0flo3VdpQrG5YllDFqR9LNkZLQ/rs:fit/g:sm/q:90/h:523/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NDctODgwMS5wbmc.jpeg",
+      "uri150": "https://i.discogs.com/H2-VJz15INJuDRlz35m1IqhGkTUz1t0ezHOXXPIfqc0/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NDctODgwMS5wbmc.jpeg",
+      "width": 600
+    },
+    {
+      "height": 600,
+      "resource_url": "https://i.discogs.com/rkW66lP5ZqvkWBnGr5-v-Q63EsgwB1saSGN9iBCBmuc/rs:fit/g:sm/q:90/h:600/w:281/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NTItNjg5OC5wbmc.jpeg",
+      "type": "secondary",
+      "uri": "https://i.discogs.com/rkW66lP5ZqvkWBnGr5-v-Q63EsgwB1saSGN9iBCBmuc/rs:fit/g:sm/q:90/h:600/w:281/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NTItNjg5OC5wbmc.jpeg",
+      "uri150": "https://i.discogs.com/_y7kr6l3Hl5yurhvxiUSACUtPODWBNmKXNRgS4hAaNw/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NTItNjg5OC5wbmc.jpeg",
+      "width": 281
+    },
+    {
+      "height": 600,
+      "resource_url": "https://i.discogs.com/0_2TFS_uKXbM53cGuD1fCL146QurV1bLUBgzTz6V-zM/rs:fit/g:sm/q:90/h:600/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NTYtMTA5My5wbmc.jpeg",
+      "type": "secondary",
+      "uri": "https://i.discogs.com/0_2TFS_uKXbM53cGuD1fCL146QurV1bLUBgzTz6V-zM/rs:fit/g:sm/q:90/h:600/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NTYtMTA5My5wbmc.jpeg",
+      "uri150": "https://i.discogs.com/5aSrNCd3QExOSb9qz1AwXey4l4gwA1Cka9DVGRGzwgI/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NTY1Njg0/NTYtMTA5My5wbmc.jpeg",
+      "width": 600
+    }
+  ],
+  "is_offensive": false,
+  "labels": [
+    {
+      "catno": "HOLO-010",
+      "entity_type": "1",
+      "entity_type_name": "Label",
+      "id": 1953831,
+      "name": "Cover Corp.",
+      "resource_url": "https://api.discogs.com/labels/1953831",
+      "thumbnail_url": "https://i.discogs.com/17zykJ4KxS2bl31uKtGs_XHfRlIsEy_LolScLhgxYcA/rs:fit/g:sm/q:90/h:600/w:600/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9MLTE5NTM4/MzEtMTYwNzQ0NjQ5/Ny02Mjg5LnBuZw.jpeg"
+    }
+  ],
+  "lowest_price": 89.31,
+  "notes": "At her 2nd Live concert held on January 31, 2024, merchandise was sold, and a replica signed alternate jacket was included as a bonus.",
+  "num_for_sale": 6,
+  "released": "2024-01-10",
+  "released_formatted": "10 Jan 2024",
+  "resource_url": "https://api.discogs.com/releases/34963553",
+  "series": [],
+  "status": "Accepted",
+  "styles": [
+    "Vocal",
+    "J-pop"
+  ],
+  "thumb": "https://i.discogs.com/WLlN7vRRSg3W7P6OYcwqo99MedmXwAdlkjVsRMf0Ujc/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM0OTYz/NTUzLTE3NjgwNTk0/NTctNzAwOS5qcGVn.jpeg",
+  "title": "Hop Step Sheep",
+  "tracklist": [
+    {
+      "duration": "3:49",
+      "extraartists": [
+        {
+          "anv": "新藤晴一",
+          "id": 2114915,
+          "join": "",
+          "name": "Junichi Satou",
+          "resource_url": "https://api.discogs.com/artists/2114915",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "新藤晴一",
+          "id": 2114915,
+          "join": "",
+          "name": "Junichi Satou",
+          "resource_url": "https://api.discogs.com/artists/2114915",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "林 英樹",
+          "id": 6811445,
+          "join": "",
+          "name": "Hideki hayashi",
+          "resource_url": "https://api.discogs.com/artists/6811445",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "1",
+      "title": "Beautiful Circle",
+      "type_": "track"
+    },
+    {
+      "duration": "3:37",
+      "extraartists": [
+        {
+          "anv": "佐藤陽介",
+          "id": 6543211,
+          "join": "",
+          "name": "Yosuke Sato (5)",
+          "resource_url": "https://api.discogs.com/artists/6543211",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "佐藤陽介",
+          "id": 6543211,
+          "join": "",
+          "name": "Yosuke Sato (5)",
+          "resource_url": "https://api.discogs.com/artists/6543211",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "佐藤陽介",
+          "id": 6543211,
+          "join": "",
+          "name": "Yosuke Sato (5)",
+          "resource_url": "https://api.discogs.com/artists/6543211",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "2",
+      "title": "きっと",
+      "type_": "track"
+    },
+    {
+      "duration": "4:37",
+      "extraartists": [
+        {
+          "anv": "",
+          "id": 293944,
+          "join": "",
+          "name": "tasuku",
+          "resource_url": "https://api.discogs.com/artists/293944",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "岡野昭仁",
+          "id": 4222009,
+          "join": "",
+          "name": "Akihito Okano",
+          "resource_url": "https://api.discogs.com/artists/4222009",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "",
+          "id": 293944,
+          "join": "",
+          "name": "tasuku",
+          "resource_url": "https://api.discogs.com/artists/293944",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "佐藤純一",
+          "id": 2114915,
+          "join": "",
+          "name": "Junichi Satou",
+          "resource_url": "https://api.discogs.com/artists/2114915",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "3",
+      "title": "Fins",
+      "type_": "track"
+    },
+    {
+      "duration": "3:51",
+      "extraartists": [
+        {
+          "anv": "木村孝明",
+          "id": 9309103,
+          "join": "",
+          "name": "Takaaki Kimura",
+          "resource_url": "https://api.discogs.com/artists/9309103",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "木村孝明",
+          "id": 9309103,
+          "join": "",
+          "name": "Takaaki Kimura",
+          "resource_url": "https://api.discogs.com/artists/9309103",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "",
+          "id": 11811530,
+          "join": "",
+          "name": "角巻わため",
+          "resource_url": "https://api.discogs.com/artists/11811530",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "4",
+      "title": "Go my way",
+      "type_": "track"
+    },
+    {
+      "duration": "4:03",
+      "extraartists": [
+        {
+          "anv": "佐藤陽介",
+          "id": 6543211,
+          "join": "",
+          "name": "Yosuke Sato (5)",
+          "resource_url": "https://api.discogs.com/artists/6543211",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "佐藤陽介",
+          "id": 6543211,
+          "join": "",
+          "name": "Yosuke Sato (5)",
+          "resource_url": "https://api.discogs.com/artists/6543211",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "佐藤陽介",
+          "id": 6543211,
+          "join": "",
+          "name": "Yosuke Sato (5)",
+          "resource_url": "https://api.discogs.com/artists/6543211",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "5",
+      "title": "Now on step",
+      "type_": "track"
+    },
+    {
+      "duration": "3:04",
+      "extraartists": [
+        {
+          "anv": "FAKE TYPE.",
+          "id": 2889333,
+          "join": "",
+          "name": "DYES IWASAKI",
+          "resource_url": "https://api.discogs.com/artists/2889333",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "",
+          "id": 4459455,
+          "join": "",
+          "name": "FAKE TYPE.",
+          "resource_url": "https://api.discogs.com/artists/4459455",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "FAKE TYPE.",
+          "id": 9638746,
+          "join": "",
+          "name": "TOPHAMHAT-KYO",
+          "resource_url": "https://api.discogs.com/artists/9638746",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "6",
+      "title": "What an amazing swing",
+      "type_": "track"
+    },
+    {
+      "duration": "4:13",
+      "extraartists": [
+        {
+          "anv": "",
+          "id": 12621749,
+          "join": "",
+          "name": "ケンモチヒデフミ",
+          "resource_url": "https://api.discogs.com/artists/12621749",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "",
+          "id": 12621749,
+          "join": "",
+          "name": "ケンモチヒデフミ",
+          "resource_url": "https://api.discogs.com/artists/12621749",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "",
+          "id": 12621749,
+          "join": "",
+          "name": "ケンモチヒデフミ",
+          "resource_url": "https://api.discogs.com/artists/12621749",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "7",
+      "title": "WataMeister",
+      "type_": "track"
+    },
+    {
+      "duration": "3:53",
+      "extraartists": [
+        {
+          "anv": "山﨑佳祐",
+          "id": 5525071,
+          "join": "",
+          "name": "Keisuke Yamasaki",
+          "resource_url": "https://api.discogs.com/artists/5525071",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "柴山太朗",
+          "id": 16588961,
+          "join": "",
+          "name": "Taro Shibayama",
+          "resource_url": "https://api.discogs.com/artists/16588961",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "",
+          "id": 11811530,
+          "join": "",
+          "name": "角巻わため",
+          "resource_url": "https://api.discogs.com/artists/11811530",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "8",
+      "title": "君色ハナミズキ",
+      "type_": "track"
+    },
+    {
+      "duration": "3:29",
+      "extraartists": [
+        {
+          "anv": "堀江晶太",
+          "id": 5084782,
+          "join": "",
+          "name": "Shota Horie",
+          "resource_url": "https://api.discogs.com/artists/5084782",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "堀江晶太",
+          "id": 5084782,
+          "join": "",
+          "name": "Shota Horie",
+          "resource_url": "https://api.discogs.com/artists/5084782",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "",
+          "id": 11811530,
+          "join": "",
+          "name": "角巻わため",
+          "resource_url": "https://api.discogs.com/artists/11811530",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "9",
+      "title": "夢見る羊",
+      "type_": "track"
+    },
+    {
+      "duration": "3:04",
+      "extraartists": [
+        {
+          "anv": "堀江晶太",
+          "id": 5084782,
+          "join": "",
+          "name": "Shota Horie",
+          "resource_url": "https://api.discogs.com/artists/5084782",
+          "role": "Arranged By",
+          "tracks": ""
+        },
+        {
+          "anv": "堀江晶太",
+          "id": 5084782,
+          "join": "",
+          "name": "Shota Horie",
+          "resource_url": "https://api.discogs.com/artists/5084782",
+          "role": "Composed By",
+          "tracks": ""
+        },
+        {
+          "anv": "",
+          "id": 11811530,
+          "join": "",
+          "name": "角巻わため",
+          "resource_url": "https://api.discogs.com/artists/11811530",
+          "role": "Lyrics By",
+          "tracks": ""
+        }
+      ],
+      "position": "10",
+      "title": "Happy day to you!",
+      "type_": "track"
+    }
+  ],
+  "uri": "https://www.discogs.com/release/34963553-Tsunomaki-Watame-Hop-Step-Sheep",
+  "videos": [
+    {
+      "description": "角巻わため 3rdアルバム『Hop Step Sheep』発売🎉\n\nリリース日：2024年1月10日（水）\n\n⇩販売予約リンク/Pre-order⇩\nhttps://cover.lnk.to/HopStepSheep\n\n全国流通アルバムなので、店舗によってキャンペーンも実施予定！\n\n------------------------\n#わためセカンドライブ\n\n🐏角巻わため 2nd Live\n「わためぇ Night Fever!! in TOKYO GARDEN THEATER」開催決定✨\n\n開催日：2024",
+      "duration": 181,
+      "embed": true,
+      "title": "角巻わため 3rd Album『Hop Step Sheep』クロスフェード",
+      "uri": "https://www.youtube.com/watch?v=HTDQTpaPB88"
+    }
+  ],
+  "year": 2024
+}

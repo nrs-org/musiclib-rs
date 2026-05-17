@@ -1,0 +1,33 @@
+{
+  "external_urls": {
+    "spotify": "https://open.spotify.com/artist/68609MOnEU86kVyMf26JnM"
+  },
+  "followers": {
+    "href": null,
+    "total": 104217
+  },
+  "genres": [],
+  "href": "https://api.spotify.com/v1/artists/68609MOnEU86kVyMf26JnM",
+  "id": "68609MOnEU86kVyMf26JnM",
+  "images": [
+    {
+      "height": 640,
+      "url": "https://i.scdn.co/image/ab6761610000e5eb18e9b4ec414a2d78bd25270a",
+      "width": 640
+    },
+    {
+      "height": 320,
+      "url": "https://i.scdn.co/image/ab6761610000517418e9b4ec414a2d78bd25270a",
+      "width": 320
+    },
+    {
+      "height": 160,
+      "url": "https://i.scdn.co/image/ab6761610000f17818e9b4ec414a2d78bd25270a",
+      "width": 160
+    }
+  ],
+  "name": "角巻わため",
+  "popularity": 41,
+  "type": "artist",
+  "uri": "spotify:artist:68609MOnEU86kVyMf26JnM"
+}

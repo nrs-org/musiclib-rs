@@ -60,18 +60,13 @@ pub(crate) const PARTS: &str = "artists+releases+url-rels";
 
 // --- Helpers ---
 
-fn parse_release_date(date_str: &str) -> Option<time::OffsetDateTime> {
-    let padded = match date_str.len() {
-        4 => format!("{date_str}-01-01"),
-        7 => format!("{date_str}-01"),
-        _ => date_str.to_string(),
-    };
-    time::Date::parse(
-        &padded,
-        &time::macros::format_description!("[year]-[month]-[day]"),
-    )
-    .ok()
-    .map(|d| d.with_time(time::Time::MIDNIGHT).assume_utc())
+fn parse_release_date(date_str: &str) -> Option<String> {
+    Some(match date_str.len() {
+        4 => format!("{date_str}-XX-XX XX:XX:XX"),
+        7 => format!("{date_str}-XX XX:XX:XX"),
+        10 => format!("{date_str} XX:XX:XX"),
+        _ => return None,
+    })
 }
 
 // --- Public API ---
@@ -202,8 +197,11 @@ mod tests {
         .await?;
 
         // first-release-date
-        assert!(rg.release_date.is_some());
-        assert_eq!(rg.release_date.unwrap().year(), 2022);
+        assert!(
+            rg.release_date
+                .as_deref()
+                .is_some_and(|d| d.starts_with("2022"))
+        );
 
         // Sources
         assert_eq!(

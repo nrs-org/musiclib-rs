@@ -1,0 +1,53 @@
+{
+  "data_quality": "Needs Vote",
+  "groups": [
+    {
+      "active": true,
+      "id": 9318217,
+      "name": "Hololive Idol Project",
+      "resource_url": "https://api.discogs.com/artists/9318217"
+    },
+    {
+      "active": true,
+      "id": 11811518,
+      "name": "ホロライブ4期生",
+      "resource_url": "https://api.discogs.com/artists/11811518"
+    },
+    {
+      "active": true,
+      "id": 13823017,
+      "name": "Blue Journey",
+      "resource_url": "https://api.discogs.com/artists/13823017"
+    },
+    {
+      "active": true,
+      "id": 15022435,
+      "name": "hololive × HoneyWorks",
+      "resource_url": "https://api.discogs.com/artists/15022435"
+    }
+  ],
+  "id": 11811530,
+  "images": [
+    {
+      "height": 500,
+      "resource_url": "https://i.discogs.com/tqEgzdFPbxf_Oin-I6axOC62TVTFdMgWi_f_OaB1VSQ/rs:fit/g:sm/q:90/h:500/w:500/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9BLTExODEx/NTMwLTE2NjMyNTkw/NTctMTc2MC5wbmc.jpeg",
+      "type": "primary",
+      "uri": "https://i.discogs.com/tqEgzdFPbxf_Oin-I6axOC62TVTFdMgWi_f_OaB1VSQ/rs:fit/g:sm/q:90/h:500/w:500/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9BLTExODEx/NTMwLTE2NjMyNTkw/NTctMTc2MC5wbmc.jpeg",
+      "uri150": "https://i.discogs.com/pk9ht_I_MEm-3V6xGtsmGt7SsStyC6ObTLuXLxxjEbc/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9BLTExODEx/NTMwLTE2NjMyNTkw/NTctMTc2MC5wbmc.jpeg",
+      "width": 500
+    }
+  ],
+  "name": "角巻わため",
+  "namevariations": [
+    "Tsunomaki Watame"
+  ],
+  "profile": "角巻わため (Tsunomaki Watame) is a female Japanese Virtual YouTuber associated with hololive, debuting as part of its fourth generation of VTubers alongside [a=桐生ココ], [a=常闇トワ], [a=天音かなた] and [a=姫森ルーナ].",
+  "realname": "角巻わため (Tsunomaki Watame)",
+  "releases_url": "https://api.discogs.com/artists/11811530/releases",
+  "resource_url": "https://api.discogs.com/artists/11811530",
+  "uri": "https://www.discogs.com/artist/11811530-角巻わため",
+  "urls": [
+    "https://twitter.com/tsunomakiwatame",
+    "https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA"
+  ]
+}

@@ -25,6 +25,55 @@ fixtures:
           metadata: src/providers/backends/musicbrainz/release_watame_hop_step_sheep.json
           recordings: src/providers/backends/musicbrainz/release_watame_hop_step_sheep_recordings.json
         url: https://musicbrainz.org/release/c9496f63-4978-4008-b069-953e8fb1f8a6
+  - backend: spotify
+    entries:
+      # 角巻わため (Tsunomaki Watame)
+      - path:
+          metadata: src/providers/backends/spotify/artist_watame.json
+          albums: src/providers/backends/spotify/artist_watame_albums.json
+        url: https://open.spotify.com/artist/68609MOnEU86kVyMf26JnM
+      # Hop Step Sheep (album)
+      - path: src/providers/backends/spotify/album_hop_step_sheep.json
+        url: https://open.spotify.com/album/0LCmjkgN0CqcPtLuNHUBma
+      # Beautiful Circle (track, track 1 of Hop Step Sheep)
+      - path: src/providers/backends/spotify/track_beautiful_circle.json
+        url: https://open.spotify.com/track/4C3klfwXqCFv61VJ4bP7oJ
+      # charaalbum shortlist (playlist)
+      - path: src/providers/backends/spotify/playlist_charaalbum.json
+        url: https://open.spotify.com/playlist/5NYKuv10GX1WoQEODhgQIx
+  - backend: discogs
+    entries:
+      # 角巻わため (Tsunomaki Watame)
+      - path:
+          metadata: src/providers/backends/discogs/artist_watame.json
+          releases: src/providers/backends/discogs/artist_watame_releases.json
+        url: https://www.discogs.com/artist/11811530
+      # Hop Step Sheep (release)
+      - path: src/providers/backends/discogs/release_hop_step_sheep.json
+        url: https://www.discogs.com/release/34963553
+  - backend: soundcloud
+    entries:
+      # Laser Imouto (artist)
+      - path:
+          metadata: src/providers/backends/soundcloud/artist_laserimouto.json
+          sets: src/providers/backends/soundcloud/artist_laserimouto_sets.json
+          albums: src/providers/backends/soundcloud/artist_laserimouto_albums.json
+        url: https://soundcloud.com/laserimouto
+      # Prismatix (track)
+      - path: src/providers/backends/soundcloud/track_prismatix.json
+        url: https://soundcloud.com/laserimouto/prismatix
+      # Anime Hardcore Bootleg (playlist)
+      - path: src/providers/backends/soundcloud/playlist_anime_hardcore_bootleg.json
+        url: https://soundcloud.com/laserimouto/sets/anime-hardcore-bootleg
+      # katagiri (artist, to find album)
+      - path:
+          metadata: src/providers/backends/soundcloud/artist_katagiri.json
+          sets: src/providers/backends/soundcloud/artist_katagiri_sets.json
+          albums: src/providers/backends/soundcloud/artist_katagiri_albums.json
+        url: https://soundcloud.com/katagiri
+      # Triangular Double Bond (album)
+      - path: src/providers/backends/soundcloud/album_triangular_double_bond.json
+        url: https://soundcloud.com/katagiri/sets/triangular-double-bond
   - backend: youtube_api
     entries:
       - path: src/providers/backends/youtube_api/video_whatamess_xfade.json

@@ -1,0 +1,92 @@
+{
+  "__files_to_move": {},
+  "_type": "playlist",
+  "_version": {
+    "current_git_head": null,
+    "release_git_head": "04d6974f502bbdfaed72c624344f262e30ad9708",
+    "repository": "yt-dlp/yt-dlp",
+    "version": "2026.03.17"
+  },
+  "album": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+  "album_artist": "katagiri",
+  "album_artists": [
+    "katagiri"
+  ],
+  "album_type": "album",
+  "description": "pencil / DJKurara / かたぎり 3way Split\nFree DL : http://dochakuso.web.fc2.com/release/dcks-0099.html\n\nㅤ01 Tribute to DD / pencil\n　02 Listen To My Way / DJKurara\n　03 Various Artists / かたぎり\n　04 Awesome Great Music (No Future) / DJKurara vs pencil\n　05 Noiseful Imaging / かたぎり vs DJKurara\n　06 you love this track (hello, otaku) / pencil vs かたぎり",
+  "entries": [
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+      "album_artist": "katagiri",
+      "album_type": "album",
+      "id": "1262095069",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/penciler/tribute-to-dd"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+      "album_artist": "katagiri",
+      "album_type": "album",
+      "id": "1261501123",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/djkurara/listen-to-my-way"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+      "album_artist": "katagiri",
+      "album_type": "album",
+      "id": "1262092987",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/katagiri/various-artists"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+      "album_artist": "katagiri",
+      "album_type": "album",
+      "id": "682331066",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/djkurara/djkurara-vs-pencil-awesome-great-music-no-future"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+      "album_artist": "katagiri",
+      "album_type": "album",
+      "id": "1262093005",
+      "ie_key": "Soundcloud",
+      "url": "https://soundcloud.com/katagiri/noiseful-imaging"
+    },
+    {
+      "__x_forwarded_for_ip": null,
+      "_type": "url_transparent",
+      "album": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+      "album_artist": "katagiri",
+      "album_type": "album",
+      "id": "1262092402",
+      "ie_key": "Soundcloud",
+      "url": "https://api-v2.soundcloud.com/tracks/1262092402"
+    }
+  ],
+  "epoch": 1779010620,
+  "extractor": "soundcloud:set",
+  "extractor_key": "SoundcloudSet",
+  "id": "1433930380",
+  "original_url": "https://soundcloud.com/katagiri/sets/triangular-double-bond",
+  "playlist_count": 6,
+  "release_year": null,
+  "title": "pencil / DJKurara / かたぎり - TRIANGULAR DOUBLE BOND [DCKS-0099]",
+  "uploader": "katagiri",
+  "uploader_id": "71173148",
+  "webpage_url": "https://soundcloud.com/katagiri/sets/triangular-double-bond",
+  "webpage_url_basename": "triangular-double-bond",
+  "webpage_url_domain": "soundcloud.com"
+}

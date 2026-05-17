@@ -104,7 +104,19 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
     let result = get_video_raw::<VideoListResponse, _, _, Error, _>(client, url, move |v, id| {
         let v = &v.items[0];
         let url = video_url(id);
-        let release_date = OffsetDateTime::parse(&v.snippet.published_at, &Rfc3339).ok();
+        let release_date = OffsetDateTime::parse(&v.snippet.published_at, &Rfc3339)
+            .ok()
+            .map(|dt| {
+                format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    dt.year(),
+                    dt.month() as u8,
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second(),
+                )
+            });
         let duration_ms = parse_iso_duration_ms(&v.content_details.duration);
         let result = Ok(EntityResult {
             release_date,
@@ -159,6 +171,7 @@ mod tests {
         test_utils::MockHttpClient,
     };
 
+    #[test]
     fn test_parse_iso_duration_ms() {
         assert_eq!(super::parse_iso_duration_ms("PT1H2M3S"), Some(3723000));
         assert_eq!(super::parse_iso_duration_ms("PT15M"), Some(900000));
@@ -187,10 +200,7 @@ mod tests {
 
         let video = get_video(&client, &format!("https://www.youtube.com/watch?v={id}")).await?;
 
-        assert!(video.release_date.is_some());
-        assert_eq!(video.release_date.unwrap().year(), 2024);
-        assert_eq!(video.release_date.unwrap().month(), time::Month::December);
-        assert_eq!(video.release_date.unwrap().day(), 29);
+        assert_eq!(video.release_date.as_deref(), Some("2024-12-29 13:00:03"));
         assert_eq!(video.sources.len(), 1);
         assert_eq!(
             video.sources.get(SOURCE).unwrap(),
