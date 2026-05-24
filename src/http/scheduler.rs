@@ -1,6 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use super::{BodyExtractorCow, Error, HttpClient, Request, Response};
@@ -221,6 +222,107 @@ async fn dispatch_with_retry(
     }
 
     unreachable!()
+}
+
+/// Routes each request to a per-domain [`Scheduler`] worker, creating one
+/// lazily on first use. This allows independent concurrency limits and retry
+/// state per host while sharing a single [`HttpClient`] impl underneath.
+pub struct DomainScheduler {
+    inner: Arc<dyn HttpClient>,
+    /// Per-host overrides. Keyed by exact host string (e.g. `"api.spotify.com"`).
+    domain_configs: HashMap<String, SchedulerConfig>,
+    /// Fallback config for hosts that have no explicit entry.
+    default_config: SchedulerConfig,
+    workers: DashMap<String, mpsc::Sender<RequestEnvelope>>,
+}
+
+impl DomainScheduler {
+    pub fn new(inner: Arc<dyn HttpClient>, default_config: SchedulerConfig) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            domain_configs: HashMap::new(),
+            default_config,
+            workers: DashMap::new(),
+        })
+    }
+
+    pub fn with_domain_configs(
+        inner: Arc<dyn HttpClient>,
+        default_config: SchedulerConfig,
+        domain_configs: HashMap<String, SchedulerConfig>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            domain_configs,
+            default_config,
+            workers: DashMap::new(),
+        })
+    }
+
+    fn config_for(&self, host: &str) -> &SchedulerConfig {
+        self.domain_configs
+            .get(host)
+            .unwrap_or(&self.default_config)
+    }
+
+    fn get_or_create_worker(&self, host: &str) -> mpsc::Sender<RequestEnvelope> {
+        if let Some(entry) = self.workers.get(host) {
+            return entry.value().clone();
+        }
+
+        // Use entry API to avoid a race where two threads both see a miss.
+        let tx = self
+            .workers
+            .entry(host.to_string())
+            .or_insert_with(|| {
+                let config = self.config_for(host);
+                let (tx, rx) = mpsc::channel(config.channel_capacity);
+                let scheduler = Scheduler {
+                    inner: Arc::clone(&self.inner),
+                    rx,
+                    semaphore: config.max_concurrent.map(|n| Arc::new(Semaphore::new(n))),
+                    retry: config.retry.clone(),
+                };
+                tokio::spawn(scheduler.run());
+                tx
+            })
+            .clone();
+
+        tx
+    }
+}
+
+#[async_trait]
+impl HttpClient for DomainScheduler {
+    async fn make_request(
+        &self,
+        req: Request,
+        body_extractor: BodyExtractorCow<'static>,
+    ) -> Result<Arc<Response>, Error> {
+        // Extract the host portion cheaply without pulling in a URL parser.
+        // Expected form: scheme://host/path — we grab the segment between "://" and the next "/".
+        let host = req
+            .url
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split('/').next())
+            .unwrap_or("__unknown__")
+            .to_string();
+
+        let tx = self.get_or_create_worker(&host);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RequestEnvelope {
+            req,
+            extractor: body_extractor,
+            reply: reply_tx,
+        })
+        .await
+        .expect("Per-domain scheduler task has stopped");
+
+        reply_rx
+            .await
+            .expect("Per-domain scheduler dropped reply sender")
+    }
 }
 
 /// Helper to cheaply re-wrap an `Arc<BodyExtractorCow<'static>>` for reuse
