@@ -188,6 +188,7 @@ pub async fn get_artist(client: &SpotifyClient, url: &str) -> Result<EntityResul
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -259,7 +260,9 @@ mod tests {
         let mut albums = artist.children[0].cursor();
 
         // First album: Hop Step Sheep
-        let (first_album, _) = albums.next().await?.expect("expected first album");
+        let (first_album, _) = child_next(&mut albums)
+            .await?
+            .expect("expected first album");
         assert_eq!(first_album.entry_type, EntryType::Release);
         assert_eq!(first_album.external_type.as_ref(), EXTERNAL_TYPE_ALBUM);
         assert_eq!(first_album.name.as_deref(), Some("Hop Step Sheep"));
@@ -271,7 +274,9 @@ mod tests {
         );
 
         // Second album: わためのうた vol.２
-        let (second_album, _) = albums.next().await?.expect("expected second album");
+        let (second_album, _) = child_next(&mut albums)
+            .await?
+            .expect("expected second album");
         assert_eq!(second_album.name.as_deref(), Some("わためのうた vol.２"));
 
         Ok(())

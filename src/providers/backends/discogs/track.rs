@@ -87,6 +87,7 @@ fn positions_match(a: &TrackPosition, b: &TrackPosition) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -158,24 +159,32 @@ mod tests {
         let mut artists = track.children[0].cursor();
 
         // Main artist (falls back to release artists)
-        let (main, _) = artists.next().await?.expect("expected main artist");
+        let (main, _) = child_next(&mut artists)
+            .await?
+            .expect("expected main artist");
         assert_eq!(main.name.as_deref(), Some("角巻わため"));
         assert_eq!(main.contributions[0].role, "listed_artist");
 
         // extraartists: Junichi Satou x2 (Arranged By, Composed By), Hideki Hayashi (Lyrics By)
-        let (ea1, _) = artists.next().await?.expect("expected extraartist 1");
+        let (ea1, _) = child_next(&mut artists)
+            .await?
+            .expect("expected extraartist 1");
         assert_eq!(ea1.name.as_deref(), Some("Junichi Satou"));
         assert_eq!(ea1.contributions[0].role, "Arranged By");
 
-        let (ea2, _) = artists.next().await?.expect("expected extraartist 2");
+        let (ea2, _) = child_next(&mut artists)
+            .await?
+            .expect("expected extraartist 2");
         assert_eq!(ea2.name.as_deref(), Some("Junichi Satou"));
         assert_eq!(ea2.contributions[0].role, "Composed By");
 
-        let (ea3, _) = artists.next().await?.expect("expected extraartist 3");
+        let (ea3, _) = child_next(&mut artists)
+            .await?
+            .expect("expected extraartist 3");
         assert_eq!(ea3.name.as_deref(), Some("Hideki hayashi"));
         assert_eq!(ea3.contributions[0].role, "Lyrics By");
 
-        assert!(artists.next().await?.is_none());
+        assert!(child_next(&mut artists).await?.is_none());
 
         Ok(())
     }

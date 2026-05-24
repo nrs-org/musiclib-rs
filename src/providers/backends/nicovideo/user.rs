@@ -94,6 +94,7 @@ pub async fn get_user(client: &YtdlpClient, url: &str) -> Result<EntityResult<()
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use crate::{
@@ -134,7 +135,9 @@ mod tests {
 
         assert_eq!(user.children.len(), 1);
         let mut videos = user.children[0].cursor();
-        let (first_video, _) = videos.next().await?.expect("expected first video");
+        let (first_video, _) = child_next(&mut videos)
+            .await?
+            .expect("expected first video");
         assert_eq!(first_video.entry_type, EntryType::Track);
 
         Ok(())

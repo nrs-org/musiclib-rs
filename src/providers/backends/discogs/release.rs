@@ -297,6 +297,7 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -360,18 +361,18 @@ mod tests {
 
         // Artist child
         let mut artists = rel.children[0].cursor();
-        let (artist, _) = artists.next().await?.expect("expected artist");
+        let (artist, _) = child_next(&mut artists).await?.expect("expected artist");
         assert_eq!(artist.entry_type, EntryType::Artist);
         assert_eq!(artist.name.as_deref(), Some("角巻わため"));
         assert_eq!(
             artist.sources.get(SOURCE).unwrap(),
             &HashSet::from(["https://www.discogs.com/artist/11811530".to_string()])
         );
-        assert!(artists.next().await?.is_none());
+        assert!(child_next(&mut artists).await?.is_none());
 
         // Track children: 10 tracks
         let mut tracks = rel.children[1].cursor();
-        let (track1, _) = tracks.next().await?.expect("expected track 1");
+        let (track1, _) = child_next(&mut tracks).await?.expect("expected track 1");
         assert_eq!(track1.entry_type, EntryType::Track);
         assert_eq!(track1.external_type.as_ref(), EXTERNAL_TYPE_TRACK);
         assert_eq!(track1.name.as_deref(), Some("Beautiful Circle"));
@@ -385,13 +386,13 @@ mod tests {
 
         // Last track
         for _ in 2..=9 {
-            tracks.next().await?.expect("expected track");
+            child_next(&mut tracks).await?.expect("expected track");
         }
-        let (track10, _) = tracks.next().await?.expect("expected track 10");
+        let (track10, _) = child_next(&mut tracks).await?.expect("expected track 10");
         assert_eq!(track10.name.as_deref(), Some("Happy day to you!"));
         let pos10 = track10.position.as_ref().expect("expected position");
         assert_eq!(pos10.track_no, 10);
-        assert!(tracks.next().await?.is_none());
+        assert!(child_next(&mut tracks).await?.is_none());
 
         Ok(())
     }

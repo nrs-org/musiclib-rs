@@ -244,6 +244,7 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -318,7 +319,7 @@ mod tests {
         ));
         let mut children_cursor = playlist.children[0].cursor();
         let mut children_vec = Vec::new();
-        while let Some((child, _)) = children_cursor.next().await? {
+        while let Some((child, _)) = child_next(&mut children_cursor).await? {
             children_vec.push(child);
         }
         assert_eq!(children_vec.len(), 32);

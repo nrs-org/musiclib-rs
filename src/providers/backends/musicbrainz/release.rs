@@ -220,6 +220,7 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -287,7 +288,9 @@ mod tests {
 
         // Track child
         let mut tracks_cursor = rel.children[1].cursor();
-        let (track, _) = tracks_cursor.next().await?.expect("expected track");
+        let (track, _) = child_next(&mut tracks_cursor)
+            .await?
+            .expect("expected track");
         assert_eq!(track.entry_type, EntryType::Track);
         assert_eq!(track.external_type.as_ref(), EXTERNAL_TYPE_RECORDING);
         assert_eq!(
@@ -352,7 +355,9 @@ mod tests {
 
         // First track
         let mut tracks_cursor = rel.children[1].cursor();
-        let (track, _) = tracks_cursor.next().await?.expect("expected first track");
+        let (track, _) = child_next(&mut tracks_cursor)
+            .await?
+            .expect("expected first track");
         assert_eq!(track.entry_type, EntryType::Track);
         assert_eq!(track.external_type.as_ref(), EXTERNAL_TYPE_RECORDING);
         assert_eq!(track.name.as_deref(), Some("Beautiful Circle"));
@@ -388,12 +393,16 @@ mod tests {
         // 1 child source containing: 1 artist-credit (Watame) + 15 artist-rels
         assert_eq!(rec.children.len(), 1);
         let mut rec_artists = rec.children[0].cursor();
-        let (main_artist, _) = rec_artists.next().await?.expect("expected main artist");
+        let (main_artist, _) = child_next(&mut rec_artists)
+            .await?
+            .expect("expected main artist");
         assert_eq!(main_artist.name.as_deref(), Some("角巻わため"));
         assert!(main_artist.contributions[0].main_artist);
 
         // First relation: arranger 佐藤純一
-        let (arranger, _) = rec_artists.next().await?.expect("expected arranger");
+        let (arranger, _) = child_next(&mut rec_artists)
+            .await?
+            .expect("expected arranger");
         assert_eq!(arranger.name.as_deref(), Some("佐藤純一"));
         assert_eq!(arranger.contributions[0].role, "arranger");
         assert!(!arranger.contributions[0].main_artist);

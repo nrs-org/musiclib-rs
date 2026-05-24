@@ -162,6 +162,7 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -222,7 +223,9 @@ mod tests {
             },
         ));
         let mut children_cursor = video.children[0].cursor();
-        let (child, _) = children_cursor.next().await?.expect("expected a child");
+        let (child, _) = child_next(&mut children_cursor)
+            .await?
+            .expect("expected a child");
         assert_eq!(child.entry_type, EntryType::Artist);
         assert_eq!(
             child.sources.get(SOURCE).unwrap(),
@@ -234,7 +237,7 @@ mod tests {
         assert_eq!(child.contributions.len(), 1);
         let contribution = &child.contributions[0];
         assert_eq!(contribution.role, StandardRoleNames::UPLOADER);
-        assert!(children_cursor.next().await?.is_none());
+        assert!(child_next(&mut children_cursor).await?.is_none());
 
         assert_eq!(video.aliases.len(), 1);
         let alias = &video.aliases[0];

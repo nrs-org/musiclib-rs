@@ -118,6 +118,7 @@ pub async fn get_playlist(client: &YtdlpClient, url: &str) -> Result<EntityResul
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use crate::{
@@ -170,12 +171,16 @@ mod tests {
         assert_eq!(playlist.children.len(), 2);
 
         let mut uploaders = playlist.children[0].cursor();
-        let (uploader, _) = uploaders.next().await?.expect("expected uploader");
+        let (uploader, _) = child_next(&mut uploaders)
+            .await?
+            .expect("expected uploader");
         assert_eq!(uploader.entry_type, EntryType::Artist);
         assert_eq!(uploader.name.as_deref(), Some("Laser Imouto"));
 
         let mut tracks = playlist.children[1].cursor();
-        let (first_track, _) = tracks.next().await?.expect("expected first track");
+        let (first_track, _) = child_next(&mut tracks)
+            .await?
+            .expect("expected first track");
         assert_eq!(first_track.entry_type, EntryType::Track);
         assert_eq!(first_track.position.as_ref().map(|p| p.track_no), Some(1));
         assert_eq!(

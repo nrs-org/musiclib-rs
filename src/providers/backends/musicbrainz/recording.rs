@@ -158,6 +158,7 @@ pub async fn get_recording(
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use http::Method;
@@ -213,7 +214,9 @@ mod tests {
         // Artist child: Haruka Karibu
         assert_eq!(rec.children.len(), 1);
         let mut cursor = rec.children[0].cursor();
-        let (artist, _) = cursor.next().await?.expect("expected artist child");
+        let (artist, _) = child_next(&mut cursor)
+            .await?
+            .expect("expected artist child");
         assert_eq!(artist.entry_type, EntryType::Artist);
         assert_eq!(artist.name.as_deref(), Some("Haruka Karibu"));
         assert_eq!(

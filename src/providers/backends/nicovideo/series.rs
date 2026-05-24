@@ -132,6 +132,7 @@ pub async fn get_series(client: &YtdlpClient, url: &str) -> Result<EntityResult<
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use crate::{
@@ -182,7 +183,9 @@ mod tests {
         assert_eq!(series.children.len(), 2);
 
         let mut uploaders = series.children[0].cursor();
-        let (uploader, _) = uploaders.next().await?.expect("expected uploader");
+        let (uploader, _) = child_next(&mut uploaders)
+            .await?
+            .expect("expected uploader");
         assert_eq!(uploader.entry_type, EntryType::Artist);
         assert_eq!(
             uploader.sources.get(SOURCE).unwrap(),
@@ -192,7 +195,9 @@ mod tests {
         );
 
         let mut tracks = series.children[1].cursor();
-        let (first, _) = tracks.next().await?.expect("expected first track");
+        let (first, _) = child_next(&mut tracks)
+            .await?
+            .expect("expected first track");
         assert_eq!(first.entry_type, EntryType::Track);
         assert_eq!(first.position.as_ref().map(|p| p.track_no), Some(1));
 

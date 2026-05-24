@@ -228,6 +228,7 @@ pub async fn get_artist(client: &DiscogsClient, url: &str) -> Result<EntityResul
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -312,7 +313,9 @@ mod tests {
         let mut releases = artist.children[0].cursor();
 
         // First item: 愛昧ショコラーテ (type "release", year 2020)
-        let (first, _) = releases.next().await?.expect("expected first release");
+        let (first, _) = child_next(&mut releases)
+            .await?
+            .expect("expected first release");
         assert_eq!(first.entry_type, EntryType::Release);
         assert_eq!(first.external_type.as_ref(), EXTERNAL_TYPE_RELEASE);
         assert_eq!(first.name.as_deref(), Some("愛昧ショコラーテ"));
@@ -323,9 +326,11 @@ mod tests {
 
         // Advance to the 8th item (index 7): Hololive Summer 2022 (type "master")
         for _ in 2..=7 {
-            releases.next().await?.expect("expected release");
+            child_next(&mut releases).await?.expect("expected release");
         }
-        let (master_item, _) = releases.next().await?.expect("expected master item");
+        let (master_item, _) = child_next(&mut releases)
+            .await?
+            .expect("expected master item");
         assert_eq!(master_item.entry_type, EntryType::ReleaseGroup);
         assert_eq!(master_item.external_type.as_ref(), EXTERNAL_TYPE_MASTER);
         assert_eq!(master_item.name.as_deref(), Some("Hololive Summer 2022"));
@@ -336,9 +341,9 @@ mod tests {
 
         // 13 total items, no next page
         for _ in 9..=13 {
-            releases.next().await?.expect("expected release");
+            child_next(&mut releases).await?.expect("expected release");
         }
-        assert!(releases.next().await?.is_none());
+        assert!(child_next(&mut releases).await?.is_none());
 
         Ok(())
     }

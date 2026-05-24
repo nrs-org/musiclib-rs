@@ -112,6 +112,7 @@ pub async fn get_video(client: &YtdlpClient, url: &str) -> Result<EntityResult<(
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use crate::{
@@ -161,7 +162,7 @@ mod tests {
 
         assert_eq!(video.children.len(), 1);
         let mut artists = video.children[0].cursor();
-        let (artist, _) = artists.next().await?.expect("expected artist");
+        let (artist, _) = child_next(&mut artists).await?.expect("expected artist");
         assert_eq!(artist.entry_type, EntryType::Artist);
         assert_eq!(
             artist.sources.get(SOURCE).unwrap(),

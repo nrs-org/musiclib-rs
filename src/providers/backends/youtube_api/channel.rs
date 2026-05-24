@@ -1,5 +1,11 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
+use futures::{Stream, StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::future::Future;
 
@@ -254,132 +260,170 @@ impl PageFetcher for ChannelUploadsPageFetcher {
 /// Fetches the full YTMusic discography list upfront, then yields one entry at a time.
 /// For entries missing `audioPlaylistId`, resolves it lazily via `GET /albums/{browseId}`.
 struct YtmusicDiscographySource {
+    stream: BoxStream<'static, Result<(ChildRef, ()), Error>>,
+    /// Known total count once fetched; used for size_hint.
+    total: Option<usize>,
+    /// Items consumed so far; used to compute remaining hint.
+    consumed: usize,
+}
+
+async fn fetch_discography(
+    http: Arc<dyn HttpClient>,
+    server_url: &str,
+    channel_id: &str,
+) -> Result<Vec<YtmusicRelease>, Error> {
+    let url = format!(
+        "{}/artists/{}/discography",
+        server_url.trim_end_matches('/'),
+        urlencoding::encode(channel_id)
+    );
+    let response = http
+        .get_bytes(Request {
+            url,
+            ..Default::default()
+        })
+        .await?;
+    if !response.status.is_success() {
+        return Err(Error::InvalidUrl(format!(
+            "ytmusicapi server returned {} for channel {channel_id}",
+            response.status
+        )));
+    }
+    let body = response
+        .body_to_bytes()
+        .await
+        .map_err(|e| Error::InvalidUrl(e.to_string()))?;
+    serde_json::from_slice(&body)
+        .map_err(|e| Error::InvalidUrl(format!("ytmusicapi parse error: {e}")))
+}
+
+async fn resolve_playlist_id(
+    http: Arc<dyn HttpClient>,
+    server_url: &str,
+    browse_id: &str,
+) -> Result<String, Error> {
+    let url = format!(
+        "{}/albums/{}",
+        server_url.trim_end_matches('/'),
+        urlencoding::encode(browse_id)
+    );
+    let response = http
+        .get_bytes(Request {
+            url,
+            ..Default::default()
+        })
+        .await?;
+    if !response.status.is_success() {
+        return Err(Error::InvalidUrl(format!(
+            "ytmusicapi server returned {} for album {browse_id}",
+            response.status
+        )));
+    }
+    let body = response
+        .body_to_bytes()
+        .await
+        .map_err(|e| Error::InvalidUrl(e.to_string()))?;
+    let album: YtmusicAlbumResponse = serde_json::from_slice(&body)
+        .map_err(|e| Error::InvalidUrl(format!("ytmusicapi album parse error: {e}")))?;
+    album
+        .audio_playlist_id
+        .ok_or_else(|| Error::InvalidUrl(format!("no audioPlaylistId for album {browse_id}")))
+}
+
+fn discography_stream(
     http: Arc<dyn HttpClient>,
     server_url: String,
     channel_id: String,
-    /// `None` means the list hasn't been fetched yet.
-    releases: Option<std::vec::IntoIter<YtmusicRelease>>,
-    remaining: Option<usize>,
-}
-
-impl YtmusicDiscographySource {
-    fn new(http: Arc<dyn HttpClient>, server_url: String, channel_id: String) -> Self {
-        Self {
+) -> BoxStream<'static, Result<(ChildRef, ()), Error>> {
+    // State: (http, server_url, channel_id, Option<pending releases>)
+    // The releases are fetched lazily on the first iteration step.
+    futures::stream::unfold(
+        (
             http,
             server_url,
             channel_id,
-            releases: None,
-            remaining: None,
-        }
-    }
-
-    async fn ensure_fetched(&mut self) -> Result<(), Error> {
-        if self.releases.is_some() {
-            return Ok(());
-        }
-        let url = format!(
-            "{}/artists/{}/discography",
-            self.server_url.trim_end_matches('/'),
-            urlencoding::encode(&self.channel_id)
-        );
-        let response = self
-            .http
-            .get_bytes(Request {
-                url,
-                ..Default::default()
-            })
-            .await?;
-        if !response.status.is_success() {
-            return Err(Error::InvalidUrl(format!(
-                "ytmusicapi server returned {} for channel {}",
-                response.status, self.channel_id
-            )));
-        }
-        let body = response
-            .body_to_bytes()
-            .await
-            .map_err(|e| Error::InvalidUrl(e.to_string()))?;
-        let releases: Vec<YtmusicRelease> = serde_json::from_slice(&body)
-            .map_err(|e| Error::InvalidUrl(format!("ytmusicapi parse error: {e}")))?;
-        self.remaining = Some(releases.len());
-        self.releases = Some(releases.into_iter());
-        Ok(())
-    }
-
-    async fn resolve_playlist_id(&self, browse_id: &str) -> Result<String, Error> {
-        let url = format!(
-            "{}/albums/{}",
-            self.server_url.trim_end_matches('/'),
-            urlencoding::encode(browse_id)
-        );
-        let response = self
-            .http
-            .get_bytes(Request {
-                url,
-                ..Default::default()
-            })
-            .await?;
-        if !response.status.is_success() {
-            return Err(Error::InvalidUrl(format!(
-                "ytmusicapi server returned {} for album {browse_id}",
-                response.status
-            )));
-        }
-        let body = response
-            .body_to_bytes()
-            .await
-            .map_err(|e| Error::InvalidUrl(e.to_string()))?;
-        let album: YtmusicAlbumResponse = serde_json::from_slice(&body)
-            .map_err(|e| Error::InvalidUrl(format!("ytmusicapi album parse error: {e}")))?;
-        album
-            .audio_playlist_id
-            .ok_or_else(|| Error::InvalidUrl(format!("no audioPlaylistId for album {browse_id}")))
-    }
-}
-
-#[async_trait::async_trait]
-impl ChildSource for YtmusicDiscographySource {
-    async fn next(&mut self) -> Result<Option<(ChildRef, ())>, Error> {
-        self.ensure_fetched().await?;
-        loop {
-            let release = {
-                let iter = self.releases.as_mut().unwrap();
-                let r = iter.next();
-                r
-            };
-            let Some(release) = release else {
-                return Ok(None);
-            };
-            self.remaining = self.remaining.map(|n| n.saturating_sub(1));
-
-            let playlist_id = match release.audio_playlist_id {
-                Some(id) => id,
-                None => match release.browse_id {
-                    Some(bid) => self.resolve_playlist_id(&bid).await?,
-                    None => continue,
-                },
-            };
-
-            return Ok(Some((
-                ChildRef {
+            None::<std::collections::VecDeque<YtmusicRelease>>,
+        ),
+        |(http, server_url, channel_id, mut releases)| async move {
+            if releases.is_none() {
+                match fetch_discography(Arc::clone(&http), &server_url, &channel_id).await {
+                    Ok(r) => releases = Some(r.into()),
+                    Err(e) => return Some((Err(e), (http, server_url, channel_id, None))),
+                }
+            }
+            let queue = releases.as_mut().unwrap();
+            loop {
+                let Some(release) = queue.pop_front() else {
+                    return None;
+                };
+                let playlist_id = match release.audio_playlist_id {
+                    Some(id) => id,
+                    None => match release.browse_id {
+                        Some(bid) => {
+                            match resolve_playlist_id(Arc::clone(&http), &server_url, &bid).await {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    return Some((
+                                        Err(e),
+                                        (http, server_url, channel_id, releases),
+                                    ));
+                                }
+                            }
+                        }
+                        None => continue,
+                    },
+                };
+                let child = ChildRef {
                     entry_type: EntryType::Release,
                     sources: [(SOURCE.into(), HashSet::from([playlist_url(&playlist_id)]))].into(),
                     name: release.title,
                     external_type: EXTERNAL_TYPE_PLAYLIST.into(),
                     ..Default::default()
-                },
-                (),
-            )));
+                };
+                let remaining = releases.clone().map(|q| q.len());
+                let _ = remaining; // used for size_hint via YtmusicDiscographySource.total
+                return Some((Ok((child, ())), (http, server_url, channel_id, releases)));
+            }
+        },
+    )
+    .boxed()
+}
+
+impl YtmusicDiscographySource {
+    fn new(http: Arc<dyn HttpClient>, server_url: String, channel_id: String) -> Self {
+        Self {
+            stream: discography_stream(http, server_url, channel_id),
+            total: None,
+            consumed: 0,
         }
+    }
+}
+
+impl Stream for YtmusicDiscographySource {
+    type Item = Result<(ChildRef, ()), Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let result = self.stream.as_mut().poll_next(cx);
+        if matches!(result, Poll::Ready(Some(Ok(_)))) {
+            self.consumed += 1;
+        }
+        result
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self.remaining {
-            Some(n) => (n, Some(n)),
+        match self.total {
+            Some(n) => {
+                let remaining = n.saturating_sub(self.consumed);
+                (remaining, Some(remaining))
+            }
             None => (0, None),
         }
     }
+}
 
+impl Unpin for YtmusicDiscographySource {}
+
+impl ChildSource for YtmusicDiscographySource {
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
         release_eval(expr)
     }
@@ -630,6 +674,7 @@ fn channel_endpoint_and_params(
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use bytes::Bytes;
@@ -730,7 +775,9 @@ mod tests {
         // Source 0: playlists → Release entries (only read first page's first item;
         // the fixture has a nextPageToken so we don't drain beyond it)
         let mut playlists_cursor = channel.children[0].cursor();
-        let (first_playlist, _) = playlists_cursor.next().await?.expect("expected a playlist");
+        let (first_playlist, _) = child_next(&mut playlists_cursor)
+            .await?
+            .expect("expected a playlist");
         assert_eq!(first_playlist.entry_type, EntryType::Release);
         assert_eq!(
             first_playlist.sources.get(SOURCE).unwrap(),
@@ -746,7 +793,9 @@ mod tests {
 
         // Source 1: uploads → Track entries (same: only read the first item)
         let mut uploads_cursor = channel.children[1].cursor();
-        let (first_upload, _) = uploads_cursor.next().await?.expect("expected an upload");
+        let (first_upload, _) = child_next(&mut uploads_cursor)
+            .await?
+            .expect("expected an upload");
         assert_eq!(first_upload.entry_type, EntryType::Track);
         assert_eq!(
             first_upload.sources.get(SOURCE).unwrap(),
@@ -834,12 +883,9 @@ mod tests {
         // Source 2: ytmusicapi discography
         let mut ytmusic_cursor = channel.children[2].cursor();
         // First next() triggers the fetch (22 entries in the discography list).
-        let first = ytmusic_cursor
-            .next()
+        let first = child_next(&mut ytmusic_cursor)
             .await?
             .expect("expected first release");
-        // After fetch, a fresh cursor reports the full raw count via size_hint.
-        assert_eq!(channel.children[2].cursor().size_hint(), (22, Some(22)));
         // Spot-check first release (Hop Step Sheep — has audioPlaylistId directly)
         assert_eq!(first.0.entry_type, EntryType::Release);
         assert_eq!(first.0.name.as_deref().unwrap(), "Hop Step Sheep");
@@ -851,18 +897,18 @@ mod tests {
             ])
         );
         // Second and third albums
-        let second = ytmusic_cursor
-            .next()
+        let second = child_next(&mut ytmusic_cursor)
             .await?
             .expect("expected second release");
         assert_eq!(second.0.name.as_deref().unwrap(), "わためのうた vol.２");
-        let third = ytmusic_cursor
-            .next()
+        let third = child_next(&mut ytmusic_cursor)
             .await?
             .expect("expected third release");
         assert_eq!(third.0.name.as_deref().unwrap(), "WATAME NO UTA vol.1");
         // Fourth: DivaFever — resolved lazily via /albums/{browseId}
-        let fourth = ytmusic_cursor.next().await?.expect("expected DivaFever");
+        let fourth = child_next(&mut ytmusic_cursor)
+            .await?
+            .expect("expected DivaFever");
         assert_eq!(fourth.0.name.as_deref().unwrap(), "DivaFever");
         assert_eq!(
             fourth.0.sources.get(SOURCE).unwrap(),

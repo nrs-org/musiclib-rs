@@ -1,9 +1,12 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
 };
 
+use futures::{Stream, StreamExt, stream::BoxStream};
 use regex::Regex;
 
 pub type OptionsId = u32;
@@ -431,28 +434,34 @@ impl ChildFetchOptions {
 }
 
 /// Async source of children, optionally annotated with metadata `T` per child.
-#[async_trait::async_trait]
-pub trait ChildSource<T: Clone + Send + Sync + 'static = ()>: Send {
-    /// Return the next (child, metadata) pair, or `None` when exhausted.
-    async fn next(&mut self) -> Result<Option<(ChildRef, T)>, Error>;
-
-    /// Optional count hint for the remaining items: (lower_bound, upper_bound).
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, None)
-    }
-
-    /// Static evaluation of a matcher expression against the remaining items in this source.
-    /// Returns `True` if all remaining items will match, `False` if none will, or `Indeterminate`.
+///
+/// Extends [`Stream`] so that combinators like `buffer_unordered` work directly.
+/// The `evaluate_expr` / `static_check` methods provide source-level static
+/// analysis for the matcher system without consuming any items.
+pub trait ChildSource<T: Clone + Send + Sync + 'static = ()>:
+    Stream<Item = Result<(ChildRef, T), Error>> + Send + Unpin
+{
+    /// Static evaluation of a matcher expression against the remaining items in
+    /// this source. Returns `True` if all will match, `False` if none will, or
+    /// `Indeterminate` (the default).
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
         let _ = expr;
         Tribool::Indeterminate
     }
 
-    /// Combined static check using both `evaluate_expr` and `size_hint`.
-    /// Returns the tribool from `evaluate_expr` alongside the upper bound of remaining items.
+    /// Combined static check: tribool result + upper bound on remaining items.
     fn static_check(&self, expr: &CompiledMatcherExpr) -> (Tribool, Option<usize>) {
-        (self.evaluate_expr(expr), self.size_hint().1)
+        let (_, upper) = self.size_hint();
+        (self.evaluate_expr(expr), upper)
     }
+}
+
+/// Convenience wrapper: polls the next item and re-orders from `Option<Result<_>>` to
+/// `Result<Option<_>>`, matching the old `async fn next` ergonomics at call sites.
+pub async fn child_next<T: Clone + Send + Sync + 'static>(
+    source: &mut (impl ChildSource<T> + ?Sized),
+) -> Result<Option<(ChildRef, T)>, Error> {
+    StreamExt::next(source).await.transpose()
 }
 
 /// Wraps a `Vec<ChildRef>` as a `ChildSource<()>`.
@@ -471,20 +480,27 @@ impl VecChildSource {
     }
 }
 
-#[async_trait::async_trait]
-impl ChildSource for VecChildSource {
-    async fn next(&mut self) -> Result<Option<(ChildRef, ())>, Error> {
-        let item = self.children.next();
-        if item.is_some() {
-            self.remaining = self.remaining.saturating_sub(1);
+impl Stream for VecChildSource {
+    type Item = Result<(ChildRef, ()), Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.children.next() {
+            Some(child) => {
+                self.remaining = self.remaining.saturating_sub(1);
+                Poll::Ready(Some(Ok((child, ()))))
+            }
+            None => Poll::Ready(None),
         }
-        Ok(item.map(|c| (c, ())))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
     }
+}
 
+impl Unpin for VecChildSource {}
+
+impl ChildSource for VecChildSource {
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
         static_eval_expr(expr, &default_eval_leaf)
     }
@@ -502,28 +518,65 @@ pub trait PageFetcher: Send {
     async fn fetch_page(&mut self, page_token: Option<&str>) -> Result<ChildPage, Error>;
 }
 
+/// `ChildSource` that lazily paginates through children using a `PageFetcher`.
+///
+/// The inner stream is built with `stream::unfold` so the `PageFetcher` moves
+/// into the closure state — avoiding the self-referential borrow that would
+/// arise from storing an in-progress `fetch_page` future alongside the fetcher.
+pub struct PaginatedChildSource<
+    F: Fn(&CompiledMatcherExpr) -> Tribool + Send = fn(&CompiledMatcherExpr) -> Tribool,
+> {
+    stream: BoxStream<'static, Result<(ChildRef, ()), Error>>,
+    static_eval: F,
+}
+
 fn indeterminate_eval(_: &CompiledMatcherExpr) -> Tribool {
     Tribool::Indeterminate
 }
 
-/// `ChildSource` that lazily paginates through children using a `PageFetcher`.
-pub struct PaginatedChildSource<
-    F: Fn(&CompiledMatcherExpr) -> Tribool + Send = fn(&CompiledMatcherExpr) -> Tribool,
-> {
+fn paginated_stream(
     fetcher: Box<dyn PageFetcher>,
-    buffer: std::vec::IntoIter<ChildRef>,
-    next_page_token: Option<String>,
-    exhausted: bool,
-    static_eval: F,
+) -> BoxStream<'static, Result<(ChildRef, ()), Error>> {
+    // State: (fetcher, buffered items, next page token, exhausted flag)
+    futures::stream::unfold(
+        (
+            fetcher,
+            std::collections::VecDeque::<ChildRef>::new(),
+            None::<String>,
+            false,
+        ),
+        |(mut fetcher, mut buffer, mut page_token, mut exhausted)| async move {
+            loop {
+                if let Some(child) = buffer.pop_front() {
+                    return Some((Ok((child, ())), (fetcher, buffer, page_token, exhausted)));
+                }
+                if exhausted {
+                    return None;
+                }
+                match fetcher.fetch_page(page_token.as_deref()).await {
+                    Ok(page) => {
+                        buffer.extend(page.children);
+                        match page.next_page_token {
+                            Some(token) => page_token = Some(token),
+                            None => exhausted = true,
+                        }
+                    }
+                    Err(e) => {
+                        // Signal the error then stop.
+                        exhausted = true;
+                        return Some((Err(e), (fetcher, buffer, page_token, exhausted)));
+                    }
+                }
+            }
+        },
+    )
+    .boxed()
 }
 
 impl PaginatedChildSource {
     pub fn new(fetcher: Box<dyn PageFetcher>) -> Self {
         Self {
-            fetcher,
-            buffer: Vec::new().into_iter(),
-            next_page_token: None,
-            exhausted: false,
+            stream: paginated_stream(fetcher),
             static_eval: indeterminate_eval,
         }
     }
@@ -537,37 +590,23 @@ impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> PaginatedChildSource<F> {
         f: G,
     ) -> PaginatedChildSource<G> {
         PaginatedChildSource {
-            fetcher: self.fetcher,
-            buffer: self.buffer,
-            next_page_token: self.next_page_token,
-            exhausted: self.exhausted,
+            stream: self.stream,
             static_eval: f,
         }
     }
 }
 
-#[async_trait::async_trait]
-impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> ChildSource for PaginatedChildSource<F> {
-    async fn next(&mut self) -> Result<Option<(ChildRef, ())>, Error> {
-        loop {
-            if let Some(child) = self.buffer.next() {
-                return Ok(Some((child, ())));
-            }
-            if self.exhausted {
-                return Ok(None);
-            }
-            let page = self
-                .fetcher
-                .fetch_page(self.next_page_token.as_deref())
-                .await?;
-            self.buffer = page.children.into_iter();
-            match page.next_page_token {
-                Some(token) => self.next_page_token = Some(token),
-                None => self.exhausted = true,
-            }
-        }
-    }
+impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> Stream for PaginatedChildSource<F> {
+    type Item = Result<(ChildRef, ()), Error>;
 
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.stream.as_mut().poll_next(cx)
+    }
+}
+
+impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> Unpin for PaginatedChildSource<F> {}
+
+impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> ChildSource for PaginatedChildSource<F> {
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
         (self.static_eval)(expr)
     }
@@ -582,11 +621,11 @@ pub struct CachedChildSource<T: Clone + Send + Sync + 'static = ()> {
 
 struct CachedState<T: Clone + Send + Sync + 'static> {
     buffer: Vec<(ChildRef, T)>,
-    live: Option<Box<dyn ChildSource<T>>>,
+    live: Option<Box<dyn ChildSource<T> + Unpin>>,
 }
 
 impl<T: Clone + Send + Sync + 'static> CachedChildSource<T> {
-    pub fn new(source: Box<dyn ChildSource<T>>) -> Self {
+    pub fn new(source: Box<dyn ChildSource<T> + Unpin>) -> Self {
         Self {
             state: Mutex::new(CachedState {
                 buffer: Vec::new(),
@@ -747,59 +786,87 @@ fn cached_evaluate_expr<T: Clone + Send + Sync + 'static>(
     }
 }
 
-#[async_trait::async_trait]
-impl<T: Clone + Send + Sync + 'static> ChildSource<T> for CachedChildCursor<'_, T> {
-    async fn next(&mut self) -> Result<Option<(ChildRef, T)>, Error> {
-        let mut state = self.cache.state.lock().await;
-        if self.index < state.buffer.len() {
-            let item = state.buffer[self.index].clone();
-            self.index += 1;
-            return Ok(Some(item));
-        }
-        if let Some(live) = &mut state.live {
-            if let Some(item) = live.next().await? {
+/// Returns `Some((item, new_index))` or `None` when exhausted.
+/// Taking `index` by value (not `&mut`) avoids holding a borrow across the await.
+async fn cached_next_owned<T: Clone + Send + Sync + 'static>(
+    cache: &CachedChildSource<T>,
+    index: usize,
+) -> Option<(Result<(ChildRef, T), Error>, usize)> {
+    let mut state = cache.state.lock().await;
+    if index < state.buffer.len() {
+        let item = state.buffer[index].clone();
+        return Some((Ok(item), index + 1));
+    }
+    if let Some(live) = &mut state.live {
+        match StreamExt::next(live.as_mut()).await {
+            Some(Ok(item)) => {
                 state.buffer.push(item.clone());
-                self.index += 1;
-                return Ok(Some(item));
+                return Some((Ok(item), index + 1));
             }
-            state.live = None;
+            Some(Err(e)) => return Some((Err(e), index)),
+            None => state.live = None,
         }
-        Ok(None)
+    }
+    None
+}
+
+impl<T: Clone + Send + Sync + 'static> Stream for CachedChildCursor<'_, T> {
+    type Item = Result<(ChildRef, T), Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let cache = this.cache;
+        let index = this.index;
+        let mut fut = Box::pin(cached_next_owned(cache, index));
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(Some((item, new_index))) => {
+                this.index = new_index;
+                Poll::Ready(Some(item))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         cached_size_hint(self.cache, self.index)
     }
+}
 
+impl<T: Clone + Send + Sync + 'static> Unpin for CachedChildCursor<'_, T> {}
+
+impl<T: Clone + Send + Sync + 'static> ChildSource<T> for CachedChildCursor<'_, T> {
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
         cached_evaluate_expr(self.cache, self.index, expr)
     }
 }
 
-#[async_trait::async_trait]
-impl<T: Clone + Send + Sync + 'static> ChildSource<T> for OwnedCachedChildCursor<T> {
-    async fn next(&mut self) -> Result<Option<(ChildRef, T)>, Error> {
-        let mut state = self.cache.state.lock().await;
-        if self.index < state.buffer.len() {
-            let item = state.buffer[self.index].clone();
-            self.index += 1;
-            return Ok(Some(item));
-        }
-        if let Some(live) = &mut state.live {
-            if let Some(item) = live.next().await? {
-                state.buffer.push(item.clone());
-                self.index += 1;
-                return Ok(Some(item));
+impl<T: Clone + Send + Sync + 'static> Stream for OwnedCachedChildCursor<T> {
+    type Item = Result<(ChildRef, T), Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let cache = Arc::clone(&this.cache);
+        let index = this.index;
+        let mut fut = Box::pin(cached_next_owned(&cache, index));
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(Some((item, new_index))) => {
+                this.index = new_index;
+                Poll::Ready(Some(item))
             }
-            state.live = None;
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
-        Ok(None)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         cached_size_hint(&self.cache, self.index)
     }
+}
 
+impl<T: Clone + Send + Sync + 'static> Unpin for OwnedCachedChildCursor<T> {}
+
+impl<T: Clone + Send + Sync + 'static> ChildSource<T> for OwnedCachedChildCursor<T> {
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
         cached_evaluate_expr(&self.cache, self.index, expr)
     }

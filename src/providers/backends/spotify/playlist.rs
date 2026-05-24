@@ -234,6 +234,7 @@ pub async fn get_playlist(client: &SpotifyClient, url: &str) -> Result<EntityRes
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use http::Method;
@@ -291,7 +292,9 @@ mod tests {
 
         // Owner: lab slanderer
         let mut owner_cursor = playlist.children[0].cursor();
-        let (owner, _) = owner_cursor.next().await?.expect("expected owner");
+        let (owner, _) = child_next(&mut owner_cursor)
+            .await?
+            .expect("expected owner");
         assert_eq!(owner.entry_type, EntryType::Artist);
         assert_eq!(
             owner.sources.get(SOURCE).unwrap(),
@@ -302,7 +305,9 @@ mod tests {
 
         // First track: ステラ
         let mut tracks = playlist.children[1].cursor();
-        let (track, _) = tracks.next().await?.expect("expected first track");
+        let (track, _) = child_next(&mut tracks)
+            .await?
+            .expect("expected first track");
         assert_eq!(track.entry_type, EntryType::Track);
         assert_eq!(track.external_type.as_ref(), EXTERNAL_TYPE_TRACK);
         assert_eq!(

@@ -158,6 +158,7 @@ pub async fn get_release_group(
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -224,7 +225,9 @@ mod tests {
 
         // Artist child: 角巻わため
         let mut artists_cursor = rg.children[0].cursor();
-        let (artist, _) = artists_cursor.next().await?.expect("expected artist");
+        let (artist, _) = child_next(&mut artists_cursor)
+            .await?
+            .expect("expected artist");
         assert_eq!(artist.entry_type, EntryType::Artist);
         assert_eq!(artist.external_type.as_ref(), EXTERNAL_TYPE_ARTIST);
         assert_eq!(artist.name.as_deref(), Some("角巻わため"));
@@ -232,7 +235,7 @@ mod tests {
         // Release children: 3 releases
         let mut releases_cursor = rg.children[1].cursor();
         let mut releases = Vec::new();
-        while let Some((r, _)) = releases_cursor.next().await? {
+        while let Some((r, _)) = child_next(&mut releases_cursor).await? {
             releases.push(r);
         }
         assert_eq!(releases.len(), 3);

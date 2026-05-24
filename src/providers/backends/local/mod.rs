@@ -217,7 +217,7 @@ impl FetchProvider for Provider {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::providers::types::{ChildSource, EntrySpecificData, EntryType};
+    use crate::providers::types::{ChildSource, EntrySpecificData, EntryType, child_next};
 
     use super::{entry_to_entity_result, read_entry, to_local_url};
 
@@ -251,7 +251,7 @@ mod tests {
 
         assert_eq!(track.children.len(), 1);
         let mut artists = track.children[0].cursor();
-        let (artist, _) = artists.next().await?.expect("expected artist");
+        let (artist, _) = child_next(&mut artists).await?.expect("expected artist");
         assert_eq!(artist.entry_type, EntryType::Artist);
         assert_eq!(artist.name.as_deref(), Some("Local Artist"));
 
@@ -282,14 +282,20 @@ mod tests {
         assert_eq!(release.aliases[0].name, "Local Album");
 
         let mut children = release.children[0].cursor();
-        let (first, _) = children.next().await?.expect("expected first child");
+        let (first, _) = child_next(&mut children)
+            .await?
+            .expect("expected first child");
         assert_eq!(first.entry_type, EntryType::Artist);
 
-        let (second, _) = children.next().await?.expect("expected second child");
+        let (second, _) = child_next(&mut children)
+            .await?
+            .expect("expected second child");
         assert_eq!(second.entry_type, EntryType::Track);
         assert_eq!(second.position.as_ref().map(|p| p.track_no), Some(1));
 
-        let (third, _) = children.next().await?.expect("expected third child");
+        let (third, _) = child_next(&mut children)
+            .await?
+            .expect("expected third child");
         assert_eq!(third.entry_type, EntryType::Track);
         assert_eq!(third.position.as_ref().map(|p| p.track_no), Some(2));
 
@@ -305,7 +311,7 @@ mod tests {
 
         // The local:// child sources should be resolved to absolute paths.
         let mut cursor = result.children[0].cursor();
-        let (child, _) = cursor.next().await?.expect("expected child");
+        let (child, _) = child_next(&mut cursor).await?.expect("expected child");
         let local_ids = child.sources.get("local").unwrap();
         assert!(
             local_ids.iter().next().unwrap().starts_with("local:///"),

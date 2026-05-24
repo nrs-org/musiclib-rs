@@ -9,7 +9,7 @@ use musiclib_rs::{
         types::{
             ChildFetchOptions, ChildMatcher, ChildMatcherExpr, ChildRef, ChildRule, ChildSource,
             EntityResult, EntryFetchOptions, EntryFetchOptionsPool, EntrySpecificData, EntryType,
-            ExternalSources, OptionsId,
+            ExternalSources, OptionsId, child_next,
         },
     },
 };
@@ -191,13 +191,14 @@ fn merge_provider_result(
         for child_source in &result.children {
             let mut cursor = child_source.owned_cursor();
             loop {
-                let item: Option<(ChildRef, ChildFetchOptions)> = match cursor.next().await {
-                    Ok(item) => item,
-                    Err(e) => {
-                        eprintln!("  warn: child cursor error: {e}");
-                        break;
-                    }
-                };
+                let item: Option<(ChildRef, ChildFetchOptions)> =
+                    match child_next(&mut cursor).await {
+                        Ok(item) => item,
+                        Err(e) => {
+                            eprintln!("  warn: child cursor error: {e}");
+                            break;
+                        }
+                    };
                 let Some((child_ref, child_fetch_opts)) = item else {
                     break;
                 };

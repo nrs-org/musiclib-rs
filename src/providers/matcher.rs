@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
+use futures::{Stream, StreamExt, stream::BoxStream};
 use regex::Regex;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tokio::sync::OnceCell;
 
 use crate::providers::{
@@ -15,6 +20,7 @@ use crate::providers::{
         CompiledMusicBrainzDataMatcher, CompiledYouTubeDataMatcher, EntityResult, EntryDataMatcher,
         EntryFetchOptionsPool, EntrySpecificData, Error, MusicBrainzDataMatcher, OptionsId,
         OwnedCachedChildCursor, QuantifierMode, RelationMatcher, Tribool, YouTubeDataMatcher,
+        child_next,
     },
 };
 
@@ -145,53 +151,80 @@ fn can_future_items_match(expr: &CompiledMatcherExpr, index: usize) -> bool {
 // --- Filtering child source ---
 
 struct FilteringChildSource {
+    stream: BoxStream<'static, Result<(ChildRef, ChildFetchOptions), Error>>,
+}
+
+fn filtering_stream(
     cursor: OwnedCachedChildCursor,
     rules: Vec<CompiledChildRule>,
     pool: Arc<EntryFetchOptionsPool>,
     provider: Arc<dyn FetchProvider>,
-    index: usize,
-}
+) -> BoxStream<'static, Result<(ChildRef, ChildFetchOptions), Error>> {
+    futures::stream::unfold(
+        (cursor, rules, pool, provider, 0usize),
+        |(mut cursor, rules, pool, provider, mut index)| async move {
+            loop {
+                if !rules
+                    .iter()
+                    .any(|r| can_future_items_match(&r.matcher, index))
+                {
+                    return None;
+                }
+                let (child, _) = match child_next(&mut cursor).await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => return None,
+                    Err(e) => return Some((Err(e), (cursor, rules, pool, provider, index))),
+                };
 
-#[async_trait::async_trait]
-impl ChildSource<ChildFetchOptions> for FilteringChildSource {
-    async fn next(&mut self) -> Result<Option<(ChildRef, ChildFetchOptions)>, Error> {
-        loop {
-            if !self
-                .rules
-                .iter()
-                .any(|r| can_future_items_match(&r.matcher, self.index))
-            {
-                return Ok(None);
-            }
-
-            let Some((child, _)) = self.cursor.next().await? else {
-                return Ok(None);
-            };
-
-            let entity_cell = OnceCell::new();
-            let ctx = MatchContext {
-                child: &child,
-                child_index: self.index,
-                entity_cell: &entity_cell,
-            };
-            self.index += 1;
-
-            for rule in &self.rules {
-                if evaluate_expr(&rule.matcher, &ctx, self.provider.clone()).await? {
-                    match rule.options_id {
-                        None => break, // skip this child
-                        Some(id) => {
-                            return Ok(Some((
-                                child,
-                                ChildFetchOptions::new(self.pool.clone(), id),
-                            )));
+                let entity_cell = OnceCell::new();
+                let child_index = index;
+                index += 1;
+                let mut matched_id: Option<Option<OptionsId>> = None;
+                {
+                    let ctx = MatchContext {
+                        child: &child,
+                        child_index,
+                        entity_cell: &entity_cell,
+                    };
+                    for rule in &rules {
+                        match evaluate_expr(&rule.matcher, &ctx, provider.clone()).await {
+                            Err(e) => {
+                                return Some((Err(e), (cursor, rules, pool, provider, index)));
+                            }
+                            Ok(true) => {
+                                matched_id = Some(rule.options_id);
+                                break;
+                            }
+                            Ok(false) => {}
                         }
                     }
                 }
+                match matched_id {
+                    Some(Some(id)) => {
+                        return Some((
+                            Ok((child, ChildFetchOptions::new(pool.clone(), id))),
+                            (cursor, rules, pool, provider, index),
+                        ));
+                    }
+                    Some(None) | None => continue, // skip or no rule matched
+                }
             }
-        }
+        },
+    )
+    .boxed()
+}
+
+impl Stream for FilteringChildSource {
+    type Item = Result<(ChildRef, ChildFetchOptions), Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.stream.as_mut().poll_next(cx)
     }
 }
+
+impl Unpin for FilteringChildSource {}
+
+impl ChildSource<ChildFetchOptions> for FilteringChildSource {}
 
 /// Filter a `CachedChildSource` through the `child_rules` stored in `pool` at `root_id`.
 /// Compiles all matchers (pre-compiling regexes, sorting All/Any by cost) upfront, then
@@ -215,11 +248,7 @@ pub fn filter_children(
         .collect::<Result<Vec<_>, Error>>()?;
 
     Ok(CachedChildSource::new(Box::new(FilteringChildSource {
-        cursor: source.owned_cursor(),
-        rules,
-        pool,
-        provider,
-        index: 0,
+        stream: filtering_stream(source.owned_cursor(), rules, pool, provider),
     })))
 }
 
@@ -374,7 +403,7 @@ async fn evaluate_children_satisfy(
         let mut cursor = source.cursor();
         let mut i: usize = 0;
 
-        while let Some((child, _)) = cursor.next().await? {
+        while let Some((child, _)) = child_next(&mut cursor).await? {
             total += 1;
             let child_entity_cell = OnceCell::new();
             let child_ctx = MatchContext {
@@ -404,7 +433,7 @@ async fn evaluate_children_satisfy(
                 }
                 Tribool::True => {
                     // All remaining items in this source will match; drain and count them.
-                    while cursor.next().await?.is_some() {
+                    while child_next(&mut cursor).await?.is_some() {
                         match_count += 1;
                         total += 1;
                     }
@@ -562,7 +591,7 @@ mod tests {
     ) -> Vec<(ChildRef, ChildFetchOptions)> {
         let mut cursor = source.cursor();
         let mut out = Vec::new();
-        while let Some(item) = cursor.next().await.unwrap() {
+        while let Some(item) = child_next(&mut cursor).await.unwrap() {
             out.push(item);
         }
         out
@@ -741,49 +770,65 @@ mod tests {
         })
     }
 
-    #[async_trait::async_trait]
-    impl ChildSource<()> for GenerativeChildSource {
-        async fn next(&mut self) -> Result<Option<(ChildRef, ())>, Error> {
+    // GenerativeChildSource produces Track children on demand.
+    // It implements Stream<Item = Result<(ChildRef, T), Error>> for both T=() and T=ChildFetchOptions
+    // via a macro-like pattern: one concrete impl, one forwarding impl.
+
+    impl Stream for GenerativeChildSource {
+        type Item = Result<(ChildRef, ()), Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             if self.current >= self.total {
-                return Ok(None);
+                return Poll::Ready(None);
             }
             let child = make_child(EntryType::Track, "track", "youtube");
             self.current += 1;
-            Ok(Some((child, ())))
+            Poll::Ready(Some(Ok((child, ()))))
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
             let remaining = (self.total - self.current) as usize;
             (remaining, Some(remaining))
         }
+    }
 
+    impl Unpin for GenerativeChildSource {}
+
+    impl ChildSource<()> for GenerativeChildSource {
         fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
             generative_evaluate_expr(expr)
         }
     }
 
-    #[async_trait::async_trait]
-    impl ChildSource<ChildFetchOptions> for GenerativeChildSource {
-        async fn next(&mut self) -> Result<Option<(ChildRef, ChildFetchOptions)>, Error> {
-            self.call_count.fetch_add(1, Ordering::SeqCst);
-            if self.current >= self.total {
-                return Ok(None);
-            }
-            let child = make_child(EntryType::Track, "track", "youtube");
-            self.current += 1;
-            let pool = Arc::new(EntryFetchOptionsPool::default());
-            Ok(Some((
-                child,
-                ChildFetchOptions::new(pool, EntryFetchOptionsPool::DEFAULT_ID),
-            )))
+    // For ChildFetchOptions we need a separate wrapper that maps items.
+    struct GenerativeChildSourceOpts(GenerativeChildSource);
+
+    impl Stream for GenerativeChildSourceOpts {
+        type Item = Result<(ChildRef, ChildFetchOptions), Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.0).poll_next(cx).map(|opt| {
+                opt.map(|res| {
+                    res.map(|(child, ())| {
+                        let pool = Arc::new(EntryFetchOptionsPool::default());
+                        (
+                            child,
+                            ChildFetchOptions::new(pool, EntryFetchOptionsPool::DEFAULT_ID),
+                        )
+                    })
+                })
+            })
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
-            let remaining = (self.total - self.current) as usize;
-            (remaining, Some(remaining))
+            self.0.size_hint()
         }
+    }
 
+    impl Unpin for GenerativeChildSourceOpts {}
+
+    impl ChildSource<ChildFetchOptions> for GenerativeChildSourceOpts {
         fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
             generative_evaluate_expr(expr)
         }
@@ -820,16 +865,17 @@ mod tests {
         call_count: Arc<AtomicUsize>,
     }
 
-    #[async_trait::async_trait]
-    impl ChildSource<ChildFetchOptions> for CountingSource {
-        async fn next(&mut self) -> Result<Option<(ChildRef, ChildFetchOptions)>, Error> {
+    impl Stream for CountingSource {
+        type Item = Result<(ChildRef, ChildFetchOptions), Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             let pool = Arc::new(EntryFetchOptionsPool::default());
-            Ok(self.items.next().map(|c| {
-                (
+            Poll::Ready(self.items.next().map(|c| {
+                Ok((
                     c,
                     ChildFetchOptions::new(pool, EntryFetchOptionsPool::DEFAULT_ID),
-                )
+                ))
             }))
         }
 
@@ -837,6 +883,9 @@ mod tests {
             self.items.size_hint()
         }
     }
+
+    impl Unpin for CountingSource {}
+    impl ChildSource<ChildFetchOptions> for CountingSource {}
 
     /// Provider that returns a pre-built `EntityResult` exactly once for a given identifier.
     struct SingleResultProvider {
@@ -1002,11 +1051,11 @@ mod tests {
     // --- evaluate_expr / static_check early exit ---
 
     fn make_entity_with_generative_source(n: u64, call_count: Arc<AtomicUsize>) -> EntityResult {
-        let source = GenerativeChildSource {
+        let source = GenerativeChildSourceOpts(GenerativeChildSource {
             current: 0,
             total: n,
             call_count,
-        };
+        });
         EntityResult {
             release_date: None,
             sources: Default::default(),

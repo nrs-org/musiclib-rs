@@ -248,6 +248,7 @@ pub async fn get_album(client: &SpotifyClient, url: &str) -> Result<EntityResult
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use http::Method;
@@ -309,7 +310,7 @@ mod tests {
         assert_eq!(album.children.len(), 2);
 
         let mut artists = album.children[0].cursor();
-        let (artist, _) = artists.next().await?.expect("expected artist");
+        let (artist, _) = child_next(&mut artists).await?.expect("expected artist");
         assert_eq!(artist.entry_type, EntryType::Artist);
         assert_eq!(artist.external_type.as_ref(), EXTERNAL_TYPE_ARTIST);
         assert_eq!(artist.name.as_deref(), Some("角巻わため"));
@@ -322,7 +323,9 @@ mod tests {
 
         // All 10 tracks are inline — first track is Beautiful Circle
         let mut tracks = album.children[1].cursor();
-        let (track, _) = tracks.next().await?.expect("expected first track");
+        let (track, _) = child_next(&mut tracks)
+            .await?
+            .expect("expected first track");
         assert_eq!(track.entry_type, EntryType::Track);
         assert_eq!(track.external_type.as_ref(), EXTERNAL_TYPE_TRACK);
         assert_eq!(track.name.as_deref(), Some("Beautiful Circle"));

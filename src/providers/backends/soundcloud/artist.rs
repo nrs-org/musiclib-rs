@@ -154,6 +154,7 @@ pub async fn get_artist(client: &YtdlpClient, url: &str) -> Result<EntityResult<
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use crate::{
@@ -221,11 +222,11 @@ mod tests {
 
         // albums (empty for laserimouto)
         let mut albums = artist.children[0].cursor();
-        assert!(albums.next().await?.is_none());
+        assert!(child_next(&mut albums).await?.is_none());
 
         // sets (3 for laserimouto)
         let mut sets = artist.children[1].cursor();
-        let (first_set, _) = sets.next().await?.expect("expected first set");
+        let (first_set, _) = child_next(&mut sets).await?.expect("expected first set");
         assert_eq!(first_set.entry_type, EntryType::Release);
         assert_eq!(first_set.name.as_deref(), Some("Compilation Works"));
         assert_eq!(
@@ -237,7 +238,9 @@ mod tests {
 
         // tracks (32 for laserimouto)
         let mut tracks = artist.children[2].cursor();
-        let (first_track, _) = tracks.next().await?.expect("expected first track");
+        let (first_track, _) = child_next(&mut tracks)
+            .await?
+            .expect("expected first track");
         assert_eq!(first_track.entry_type, EntryType::Track);
 
         Ok(())

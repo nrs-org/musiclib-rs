@@ -510,6 +510,7 @@ pub async fn get_artist(client: &MusicBrainzClient, url: &str) -> Result<EntityR
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -611,7 +612,9 @@ mod tests {
 
         // Source 0: release-groups — 50 items, no next page
         let mut rg_cursor = artist.children[0].cursor();
-        let (first_rg, _) = rg_cursor.next().await?.expect("expected release-group");
+        let (first_rg, _) = child_next(&mut rg_cursor)
+            .await?
+            .expect("expected release-group");
         assert_eq!(first_rg.entry_type, EntryType::ReleaseGroup);
         assert_eq!(first_rg.external_type.as_ref(), EXTERNAL_TYPE_RELEASE_GROUP);
         assert_eq!(first_rg.name.as_deref(), Some("sweet night, sweet time..."));
@@ -625,7 +628,9 @@ mod tests {
 
         // Source 1: releases — 62 items (all fit in one page)
         let mut rel_cursor = artist.children[1].cursor();
-        let (first_rel, _) = rel_cursor.next().await?.expect("expected release");
+        let (first_rel, _) = child_next(&mut rel_cursor)
+            .await?
+            .expect("expected release");
         assert_eq!(first_rel.entry_type, EntryType::Release);
         assert_eq!(first_rel.external_type.as_ref(), EXTERNAL_TYPE_RELEASE);
         assert_eq!(first_rel.name.as_deref(), Some("FAKE LAND"));
@@ -633,14 +638,18 @@ mod tests {
         // Source 2: recordings — 123 total, first page returns 100
         // Only read the first item to avoid fetching page 2 (no mock registered)
         let mut rec_cursor = artist.children[2].cursor();
-        let (first_rec, _) = rec_cursor.next().await?.expect("expected recording");
+        let (first_rec, _) = child_next(&mut rec_cursor)
+            .await?
+            .expect("expected recording");
         assert_eq!(first_rec.entry_type, EntryType::Track);
         assert_eq!(first_rec.external_type.as_ref(), EXTERNAL_TYPE_RECORDING);
         assert_eq!(first_rec.name.as_deref(), Some("Surges"));
 
         // Source 3: appearances via recording relationships — 70 items (embedded, no pagination)
         let mut app_cursor = artist.children[3].cursor();
-        let (first_app, _) = app_cursor.next().await?.expect("expected appearance");
+        let (first_app, _) = child_next(&mut app_cursor)
+            .await?
+            .expect("expected appearance");
         assert_eq!(first_app.entry_type, EntryType::Track);
         assert_eq!(first_app.external_type.as_ref(), EXTERNAL_TYPE_RECORDING);
         assert_eq!(first_app.name.as_deref(), Some("Everlasting Soul"));

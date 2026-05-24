@@ -164,6 +164,7 @@ pub async fn get_track(client: &SpotifyClient, url: &str) -> Result<EntityResult
 
 #[cfg(test)]
 mod tests {
+    use crate::providers::types::child_next;
     use std::sync::Arc;
 
     use http::Method;
@@ -233,7 +234,7 @@ mod tests {
         assert_eq!(track.children.len(), 2);
 
         let mut artists = track.children[0].cursor();
-        let (artist, _) = artists.next().await?.expect("expected artist");
+        let (artist, _) = child_next(&mut artists).await?.expect("expected artist");
         assert_eq!(artist.entry_type, EntryType::Artist);
         assert_eq!(artist.external_type.as_ref(), EXTERNAL_TYPE_ARTIST);
         assert_eq!(artist.name.as_deref(), Some("角巻わため"));
@@ -245,7 +246,9 @@ mod tests {
         );
 
         let mut albums = track.children[1].cursor();
-        let (album, _) = albums.next().await?.expect("expected parent album");
+        let (album, _) = child_next(&mut albums)
+            .await?
+            .expect("expected parent album");
         assert_eq!(album.entry_type, EntryType::Release);
         assert_eq!(album.name.as_deref(), Some("Hop Step Sheep"));
         assert_eq!(
