@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::future::Future;
 
 use crate::{
-    http::{HttpClient, Request, json_body_extractor},
+    http::{HttpClient, Request},
     providers::{
         backends::{
             ExtraJSON,
@@ -284,13 +284,10 @@ impl YtmusicDiscographySource {
         );
         let response = self
             .http
-            .make_request(
-                Request {
-                    url,
-                    ..Default::default()
-                },
-                &json_body_extractor::<Vec<YtmusicRelease>>(),
-            )
+            .get_bytes(Request {
+                url,
+                ..Default::default()
+            })
             .await?;
         if !response.status.is_success() {
             return Err(Error::InvalidUrl(format!(
@@ -298,11 +295,12 @@ impl YtmusicDiscographySource {
                 response.status, self.channel_id
             )));
         }
-        let releases = response
+        let body = response
             .body
-            .as_json::<Vec<YtmusicRelease>>()
-            .cloned()
-            .ok_or_else(|| Error::InvalidUrl("ytmusicapi server returned non-JSON body".into()))?;
+            .to_bytes()
+            .map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        let releases: Vec<YtmusicRelease> = serde_json::from_slice(&body)
+            .map_err(|e| Error::InvalidUrl(format!("ytmusicapi parse error: {e}")))?;
         self.remaining = Some(releases.len());
         self.releases = Some(releases.into_iter());
         Ok(())
@@ -316,13 +314,10 @@ impl YtmusicDiscographySource {
         );
         let response = self
             .http
-            .make_request(
-                Request {
-                    url,
-                    ..Default::default()
-                },
-                &json_body_extractor::<YtmusicAlbumResponse>(),
-            )
+            .get_bytes(Request {
+                url,
+                ..Default::default()
+            })
             .await?;
         if !response.status.is_success() {
             return Err(Error::InvalidUrl(format!(
@@ -330,10 +325,14 @@ impl YtmusicDiscographySource {
                 response.status
             )));
         }
-        response
+        let body = response
             .body
-            .as_json::<YtmusicAlbumResponse>()
-            .and_then(|a| a.audio_playlist_id.clone())
+            .to_bytes()
+            .map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        let album: YtmusicAlbumResponse = serde_json::from_slice(&body)
+            .map_err(|e| Error::InvalidUrl(format!("ytmusicapi album parse error: {e}")))?;
+        album
+            .audio_playlist_id
             .ok_or_else(|| Error::InvalidUrl(format!("no audioPlaylistId for album {browse_id}")))
     }
 }
@@ -415,75 +414,84 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
         client,
         url.as_str(),
         move |c, kind, id| {
-            let c = &c.items[0];
-            let url = channel_url(kind, id);
-            let channel_id = match kind {
-                ChannelKind::ChannelId => id.to_string(),
-                // The API returns the channel ID in the URL for non-ID kinds,
-                // but we need it from the response for the playlists/uploads queries.
-                // For now use the uploads playlist ID to derive it: uploads = "UU" + channel_id[2..]
-                _ => format!("UC{}", &c.content_details.related_playlists.uploads[2..]),
-            };
-            let uploads_playlist_id = c.content_details.related_playlists.uploads.clone();
+            let c = c.items.first().cloned();
+            let id = id.to_string();
+            let client = client.clone();
+            async move {
+                let id = id.as_str();
+                let c =
+                    c.ok_or_else(|| Error::NotFound(format!("YouTube channel not found: {id}")))?;
+                let url = channel_url(kind, id);
+                let channel_id = match kind {
+                    ChannelKind::ChannelId => id.to_string(),
+                    // The API returns the channel ID in the URL for non-ID kinds,
+                    // but we need it from the response for the playlists/uploads queries.
+                    // For now use the uploads playlist ID to derive it: uploads = "UU" + channel_id[2..]
+                    _ => format!("UC{}", &c.content_details.related_playlists.uploads[2..]),
+                };
+                let uploads_playlist_id = c.content_details.related_playlists.uploads.clone();
 
-            // Always include the canonical channel ID URL.
-            let mut source_set = HashSet::from([
-                url.to_string(),
-                channel_url(ChannelKind::ChannelId, &channel_id),
-            ]);
-            // customUrl from the API is "@handle" — add both the /c/ (Custom) and /@handle forms.
-            if let Some(custom_url) = &c.snippet.custom_url {
-                source_set.insert(channel_url(ChannelKind::Custom, custom_url));
-                if custom_url.starts_with('@') {
-                    source_set.insert(channel_url(ChannelKind::Handle, custom_url));
+                // Always include the canonical channel ID URL.
+                let mut source_set = HashSet::from([
+                    url.to_string(),
+                    channel_url(ChannelKind::ChannelId, &channel_id),
+                ]);
+                if let Some(custom_url) = &c.snippet.custom_url {
+                    if custom_url.starts_with('@') {
+                        // Modern handle — only the /@handle form is valid
+                        source_set.insert(channel_url(ChannelKind::Handle, custom_url));
+                    } else {
+                        // Legacy custom name — only the /c/name form is valid
+                        source_set.insert(channel_url(ChannelKind::Custom, custom_url));
+                    }
                 }
+
+                // Source 1: playlists owned by the channel (Release)
+                let channel_id_for_ytmusic = channel_id.clone();
+                let playlists_source =
+                    PaginatedChildSource::new(Box::new(ChannelPlaylistsPageFetcher {
+                        client: client.clone(),
+                        channel_id,
+                    }))
+                    .with_static_eval(release_eval);
+
+                // Source 2: videos uploaded by the channel (Track)
+                let uploads_source =
+                    PaginatedChildSource::new(Box::new(ChannelUploadsPageFetcher {
+                        client: client.clone(),
+                        uploads_playlist_id,
+                    }))
+                    .with_static_eval(track_eval);
+
+                // Source 3 (optional): YouTube Music discography via ytmusicapi server.
+                // Only added when YTMUSICAPI_SERVER_URL is configured on the client.
+                let mut children: Vec<Arc<CachedChildSource>> = vec![
+                    Arc::new(CachedChildSource::new(Box::new(playlists_source))),
+                    Arc::new(CachedChildSource::new(Box::new(uploads_source))),
+                ];
+                if let Some(ytmusicapi_url) = &client.ytmusicapi_url {
+                    let ytmusic_source = YtmusicDiscographySource::new(
+                        client.client.clone(),
+                        ytmusicapi_url.clone(),
+                        channel_id_for_ytmusic,
+                    );
+                    children.push(Arc::new(CachedChildSource::new(Box::new(ytmusic_source))));
+                }
+
+                Ok(EntityResult {
+                    release_date: None,
+                    sources: [(SOURCE.into(), source_set)].into(),
+                    extra: serde_json::to_value(&c).unwrap_or_default(),
+                    specific_data: EntrySpecificData::Artist,
+                    children,
+                    aliases: vec![Alias {
+                        name: c.snippet.title.clone(),
+                        source: SOURCE.into(),
+                        primary: true,
+                        ..Default::default()
+                    }],
+                })
             }
-
-            // Source 1: playlists owned by the channel (Release)
-            let channel_id_for_ytmusic = channel_id.clone();
-            let playlists_source =
-                PaginatedChildSource::new(Box::new(ChannelPlaylistsPageFetcher {
-                    client: client.clone(),
-                    channel_id,
-                }))
-                .with_static_eval(release_eval);
-
-            // Source 2: videos uploaded by the channel (Track)
-            let uploads_source = PaginatedChildSource::new(Box::new(ChannelUploadsPageFetcher {
-                client: client.clone(),
-                uploads_playlist_id,
-            }))
-            .with_static_eval(track_eval);
-
-            // Source 3 (optional): YouTube Music discography via ytmusicapi server.
-            // Only added when YTMUSICAPI_SERVER_URL is configured on the client.
-            let mut children: Vec<Arc<CachedChildSource>> = vec![
-                Arc::new(CachedChildSource::new(Box::new(playlists_source))),
-                Arc::new(CachedChildSource::new(Box::new(uploads_source))),
-            ];
-            if let Some(ytmusicapi_url) = &client.ytmusicapi_url {
-                let ytmusic_source = YtmusicDiscographySource::new(
-                    client.client.clone(),
-                    ytmusicapi_url.clone(),
-                    channel_id_for_ytmusic,
-                );
-                children.push(Arc::new(CachedChildSource::new(Box::new(ytmusic_source))));
-            }
-
-            let result = Ok(EntityResult {
-                release_date: None,
-                sources: [(SOURCE.into(), source_set)].into(),
-                extra: serde_json::to_value(c).unwrap_or_default(),
-                specific_data: EntrySpecificData::Artist,
-                children,
-                aliases: vec![Alias {
-                    name: c.snippet.title.clone(),
-                    source: SOURCE.into(),
-                    primary: true,
-                    ..Default::default()
-                }],
-            });
-            async move { result }
         },
     )
     .await?;
@@ -531,14 +539,23 @@ where
     // Resolve it first via the channels endpoint.
     let channel_id =
         get_channel_raw::<ChannelListResponse, _, _, E, _>(client, url, |c, kind, id| {
-            let channel_id = match kind {
-                ChannelKind::ChannelId => id.to_string(),
-                _ => format!(
-                    "UC{}",
-                    &c.items[0].content_details.related_playlists.uploads[2..]
-                ),
-            };
-            async move { Ok(channel_id) }
+            let first = c.items.first().cloned();
+            let id = id.to_string();
+            async move {
+                let channel_id = match kind {
+                    ChannelKind::ChannelId => id.clone(),
+                    _ => {
+                        let uploads = first.ok_or_else(|| {
+                            E::from(Error::NotFound(format!("YouTube channel not found: {id}")))
+                        })?;
+                        format!(
+                            "UC{}",
+                            &uploads.content_details.related_playlists.uploads[2..]
+                        )
+                    }
+                };
+                Ok(channel_id)
+            }
         })
         .await?;
     client
@@ -567,9 +584,20 @@ where
     FR: Future<Output = Result<R, E>> + Send + 'static,
 {
     let uploads_playlist_id =
-        get_channel_raw::<ChannelListResponse, _, _, E, _>(client, url, |c, _kind, _id| {
-            let uploads = c.items[0].content_details.related_playlists.uploads.clone();
-            async move { Ok(uploads) }
+        get_channel_raw::<ChannelListResponse, _, _, E, _>(client, url, |c, _kind, id| {
+            let first = c.items.first().cloned();
+            let id = id.to_string();
+            async move {
+                let uploads = first
+                    .ok_or_else(|| {
+                        E::from(Error::NotFound(format!("YouTube channel not found: {id}")))
+                    })?
+                    .content_details
+                    .related_playlists
+                    .uploads
+                    .clone();
+                Ok(uploads)
+            }
         })
         .await?;
     client
@@ -691,7 +719,6 @@ mod tests {
             channel.sources.get(SOURCE).unwrap(),
             &HashSet::from([
                 format!("https://www.youtube.com/channel/{channel_id}"),
-                "https://www.youtube.com/c/@tsunomakiwatame".to_string(),
                 "https://www.youtube.com/@tsunomakiwatame".to_string(),
             ])
         );

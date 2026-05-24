@@ -9,7 +9,7 @@ use crate::providers::{
         ExtraJSON,
         youtube_api::{
             SOURCE,
-            canonicalize::{match_video_url, video_url},
+            canonicalize::{ChannelKind, channel_url, match_video_url, video_url},
             client::YoutubeClient,
             types::EXTERNAL_TYPE_CHANNEL_ID,
         },
@@ -102,51 +102,59 @@ where
 
 pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult<()>, Error> {
     let result = get_video_raw::<VideoListResponse, _, _, Error, _>(client, url, move |v, id| {
-        let v = &v.items[0];
-        let url = video_url(id);
-        let release_date = OffsetDateTime::parse(&v.snippet.published_at, &Rfc3339)
-            .ok()
-            .map(|dt| {
-                format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                    dt.year(),
-                    dt.month() as u8,
-                    dt.day(),
-                    dt.hour(),
-                    dt.minute(),
-                    dt.second(),
-                )
-            });
-        let duration_ms = parse_iso_duration_ms(&v.content_details.duration);
-        let result = Ok(EntityResult {
-            release_date,
-            sources: [(SOURCE.into(), HashSet::from([url]))].into(),
-            extra: serde_json::to_value(v).unwrap_or_default(),
-            specific_data: EntrySpecificData::Track {
-                duration_ms,
-                positions: Default::default(),
-            },
-            children: vec![Arc::new(CachedChildSource::from_children(vec![ChildRef {
-                entry_type: EntryType::Artist,
-                sources: [(SOURCE.into(), HashSet::from([v.snippet.channel_id.clone()]))].into(),
-                name: Some(v.snippet.channel_title.clone()),
-                external_type: EXTERNAL_TYPE_CHANNEL_ID.into(),
-                contributions: vec![Contribution {
-                    role: StandardRoleNames::UPLOADER.into(),
-                    main_artist: true,
+        let v = v.items.first().cloned();
+        let id = id.to_string();
+        async move {
+            let id = id.as_str();
+            let v = v.ok_or_else(|| Error::NotFound(format!("YouTube video not found: {id}")))?;
+            let url = video_url(id);
+            let release_date = OffsetDateTime::parse(&v.snippet.published_at, &Rfc3339)
+                .ok()
+                .map(|dt| {
+                    format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                        dt.year(),
+                        dt.month() as u8,
+                        dt.day(),
+                        dt.hour(),
+                        dt.minute(),
+                        dt.second(),
+                    )
+                });
+            let duration_ms = parse_iso_duration_ms(&v.content_details.duration);
+            Ok(EntityResult {
+                release_date,
+                sources: [(SOURCE.into(), HashSet::from([url]))].into(),
+                extra: serde_json::to_value(&v).unwrap_or_default(),
+                specific_data: EntrySpecificData::Track {
+                    duration_ms,
+                    positions: Default::default(),
+                },
+                children: vec![Arc::new(CachedChildSource::from_children(vec![ChildRef {
+                    entry_type: EntryType::Artist,
+                    sources: [(
+                        SOURCE.into(),
+                        HashSet::from([channel_url(ChannelKind::ChannelId, &v.snippet.channel_id)]),
+                    )]
+                    .into(),
+                    name: Some(v.snippet.channel_title.clone()),
+                    external_type: EXTERNAL_TYPE_CHANNEL_ID.into(),
+                    contributions: vec![Contribution {
+                        role: StandardRoleNames::UPLOADER.into(),
+                        main_artist: true,
+                        source: SOURCE.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }]))],
+                aliases: vec![Alias {
+                    name: v.snippet.title.clone(),
                     source: SOURCE.into(),
+                    primary: true,
                     ..Default::default()
                 }],
-                ..Default::default()
-            }]))],
-            aliases: vec![Alias {
-                name: v.snippet.title.clone(),
-                source: SOURCE.into(),
-                primary: true,
-                ..Default::default()
-            }],
-        });
-        async move { result }
+            })
+        }
     })
     .await?;
     Ok(result)
@@ -218,7 +226,9 @@ mod tests {
         assert_eq!(child.entry_type, EntryType::Artist);
         assert_eq!(
             child.sources.get(SOURCE).unwrap(),
-            &HashSet::from(["UCqm3BQLlJfvkTsX_hvm0UmA".to_string()])
+            &HashSet::from(
+                ["https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA".to_string()]
+            )
         );
         assert_eq!(child.name.as_ref().unwrap(), "Watame Ch. 角巻わため");
         assert_eq!(child.contributions.len(), 1);

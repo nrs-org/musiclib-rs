@@ -198,39 +198,44 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
         client,
         url.as_str(),
         move |p, id| {
-            let p = &p.items[0];
-            let url = playlist_url(id);
-            let release_date = OffsetDateTime::parse(&p.snippet.published_at, &Rfc3339)
-                .ok()
-                .map(|dt| {
-                    format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                        dt.year(),
-                        dt.month() as u8,
-                        dt.day(),
-                        dt.hour(),
-                        dt.minute(),
-                        dt.second(),
-                    )
-                });
-            let result = Ok(EntityResult {
-                release_date,
-                sources: [(SOURCE.into(), HashSet::from([url.to_string()]))].into(),
-                extra: serde_json::to_value(p).unwrap_or_default(),
-                specific_data: EntrySpecificData::Release {
-                    release_type: Some("playlist".into()),
-                    num_discs: None,
-                    num_tracks: None,
-                },
-                children: vec![Arc::new(CachedChildSource::new(Box::new(children_source)))],
-                aliases: vec![Alias {
-                    name: p.snippet.title.clone(),
-                    source: SOURCE.into(),
-                    primary: true,
-                    ..Default::default()
-                }],
-            });
-            async move { result }
+            let p = p.items.first().cloned();
+            let id = id.to_string();
+            async move {
+                let id = id.as_str();
+                let p =
+                    p.ok_or_else(|| Error::NotFound(format!("YouTube playlist not found: {id}")))?;
+                let url = playlist_url(id);
+                let release_date = OffsetDateTime::parse(&p.snippet.published_at, &Rfc3339)
+                    .ok()
+                    .map(|dt| {
+                        format!(
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                            dt.year(),
+                            dt.month() as u8,
+                            dt.day(),
+                            dt.hour(),
+                            dt.minute(),
+                            dt.second(),
+                        )
+                    });
+                Ok(EntityResult {
+                    release_date,
+                    sources: [(SOURCE.into(), HashSet::from([url.to_string()]))].into(),
+                    extra: serde_json::to_value(&p).unwrap_or_default(),
+                    specific_data: EntrySpecificData::Release {
+                        release_type: Some("playlist".into()),
+                        num_discs: None,
+                        num_tracks: None,
+                    },
+                    children: vec![Arc::new(CachedChildSource::new(Box::new(children_source)))],
+                    aliases: vec![Alias {
+                        name: p.snippet.title.clone(),
+                        source: SOURCE.into(),
+                        primary: true,
+                        ..Default::default()
+                    }],
+                })
+            }
         },
     )
     .await?;
