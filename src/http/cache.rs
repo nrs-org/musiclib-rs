@@ -35,10 +35,10 @@ impl HttpClient for CacheHttpClient {
     async fn make_request(
         &self,
         req: Request,
-        body_extractor: &dyn super::BodyExtractor,
+        body_extractor: super::BodyExtractorCow<'static>,
     ) -> Result<Arc<Response>, super::Error> {
         if !req.force_refetch
-            && let Some(cached) = self.cache.get_req(&req, body_extractor).await?
+            && let Some(cached) = self.cache.get_req(&req, body_extractor.as_ref()).await?
         {
             return Ok(cached);
         }

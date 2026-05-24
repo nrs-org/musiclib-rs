@@ -296,8 +296,8 @@ impl YtmusicDiscographySource {
             )));
         }
         let body = response
-            .body
-            .to_bytes()
+            .body_to_bytes()
+            .await
             .map_err(|e| Error::InvalidUrl(e.to_string()))?;
         let releases: Vec<YtmusicRelease> = serde_json::from_slice(&body)
             .map_err(|e| Error::InvalidUrl(format!("ytmusicapi parse error: {e}")))?;
@@ -326,8 +326,8 @@ impl YtmusicDiscographySource {
             )));
         }
         let body = response
-            .body
-            .to_bytes()
+            .body_to_bytes()
+            .await
             .map_err(|e| Error::InvalidUrl(e.to_string()))?;
         let album: YtmusicAlbumResponse = serde_json::from_slice(&body)
             .map_err(|e| Error::InvalidUrl(format!("ytmusicapi album parse error: {e}")))?;
@@ -632,6 +632,7 @@ fn channel_endpoint_and_params(
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
+    use bytes::Bytes;
     use http::Method;
 
     use crate::{
@@ -792,7 +793,7 @@ mod tests {
             Method::GET,
             &ytmusic_url,
             ResponseStatus::OK,
-            include_bytes!("./ytmusic_watame_artist.json").to_vec(),
+            Bytes::from_static(include_bytes!("./ytmusic_watame_artist.json")),
         );
         // discography route
         let ytmusic_discography_url = format!(

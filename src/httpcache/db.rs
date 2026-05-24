@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{borrow::Cow, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -9,7 +9,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    http::{BodyExtractor, HeaderName, HeaderValue, Response},
+    http::{BodyExtractor, HeaderName, HeaderValue, RawResponse, Response},
     httpcache::HttpCache,
 };
 
@@ -19,8 +19,8 @@ pub enum Error {
     InvalidStatusCode(i32),
     #[error("Database error: {0}")]
     Database(#[from] DbErr),
-    #[error("Response construction error: {0}")]
-    Response(#[from] http::Error),
+    #[error("Body read error: {0}")]
+    BodyRead(#[from] Box<crate::http::Error>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -75,24 +75,31 @@ impl DbHttpCache {
 }
 
 impl DbHttpCache {
-    fn map_response(model: cache_entry::Model) -> Result<reqwest::Response, Error> {
+    fn map_response(model: cache_entry::Model) -> Result<RawResponse<'static>, Error> {
         let status = u16::try_from(model.status)
             .map_err(|_| Error::InvalidStatusCode(model.status))
             .and_then(|code| {
                 StatusCode::from_u16(code).map_err(|_| Error::InvalidStatusCode(code as i32))
             })?;
 
-        let mut response = http::Response::builder().status(status).body(model.body)?;
+        let body = reqwest::Body::from(model.body);
+        let mut headers = Vec::new();
 
         for (k, v) in model.headers.0 {
             if let Ok(k) = HeaderName::from_str(&k)
                 && let Ok(v) = HeaderValue::from_str(&v)
             {
-                response.headers_mut().insert(k, v);
+                headers.push((k, v));
             }
         }
 
-        Ok(reqwest::Response::from(response))
+        let headers = Cow::Owned(headers);
+
+        Ok(RawResponse {
+            status,
+            headers,
+            body,
+        })
     }
 }
 
@@ -112,7 +119,11 @@ impl HttpCache for DbHttpCache {
                     .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                     .collect(),
             )),
-            body: Set(value.body.to_bytes()?),
+            body: Set(value
+                .body_to_bytes()
+                .await
+                .map_err(|err| Error::BodyRead(Box::new(err)))?
+                .to_vec()),
             created_at: Set(now),
             expires_at: Set(now + time::Duration::days(7)), // Example expiration
             stale_at: Set(now + time::Duration::days(3)),   // Example staleness

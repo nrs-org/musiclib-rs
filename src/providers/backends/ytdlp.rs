@@ -36,7 +36,7 @@ impl YtdlpClient {
                     url: request_url,
                     ..Default::default()
                 },
-                &json_body_extractor::<Value>(),
+                json_body_extractor::<Value>().into(),
             )
             .await?;
 
@@ -48,10 +48,10 @@ impl YtdlpClient {
         }
 
         response
-            .body
-            .as_json::<Value>()
-            .cloned()
-            .ok_or_else(|| Error::InvalidUrl("ytdlp server returned non-JSON body".into()))
+            .json::<Value>()
+            .await
+            .map(|json| json.clone())
+            .map_err(|_| Error::InvalidUrl("ytdlp server returned non-JSON body".into()))
     }
 
     pub async fn fetch_as<T: DeserializeOwned>(&self, url: &str) -> Result<T, Error> {

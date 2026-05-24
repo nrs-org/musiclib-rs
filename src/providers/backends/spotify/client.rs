@@ -136,15 +136,15 @@ impl SpotifyClient {
                             HeaderValue::from_static("application/x-www-form-urlencoded"),
                         ),
                     ],
-                    body: Some(b"grant_type=client_credentials".to_vec()),
+                    body: Some("grant_type=client_credentials".into()),
                     ..Default::default()
                 },
-                &json_body_extractor::<TokenResponse>(),
+                json_body_extractor::<TokenResponse>().into(),
             )
             .await
             .map_err(Error::from)?;
 
-        let token_resp = response.body.as_json::<TokenResponse>().ok_or_else(|| {
+        let token_resp = response.json::<TokenResponse>().await.map_err(|_| {
             Error::AuthenticationFailed("Failed to parse Spotify token response".into())
         })?;
 
@@ -199,8 +199,8 @@ impl SpotifyClient {
             }
 
             let inner = response
-                .body
-                .as_json::<ApiResponse<T>>()
+                .json::<ApiResponse<T>>()
+                .await
                 .expect("should be ApiResponse<T>")
                 .clone()
                 .into_inner()

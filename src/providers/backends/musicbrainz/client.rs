@@ -140,9 +140,9 @@ impl MusicBrainzClient {
                 }
                 200..=299 => {
                     let data = response
-                        .body
-                        .as_json::<ApiResponse<T>>()
-                        .expect("body is ApiResponse<T>")
+                        .json::<ApiResponse<T>>()
+                        .await
+                        .map_err(Error::from)?
                         .clone()
                         .into_ok()
                         .ok_or_else(|| {

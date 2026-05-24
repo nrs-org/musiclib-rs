@@ -80,7 +80,7 @@ impl YoutubeClient {
             .await
             .map_err(Error::from)?;
 
-        let result = response.body.as_json::<T>().expect("should be T");
-        callback(result).await
+        let result = response.json::<T>().await.expect("should be T");
+        callback(&result).await
     }
 }

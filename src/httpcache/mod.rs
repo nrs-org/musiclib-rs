@@ -16,6 +16,8 @@ pub enum Error {
     Database(#[from] db::Error),
     #[error("Error extracting response body: {0}")]
     BodyExtract(#[from] crate::http::BodyExtractError),
+    #[error("Error reading bytes from response body: {0}")]
+    BodyRead(#[from] Box<crate::http::Error>),
     #[error("Reserialization error: {0}")]
     Reserialization(#[from] erased_serde::Error),
 }

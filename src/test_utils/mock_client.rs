@@ -1,13 +1,16 @@
 use std::{
+    borrow::Cow,
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 
 use crate::http::{
-    BodyExtractor, HeaderValue, HttpClient, Method, Request, Response, ResponseBody, ResponseStatus,
+    BodyExtractor, BodyExtractorCow, HeaderValue, HttpClient, Method, RawResponse, Request,
+    Response, ResponseStatus,
 };
 
 /// Raw response stored in the mock before the body extractor is applied.
@@ -15,11 +18,11 @@ use crate::http::{
 struct RawRoute {
     status: ResponseStatus,
     headers: Vec<(http::header::HeaderName, HeaderValue)>,
-    body: Vec<u8>,
+    body: Bytes,
 }
 
 impl RawRoute {
-    fn json(status: ResponseStatus, body: Vec<u8>) -> Self {
+    fn json(status: ResponseStatus, body: Bytes) -> Self {
         Self {
             status,
             headers: vec![(
@@ -55,7 +58,7 @@ impl MockHttpClient {
             .push_back(raw);
     }
 
-    pub fn add_route(&mut self, method: Method, url: &str, status: ResponseStatus, body: Vec<u8>) {
+    pub fn add_route(&mut self, method: Method, url: &str, status: ResponseStatus, body: Bytes) {
         self.push_route(method, url, RawRoute::json(status, body));
     }
 
@@ -64,7 +67,7 @@ impl MockHttpClient {
         T: DeserializeOwned + 'static,
     {
         serde_json::from_str::<T>(content).expect("Invalid JSON content");
-        self.add_route(method, url, ResponseStatus::OK, content.as_bytes().to_vec());
+        self.add_route(method, url, ResponseStatus::OK, content.into());
     }
 
     pub fn set_on_route_callback<F>(&mut self, callback: F)
@@ -80,7 +83,7 @@ impl HttpClient for MockHttpClient {
     async fn make_request(
         &self,
         req: Request,
-        body_extractor: &dyn BodyExtractor,
+        body_extractor: BodyExtractorCow<'static>,
     ) -> Result<Arc<Response>, crate::http::Error> {
         if let Some(callback) = &self.on_route_callback {
             callback(&req.method, &req.url);
@@ -89,11 +92,15 @@ impl HttpClient for MockHttpClient {
         let queue = match self.routes.get(&(req.method, req.url)) {
             Some(q) => q,
             None => {
-                return Ok(Arc::new(Response {
-                    status: ResponseStatus::NOT_FOUND,
-                    headers: vec![],
-                    body: ResponseBody::from(vec![]),
-                }));
+                return Ok(Arc::new(
+                    body_extractor
+                        .extract_response(RawResponse {
+                            status: ResponseStatus::NOT_FOUND,
+                            headers: Cow::Borrowed(&[]),
+                            body: reqwest::Body::from(&[] as &[u8]),
+                        })
+                        .await?,
+                ));
             }
         };
 
@@ -110,22 +117,15 @@ impl HttpClient for MockHttpClient {
             }
         };
 
-        let reqwest_resp = http::Response::builder()
-            .status(raw.status)
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .body(raw.body)
-            .unwrap();
-        let reqwest_resp = reqwest::Response::from(reqwest_resp);
-
-        let body = body_extractor
-            .extract(reqwest_resp)
+        let response = body_extractor
+            .extract_response(RawResponse {
+                status: raw.status,
+                headers: Cow::Borrowed(&raw.headers),
+                body: reqwest::Body::from(raw.body),
+            })
             .await
             .map_err(crate::http::Error::BodyExtract)?;
 
-        Ok(Arc::new(Response {
-            status: raw.status,
-            headers: raw.headers,
-            body,
-        }))
+        Ok(Arc::new(response))
     }
 }

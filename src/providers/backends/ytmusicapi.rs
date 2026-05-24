@@ -51,7 +51,7 @@ impl Provider {
                     url: url.to_string(),
                     ..Default::default()
                 },
-                &json_body_extractor::<serde_json::Value>(),
+                json_body_extractor::<serde_json::Value>().into(),
             )
             .await?;
         if !response.status.is_success() {
@@ -61,10 +61,10 @@ impl Provider {
             )));
         }
         response
-            .body
-            .as_json::<serde_json::Value>()
-            .cloned()
-            .ok_or_else(|| Error::InvalidUrl("ytmusicapi server returned non-JSON body".into()))
+            .json::<serde_json::Value>()
+            .await
+            .map(|json| json.clone())
+            .map_err(|_| Error::InvalidUrl("ytmusicapi server returned non-JSON body".into()))
     }
 }
 

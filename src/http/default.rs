@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::http::BodyExtractor;
+use crate::http::{BodyExtractor, BodyExtractorCow};
 
 use super::{HttpClient, Request, Response};
 use async_trait::async_trait;
@@ -21,7 +21,7 @@ impl HttpClient for DefaultHttpClient {
     async fn make_request(
         &self,
         req: Request,
-        body_extractor: &dyn BodyExtractor,
+        body_extractor: BodyExtractorCow<'static>,
     ) -> Result<Arc<Response>, super::Error> {
         let res = self
             .client
@@ -30,7 +30,7 @@ impl HttpClient for DefaultHttpClient {
             .body(req.body.unwrap_or_default())
             .send()
             .await?;
-        let res = Response::from(res, body_extractor).await?;
+        let res = Response::from(res, body_extractor)?;
         Ok(Arc::new(res))
     }
 }

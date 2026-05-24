@@ -87,7 +87,8 @@ impl DiscogsClient {
             .await
             .map_err(Error::from)?;
 
-        let result = response.body.as_json::<T>().expect("should be T");
-        callback(result).await
+        response.error_for_status_ref().map_err(Error::from)?;
+        let result = response.json::<T>().await.map_err(Error::from)?;
+        callback(&result).await
     }
 }
