@@ -20,7 +20,8 @@ use crate::providers::{
 
 pub struct CompiledChildRule {
     pub matcher: CompiledMatcherExpr,
-    pub options_id: OptionsId,
+    /// `None` means skip this child entirely; `Some(id)` means fetch with those options.
+    pub options_id: Option<OptionsId>,
 }
 
 // --- Compilation ---
@@ -177,10 +178,15 @@ impl ChildSource<ChildFetchOptions> for FilteringChildSource {
 
             for rule in &self.rules {
                 if evaluate_expr(&rule.matcher, &ctx, self.provider.clone()).await? {
-                    return Ok(Some((
-                        child,
-                        ChildFetchOptions::new(self.pool.clone(), rule.options_id),
-                    )));
+                    match rule.options_id {
+                        None => break, // skip this child
+                        Some(id) => {
+                            return Ok(Some((
+                                child,
+                                ChildFetchOptions::new(self.pool.clone(), id),
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -484,7 +490,7 @@ mod tests {
     fn always_rule(pool: &mut EntryFetchOptionsPool, options: EntryFetchOptions) -> ChildRule {
         ChildRule {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::Always),
-            options_id: pool.insert(options),
+            options_id: Some(pool.insert(options)),
         }
     }
 
@@ -497,7 +503,7 @@ mod tests {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
                 EntryDataMatcher::EntryType(t),
             )),
-            options_id: pool.insert(options),
+            options_id: Some(pool.insert(options)),
         }
     }
 
@@ -510,7 +516,7 @@ mod tests {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
                 EntryDataMatcher::NameRegex(pattern.to_string()),
             )),
-            options_id: pool.insert(options),
+            options_id: Some(pool.insert(options)),
         }
     }
 
@@ -524,7 +530,7 @@ mod tests {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::Relation(
                 RelationMatcher::IndexRange { min, max },
             )),
-            options_id: pool.insert(options),
+            options_id: Some(pool.insert(options)),
         }
     }
 
@@ -675,7 +681,7 @@ mod tests {
                 matcher: ChildMatcherExpr::Not(Box::new(ChildMatcherExpr::Matcher(
                     ChildMatcher::EntryData(EntryDataMatcher::EntryType(EntryType::Artist)),
                 ))),
-                options_id,
+                options_id: Some(options_id),
             }],
         )
         .await;
@@ -705,7 +711,7 @@ mod tests {
                         EntryDataMatcher::NameRegex("Original".to_string()),
                     )),
                 ]),
-                options_id,
+                options_id: Some(options_id),
             }],
         )
         .await;
@@ -918,7 +924,7 @@ mod tests {
                     max: None,
                 },
             }),
-            options_id: pool.insert(options),
+            options_id: Some(pool.insert(options)),
         }
     }
 
@@ -1031,7 +1037,7 @@ mod tests {
                     max: None,
                 },
             }),
-            options_id: pool.insert(options),
+            options_id: Some(pool.insert(options)),
         }
     }
 

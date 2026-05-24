@@ -597,9 +597,9 @@ fn resolve_fetch_ref(
     fetch: &Option<YamlFetchRef>,
     name_to_id: &HashMap<String, OptionsId>,
     pool: &mut EntryFetchOptionsPool,
-) -> Result<OptionsId, YamlConversionError> {
+) -> Result<Option<OptionsId>, YamlConversionError> {
     match fetch {
-        None => Ok(EntryFetchOptionsPool::DEFAULT_ID),
+        None => Ok(None),
         Some(YamlFetchRef::Ref(name)) => {
             if name.contains("::") {
                 return Err(YamlConversionError::CrossFileRefInMemory(name.clone()));
@@ -607,11 +607,12 @@ fn resolve_fetch_ref(
             name_to_id
                 .get(name)
                 .copied()
+                .map(Some)
                 .ok_or_else(|| YamlConversionError::UnknownRef(name.clone()))
         }
         Some(YamlFetchRef::Inline(inline)) => {
             let opts = resolve_options(inline, name_to_id, pool)?;
-            Ok(pool.insert(opts))
+            Ok(Some(pool.insert(opts)))
         }
     }
 }
@@ -786,7 +787,9 @@ fn collect_refs(
 
     stack_set.insert(id);
     for rule in &pool.get(id).child_rules {
-        collect_refs(pool, rule.options_id, in_degree, stack_set, cyclic);
+        if let Some(options_id) = rule.options_id {
+            collect_refs(pool, options_id, in_degree, stack_set, cyclic);
+        }
     }
     stack_set.remove(&id);
 }
@@ -802,7 +805,7 @@ fn emit_options(
         .iter()
         .map(|r| YamlChildRule {
             matcher: emit_matcher_expr(&r.matcher),
-            fetch: emit_fetch_ref(pool, r.options_id, names),
+            fetch: r.options_id.and_then(|id| emit_fetch_ref(pool, id, names)),
         })
         .collect();
 
@@ -1078,9 +1081,9 @@ fn resolve_fetch_ref_multi(
     current_dir: &Path,
     file_name_to_id: &HashMap<PathBuf, HashMap<String, OptionsId>>,
     pool: &mut EntryFetchOptionsPool,
-) -> Result<OptionsId, YamlConversionError> {
+) -> Result<Option<OptionsId>, YamlConversionError> {
     match fetch {
-        None => Ok(EntryFetchOptionsPool::DEFAULT_ID),
+        None => Ok(None),
         Some(YamlFetchRef::Ref(s)) => {
             if let Some((path_part, entry_name)) = s.split_once("::") {
                 let abs = current_dir.join(path_part);
@@ -1093,11 +1096,13 @@ fn resolve_fetch_ref_multi(
                     .get(&canonical)
                     .and_then(|m| m.get(entry_name))
                     .copied()
+                    .map(Some)
                     .ok_or_else(|| YamlConversionError::UnknownRef(s.clone()))
             } else {
                 local_name_to_id
                     .get(s)
                     .copied()
+                    .map(Some)
                     .ok_or_else(|| YamlConversionError::UnknownRef(s.clone()))
             }
         }
@@ -1109,7 +1114,7 @@ fn resolve_fetch_ref_multi(
                 file_name_to_id,
                 pool,
             )?;
-            Ok(pool.insert(opts))
+            Ok(Some(pool.insert(opts)))
         }
     }
 }
@@ -1154,7 +1159,7 @@ main:
             r[0].matcher,
             ChildMatcherExpr::Matcher(ChildMatcher::Always)
         ));
-        assert_eq!(r[0].options_id, EntryFetchOptionsPool::DEFAULT_ID);
+        assert_eq!(r[0].options_id, None);
     }
 
     #[test]
@@ -1172,8 +1177,7 @@ main:
         );
         let r = rules(&pool, root);
         assert_eq!(r.len(), 1);
-        let child_id = r[0].options_id;
-        assert_ne!(child_id, EntryFetchOptionsPool::DEFAULT_ID);
+        let child_id = r[0].options_id.expect("expected Some options_id");
         assert_eq!(rules(&pool, child_id).len(), 1);
     }
 
@@ -1191,11 +1195,11 @@ main:
       fetch: mv_only
 ",
         );
-        let mv_id = rules(&pool, root)[0].options_id;
+        let mv_id = rules(&pool, root)[0].options_id.expect("expected Some");
         let mv_rules = rules(&pool, mv_id);
         assert_eq!(mv_rules.len(), 1);
         // Self-reference: the rule inside mv_only points back to mv_only
-        assert_eq!(mv_rules[0].options_id, mv_id);
+        assert_eq!(mv_rules[0].options_id, Some(mv_id));
     }
 
     #[test]
@@ -1216,7 +1220,7 @@ main:
         let r = rules(&pool, root);
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].options_id, r[1].options_id);
-        assert_ne!(r[0].options_id, EntryFetchOptionsPool::DEFAULT_ID);
+        assert!(r[0].options_id.is_some());
     }
 
     #[test]
@@ -1231,8 +1235,7 @@ main:
           - match: { name_regex: 'MV' }
 ",
         );
-        let inline_id = rules(&pool, root)[0].options_id;
-        assert_ne!(inline_id, EntryFetchOptionsPool::DEFAULT_ID);
+        let inline_id = rules(&pool, root)[0].options_id.expect("expected Some");
         assert_eq!(rules(&pool, inline_id).len(), 1);
     }
 
@@ -1313,8 +1316,7 @@ main:
           - match: { name_regex: 'MV' }
 ",
         );
-        let inline_id = rules(&pool, root)[0].options_id;
-        assert_ne!(inline_id, EntryFetchOptionsPool::DEFAULT_ID);
+        let inline_id = rules(&pool, root)[0].options_id.expect("expected Some");
         assert_eq!(rules(&pool, inline_id).len(), 1);
     }
 
@@ -1332,9 +1334,9 @@ main:
       fetch: mv_only
 ",
         );
-        let mv_id = rules(&pool, root)[0].options_id;
+        let mv_id = rules(&pool, root)[0].options_id.expect("expected Some");
         // Still self-referential after round-trip
-        assert_eq!(rules(&pool, mv_id)[0].options_id, mv_id);
+        assert_eq!(rules(&pool, mv_id)[0].options_id, Some(mv_id));
     }
 
     #[test]
@@ -1392,8 +1394,7 @@ main:
         .unwrap();
 
         let (pool, root, _hash) = load_from_file(&a).await.expect("load failed");
-        let shared_id = rules(&pool, root)[0].options_id;
-        assert_ne!(shared_id, EntryFetchOptionsPool::DEFAULT_ID);
+        let shared_id = rules(&pool, root)[0].options_id.expect("expected Some");
         assert_eq!(rules(&pool, shared_id).len(), 1);
     }
 
@@ -1419,8 +1420,10 @@ main:
         let (pool, root_id, _hash) = load_from_file(&a)
             .await
             .expect("cross-file cycle must not error");
-        let b_opts_id = rules(&pool, root_id)[0].options_id;
-        let back_id = rules(&pool, b_opts_id)[0].options_id;
+        let b_opts_id = rules(&pool, root_id)[0].options_id.expect("expected Some");
+        let back_id = rules(&pool, b_opts_id)[0]
+            .options_id
+            .expect("expected Some");
         assert_eq!(back_id, root_id);
     }
 
@@ -1453,7 +1456,7 @@ main:
         let (pool, root, _hash) = load_from_file(&a).await.expect("load failed");
         let r = rules(&pool, root);
         // Both rules ultimately point at c.yaml::entry — should be the same OptionsId
-        let via_b = rules(&pool, r[0].options_id)[0].options_id;
+        let via_b = rules(&pool, r[0].options_id.expect("Some"))[0].options_id;
         let direct = r[1].options_id;
         assert_eq!(via_b, direct);
     }

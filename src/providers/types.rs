@@ -153,6 +153,8 @@ pub enum Error {
     MissingCredentials(String),
     #[error("Invalid pattern: {0}")]
     InvalidPattern(String),
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
 
 // Matchers based on entry metadata (requires fetching the entry)
@@ -348,8 +350,8 @@ pub fn static_eval_expr(
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChildRule {
     pub matcher: ChildMatcherExpr,
-    /// Index into the accompanying `EntryFetchOptionsPool`.
-    pub options_id: OptionsId,
+    /// Index into the accompanying `EntryFetchOptionsPool`, or `None` to skip this child entirely.
+    pub options_id: Option<OptionsId>,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
