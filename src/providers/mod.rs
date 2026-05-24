@@ -9,6 +9,7 @@ use crate::providers::types::{
 pub mod backends;
 pub mod fetch_options_yaml;
 pub mod matcher;
+pub mod registry;
 pub mod std_values;
 pub mod types;
 
