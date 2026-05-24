@@ -1,0 +1,8 @@
+# Store the artist entry only — do not fetch any children.
+#
+# Use this when you want an artist record in the database without pulling
+# in their releases or tracks (e.g. for collaborators discovered while
+# importing someone else's discography).
+
+main:
+  child_rules: []

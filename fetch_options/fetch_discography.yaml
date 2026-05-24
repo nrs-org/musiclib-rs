@@ -1,0 +1,17 @@
+# Fetch the full discography of an artist.
+#
+# - Non-artist children (releases, release groups, tracks, …) recurse with
+#   the same options, so the whole tree is traversed.
+# - Artist children encountered along the way (collaborators, credited artists, …)
+#   are stored as leaf entries — their own discographies are NOT fetched.
+#
+# Use no_fetch_discography.yaml as the options when you want the opposite.
+
+main:
+  child_rules:
+    - match: { external_type: "youtube:video" }
+      fetch: null                               # skip individual YouTube videos
+    - match: { not: { entry_type: artist } }
+      fetch: main                               # non-artists recurse
+    - match: { entry_type: artist }
+      fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
