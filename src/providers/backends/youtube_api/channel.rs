@@ -805,7 +805,7 @@ mod tests {
             Method::GET,
             &ytmusic_discography_url,
             ResponseStatus::OK,
-            include_bytes!("./ytmusic_watame_discography.json").to_vec(),
+            Bytes::from_static(include_bytes!("./ytmusic_watame_discography.json")),
         );
         // one single album resolution route (DivaFever)
         let divafever_browse_id = "MPREb_Rd27MfU0AZG";

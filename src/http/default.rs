@@ -61,7 +61,7 @@ mod tests {
 
         let res = client.get(req).await?;
         assert_eq!(res.status, ResponseStatus::OK);
-        assert_eq!(res.body.to_bytes()?, b"Hello, World!");
+        assert_eq!(res.body_to_bytes().await?.as_ref(), b"Hello, World!");
 
         Ok(())
     }
@@ -85,9 +85,9 @@ mod tests {
         let res1 = client1.get(req.clone()).await?;
         let res2 = client2.get(req).await?;
         assert_eq!(res1.status, ResponseStatus::OK);
-        assert_eq!(res1.body.to_bytes()?, b"Hello, World!");
+        assert_eq!(res1.body_to_bytes().await?.as_ref(), b"Hello, World!");
         assert_eq!(res2.status, ResponseStatus::OK);
-        assert_eq!(res2.body.to_bytes()?, b"Hello, World!");
+        assert_eq!(res2.body_to_bytes().await?.as_ref(), b"Hello, World!");
 
         Ok(())
     }

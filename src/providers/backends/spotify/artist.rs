@@ -190,6 +190,8 @@ pub async fn get_artist(client: &SpotifyClient, url: &str) -> Result<EntityResul
 mod tests {
     use std::sync::Arc;
 
+    use bytes::Bytes;
+
     use crate::{
         http::{Method, ResponseStatus},
         providers::{
@@ -286,7 +288,7 @@ mod tests {
             Method::GET,
             &artist_api_url(id),
             ResponseStatus::UNAUTHORIZED,
-            br#"{"error":{"status":401,"message":"No token provided"}}"#.to_vec(),
+            Bytes::from_static(br#"{"error":{"status":401,"message":"No token provided"}}"#),
         );
         // Second call (after token refresh) returns the real data.
         http_client.add_route_json::<ArtistResponse>(
@@ -304,7 +306,7 @@ mod tests {
             Method::POST,
             TOKEN_URL,
             ResponseStatus::OK,
-            br#"{"access_token":"fresh_token"}"#.to_vec(),
+            Bytes::from_static(br#"{"access_token":"fresh_token"}"#),
         );
 
         let client =

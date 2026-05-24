@@ -56,6 +56,12 @@ where
     }
 }
 
+impl From<Arc<dyn BodyExtractor>> for BodyExtractorCow<'static> {
+    fn from(value: Arc<dyn BodyExtractor>) -> Self {
+        Self::Owned(value)
+    }
+}
+
 #[async_trait]
 impl<'a> BodyExtractor for BodyExtractorCow<'a> {
     async fn extract(&self, res: RawResponse<'_>) -> Result<ResponseBody, BodyExtractError> {
@@ -110,9 +116,8 @@ pub fn text_body_extractor() -> &'static impl BodyExtractor {
 }
 
 pub fn json_body_extractor<T: DeserializeOwned + Serialize + Send + Sync + 'static>()
--> &'static impl BodyExtractor {
+-> Arc<dyn BodyExtractor> {
     struct JsonExtractor<T>(PhantomData<T>);
-    static JSON_EXTRACTOR: JsonExtractor<serde_json::Value> = JsonExtractor(PhantomData);
     #[async_trait]
     impl<T: DeserializeOwned + Serialize + Send + Sync + 'static> BodyExtractor for JsonExtractor<T> {
         async fn extract(&self, res: RawResponse<'_>) -> Result<ResponseBody, BodyExtractError> {
@@ -128,7 +133,7 @@ pub fn json_body_extractor<T: DeserializeOwned + Serialize + Send + Sync + 'stat
             }
         }
     }
-    &JSON_EXTRACTOR
+    Arc::new(JsonExtractor::<T>(PhantomData))
 }
 
 pub fn auto_body_extractor() -> &'static impl BodyExtractor {
@@ -144,6 +149,7 @@ pub fn auto_body_extractor() -> &'static impl BodyExtractor {
 
             if content_type.contains("application/json") {
                 json_body_extractor::<serde_json::Value>()
+                    .as_ref()
                     .extract(res)
                     .await
             } else if content_type.contains("text/") {
@@ -193,7 +199,7 @@ impl dyn HttpClient {
         &self,
         req: Request,
     ) -> Result<Arc<Response>, Error> {
-        self.make_request(req, json_body_extractor::<T>().into())
+        self.make_request(req, BodyExtractorCow::Owned(json_body_extractor::<T>()))
             .await
     }
 }

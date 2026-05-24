@@ -85,11 +85,11 @@ mod tests {
         };
 
         let res1 = client.get_text(req.clone()).await?;
-        assert_eq!(res1.body.as_text(), Some("Hello, World! (counter: 0)"));
+        assert_eq!(&*res1.text().await?, "Hello, World! (counter: 0)");
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         let res2 = client.get_text(req.clone()).await?;
-        assert_eq!(res2.body.as_text(), Some("Hello, World! (counter: 0)"));
+        assert_eq!(&*res2.text().await?, "Hello, World! (counter: 0)");
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         let req_force = Request {
@@ -98,7 +98,7 @@ mod tests {
         };
 
         let res3 = client.get_text(req_force).await?;
-        assert_eq!(res3.body.as_text(), Some("Hello, World! (counter: 1)"));
+        assert_eq!(&*res3.text().await?, "Hello, World! (counter: 1)");
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
         Ok(())
     }
@@ -125,10 +125,10 @@ mod tests {
         };
 
         let res1 = client.get_text(req.clone()).await?;
-        assert_eq!(res1.body.as_text(), Some("Hello, World!"));
+        assert_eq!(&*res1.text().await?, "Hello, World!");
 
         let res2 = client.get_text(req.clone()).await?;
-        assert_eq!(res2.body.as_text(), Some("Hello, World!"));
+        assert_eq!(&*res2.text().await?, "Hello, World!");
 
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
 
