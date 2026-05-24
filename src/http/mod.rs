@@ -6,6 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 mod cache;
 mod default;
+pub mod scheduler;
 mod types;
 
 use tokio::sync::RwLock;
