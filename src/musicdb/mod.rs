@@ -1,6 +1,6 @@
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, Database, DatabaseConnection, DbErr, EntityTrait, InsertResult,
-    QueryFilter, sea_query,
+    ActiveValue::Set, ColumnTrait, Database, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
+    sea_query,
 };
 
 use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType};
@@ -191,103 +191,131 @@ impl MusicDb {
         Ok(result.last_insert_id)
     }
 
-    /// Insert a (source, identifier) pair for an entry. Silently ignores duplicates.
-    pub async fn insert_source(
+    /// Insert multiple (source, identifier) pairs for an entry in one round-trip.
+    /// Silently ignores duplicates.
+    pub async fn insert_sources_batch(
         &self,
         entry_id: i64,
-        source: &str,
-        identifier: &str,
+        sources: impl IntoIterator<Item = (&str, &str)>,
     ) -> Result<(), Error> {
-        ignore_not_inserted(
-            entry_source::Entity::insert(entry_source::ActiveModel {
+        let models: Vec<entry_source::ActiveModel> = sources
+            .into_iter()
+            .map(|(source, identifier)| entry_source::ActiveModel {
                 entry_id: Set(entry_id),
                 source: Set(source.to_string()),
                 identifier: Set(identifier.to_string()),
             })
-            .on_conflict(
-                sea_query::OnConflict::columns([
-                    entry_source::Column::EntryId,
-                    entry_source::Column::Source,
-                    entry_source::Column::Identifier,
-                ])
-                .do_nothing()
-                .to_owned(),
-            )
-            .exec(&self.db)
-            .await,
+            .collect();
+        if models.is_empty() {
+            return Ok(());
+        }
+        ignore_many_not_inserted(
+            entry_source::Entity::insert_many(models)
+                .on_conflict(
+                    sea_query::OnConflict::columns([
+                        entry_source::Column::EntryId,
+                        entry_source::Column::Source,
+                        entry_source::Column::Identifier,
+                    ])
+                    .do_nothing()
+                    .to_owned(),
+                )
+                .exec(&self.db)
+                .await,
         )
     }
 
-    pub async fn insert_alias(&self, entry_id: i64, alias: &Alias) -> Result<(), Error> {
-        entry_alias::Entity::insert(entry_alias::ActiveModel {
-            id: sea_orm::ActiveValue::NotSet,
-            entry_id: Set(entry_id),
-            name: Set(alias.name.clone()),
-            source: Set(alias.source.clone()),
-            locale: Set(alias.locale.clone()),
-            extra: Set(Some(alias.extra.to_string())),
-            primary: Set(alias.primary),
-        })
-        .exec(&self.db)
-        .await?;
+    /// Insert multiple aliases for an entry in one round-trip.
+    pub async fn insert_aliases_batch(
+        &self,
+        entry_id: i64,
+        aliases: &[Alias],
+    ) -> Result<(), Error> {
+        if aliases.is_empty() {
+            return Ok(());
+        }
+        let models: Vec<entry_alias::ActiveModel> = aliases
+            .iter()
+            .map(|alias| entry_alias::ActiveModel {
+                id: sea_orm::ActiveValue::NotSet,
+                entry_id: Set(entry_id),
+                name: Set(alias.name.clone()),
+                source: Set(alias.source.clone()),
+                locale: Set(alias.locale.clone()),
+                extra: Set(Some(alias.extra.to_string())),
+                primary: Set(alias.primary),
+            })
+            .collect();
+        entry_alias::Entity::insert_many(models)
+            .exec(&self.db)
+            .await?;
         Ok(())
     }
 
-    /// Insert a parent→child edge. Silently ignores duplicate edges.
-    pub async fn insert_child_edge(
+    /// Insert multiple parent→child edges in one round-trip. Silently ignores duplicates.
+    pub async fn insert_child_edges_batch(
         &self,
-        parent_id: i64,
-        child_id: i64,
-        disc_no: Option<i32>,
-        track_no: Option<i32>,
+        edges: impl IntoIterator<Item = (i64, i64, Option<i32>, Option<i32>)>,
     ) -> Result<(), Error> {
-        ignore_not_inserted(
-            entry_child::Entity::insert(entry_child::ActiveModel {
-                parent_id: Set(parent_id),
-                child_id: Set(child_id),
-                disc_no: Set(disc_no),
-                track_no: Set(track_no),
-            })
-            .on_conflict(
-                sea_query::OnConflict::columns([
-                    entry_child::Column::ParentId,
-                    entry_child::Column::ChildId,
-                ])
-                .do_nothing()
-                .to_owned(),
+        let models: Vec<entry_child::ActiveModel> = edges
+            .into_iter()
+            .map(
+                |(parent_id, child_id, disc_no, track_no)| entry_child::ActiveModel {
+                    parent_id: Set(parent_id),
+                    child_id: Set(child_id),
+                    disc_no: Set(disc_no),
+                    track_no: Set(track_no),
+                },
             )
-            .exec(&self.db)
-            .await,
+            .collect();
+        if models.is_empty() {
+            return Ok(());
+        }
+        ignore_many_not_inserted(
+            entry_child::Entity::insert_many(models)
+                .on_conflict(
+                    sea_query::OnConflict::columns([
+                        entry_child::Column::ParentId,
+                        entry_child::Column::ChildId,
+                    ])
+                    .do_nothing()
+                    .to_owned(),
+                )
+                .exec(&self.db)
+                .await,
         )
     }
 
-    /// Insert an artist contribution to an entry.
-    #[allow(dead_code)] // may be unused depending on provider output
-    pub async fn insert_contribution(
+    /// Insert multiple artist contributions in one round-trip.
+    pub async fn insert_contributions_batch(
         &self,
         entry_id: i64,
-        artist_id: i64,
-        contrib: &Contribution,
+        contributions: impl IntoIterator<Item = (i64, Contribution)>,
     ) -> Result<(), Error> {
-        contribution::Entity::insert(contribution::ActiveModel {
-            id: sea_orm::ActiveValue::NotSet,
-            entry_id: Set(entry_id),
-            artist_id: Set(artist_id),
-            role: Set(contrib.role.clone()),
-            main_artist: Set(contrib.main_artist),
-            extra: Set(Some(contrib.extra.to_string())),
-            source: Set(contrib.source.to_string()),
-        })
-        .exec(&self.db)
-        .await?;
+        let models: Vec<contribution::ActiveModel> = contributions
+            .into_iter()
+            .map(|(artist_id, contrib)| contribution::ActiveModel {
+                id: sea_orm::ActiveValue::NotSet,
+                entry_id: Set(entry_id),
+                artist_id: Set(artist_id),
+                role: Set(contrib.role.clone()),
+                main_artist: Set(contrib.main_artist),
+                extra: Set(Some(contrib.extra.to_string())),
+                source: Set(contrib.source.to_string()),
+            })
+            .collect();
+        if models.is_empty() {
+            return Ok(());
+        }
+        contribution::Entity::insert_many(models)
+            .exec(&self.db)
+            .await?;
         Ok(())
     }
 }
 
-/// SeaORM returns `DbErr::RecordNotInserted` when `ON CONFLICT DO NOTHING` skips a row.
-/// Treat that as success for idempotent inserts.
-fn ignore_not_inserted<T: sea_orm::ActiveModelTrait>(
-    result: Result<InsertResult<T>, DbErr>,
+fn ignore_many_not_inserted<T: sea_orm::ActiveModelTrait>(
+    result: Result<sea_orm::InsertManyResult<T>, DbErr>,
 ) -> Result<(), Error> {
     match result {
         Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),

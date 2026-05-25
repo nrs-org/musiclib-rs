@@ -8,8 +8,8 @@ use musiclib_rs::{
         registry::{RegistryConfig, build_providers},
         types::{
             ChildFetchOptions, ChildMatcher, ChildMatcherExpr, ChildRef, ChildRule, ChildSource,
-            EntityResult, EntryFetchOptions, EntryFetchOptionsPool, EntrySpecificData, EntryType,
-            ExternalSources, OptionsId,
+            Contribution, EntityResult, EntryFetchOptions, EntryFetchOptionsPool,
+            EntrySpecificData, EntryType, ExternalSources, OptionsId,
         },
     },
 };
@@ -178,15 +178,25 @@ fn merge_provider_result(
 ) -> BoxFuture<'static, anyhow::Result<()>> {
     Box::pin(async move {
         // Pre-insert the canonical id so recursive calls see this entry as already claimed.
+        // Collect all source pairs (canonical + external) and flush in one batch.
+        let mut source_pairs: Vec<(&str, &str)> = vec![("canonical", &canonical_id)];
+        for (src, ids) in &result.sources.0 {
+            for id in ids {
+                source_pairs.push((src, id));
+            }
+        }
         importer
             .db
-            .insert_source(entry_id, "canonical", &canonical_id)
+            .insert_sources_batch(entry_id, source_pairs)
             .await?;
-        insert_sources(&importer.db, entry_id, &result.sources).await?;
 
-        for alias in &result.aliases {
-            importer.db.insert_alias(entry_id, alias).await?;
-        }
+        importer
+            .db
+            .insert_aliases_batch(entry_id, &result.aliases)
+            .await?;
+
+        let mut child_edges: Vec<(i64, i64, Option<i32>, Option<i32>)> = Vec::new();
+        let mut contribs: Vec<(i64, i64, Contribution)> = Vec::new();
 
         for child_source in &result.children {
             let mut cursor = child_source.owned_cursor();
@@ -212,26 +222,29 @@ fn merge_provider_result(
                 {
                     Ok(child_id) => {
                         let pos = child_ref.position.as_ref();
-                        importer
-                            .db
-                            .insert_child_edge(
-                                entry_id,
-                                child_id,
-                                pos.and_then(|p| p.disc_no),
-                                pos.map(|p| p.track_no),
-                            )
-                            .await?;
-                        for contrib in &child_ref.contributions {
-                            importer
-                                .db
-                                .insert_contribution(entry_id, child_id, contrib)
-                                .await?;
+                        child_edges.push((
+                            entry_id,
+                            child_id,
+                            pos.and_then(|p| p.disc_no),
+                            pos.map(|p| p.track_no),
+                        ));
+                        for contrib in child_ref.contributions.iter().cloned() {
+                            contribs.push((entry_id, child_id, contrib));
                         }
                     }
                     Err(e) => eprintln!("  warn: could not import child: {e}"),
                 }
             }
         }
+
+        importer.db.insert_child_edges_batch(child_edges).await?;
+        importer
+            .db
+            .insert_contributions_batch(
+                entry_id,
+                contribs.into_iter().map(|(_, artist_id, c)| (artist_id, c)),
+            )
+            .await?;
 
         // Cross-import: try every stored source URL against all providers and merge
         // any new results into the same entry row.
@@ -337,7 +350,15 @@ fn import_child(
                 .await
                 {
                     Ok(entry_id) => {
-                        insert_sources(&importer.db, entry_id, &child_ref.sources).await?;
+                        let pairs: Vec<(&str, &str)> = child_ref
+                            .sources
+                            .0
+                            .iter()
+                            .flat_map(|(src, ids)| {
+                                ids.iter().map(move |id| (src.as_ref(), id.as_ref()))
+                            })
+                            .collect();
+                        importer.db.insert_sources_batch(entry_id, pairs).await?;
                         return Ok(entry_id);
                     }
                     Err(e) => {
@@ -365,17 +386,4 @@ fn entry_type_of(specific_data: &EntrySpecificData) -> EntryType {
         EntrySpecificData::ReleaseGroup { .. } => EntryType::ReleaseGroup,
         EntrySpecificData::Artist => EntryType::Artist,
     }
-}
-
-async fn insert_sources(
-    db: &MusicDb,
-    entry_id: i64,
-    sources: &ExternalSources,
-) -> anyhow::Result<()> {
-    for (source, identifiers) in &sources.0 {
-        for id in identifiers {
-            db.insert_source(entry_id, source, id).await?;
-        }
-    }
-    Ok(())
 }
