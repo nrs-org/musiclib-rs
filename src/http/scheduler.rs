@@ -52,6 +52,10 @@ pub struct RetryConfig {
         default = "duration_defaults::default_max_backoff"
     )]
     pub max_backoff: Duration,
+    /// Extra status codes to treat as rate-limit responses (in addition to 429).
+    /// e.g. MusicBrainz uses 503 instead of 429.
+    #[serde(default)]
+    pub rate_limit_statuses: Vec<u16>,
 }
 
 impl RetryConfig {
@@ -72,7 +76,13 @@ impl RetryConfig {
             initial_backoff: duration_defaults::default_initial_backoff(),
             backoff_multiplier: Self::default_backoff_multiplier(),
             max_backoff: duration_defaults::default_max_backoff(),
+            rate_limit_statuses: Vec::new(),
         }
+    }
+
+    fn is_rate_limited(&self, status: reqwest::StatusCode) -> bool {
+        status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || self.rate_limit_statuses.contains(&status.as_u16())
     }
 }
 
@@ -149,8 +159,6 @@ async fn dispatch_with_retry(
     extractor: BodyExtractorCow<'static>,
     retry: Option<&RetryConfig>,
 ) -> Result<Arc<Response>, Error> {
-    use reqwest::StatusCode;
-
     let extractor = Arc::new(extractor);
 
     let retry = match retry {
@@ -169,7 +177,7 @@ async fn dispatch_with_retry(
             .make_request(req.clone(), Arc::clone(&extractor).as_ref().clone_static())
             .await?;
 
-        if res.status != StatusCode::TOO_MANY_REQUESTS {
+        if !retry.is_rate_limited(res.status) {
             return Ok(res);
         }
 
@@ -198,7 +206,7 @@ async fn dispatch_with_retry(
             .make_request(req.clone(), Arc::clone(&extractor).as_ref().clone_static())
             .await?;
 
-        if res.status != StatusCode::TOO_MANY_REQUESTS {
+        if !retry.is_rate_limited(res.status) {
             return Ok(res);
         }
 
