@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc};
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -45,9 +45,6 @@ impl<T> ApiResponse<T> {
         }
     }
 }
-
-const MAX_RETRIES: u32 = 6;
-const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
 impl MusicBrainzClient {
     pub fn new(token: Option<String>) -> Result<Self, Error> {
@@ -103,66 +100,36 @@ impl MusicBrainzClient {
             headers.push((HeaderName::from_static("authorization"), token.clone()));
         }
 
-        let mut backoff = INITIAL_BACKOFF;
-        for attempt in 0..MAX_RETRIES {
-            let response = self
-                .client
-                .get_json::<ApiResponse<T>>(Request {
-                    url: url.clone(),
-                    headers: headers.clone(),
-                    ..Default::default()
-                })
-                .await
-                .map_err(Error::from)
-                .map_err(E::from)?;
+        let response = self
+            .client
+            .get_json::<ApiResponse<T>>(Request {
+                url: url.clone(),
+                headers,
+                ..Default::default()
+            })
+            .await
+            .map_err(Error::from)
+            .map_err(E::from)?;
 
-            match response.status.as_u16() {
-                429 | 503 => {
-                    // Rate limited — back off and retry.
-                    let retry_after = response
-                        .headers
-                        .iter()
-                        .find(|(k, _)| k.as_str().eq_ignore_ascii_case("retry-after"))
-                        .and_then(|(_, v)| v.to_str().ok())
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .map(Duration::from_secs)
-                        .unwrap_or(backoff);
-
-                    eprintln!(
-                        "  [musicbrainz] rate limited (attempt {}/{MAX_RETRIES}), \
-                         waiting {}s",
-                        attempt + 1,
-                        retry_after.as_secs()
-                    );
-                    tokio::time::sleep(retry_after).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
-                    continue;
-                }
-                200..=299 => {
-                    let data = response
-                        .json::<ApiResponse<T>>()
-                        .await
-                        .map_err(Error::from)?
-                        .clone()
-                        .into_ok()
-                        .ok_or_else(|| {
-                            Error::InvalidUrl(format!(
-                                "unexpected response shape from MusicBrainz for {url}"
-                            ))
-                        })
-                        .map_err(E::from)?;
-                    return callback(&data).await;
-                }
-                status => {
-                    return Err(E::from(Error::InvalidUrl(format!(
-                        "MusicBrainz returned HTTP {status} for {url}"
-                    ))));
-                }
+        match response.status.as_u16() {
+            200..=299 => {
+                let data = response
+                    .json::<ApiResponse<T>>()
+                    .await
+                    .map_err(Error::from)?
+                    .clone()
+                    .into_ok()
+                    .ok_or_else(|| {
+                        Error::InvalidUrl(format!(
+                            "unexpected response shape from MusicBrainz for {url}"
+                        ))
+                    })
+                    .map_err(E::from)?;
+                callback(&data).await
             }
+            status => Err(E::from(Error::InvalidUrl(format!(
+                "MusicBrainz returned HTTP {status} for {url}"
+            )))),
         }
-
-        Err(E::from(Error::InvalidUrl(format!(
-            "MusicBrainz rate limit not resolved after {MAX_RETRIES} retries for {url}"
-        ))))
     }
 }

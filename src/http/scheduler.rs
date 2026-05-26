@@ -14,58 +14,75 @@ struct RequestEnvelope {
     reply: ReplyTx,
 }
 
-/// A handle to a running scheduler. Implements [`HttpClient`] by enqueuing
-/// requests onto the scheduler's channel and awaiting the oneshot reply.
-pub struct ScheduledHttpClient {
-    tx: mpsc::Sender<RequestEnvelope>,
-}
-
-#[async_trait]
-impl HttpClient for ScheduledHttpClient {
-    async fn make_request(
-        &self,
-        req: Request,
-        body_extractor: BodyExtractorCow<'static>,
-    ) -> Result<Arc<Response>, Error> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(RequestEnvelope {
-                req,
-                extractor: body_extractor,
-                reply: reply_tx,
-            })
-            .await
-            .expect("Scheduler task has stopped");
-        reply_rx.await.expect("Scheduler dropped reply sender")
+mod duration_defaults {
+    use std::time::Duration;
+    pub fn default_initial_backoff() -> Duration {
+        Duration::from_secs(1)
+    }
+    pub fn default_max_backoff() -> Duration {
+        Duration::from_secs(60)
     }
 }
 
-/// Exponential backoff configuration for 429 retries.
-#[derive(Debug, Clone)]
+/// Two-phase retry configuration for 429 responses.
+///
+/// Phase 1: honour the server's `Retry-After` header for up to `retry_after_attempts` retries.
+///   If a 429 has no `Retry-After` header, skip immediately to phase 2.
+/// Phase 2: exponential backoff for up to `backoff_attempts` additional retries.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct RetryConfig {
-    /// Maximum number of retry attempts after a 429.
-    pub max_retries: u32,
-    /// Initial backoff duration (used when no `Retry-After` header is present).
+    /// Max retries that use the `Retry-After` header (phase 1).
+    #[serde(default = "RetryConfig::default_retry_after_attempts")]
+    pub retry_after_attempts: u32,
+    /// Max retries using exponential backoff after phase 1 is exhausted (phase 2).
+    #[serde(default = "RetryConfig::default_backoff_attempts")]
+    pub backoff_attempts: u32,
+    /// Initial backoff duration for phase 2 (e.g. `"1s"`, `"500ms"`).
+    #[serde(
+        deserialize_with = "crate::duration::deserialize",
+        default = "duration_defaults::default_initial_backoff"
+    )]
     pub initial_backoff: Duration,
-    /// Backoff is multiplied by this factor on each attempt.
+    /// Backoff multiplier per phase-2 attempt.
+    #[serde(default = "RetryConfig::default_backoff_multiplier")]
     pub backoff_multiplier: f64,
-    /// Upper bound on backoff duration.
+    /// Upper bound on phase-2 backoff (e.g. `"1m"`, `"1h"`).
+    #[serde(
+        deserialize_with = "crate::duration::deserialize",
+        default = "duration_defaults::default_max_backoff"
+    )]
     pub max_backoff: Duration,
 }
 
 impl RetryConfig {
+    fn default_retry_after_attempts() -> u32 {
+        5
+    }
+    fn default_backoff_attempts() -> u32 {
+        3
+    }
+    fn default_backoff_multiplier() -> f64 {
+        2.0
+    }
+
     pub fn default_backoff() -> Self {
         Self {
-            max_retries: 5,
-            initial_backoff: Duration::from_secs(1),
-            backoff_multiplier: 2.0,
-            max_backoff: Duration::from_secs(60),
+            retry_after_attempts: Self::default_retry_after_attempts(),
+            backoff_attempts: Self::default_backoff_attempts(),
+            initial_backoff: duration_defaults::default_initial_backoff(),
+            backoff_multiplier: Self::default_backoff_multiplier(),
+            max_backoff: duration_defaults::default_max_backoff(),
         }
     }
 }
 
+fn default_channel_capacity() -> usize {
+    64
+}
+
 /// Controls how the scheduler dispatches requests.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct SchedulerConfig {
     /// Maximum number of requests in flight simultaneously. `None` = unlimited.
     pub max_concurrent: Option<usize>,
@@ -74,7 +91,14 @@ pub struct SchedulerConfig {
     pub retry: Option<RetryConfig>,
 
     /// Capacity of the incoming request channel.
+    #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self::unlimited()
+    }
 }
 
 impl SchedulerConfig {
@@ -83,7 +107,7 @@ impl SchedulerConfig {
         Self {
             max_concurrent: None,
             retry: Some(RetryConfig::default_backoff()),
-            channel_capacity: 64,
+            channel_capacity: default_channel_capacity(),
         }
     }
 
@@ -92,56 +116,7 @@ impl SchedulerConfig {
         Self {
             max_concurrent: Some(max_concurrent),
             retry: Some(RetryConfig::default_backoff()),
-            channel_capacity: 64,
-        }
-    }
-}
-
-pub struct Scheduler {
-    inner: Arc<dyn HttpClient>,
-    rx: mpsc::Receiver<RequestEnvelope>,
-    semaphore: Option<Arc<Semaphore>>,
-    retry: Option<RetryConfig>,
-}
-
-impl Scheduler {
-    pub fn spawn(inner: Arc<dyn HttpClient>, config: SchedulerConfig) -> ScheduledHttpClient {
-        let (tx, rx) = mpsc::channel(config.channel_capacity);
-        let scheduler = Self {
-            inner,
-            rx,
-            semaphore: config.max_concurrent.map(|n| Arc::new(Semaphore::new(n))),
-            retry: config.retry,
-        };
-        tokio::spawn(scheduler.run());
-        ScheduledHttpClient { tx }
-    }
-
-    async fn run(mut self) {
-        while let Some(envelope) = self.rx.recv().await {
-            let permit = match &self.semaphore {
-                Some(sem) => Some(
-                    Arc::clone(sem)
-                        .acquire_owned()
-                        .await
-                        .expect("Semaphore closed"),
-                ),
-                None => None,
-            };
-
-            let inner = Arc::clone(&self.inner);
-            let retry = self.retry.clone();
-            tokio::spawn(async move {
-                let _permit: Option<OwnedSemaphorePermit> = permit;
-                let result = dispatch_with_retry(
-                    inner.as_ref(),
-                    envelope.req,
-                    envelope.extractor,
-                    retry.as_ref(),
-                )
-                .await;
-                let _ = envelope.reply.send(result);
-            });
+            channel_capacity: default_channel_capacity(),
         }
     }
 }
@@ -176,8 +151,6 @@ async fn dispatch_with_retry(
 ) -> Result<Arc<Response>, Error> {
     use reqwest::StatusCode;
 
-    // Clone the extractor for potential retries. We always need an owned
-    // BodyExtractorCow<'static> for each attempt.
     let extractor = Arc::new(extractor);
 
     let retry = match retry {
@@ -189,9 +162,9 @@ async fn dispatch_with_retry(
         }
     };
 
-    let mut backoff = retry.initial_backoff;
-
-    for attempt in 0..=retry.max_retries {
+    // Phase 1: honour Retry-After header.
+    let mut retry_after_remaining = retry.retry_after_attempts;
+    loop {
         let res = inner
             .make_request(req.clone(), Arc::clone(&extractor).as_ref().clone_static())
             .await?;
@@ -200,28 +173,53 @@ async fn dispatch_with_retry(
             return Ok(res);
         }
 
-        if attempt == retry.max_retries {
-            // Return the 429 response to the caller after exhausting retries.
+        let Some(delay) = parse_retry_after(&res) else {
+            // No Retry-After header — skip straight to phase 2.
+            break;
+        };
+
+        if retry_after_remaining == 0 {
+            break;
+        }
+        retry_after_remaining -= 1;
+
+        tracing::warn!(
+            remaining = retry_after_remaining,
+            delay_ms = delay.as_millis(),
+            "429 with Retry-After, waiting before retry (phase 1)",
+        );
+        tokio::time::sleep(delay).await;
+    }
+
+    // Phase 2: exponential backoff.
+    let mut backoff = retry.initial_backoff;
+    for remaining in (0..retry.backoff_attempts).rev() {
+        let res = inner
+            .make_request(req.clone(), Arc::clone(&extractor).as_ref().clone_static())
+            .await?;
+
+        if res.status != StatusCode::TOO_MANY_REQUESTS {
             return Ok(res);
         }
 
-        // Prefer Retry-After, fall back to exponential backoff.
-        let delay = parse_retry_after(&res).unwrap_or(backoff);
+        if remaining == 0 {
+            return Ok(res);
+        }
 
         tracing::warn!(
-            attempt = attempt + 1,
-            max_retries = retry.max_retries,
-            delay_ms = delay.as_millis(),
-            "429 received, waiting before retry",
+            remaining,
+            backoff_ms = backoff.as_millis(),
+            "429 received, exponential backoff (phase 2)",
         );
-
-        tokio::time::sleep(delay).await;
-
-        backoff = (Duration::from_secs_f64(backoff.as_secs_f64() * retry.backoff_multiplier))
+        tokio::time::sleep(backoff).await;
+        backoff = Duration::from_secs_f64(backoff.as_secs_f64() * retry.backoff_multiplier)
             .min(retry.max_backoff);
     }
 
-    unreachable!()
+    // backoff_attempts was 0 — make one final attempt and return whatever we get.
+    inner
+        .make_request(req, Arc::clone(&extractor).as_ref().clone_static())
+        .await
 }
 
 /// Routes each request to a per-domain [`Scheduler`] worker, creating one
@@ -276,14 +274,36 @@ impl DomainScheduler {
             .entry(host.to_string())
             .or_insert_with(|| {
                 let config = self.config_for(host);
-                let (tx, rx) = mpsc::channel(config.channel_capacity);
-                let scheduler = Scheduler {
-                    inner: Arc::clone(&self.inner),
-                    rx,
-                    semaphore: config.max_concurrent.map(|n| Arc::new(Semaphore::new(n))),
-                    retry: config.retry.clone(),
-                };
-                tokio::spawn(scheduler.run());
+                let (tx, mut rx) = mpsc::channel::<RequestEnvelope>(config.channel_capacity);
+                let inner = Arc::clone(&self.inner);
+                let semaphore = config.max_concurrent.map(|n| Arc::new(Semaphore::new(n)));
+                let retry = config.retry.clone();
+                tokio::spawn(async move {
+                    while let Some(envelope) = rx.recv().await {
+                        let permit = match &semaphore {
+                            Some(sem) => Some(
+                                Arc::clone(sem)
+                                    .acquire_owned()
+                                    .await
+                                    .expect("Semaphore closed"),
+                            ),
+                            None => None,
+                        };
+                        let inner = Arc::clone(&inner);
+                        let retry = retry.clone();
+                        tokio::spawn(async move {
+                            let _permit: Option<OwnedSemaphorePermit> = permit;
+                            let result = dispatch_with_retry(
+                                inner.as_ref(),
+                                envelope.req,
+                                envelope.extractor,
+                                retry.as_ref(),
+                            )
+                            .await;
+                            let _ = envelope.reply.send(result);
+                        });
+                    }
+                });
                 tx
             })
             .clone();
@@ -356,7 +376,7 @@ mod tests {
     use crate::{
         http::{
             HttpClient, Request, ResponseStatus, default_http_client,
-            scheduler::{Scheduler, SchedulerConfig},
+            scheduler::{DomainScheduler, RetryConfig, SchedulerConfig},
         },
         test_utils::{MockServer, init_test_logger},
     };
@@ -368,7 +388,7 @@ mod tests {
             MockServer::new(async |_| Ok(HyperResponse::new(Full::new(Bytes::from("hello")))))
                 .await?;
 
-        let client = Scheduler::spawn(default_http_client(), SchedulerConfig::unlimited());
+        let client = DomainScheduler::new(default_http_client(), SchedulerConfig::unlimited());
         let req = Request {
             url: server.route("/"),
             ..Default::default()
@@ -394,10 +414,7 @@ mod tests {
         })
         .await?;
 
-        let client = Arc::new(Scheduler::spawn(
-            default_http_client(),
-            SchedulerConfig::unlimited(),
-        ));
+        let client = DomainScheduler::new(default_http_client(), SchedulerConfig::unlimited());
         let req = Request {
             url: server.route("/"),
             ..Default::default()
@@ -441,10 +458,10 @@ mod tests {
         .await?;
 
         let max_concurrent = 3;
-        let client = Arc::new(Scheduler::spawn(
+        let client = DomainScheduler::new(
             default_http_client(),
             SchedulerConfig::capped(max_concurrent),
-        ));
+        );
         let req = Request {
             url: server.route("/"),
             ..Default::default()
@@ -495,7 +512,7 @@ mod tests {
         })
         .await?;
 
-        let client = Scheduler::spawn(default_http_client(), SchedulerConfig::unlimited());
+        let client = DomainScheduler::new(default_http_client(), SchedulerConfig::unlimited());
         let req = Request {
             url: server.route("/"),
             ..Default::default()
@@ -530,13 +547,13 @@ mod tests {
         })
         .await?;
 
-        use crate::http::scheduler::RetryConfig;
-        let client = Scheduler::spawn(
+        let client = DomainScheduler::new(
             default_http_client(),
             SchedulerConfig {
                 max_concurrent: None,
                 retry: Some(RetryConfig {
-                    max_retries: 5,
+                    retry_after_attempts: 0,
+                    backoff_attempts: 5,
                     initial_backoff: Duration::from_millis(1), // fast for tests
                     backoff_multiplier: 2.0,
                     max_backoff: Duration::from_millis(10),

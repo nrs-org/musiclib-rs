@@ -214,3 +214,94 @@ pub fn cache_http_client() -> Arc<dyn HttpClient> {
     use cache::IntoCachedHttpClient;
     Arc::new(default_http_client().into_cached::<MemoryHttpCache>())
 }
+
+/// Configuration for building a layered [`HttpClient`] stack.
+///
+/// Configuration for building a layered [`HttpClient`] stack.
+///
+/// The stack from innermost to outermost is:
+/// `DefaultHttpClient` → `DomainScheduler` → DB cache (optional) → memory cache (optional)
+///
+/// Cache hits at an outer layer bypass all inner layers including scheduling.
+///
+/// Example YAML:
+/// ```yaml
+/// memory_cache: true
+/// db_cache: sqlite://http_cache.db
+/// schedulers:
+///   "*":                     # default for all unlisted domains
+///     max_concurrent: ~      # unlimited
+///     retry:
+///       max_retries: 5
+///       initial_backoff: 1000
+///       backoff_multiplier: 2.0
+///       max_backoff: 60000
+///   musicbrainz.org:
+///     max_concurrent: 1
+///   api.spotify.com:
+///     max_concurrent: ~
+/// ```
+#[derive(serde::Deserialize)]
+pub struct DbCacheConfig {
+    pub path: String,
+    #[serde(default)]
+    pub cache_policy: cache::CacheClientConfig,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(default)]
+pub struct HttpClientConfig {
+    /// Scheduling configs keyed by host. The special key `"*"` is the default
+    /// applied to any domain not explicitly listed.
+    pub schedulers: std::collections::HashMap<String, scheduler::SchedulerConfig>,
+    /// Persistent DB cache. `None` disables it.
+    pub db_cache: Option<DbCacheConfig>,
+    /// Wrap the outermost layer in an in-process memory cache.
+    pub memory_cache: bool,
+}
+
+impl Default for HttpClientConfig {
+    fn default() -> Self {
+        Self {
+            schedulers: std::collections::HashMap::new(),
+            db_cache: None,
+            memory_cache: false,
+        }
+    }
+}
+
+impl HttpClientConfig {
+    pub async fn build(self) -> Result<Arc<dyn HttpClient>, crate::httpcache::db::Error> {
+        use crate::httpcache::{DbHttpCache, HttpCache, MemoryHttpCache};
+        use cache::IntoCachedHttpClient;
+
+        // Base → scheduler
+        let base = default_http_client();
+        let mut schedulers = self.schedulers;
+        let default_config = schedulers
+            .remove("*")
+            .unwrap_or_else(scheduler::SchedulerConfig::unlimited);
+        let scheduled: Arc<dyn HttpClient> =
+            scheduler::DomainScheduler::with_domain_configs(base, default_config, schedulers);
+
+        // Optional DB cache layer
+        let with_db: Arc<dyn HttpClient> = match self.db_cache {
+            Some(DbCacheConfig { path, cache_policy }) => {
+                let db = Arc::new(DbHttpCache::new(path).await?) as Arc<dyn HttpCache>;
+                Arc::new(cache::CacheHttpClient {
+                    client: scheduled,
+                    cache: db,
+                    config: cache_policy,
+                })
+            }
+            None => scheduled,
+        };
+
+        // Optional memory cache layer (outermost)
+        Ok(if self.memory_cache {
+            Arc::new(with_db.into_cached::<MemoryHttpCache>())
+        } else {
+            with_db
+        })
+    }
+}

@@ -1,6 +1,7 @@
 use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 
 use musiclib_rs::{
+    http::HttpClientConfig,
     musicdb::MusicDb,
     providers::{
         FetchProvider,
@@ -22,6 +23,8 @@ async fn main() -> anyhow::Result<()> {
     let mut url = None;
     let mut fetch_options_path: Option<String> = None;
     let mut db_path = "musiclib.db".to_string();
+    let mut registry_config_path: Option<String> = None;
+    let mut http_config_path: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -35,6 +38,16 @@ async fn main() -> anyhow::Result<()> {
             "--db" => {
                 db_path = args.next().expect("--db requires a path argument");
             }
+            "--registry-config" => {
+                registry_config_path = Some(
+                    args.next()
+                        .expect("--registry-config requires a path argument"),
+                );
+            }
+            "--http-config" => {
+                http_config_path =
+                    Some(args.next().expect("--http-config requires a path argument"));
+            }
             other => {
                 if url.is_none() {
                     url = Some(other.to_string());
@@ -45,9 +58,30 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let url = url.expect("usage: import <url> [--fetch-options <path>] [--db <path>]");
+    let url = url.expect(
+        "usage: import <url> [--fetch-options <path>] [--db <path>] [--registry-config <path>] [--http-config <path>]",
+    );
 
-    let providers = build_providers(&RegistryConfig::default())?;
+    let registry_config = match registry_config_path {
+        Some(ref path) => {
+            let text = tokio::fs::read_to_string(path).await?;
+            let config: RegistryConfig = serde_yaml_ng::from_str(&text)?;
+            println!("Registry config: {path}");
+            config
+        }
+        None => RegistryConfig::default(),
+    };
+    let http_config = match http_config_path {
+        Some(ref path) => {
+            let text = tokio::fs::read_to_string(path).await?;
+            let config: HttpClientConfig = serde_yaml_ng::from_str(&text)?;
+            println!("HTTP client config: {path}");
+            config
+        }
+        None => HttpClientConfig::default(),
+    };
+    let http = http_config.build().await?;
+    let providers = build_providers(&registry_config, http)?;
     if providers.is_empty() {
         anyhow::bail!("No providers available — check your credential env vars");
     }
