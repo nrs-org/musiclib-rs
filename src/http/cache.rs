@@ -1,13 +1,40 @@
+use std::{collections::HashMap, sync::Arc};
+
 use async_trait::async_trait;
 
-use crate::httpcache::HttpCache;
+use crate::httpcache::{CachePolicy, HttpCache};
 
 use super::{HttpClient, Request, Response};
-use std::sync::Arc;
+
+#[derive(Default, serde::Deserialize)]
+pub struct CacheClientConfig {
+    /// Policy applied to requests whose host is not listed in `domains`.
+    /// `None` means don't cache by default.
+    pub default_policy: Option<CachePolicy>,
+    /// Per-host policy overrides. `None` value means don't cache for that host.
+    pub domains: HashMap<String, Option<CachePolicy>>,
+}
+
+impl CacheClientConfig {
+    fn resolve_policy(&self, url: &str) -> Option<&CachePolicy> {
+        let host = reqwest::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned));
+
+        if let Some(host) = host {
+            if let Some(domain_policy) = self.domains.get(&host) {
+                return domain_policy.as_ref();
+            }
+        }
+
+        self.default_policy.as_ref()
+    }
+}
 
 pub struct CacheHttpClient {
     pub client: Arc<dyn HttpClient>,
     pub cache: Arc<dyn HttpCache>,
+    pub config: CacheClientConfig,
 }
 
 pub trait IntoCachedHttpClient: Sized {
@@ -26,6 +53,7 @@ impl IntoCachedHttpClient for Arc<dyn HttpClient> {
         CacheHttpClient {
             client: self,
             cache,
+            config: CacheClientConfig::default(),
         }
     }
 }
@@ -46,7 +74,8 @@ impl HttpClient for CacheHttpClient {
             .client
             .make_request(req.clone(), body_extractor)
             .await?;
-        self.cache.set_req(&req, res.clone()).await?;
+        let policy = self.config.resolve_policy(&req.url);
+        self.cache.set_req(&req, policy, res.clone()).await?;
         Ok(res)
     }
 }

@@ -6,9 +6,11 @@ use crate::http::{BodyExtractor, Method, Request, Response};
 
 pub use db::DbHttpCache;
 pub use memory::MemoryHttpCache;
+pub use policy::{CachePolicy, ResponseCachePolicy, StatusCacheRule, StatusMatcher, TtlPolicy};
 
-mod db;
+pub mod db;
 mod memory;
+pub mod policy;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -24,7 +26,13 @@ pub enum Error {
 
 #[async_trait]
 pub trait HttpCache: Send + Sync {
-    async fn set(&self, key: String, value: Arc<Response>) -> Result<(), Error>;
+    async fn set(
+        &self,
+        key: String,
+        method: &Method,
+        policy: Option<&CachePolicy>,
+        value: Arc<Response>,
+    ) -> Result<(), Error>;
     async fn get(
         &self,
         key: &str,
@@ -49,13 +57,18 @@ pub trait HttpCache: Send + Sync {
         self.get(key.as_ref(), extractor).await
     }
 
-    async fn set_req(&self, req: &Request, res: Arc<Response>) -> Result<(), Error> {
+    async fn set_req(
+        &self,
+        req: &Request,
+        policy: Option<&CachePolicy>,
+        res: Arc<Response>,
+    ) -> Result<(), Error> {
         let key = req
             .cache_key
             .as_ref()
             .map(|k| Cow::Borrowed(k.as_str()))
             .unwrap_or_else(|| Cow::Owned(self.default_cache_key(&req.method, &req.url)));
 
-        self.set(key.into_owned(), res).await
+        self.set(key.into_owned(), &req.method, policy, res).await
     }
 }

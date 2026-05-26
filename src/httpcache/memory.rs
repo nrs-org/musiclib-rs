@@ -14,7 +14,13 @@ pub struct MemoryHttpCache {
 
 #[async_trait]
 impl super::HttpCache for MemoryHttpCache {
-    async fn set(&self, key: String, value: Arc<Response>) -> Result<(), super::Error> {
+    async fn set(
+        &self,
+        key: String,
+        _method: &crate::http::Method,
+        _policy: Option<&super::CachePolicy>,
+        value: Arc<Response>,
+    ) -> Result<(), super::Error> {
         self.storage.insert(key, value);
         Ok(())
     }

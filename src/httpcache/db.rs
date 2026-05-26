@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     http::{BodyExtractor, HeaderName, HeaderValue, RawResponse, Response},
-    httpcache::HttpCache,
+    httpcache::{CachePolicy, HttpCache},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +45,8 @@ mod cache_entry {
         pub created_at: OffsetDateTime,
         pub expires_at: OffsetDateTime,
         pub stale_at: OffsetDateTime,
+        /// How many times this key has consecutively returned the same status code.
+        pub consecutive_count: i32,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -66,6 +68,11 @@ impl DbHttpCache {
     }
 
     async fn init_db(db_url: String) -> Result<DatabaseConnection, Error> {
+        let db_url = if db_url.starts_with("sqlite://") && !db_url.contains('?') {
+            format!("{db_url}?mode=rwc")
+        } else {
+            db_url
+        };
         let db = Database::connect(db_url).await.unwrap();
         db.get_schema_registry("musiclib_rs::httpcache::db::*")
             .sync(&db)
@@ -105,13 +112,49 @@ impl DbHttpCache {
 
 #[async_trait]
 impl HttpCache for DbHttpCache {
-    async fn set(&self, key: String, value: Arc<Response>) -> Result<(), super::Error> {
-        let now = time::OffsetDateTime::now_utc();
+    async fn set(
+        &self,
+        key: String,
+        method: &crate::http::Method,
+        policy: Option<&CachePolicy>,
+        value: Arc<Response>,
+    ) -> Result<(), super::Error> {
+        let status = value.status.as_u16();
+
+        // Fetch the previous entry for this key to determine consecutive_count.
+        let prev = cache_entry::Entity::find_by_id(&key)
+            .one(&self.db)
+            .await
+            .map_err(Error::Database)?;
+
+        let consecutive_count = match &prev {
+            Some(m) if m.status == status as i32 => m.consecutive_count.max(0) + 1,
+            _ => 0,
+        };
+
+        // Resolve cache policy for this status code, then compute expiry times.
+        let (expires_at, stale_at) = match policy.and_then(|p| p.resolve(status)) {
+            None => {
+                // No policy or no matching rule: cache with a short default, no SWR.
+                let now = time::OffsetDateTime::now_utc();
+                (now + time::Duration::days(1), now)
+            }
+            Some(response_policy) => {
+                let ttl = response_policy.ttl.compute(consecutive_count as u32);
+                let ttl = time::Duration::try_from(ttl).unwrap_or(time::Duration::days(1));
+                let swr =
+                    time::Duration::try_from(response_policy.swr).unwrap_or(time::Duration::ZERO);
+
+                let now = time::OffsetDateTime::now_utc();
+                (now + ttl, now + ttl + swr)
+            }
+        };
+
         let entry = cache_entry::ActiveModel {
             key: Set(key),
-            method: Set(value.status.as_u16().to_string()),
-            url: Set("".to_string()), // URL is not used in this implementation
-            status: Set(value.status.as_u16() as i32),
+            method: Set(method.to_string()),
+            url: Set("".to_string()),
+            status: Set(status as i32),
             headers: Set(HeaderMap(
                 value
                     .headers
@@ -124,9 +167,10 @@ impl HttpCache for DbHttpCache {
                 .await
                 .map_err(|err| Error::BodyRead(Box::new(err)))?
                 .to_vec()),
-            created_at: Set(now),
-            expires_at: Set(now + time::Duration::days(7)), // Example expiration
-            stale_at: Set(now + time::Duration::days(3)),   // Example staleness
+            created_at: Set(time::OffsetDateTime::now_utc()),
+            expires_at: Set(expires_at),
+            stale_at: Set(stale_at),
+            consecutive_count: Set(consecutive_count),
         };
 
         cache_entry::Entity::insert(entry)
@@ -141,6 +185,7 @@ impl HttpCache for DbHttpCache {
                         cache_entry::Column::CreatedAt,
                         cache_entry::Column::ExpiresAt,
                         cache_entry::Column::StaleAt,
+                        cache_entry::Column::ConsecutiveCount,
                     ])
                     .to_owned(),
             )

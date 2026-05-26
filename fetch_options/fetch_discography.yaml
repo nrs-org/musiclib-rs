@@ -9,8 +9,8 @@
 
 main:
   child_rules:
-    - match: { external_type: "youtube:video" }
-      fetch: null                               # skip individual YouTube videos
+    - match: { not: { duration_range: { min: 60000, max: 1200000 } } }
+      fetch: null                               # skip tracks <1m or >20m (shorts, long streams)
     - match: { not: { entry_type: artist } }
       fetch: main                               # non-artists recurse
     - match: { entry_type: artist }

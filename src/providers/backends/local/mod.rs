@@ -18,13 +18,23 @@ use types::{LocalChild, LocalEntry};
 pub const SOURCE: &str = "local";
 pub const EXTERNAL_TYPE_ENTRY: &str = "local:entry";
 
-pub struct Provider;
+pub struct Provider {
+    base_dir: std::path::PathBuf,
+}
+
+impl Provider {
+    pub fn new(base_dir: std::path::PathBuf) -> Self {
+        Self { base_dir }
+    }
+}
 
 impl TryDefault for Provider {
     type Error = Error;
 
     fn try_default() -> Result<Self, Error> {
-        Ok(Self)
+        let base_dir = std::env::current_dir()
+            .map_err(|e| Error::InvalidUrl(format!("cannot determine CWD: {e}")))?;
+        Ok(Self { base_dir })
     }
 }
 
@@ -41,8 +51,13 @@ pub fn to_local_url(path: &std::path::Path) -> String {
     format!("local://{}", path.display())
 }
 
-fn match_local_url(url: &str) -> Option<PathBuf> {
-    parse_local_url(url)
+fn match_local_url(url: &str, base_dir: &std::path::Path) -> Option<PathBuf> {
+    let path = parse_local_url(url)?;
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(base_dir.join(path))
+    }
 }
 
 fn read_entry(path: &std::path::Path) -> Result<LocalEntry, Error> {
@@ -163,7 +178,7 @@ fn entry_to_entity_result(entry: LocalEntry, base: &std::path::Path) -> EntityRe
 #[async_trait]
 impl CanonicalizeProvider for Provider {
     async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult> {
-        let path = match_local_url(url)?;
+        let path = match_local_url(url, &self.base_dir)?;
         // Canonicalize path to absolute to ensure stable identifiers.
         let abs = std::fs::canonicalize(&path).ok()?;
         let entry = read_entry(&abs).ok()?;
@@ -183,8 +198,8 @@ impl FetchProvider for Provider {
         pool: Arc<EntryFetchOptionsPool>,
         root_id: OptionsId,
     ) -> Result<EntityResult, Error> {
-        let path =
-            match_local_url(identifier).ok_or_else(|| Error::InvalidUrl(identifier.to_string()))?;
+        let path = match_local_url(identifier, &self.base_dir)
+            .ok_or_else(|| Error::InvalidUrl(identifier.to_string()))?;
         let entry = read_entry(&path)?;
         let base = path.parent().unwrap_or(std::path::Path::new("."));
         let result = entry_to_entity_result(entry, base);
@@ -232,6 +247,12 @@ mod tests {
         let entry = read_entry(&path).expect("read_entry failed");
         let base = path.parent().unwrap();
         entry_to_entity_result(entry, base)
+    }
+
+    fn fixtures_provider() -> super::Provider {
+        super::Provider::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/providers/backends/local/fixtures"),
+        )
     }
 
     #[tokio::test]
