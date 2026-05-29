@@ -4,9 +4,11 @@ use regex::Regex;
 
 use crate::providers::types::{CanonicalizeResult, EntryType, TrackPosition};
 
+use super::SOURCE;
 use super::types::{
     EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_MASTER, EXTERNAL_TYPE_RELEASE, EXTERNAL_TYPE_TRACK,
 };
+use crate::providers::std_values::StandardProviderKeys;
 
 macro_rules! discogs_url_regex {
     ($entity:literal) => {
@@ -101,31 +103,38 @@ pub fn track_url(release_id: &str, position: &TrackPosition) -> String {
     }
 }
 
-pub fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
-    if let Some((release_id, position)) = match_track_url(url) {
+pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+    if source_key != StandardProviderKeys::UNKNOWN_URL {
+        return None;
+    }
+    if let Some((release_id, position)) = match_track_url(identifier) {
         let canonical = track_url(&release_id, &position);
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: canonical,
             entry_type: EntryType::Track,
             external_type: EXTERNAL_TYPE_TRACK.into(),
         });
     }
-    if let Some(id) = match_release_url(url) {
+    if let Some(id) = match_release_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: release_url(id),
             entry_type: EntryType::Release,
             external_type: EXTERNAL_TYPE_RELEASE.into(),
         });
     }
-    if let Some(id) = match_master_url(url) {
+    if let Some(id) = match_master_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: master_url(id),
             entry_type: EntryType::ReleaseGroup,
             external_type: EXTERNAL_TYPE_MASTER.into(),
         });
     }
-    if let Some(id) = match_artist_url(url) {
+    if let Some(id) = match_artist_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: artist_url(id),
             entry_type: EntryType::Artist,
             external_type: EXTERNAL_TYPE_ARTIST.into(),

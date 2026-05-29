@@ -4,9 +4,11 @@ use regex::Regex;
 
 use crate::providers::types::{CanonicalizeResult, EntryType};
 
+use super::SOURCE;
 use super::types::{
     EXTERNAL_TYPE_ALBUM, EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_TRACK,
 };
+use crate::providers::std_values::StandardProviderKeys;
 
 const SPOTIFY_ID_PATTERN: &str = r"[0-9A-Za-z]{22}";
 
@@ -65,30 +67,37 @@ pub fn artist_url(id: &str) -> String {
     format!("https://open.spotify.com/artist/{id}")
 }
 
-pub fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
-    if let Some(id) = match_track_url(url) {
+pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+    if source_key != StandardProviderKeys::UNKNOWN_URL {
+        return None;
+    }
+    if let Some(id) = match_track_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: track_url(id),
             entry_type: EntryType::Track,
             external_type: EXTERNAL_TYPE_TRACK.into(),
         });
     }
-    if let Some(id) = match_album_url(url) {
+    if let Some(id) = match_album_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: album_url(id),
             entry_type: EntryType::Release,
             external_type: EXTERNAL_TYPE_ALBUM.into(),
         });
     }
-    if let Some(id) = match_playlist_url(url) {
+    if let Some(id) = match_playlist_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: playlist_url(id),
             entry_type: EntryType::Release,
             external_type: EXTERNAL_TYPE_PLAYLIST.into(),
         });
     }
-    if let Some(id) = match_artist_url(url) {
+    if let Some(id) = match_artist_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: artist_url(id),
             entry_type: EntryType::Artist,
             external_type: EXTERNAL_TYPE_ARTIST.into(),

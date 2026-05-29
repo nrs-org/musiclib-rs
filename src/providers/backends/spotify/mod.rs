@@ -19,10 +19,7 @@ use crate::{
         backends::spotify::{
             album::{get_album, get_album_raw},
             artist::{get_artist, get_artist_albums_raw, get_artist_raw},
-            canonicalize::{
-                canonicalize, match_album_url, match_artist_url, match_playlist_url,
-                match_track_url,
-            },
+            canonicalize::canonicalize,
             client::SpotifyClient,
             playlist::{get_playlist, get_playlist_raw},
             track::{get_track, get_track_raw},
@@ -71,8 +68,8 @@ impl TryDefault for Provider {
 
 #[async_trait]
 impl CanonicalizeProvider for Provider {
-    async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult> {
-        canonicalize(url)
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        canonicalize(source_key, identifier)
     }
 }
 
@@ -80,20 +77,31 @@ impl CanonicalizeProvider for Provider {
 impl FetchProvider for Provider {
     async fn fetch_entry(
         self: Arc<Self>,
+        source_key: &str,
         identifier: &str,
         pool: Arc<EntryFetchOptionsPool>,
         root_id: OptionsId,
     ) -> Result<EntityResult, Error> {
-        let result = if match_track_url(identifier).is_some() {
+        use crate::providers::backends::spotify::types::{
+            EXTERNAL_TYPE_ALBUM, EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_TRACK,
+        };
+        let external_type = canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| Error::UnsupportedSourceKey(source_key.to_string()))?;
+        let external_type: &str = &external_type;
+        let result = if external_type == EXTERNAL_TYPE_TRACK {
             get_track(&self.client, identifier).await?
-        } else if match_album_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_ALBUM {
             get_album(&self.client, identifier).await?
-        } else if match_playlist_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_PLAYLIST {
             get_playlist(&self.client, identifier).await?
-        } else if match_artist_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_ARTIST {
             get_artist(&self.client, identifier).await?
         } else {
-            return Err(Error::InvalidUrl(identifier.to_string()));
+            return Err(Error::UnsupportedSourceKey(external_type.to_string()));
         };
 
         Ok(EntityResult {
@@ -125,7 +133,8 @@ impl RawFetchProvider for Provider {
 
     async fn raw_fetch<F, E, FR, R>(
         &self,
-        url: &str,
+        source_key: &str,
+        identifier: &str,
         _fetch_options: EntryFetchOptions,
         path_key: &str,
         callback: F,
@@ -136,28 +145,46 @@ impl RawFetchProvider for Provider {
         FR: Future<Output = Result<R, E>> + Send + 'static,
         R: Send,
     {
-        if match_track_url(url).is_some() {
-            return get_track_raw(&self.client, url, |v: &serde_json::Value, _id| callback(v))
-                .await;
+        use crate::providers::backends::spotify::types::{
+            EXTERNAL_TYPE_ALBUM, EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_TRACK,
+        };
+        let external_type = canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| E::from(Error::UnsupportedSourceKey(source_key.to_string())))?;
+        let external_type: &str = &external_type;
+        if external_type == EXTERNAL_TYPE_TRACK {
+            return get_track_raw(&self.client, identifier, |v: &serde_json::Value, _id| {
+                callback(v)
+            })
+            .await;
         }
-        if match_album_url(url).is_some() {
-            return get_album_raw(&self.client, url, |v: &serde_json::Value, _id| callback(v))
-                .await;
+        if external_type == EXTERNAL_TYPE_ALBUM {
+            return get_album_raw(&self.client, identifier, |v: &serde_json::Value, _id| {
+                callback(v)
+            })
+            .await;
         }
-        if match_playlist_url(url).is_some() {
-            return get_playlist_raw(&self.client, url, |v: &serde_json::Value, _id| callback(v))
-                .await;
+        if external_type == EXTERNAL_TYPE_PLAYLIST {
+            return get_playlist_raw(&self.client, identifier, |v: &serde_json::Value, _id| {
+                callback(v)
+            })
+            .await;
         }
-        if match_artist_url(url).is_some() {
+        if external_type == EXTERNAL_TYPE_ARTIST {
             if path_key == "albums" {
-                return get_artist_albums_raw(&self.client, url, |v: &serde_json::Value| {
+                return get_artist_albums_raw(&self.client, identifier, |v: &serde_json::Value| {
                     callback(v)
                 })
                 .await;
             }
-            return get_artist_raw(&self.client, url, |v: &serde_json::Value, _id| callback(v))
-                .await;
+            return get_artist_raw(&self.client, identifier, |v: &serde_json::Value, _id| {
+                callback(v)
+            })
+            .await;
         }
-        Err(Error::InvalidUrl(url.to_string()).into())
+        Err(Error::UnsupportedSourceKey(external_type.to_string()).into())
     }
 }

@@ -6,7 +6,6 @@ pub mod soundcloud;
 pub mod spotify;
 pub mod youtube_api;
 pub mod ytdlp;
-pub mod ytmusicapi;
 
 pub fn build_url(url: String, params: &[(&str, &str)]) -> String {
     let mut url = url;

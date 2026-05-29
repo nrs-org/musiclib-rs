@@ -657,6 +657,86 @@ where
         .await
 }
 
+/// Fetches the ytmusicapi artist overview for a channel — used for fixture updates.
+/// Requires `client.ytmusicapi_url` to be set.
+pub async fn get_channel_ytmusic_artist_raw<F, R, E, FR>(
+    client: &YoutubeClient,
+    url: &str,
+    callback: F,
+) -> Result<R, E>
+where
+    F: FnOnce(&serde_json::Value) -> FR,
+    E: From<Error> + Send + 'static,
+    FR: Future<Output = Result<R, E>> + Send + 'static,
+{
+    let channel_match = match_channel_url(url).expect("Invalid YouTube channel URL");
+    let server_url = client.ytmusicapi_url.as_deref().ok_or_else(|| {
+        E::from(Error::MissingCredentials(
+            "ytmusicapi_url not configured".into(),
+        ))
+    })?;
+    let request_url = format!(
+        "{}/artists/{}",
+        server_url.trim_end_matches('/'),
+        urlencoding::encode(channel_match.id)
+    );
+    let response = client
+        .client
+        .get_bytes(crate::http::Request {
+            url: request_url,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| E::from(Error::Http(e)))?;
+    let body = response
+        .body_to_bytes()
+        .await
+        .map_err(|e| E::from(Error::InvalidUrl(e.to_string())))?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| E::from(Error::InvalidUrl(e.to_string())))?;
+    callback(&value).await
+}
+
+/// Fetches the ytmusicapi discography for a channel — used for fixture updates.
+/// Requires `client.ytmusicapi_url` to be set.
+pub async fn get_channel_ytmusic_discography_raw<F, R, E, FR>(
+    client: &YoutubeClient,
+    url: &str,
+    callback: F,
+) -> Result<R, E>
+where
+    F: FnOnce(&serde_json::Value) -> FR,
+    E: From<Error> + Send + 'static,
+    FR: Future<Output = Result<R, E>> + Send + 'static,
+{
+    let channel_match = match_channel_url(url).expect("Invalid YouTube channel URL");
+    let server_url = client.ytmusicapi_url.as_deref().ok_or_else(|| {
+        E::from(Error::MissingCredentials(
+            "ytmusicapi_url not configured".into(),
+        ))
+    })?;
+    let request_url = format!(
+        "{}/artists/{}/discography",
+        server_url.trim_end_matches('/'),
+        urlencoding::encode(channel_match.id)
+    );
+    let response = client
+        .client
+        .get_bytes(crate::http::Request {
+            url: request_url,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| E::from(Error::Http(e)))?;
+    let body = response
+        .body_to_bytes()
+        .await
+        .map_err(|e| E::from(Error::InvalidUrl(e.to_string())))?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| E::from(Error::InvalidUrl(e.to_string())))?;
+    callback(&value).await
+}
+
 fn channel_endpoint_and_params(
     channel_kind: ChannelKind,
     id: &str,

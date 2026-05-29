@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::providers::std_values::StandardProviderKeys;
 use crate::providers::{
     backends::musicbrainz::{
         SOURCE,
@@ -20,9 +21,7 @@ pub(crate) struct UrlResource {
 
 // --- Helpers ---
 
-pub(crate) const UNKNOWN_SOURCE_KEY: &str = "unknown";
-
-/// Map a URL to a source key string. Returns `UNKNOWN_SOURCE_KEY` for unrecognised domains.
+/// Map a URL to a source key string. Returns `StandardProviderKeys::UNKNOWN_URL` for unrecognised domains.
 pub(crate) fn url_source_key(url: &str) -> &'static str {
     let Some(host) = url
         .split("//")
@@ -30,7 +29,7 @@ pub(crate) fn url_source_key(url: &str) -> &'static str {
         .and_then(|s| s.split('/').next())
         .map(|h| h.trim_start_matches("www."))
     else {
-        return UNKNOWN_SOURCE_KEY;
+        return StandardProviderKeys::UNKNOWN_URL;
     };
     match host {
         "youtube.com" | "youtu.be" | "music.youtube.com" => "youtube",
@@ -43,7 +42,7 @@ pub(crate) fn url_source_key(url: &str) -> &'static str {
         "deezer.com" => "deezer",
         "vgmdb.net" => "vgmdb",
         "last.fm" | "lastfm.com" => "lastfm",
-        _ => UNKNOWN_SOURCE_KEY,
+        _ => StandardProviderKeys::UNKNOWN_URL,
     }
 }
 

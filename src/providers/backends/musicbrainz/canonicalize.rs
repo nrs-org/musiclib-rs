@@ -4,10 +4,12 @@ use regex::Regex;
 
 use crate::providers::types::{CanonicalizeResult, EntryType};
 
+use super::SOURCE;
 use super::types::{
     EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_RECORDING, EXTERNAL_TYPE_RELEASE,
     EXTERNAL_TYPE_RELEASE_GROUP,
 };
+use crate::providers::std_values::StandardProviderKeys;
 
 const MBID_PATTERN: &str = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
@@ -66,30 +68,37 @@ pub fn recording_url(mbid: &str) -> String {
     format!("https://musicbrainz.org/recording/{mbid}")
 }
 
-pub fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
-    if let Some(mbid) = match_recording_url(url) {
+pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+    if source_key != StandardProviderKeys::UNKNOWN_URL {
+        return None;
+    }
+    if let Some(mbid) = match_recording_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: recording_url(mbid),
             entry_type: EntryType::Track,
             external_type: EXTERNAL_TYPE_RECORDING.into(),
         });
     }
-    if let Some(mbid) = match_release_url(url) {
+    if let Some(mbid) = match_release_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: release_url(mbid),
             entry_type: EntryType::Release,
             external_type: EXTERNAL_TYPE_RELEASE.into(),
         });
     }
-    if let Some(mbid) = match_release_group_url(url) {
+    if let Some(mbid) = match_release_group_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: release_group_url(mbid),
             entry_type: EntryType::ReleaseGroup,
             external_type: EXTERNAL_TYPE_RELEASE_GROUP.into(),
         });
     }
-    if let Some(mbid) = match_artist_url(url) {
+    if let Some(mbid) = match_artist_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: artist_url(mbid),
             entry_type: EntryType::Artist,
             external_type: EXTERNAL_TYPE_ARTIST.into(),

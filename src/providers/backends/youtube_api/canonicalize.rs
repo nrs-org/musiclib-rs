@@ -1,10 +1,12 @@
 use fancy_regex::Regex;
 use std::sync::LazyLock;
 
+use crate::providers::backends::youtube_api::SOURCE;
 use crate::providers::backends::youtube_api::types::{
     EXTERNAL_TYPE_CHANNEL_ID, EXTERNAL_TYPE_CUSTOM_CHANNEL, EXTERNAL_TYPE_HANDLE,
     EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_USER_CHANNEL, EXTERNAL_TYPE_VIDEO,
 };
+use crate::providers::std_values::StandardProviderKeys;
 use crate::providers::types::CanonicalizeResult;
 
 // ─────────────────────────────────────────────
@@ -212,22 +214,28 @@ pub fn channel_url(kind: ChannelKind, id: &str) -> String {
     }
 }
 
-pub(super) fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
-    if let Some(video_id) = match_video_url(url) {
+pub(super) fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+    // Only accept unresolved URLs; canonical source keys are passed straight to fetch_entry.
+    if source_key != StandardProviderKeys::UNKNOWN_URL {
+        return None;
+    }
+    if let Some(video_id) = match_video_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: video_url(video_id),
             entry_type: crate::providers::types::EntryType::Track,
             external_type: EXTERNAL_TYPE_VIDEO.into(),
         });
     }
-    if let Some(playlist_id) = match_playlist_url(url) {
+    if let Some(playlist_id) = match_playlist_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: playlist_url(playlist_id),
             entry_type: crate::providers::types::EntryType::Release,
             external_type: EXTERNAL_TYPE_PLAYLIST.into(),
         });
     }
-    if let Some(channel_match) = match_channel_url(url) {
+    if let Some(channel_match) = match_channel_url(identifier) {
         let external_type = match channel_match.kind {
             ChannelKind::ChannelId => EXTERNAL_TYPE_CHANNEL_ID,
             ChannelKind::Custom => EXTERNAL_TYPE_CUSTOM_CHANNEL,
@@ -235,6 +243,7 @@ pub(super) fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
             ChannelKind::Handle => EXTERNAL_TYPE_HANDLE,
         };
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: channel_url(channel_match.kind, channel_match.id),
             entry_type: crate::providers::types::EntryType::Artist,
             external_type: external_type.into(),

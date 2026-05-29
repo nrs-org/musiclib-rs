@@ -11,6 +11,12 @@ pub enum Error {
     Database(#[from] DbErr),
 }
 
+// Pair-centric schema. Metadata lives on `entry_source` (keyed by the
+// (source, identifier) pair); `entry` is a grouping primitive whose id is
+// referenced from `entry_source.entry_id` only. Aliases, child edges, and
+// contributions are pair-keyed, so a DB-level entry merge only needs to
+// re-point `entry_source` rows.
+
 mod entry {
     use sea_orm::entity::prelude::*;
 
@@ -20,6 +26,23 @@ mod entry {
     pub struct Model {
         #[sea_orm(primary_key)]
         pub id: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+mod entry_source {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "entry_source")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub entry_id: i64,
         pub entry_type: String,
         pub release_date: Option<String>,
         pub extra: Option<String>,
@@ -37,24 +60,6 @@ mod entry {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-mod entry_source {
-    use sea_orm::entity::prelude::*;
-
-    #[sea_orm::model]
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "entry_source")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub entry_id: i64,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub source: String,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub identifier: String,
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 mod entry_alias {
     use sea_orm::entity::prelude::*;
 
@@ -64,9 +69,9 @@ mod entry_alias {
     pub struct Model {
         #[sea_orm(primary_key)]
         pub id: i64,
-        pub entry_id: i64,
-        pub name: String,
         pub source: String,
+        pub identifier: String,
+        pub name: String,
         pub locale: Option<String>,
         pub extra: Option<String>,
         pub primary: bool,
@@ -83,9 +88,13 @@ mod entry_child {
     #[sea_orm(table_name = "entry_child")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
-        pub parent_id: i64,
+        pub parent_source: String,
         #[sea_orm(primary_key, auto_increment = false)]
-        pub child_id: i64,
+        pub parent_identifier: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub child_source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub child_identifier: String,
         pub disc_no: Option<i32>,
         pub track_no: Option<i32>,
     }
@@ -102,12 +111,13 @@ mod contribution {
     pub struct Model {
         #[sea_orm(primary_key)]
         pub id: i64,
-        pub entry_id: i64,
-        pub artist_id: i64,
+        pub source: String,
+        pub identifier: String,
+        pub artist_source: String,
+        pub artist_identifier: String,
         pub role: String,
         pub main_artist: bool,
         pub extra: Option<String>,
-        pub source: String,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -131,28 +141,63 @@ impl MusicDb {
         Ok(Self { db })
     }
 
-    /// Find an existing entry by a known (source, identifier) pair.
-    pub async fn find_entry_by_source(
+    /// Look up the entry_id grouping a given (source, identifier) pair, if any.
+    pub async fn find_entry_id_by_pair(
         &self,
         source: &str,
         identifier: &str,
     ) -> Result<Option<i64>, Error> {
-        Ok(entry_source::Entity::find()
-            .filter(entry_source::Column::Source.eq(source))
-            .filter(entry_source::Column::Identifier.eq(identifier))
-            .one(&self.db)
-            .await?
-            .map(|m| m.entry_id))
+        Ok(
+            entry_source::Entity::find_by_id((source.to_string(), identifier.to_string()))
+                .one(&self.db)
+                .await?
+                .map(|m| m.entry_id),
+        )
     }
 
-    /// Insert a new entry row and return its auto-assigned id.
-    pub async fn insert_entry(
+    /// Allocate a fresh `entry` row and return its auto-assigned id.
+    pub async fn insert_entry(&self) -> Result<i64, Error> {
+        let result = entry::Entity::insert(entry::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+        })
+        .exec(&self.db)
+        .await?;
+        Ok(result.last_insert_id)
+    }
+
+    /// Re-point every `entry_source` row from `loser` to `winner` and delete the
+    /// loser `entry` row. No other tables reference `entry_id`, so this is the
+    /// entirety of a DB-level entry merge.
+    pub async fn merge_entries(&self, loser: i64, winner: i64) -> Result<(), Error> {
+        if loser == winner {
+            return Ok(());
+        }
+        entry_source::Entity::update_many()
+            .col_expr(
+                entry_source::Column::EntryId,
+                sea_query::Expr::value(winner),
+            )
+            .filter(entry_source::Column::EntryId.eq(loser))
+            .exec(&self.db)
+            .await?;
+        entry::Entity::delete_by_id(loser).exec(&self.db).await?;
+        Ok(())
+    }
+
+    /// Insert or update the metadata row for a pair. Updates every metadata
+    /// column on conflict — the importer is the only writer and its final
+    /// observation wins.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_pair(
         &self,
+        source: &str,
+        identifier: &str,
+        entry_id: i64,
         entry_type: EntryType,
         release_date: Option<&str>,
         extra: Option<String>,
         specific_data: &EntrySpecificData,
-    ) -> Result<i64, Error> {
+    ) -> Result<(), Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -178,8 +223,10 @@ impl MusicDb {
             EntryType::Track => "track",
         };
 
-        let result = entry::Entity::insert(entry::ActiveModel {
-            id: sea_orm::ActiveValue::NotSet,
+        entry_source::Entity::insert(entry_source::ActiveModel {
+            source: Set(source.to_string()),
+            identifier: Set(identifier.to_string()),
+            entry_id: Set(entry_id),
             entry_type: Set(entry_type_str.to_string()),
             release_date: Set(release_date.map(|s| s.to_string())),
             extra: Set(extra),
@@ -190,50 +237,79 @@ impl MusicDb {
             num_tracks: Set(num_tracks),
             primary_type: Set(primary_type),
         })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                entry_source::Column::Source,
+                entry_source::Column::Identifier,
+            ])
+            .update_columns([
+                entry_source::Column::EntryId,
+                entry_source::Column::EntryType,
+                entry_source::Column::ReleaseDate,
+                entry_source::Column::Extra,
+                entry_source::Column::FetchedAt,
+                entry_source::Column::DurationMs,
+                entry_source::Column::ReleaseType,
+                entry_source::Column::NumDiscs,
+                entry_source::Column::NumTracks,
+                entry_source::Column::PrimaryType,
+            ])
+            .to_owned(),
+        )
         .exec(&self.db)
         .await?;
-
-        Ok(result.last_insert_id)
+        Ok(())
     }
 
-    /// Insert multiple (source, identifier) pairs for an entry in one round-trip.
-    /// Silently ignores duplicates.
-    pub async fn insert_sources_batch(
+    /// Insert a stub row for a pair we never fetched but which is referenced by
+    /// an is_rel / has_rel / contribution. Binds the pair to its assigned
+    /// `entry_id` so equivalence-class queries see it. Uses `entry_type =
+    /// "unknown"` and leaves other metadata NULL. Does nothing on conflict so a
+    /// stub will never overwrite a real metadata row.
+    pub async fn insert_stub_pair(
         &self,
+        source: &str,
+        identifier: &str,
         entry_id: i64,
-        sources: impl IntoIterator<Item = (&str, &str)>,
     ) -> Result<(), Error> {
-        let models: Vec<entry_source::ActiveModel> = sources
-            .into_iter()
-            .map(|(source, identifier)| entry_source::ActiveModel {
-                entry_id: Set(entry_id),
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        ignore_not_inserted(
+            entry_source::Entity::insert(entry_source::ActiveModel {
                 source: Set(source.to_string()),
                 identifier: Set(identifier.to_string()),
+                entry_id: Set(entry_id),
+                entry_type: Set("unknown".to_string()),
+                release_date: Set(None),
+                extra: Set(None),
+                fetched_at: Set(now),
+                duration_ms: Set(None),
+                release_type: Set(None),
+                num_discs: Set(None),
+                num_tracks: Set(None),
+                primary_type: Set(None),
             })
-            .collect();
-        if models.is_empty() {
-            return Ok(());
-        }
-        ignore_many_not_inserted(
-            entry_source::Entity::insert_many(models)
-                .on_conflict(
-                    sea_query::OnConflict::columns([
-                        entry_source::Column::EntryId,
-                        entry_source::Column::Source,
-                        entry_source::Column::Identifier,
-                    ])
-                    .do_nothing()
-                    .to_owned(),
-                )
-                .exec(&self.db)
-                .await,
+            .on_conflict(
+                sea_query::OnConflict::columns([
+                    entry_source::Column::Source,
+                    entry_source::Column::Identifier,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(&self.db)
+            .await,
         )
     }
 
-    /// Insert multiple aliases for an entry in one round-trip.
-    pub async fn insert_aliases_batch(
+    /// Insert aliases for a pair. Caller is responsible for deduping if needed
+    /// — the table has no uniqueness constraint on (pair, name, locale).
+    pub async fn insert_aliases_for_pair(
         &self,
-        entry_id: i64,
+        source: &str,
+        identifier: &str,
         aliases: &[Alias],
     ) -> Result<(), Error> {
         if aliases.is_empty() {
@@ -243,9 +319,9 @@ impl MusicDb {
             .iter()
             .map(|alias| entry_alias::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
-                entry_id: Set(entry_id),
+                source: Set(source.to_string()),
+                identifier: Set(identifier.to_string()),
                 name: Set(alias.name.clone()),
-                source: Set(alias.source.clone()),
                 locale: Set(alias.locale.clone()),
                 extra: Set(Some(alias.extra.to_string())),
                 primary: Set(alias.primary),
@@ -257,70 +333,68 @@ impl MusicDb {
         Ok(())
     }
 
-    /// Insert multiple parent→child edges in one round-trip. Silently ignores duplicates.
-    pub async fn insert_child_edges_batch(
+    /// Insert a parent→child edge between two pairs. Idempotent on the
+    /// composite PK (parent_pair, child_pair).
+    pub async fn insert_child_edge(
         &self,
-        edges: impl IntoIterator<Item = (i64, i64, Option<i32>, Option<i32>)>,
+        parent_source: &str,
+        parent_identifier: &str,
+        child_source: &str,
+        child_identifier: &str,
+        disc_no: Option<i32>,
+        track_no: Option<i32>,
     ) -> Result<(), Error> {
-        let models: Vec<entry_child::ActiveModel> = edges
-            .into_iter()
-            .map(
-                |(parent_id, child_id, disc_no, track_no)| entry_child::ActiveModel {
-                    parent_id: Set(parent_id),
-                    child_id: Set(child_id),
-                    disc_no: Set(disc_no),
-                    track_no: Set(track_no),
-                },
+        ignore_not_inserted(
+            entry_child::Entity::insert(entry_child::ActiveModel {
+                parent_source: Set(parent_source.to_string()),
+                parent_identifier: Set(parent_identifier.to_string()),
+                child_source: Set(child_source.to_string()),
+                child_identifier: Set(child_identifier.to_string()),
+                disc_no: Set(disc_no),
+                track_no: Set(track_no),
+            })
+            .on_conflict(
+                sea_query::OnConflict::columns([
+                    entry_child::Column::ParentSource,
+                    entry_child::Column::ParentIdentifier,
+                    entry_child::Column::ChildSource,
+                    entry_child::Column::ChildIdentifier,
+                ])
+                .do_nothing()
+                .to_owned(),
             )
-            .collect();
-        if models.is_empty() {
-            return Ok(());
-        }
-        ignore_many_not_inserted(
-            entry_child::Entity::insert_many(models)
-                .on_conflict(
-                    sea_query::OnConflict::columns([
-                        entry_child::Column::ParentId,
-                        entry_child::Column::ChildId,
-                    ])
-                    .do_nothing()
-                    .to_owned(),
-                )
-                .exec(&self.db)
-                .await,
+            .exec(&self.db)
+            .await,
         )
     }
 
-    /// Insert multiple artist contributions in one round-trip.
-    pub async fn insert_contributions_batch(
+    /// Insert a contribution attached to a (parent_pair, artist_pair) edge.
+    pub async fn insert_contribution(
         &self,
-        entry_id: i64,
-        contributions: impl IntoIterator<Item = (i64, Contribution)>,
+        source: &str,
+        identifier: &str,
+        artist_source: &str,
+        artist_identifier: &str,
+        contrib: &Contribution,
     ) -> Result<(), Error> {
-        let models: Vec<contribution::ActiveModel> = contributions
-            .into_iter()
-            .map(|(artist_id, contrib)| contribution::ActiveModel {
-                id: sea_orm::ActiveValue::NotSet,
-                entry_id: Set(entry_id),
-                artist_id: Set(artist_id),
-                role: Set(contrib.role.clone()),
-                main_artist: Set(contrib.main_artist),
-                extra: Set(Some(contrib.extra.to_string())),
-                source: Set(contrib.source.to_string()),
-            })
-            .collect();
-        if models.is_empty() {
-            return Ok(());
-        }
-        contribution::Entity::insert_many(models)
-            .exec(&self.db)
-            .await?;
+        contribution::Entity::insert(contribution::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            source: Set(source.to_string()),
+            identifier: Set(identifier.to_string()),
+            artist_source: Set(artist_source.to_string()),
+            artist_identifier: Set(artist_identifier.to_string()),
+            role: Set(contrib.role.clone()),
+            main_artist: Set(contrib.main_artist),
+            extra: Set(Some(contrib.extra.to_string())),
+        })
+        .exec(&self.db)
+        .await?;
         Ok(())
     }
 }
 
-fn ignore_many_not_inserted<T: sea_orm::ActiveModelTrait>(
-    result: Result<sea_orm::InsertManyResult<T>, DbErr>,
+fn ignore_not_inserted<T: sea_orm::ActiveModelTrait>(
+    result: Result<sea_orm::InsertResult<T>, DbErr>,
 ) -> Result<(), Error> {
     match result {
         Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),

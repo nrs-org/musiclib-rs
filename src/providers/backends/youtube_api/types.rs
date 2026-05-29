@@ -8,9 +8,10 @@ use crate::{
     providers::{
         CanonicalizeProvider, FetchProvider, RawFetchProvider, TryDefault,
         backends::youtube_api::{
-            canonicalize::{canonicalize, match_channel_url, match_playlist_url, match_video_url},
+            canonicalize::canonicalize,
             channel::{
                 get_channel, get_channel_playlists_raw, get_channel_raw, get_channel_uploads_raw,
+                get_channel_ytmusic_artist_raw, get_channel_ytmusic_discography_raw,
             },
             client::YoutubeClient,
             playlist::{get_playlist, get_playlist_items_raw, get_playlist_raw},
@@ -73,8 +74,8 @@ impl TryDefault for Provider {
 
 #[async_trait]
 impl CanonicalizeProvider for Provider {
-    async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult> {
-        canonicalize(url)
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        canonicalize(source_key, identifier)
     }
 }
 
@@ -82,18 +83,32 @@ impl CanonicalizeProvider for Provider {
 impl FetchProvider for Provider {
     async fn fetch_entry(
         self: Arc<Self>,
+        source_key: &str,
         identifier: &str,
         pool: Arc<EntryFetchOptionsPool>,
         root_id: OptionsId,
     ) -> Result<EntityResult, crate::providers::types::Error> {
-        let result = if match_video_url(identifier).is_some() {
+        let external_type = canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| Error::UnsupportedSourceKey(source_key.to_string()))?;
+        let external_type: &str = &external_type;
+        let result = if external_type == EXTERNAL_TYPE_VIDEO {
             get_video(&self.client, identifier).await?
-        } else if match_playlist_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_PLAYLIST {
             get_playlist(&self.client, identifier).await?
-        } else if match_channel_url(identifier).is_some() {
+        } else if matches!(
+            external_type,
+            EXTERNAL_TYPE_CHANNEL_ID
+                | EXTERNAL_TYPE_CUSTOM_CHANNEL
+                | EXTERNAL_TYPE_USER_CHANNEL
+                | EXTERNAL_TYPE_HANDLE
+        ) {
             get_channel(&self.client, identifier).await?
         } else {
-            return Err(Error::MissingCredentials("Invalid YouTube URL".to_string()));
+            return Err(Error::UnsupportedSourceKey(external_type.to_string()));
         };
 
         Ok(EntityResult {
@@ -125,7 +140,8 @@ impl RawFetchProvider for Provider {
 
     async fn raw_fetch<F, E, FR, R>(
         &self,
-        url: &str,
+        source_key: &str,
+        identifier: &str,
         _fetch_options: crate::providers::types::EntryFetchOptions,
         path_key: &str,
         callback: F,
@@ -136,54 +152,87 @@ impl RawFetchProvider for Provider {
         FR: Future<Output = Result<R, E>> + Send + 'static,
         R: Send,
     {
-        if match_video_url(url).is_some() {
-            return get_video_raw(&self.client, url, |value: &serde_json::Value, _id| {
-                callback(value)
-            })
+        let external_type = canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| E::from(Error::UnsupportedSourceKey(source_key.to_string())))?;
+        let external_type: &str = &external_type;
+        if external_type == EXTERNAL_TYPE_VIDEO {
+            return get_video_raw(
+                &self.client,
+                identifier,
+                |value: &serde_json::Value, _id| callback(value),
+            )
             .await;
         }
 
-        if match_playlist_url(url).is_some() {
+        if external_type == EXTERNAL_TYPE_PLAYLIST {
             if path_key == "items" {
                 return get_playlist_items_raw(
                     &self.client,
-                    url,
+                    identifier,
                     |value: &serde_json::Value, _id| callback(value),
                 )
                 .await;
             }
-            if path_key == "path" || path_key == "metadata" {
-                return get_playlist_raw(&self.client, url, |value: &serde_json::Value, _id| {
-                    callback(value)
-                })
-                .await;
-            }
+            return get_playlist_raw(
+                &self.client,
+                identifier,
+                |value: &serde_json::Value, _id| callback(value),
+            )
+            .await;
         }
 
-        if match_channel_url(url).is_some() {
+        if matches!(
+            external_type,
+            EXTERNAL_TYPE_CHANNEL_ID
+                | EXTERNAL_TYPE_CUSTOM_CHANNEL
+                | EXTERNAL_TYPE_USER_CHANNEL
+                | EXTERNAL_TYPE_HANDLE
+        ) {
             if path_key == "playlists" {
                 return get_channel_playlists_raw(
                     &self.client,
-                    url,
+                    identifier,
                     |value: &serde_json::Value| callback(value),
                 )
                 .await;
             }
             if path_key == "uploads" {
-                return get_channel_uploads_raw(&self.client, url, |value: &serde_json::Value| {
-                    callback(value)
-                })
+                return get_channel_uploads_raw(
+                    &self.client,
+                    identifier,
+                    |value: &serde_json::Value| callback(value),
+                )
+                .await;
+            }
+            if path_key == "ytmusic_metadata" {
+                return get_channel_ytmusic_artist_raw(
+                    &self.client,
+                    identifier,
+                    |value: &serde_json::Value| callback(value),
+                )
+                .await;
+            }
+            if path_key == "ytmusic_discography" {
+                return get_channel_ytmusic_discography_raw(
+                    &self.client,
+                    identifier,
+                    |value: &serde_json::Value| callback(value),
+                )
                 .await;
             }
             return get_channel_raw(
                 &self.client,
-                url,
+                identifier,
                 |value: &serde_json::Value, _kind, _id| callback(value),
             )
             .await;
         }
 
-        Err(Error::InvalidUrl(url.to_string()).into())
+        Err(Error::UnsupportedSourceKey(external_type.to_string()).into())
     }
 }
 

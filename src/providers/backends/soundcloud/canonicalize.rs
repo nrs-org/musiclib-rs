@@ -1,4 +1,5 @@
-use super::{EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_TRACK};
+use super::{EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_TRACK, SOURCE};
+use crate::providers::std_values::StandardProviderKeys;
 use crate::providers::types::{CanonicalizeResult, EntryType};
 
 fn strip_query(url: &str) -> &str {
@@ -56,23 +57,29 @@ pub fn artist_albums_url(artist_url: &str) -> String {
     format!("{}/albums", artist_url.trim_end_matches('/'))
 }
 
-pub fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
-    if let Some(id) = match_track_url(url) {
+pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+    if source_key != StandardProviderKeys::UNKNOWN_URL {
+        return None;
+    }
+    if let Some(id) = match_track_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: id,
             entry_type: EntryType::Track,
             external_type: EXTERNAL_TYPE_TRACK.into(),
         });
     }
-    if let Some(id) = match_playlist_url(url) {
+    if let Some(id) = match_playlist_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: id,
             entry_type: EntryType::Release,
             external_type: EXTERNAL_TYPE_PLAYLIST.into(),
         });
     }
-    if let Some(id) = match_artist_url(url) {
+    if let Some(id) = match_artist_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: id,
             entry_type: EntryType::Artist,
             external_type: EXTERNAL_TYPE_ARTIST.into(),

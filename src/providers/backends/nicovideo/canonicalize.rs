@@ -1,8 +1,9 @@
 use crate::providers::types::{CanonicalizeResult, EntryType};
 
 use super::{
-    EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_MYLIST, EXTERNAL_TYPE_SERIES, EXTERNAL_TYPE_VIDEO,
+    EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_MYLIST, EXTERNAL_TYPE_SERIES, EXTERNAL_TYPE_VIDEO, SOURCE,
 };
+use crate::providers::std_values::StandardProviderKeys;
 
 /// Matches `https://www.nicovideo.jp/watch/smXXXX` etc.
 pub fn match_video_url(url: &str) -> Option<&str> {
@@ -49,30 +50,37 @@ pub fn match_series_url(url: &str) -> Option<&str> {
     if id.is_empty() { None } else { Some(id) }
 }
 
-pub fn canonicalize(url: &str) -> Option<CanonicalizeResult> {
-    if let Some(id) = match_video_url(url) {
+pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+    if source_key != StandardProviderKeys::UNKNOWN_URL {
+        return None;
+    }
+    if let Some(id) = match_video_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: format!("https://www.nicovideo.jp/watch/{id}"),
             entry_type: EntryType::Track,
             external_type: EXTERNAL_TYPE_VIDEO.into(),
         });
     }
-    if let Some(id) = match_series_url(url) {
+    if let Some(id) = match_series_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: format!("https://www.nicovideo.jp/series/{id}"),
             entry_type: EntryType::Release,
             external_type: EXTERNAL_TYPE_SERIES.into(),
         });
     }
-    if let Some((user_id, mylist_id)) = match_mylist_url(url) {
+    if let Some((user_id, mylist_id)) = match_mylist_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: mylist_url(user_id, mylist_id),
             entry_type: EntryType::Release,
             external_type: EXTERNAL_TYPE_MYLIST.into(),
         });
     }
-    if let Some(id) = match_user_url(url) {
+    if let Some(id) = match_user_url(identifier) {
         return Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: user_url(id),
             entry_type: EntryType::Artist,
             external_type: EXTERNAL_TYPE_ARTIST.into(),

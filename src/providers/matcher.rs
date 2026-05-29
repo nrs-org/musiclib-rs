@@ -8,6 +8,7 @@ use std::{
 };
 use tokio::sync::OnceCell;
 
+use crate::providers::std_values::StandardProviderKeys;
 use crate::providers::{
     FetchProvider,
     backends::{
@@ -268,9 +269,13 @@ impl MatchContext<'_> {
                     self.child.sources.first_identifier().ok_or_else(|| {
                         Error::InvalidUrl("child has no source identifiers".into())
                     })?;
+                // Backends derive entity kind internally via canonicalize; passing
+                // UNKNOWN_URL lets them re-canonicalize the identifier for dispatch.
                 let pool = Arc::new(EntryFetchOptionsPool::default());
                 let root_id = EntryFetchOptionsPool::DEFAULT_ID;
-                provider.fetch_entry(identifier, pool, root_id).await
+                provider
+                    .fetch_entry(StandardProviderKeys::UNKNOWN_URL, identifier, pool, root_id)
+                    .await
             })
             .await
     }
@@ -568,7 +573,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::providers::CanonicalizeProvider for PanicProvider {
-        async fn canonicalize(&self, _url: &str) -> Option<CanonicalizeResult> {
+        async fn canonicalize(
+            &self,
+            _source_key: &str,
+            _identifier: &str,
+        ) -> Option<CanonicalizeResult> {
             panic!("should not be called")
         }
     }
@@ -577,6 +586,7 @@ mod tests {
     impl FetchProvider for PanicProvider {
         async fn fetch_entry(
             self: Arc<Self>,
+            _source_key: &str,
             _identifier: &str,
             _pool: Arc<EntryFetchOptionsPool>,
             _root_id: OptionsId,
@@ -904,7 +914,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::providers::CanonicalizeProvider for SingleResultProvider {
-        async fn canonicalize(&self, _url: &str) -> Option<CanonicalizeResult> {
+        async fn canonicalize(
+            &self,
+            _source_key: &str,
+            _identifier: &str,
+        ) -> Option<CanonicalizeResult> {
             None
         }
     }
@@ -913,6 +927,7 @@ mod tests {
     impl FetchProvider for SingleResultProvider {
         async fn fetch_entry(
             self: Arc<Self>,
+            _source_key: &str,
             identifier: &str,
             _pool: Arc<EntryFetchOptionsPool>,
             _root_id: OptionsId,

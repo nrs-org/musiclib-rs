@@ -565,6 +565,7 @@ mod tests {
                     initial_backoff: Duration::from_millis(1), // fast for tests
                     backoff_multiplier: 2.0,
                     max_backoff: Duration::from_millis(10),
+                    rate_limit_statuses: Vec::new(),
                 }),
                 channel_capacity: 64,
             },

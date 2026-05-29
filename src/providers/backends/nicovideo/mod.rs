@@ -57,8 +57,8 @@ impl TryDefault for Provider {
 
 #[async_trait]
 impl CanonicalizeProvider for Provider {
-    async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult> {
-        canonicalize::canonicalize(url)
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        canonicalize::canonicalize(source_key, identifier)
     }
 }
 
@@ -66,20 +66,28 @@ impl CanonicalizeProvider for Provider {
 impl FetchProvider for Provider {
     async fn fetch_entry(
         self: Arc<Self>,
+        source_key: &str,
         identifier: &str,
         pool: Arc<EntryFetchOptionsPool>,
         root_id: OptionsId,
     ) -> Result<EntityResult, Error> {
-        let result = if match_video_url(identifier).is_some() {
+        let external_type = canonicalize::canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| Error::UnsupportedSourceKey(source_key.to_string()))?;
+        let external_type: &str = &external_type;
+        let result = if external_type == EXTERNAL_TYPE_VIDEO {
             get_video(&self.client, identifier).await?
-        } else if match_series_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_SERIES {
             get_series(&self.client, identifier).await?
-        } else if match_mylist_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_MYLIST {
             get_mylist(&self.client, identifier).await?
-        } else if match_user_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_ARTIST {
             get_user(&self.client, identifier).await?
         } else {
-            return Err(Error::InvalidUrl(identifier.to_string()));
+            return Err(Error::UnsupportedSourceKey(external_type.to_string()));
         };
 
         Ok(EntityResult {
@@ -111,7 +119,8 @@ impl RawFetchProvider for Provider {
 
     async fn raw_fetch<F, E, FR, R>(
         &self,
-        url: &str,
+        source_key: &str,
+        identifier: &str,
         _fetch_options: EntryFetchOptions,
         _path_key: &str,
         callback: F,
@@ -122,22 +131,45 @@ impl RawFetchProvider for Provider {
         FR: Future<Output = Result<R, E>> + Send + 'static,
         R: Send,
     {
-        if match_video_url(url).is_some() {
-            return get_video_raw::<serde_json::Value, _, _, _, _>(&self.client, url, callback)
-                .await;
+        let external_type = canonicalize::canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| E::from(Error::UnsupportedSourceKey(source_key.to_string())))?;
+        let external_type: &str = &external_type;
+        if external_type == EXTERNAL_TYPE_VIDEO {
+            return get_video_raw::<serde_json::Value, _, _, _, _>(
+                &self.client,
+                identifier,
+                callback,
+            )
+            .await;
         }
-        if match_series_url(url).is_some() {
-            return get_series_raw::<serde_json::Value, _, _, _, _>(&self.client, url, callback)
-                .await;
+        if external_type == EXTERNAL_TYPE_SERIES {
+            return get_series_raw::<serde_json::Value, _, _, _, _>(
+                &self.client,
+                identifier,
+                callback,
+            )
+            .await;
         }
-        if match_mylist_url(url).is_some() {
-            return get_mylist_raw::<serde_json::Value, _, _, _, _>(&self.client, url, callback)
-                .await;
+        if external_type == EXTERNAL_TYPE_MYLIST {
+            return get_mylist_raw::<serde_json::Value, _, _, _, _>(
+                &self.client,
+                identifier,
+                callback,
+            )
+            .await;
         }
-        if match_user_url(url).is_some() {
-            return get_user_raw::<serde_json::Value, _, _, _, _>(&self.client, url, callback)
-                .await;
+        if external_type == EXTERNAL_TYPE_ARTIST {
+            return get_user_raw::<serde_json::Value, _, _, _, _>(
+                &self.client,
+                identifier,
+                callback,
+            )
+            .await;
         }
-        Err(Error::InvalidUrl(url.to_string()).into())
+        Err(Error::UnsupportedSourceKey(source_key.to_string()).into())
     }
 }

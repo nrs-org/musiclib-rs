@@ -2,6 +2,15 @@
 name = "musiclib-rs"
 version = "0.1.0"
 edition = "2024"
+autobins = false
+
+[[bin]]
+name = "update_fixtures"
+path = "src/bin/update_fixtures.rs"
+
+[[bin]]
+name = "import"
+path = "src/bin/import/main.rs"
 
 [dependencies]
 anyhow = "1.0.102"
@@ -32,6 +41,7 @@ fancy-regex = "0.18.0"
 base64 = "0.22"
 bytes = "1.11.1"
 futures = "0.3.32"
+clap = { version = "4.6.1", features = ["derive"] }
 
 [dev-dependencies]
 tokio-util = "0.7.18"

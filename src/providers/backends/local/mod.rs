@@ -13,6 +13,7 @@ use crate::providers::{
     },
 };
 
+use crate::providers::std_values::StandardProviderKeys;
 use types::{LocalChild, LocalEntry};
 
 pub const SOURCE: &str = "local";
@@ -177,12 +178,16 @@ fn entry_to_entity_result(entry: LocalEntry, base: &std::path::Path) -> EntityRe
 
 #[async_trait]
 impl CanonicalizeProvider for Provider {
-    async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult> {
-        let path = match_local_url(url, &self.base_dir)?;
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        if source_key != StandardProviderKeys::UNKNOWN_URL && source_key != SOURCE {
+            return None;
+        }
+        let path = match_local_url(identifier, &self.base_dir)?;
         // Canonicalize path to absolute to ensure stable identifiers.
         let abs = std::fs::canonicalize(&path).ok()?;
         let entry = read_entry(&abs).ok()?;
         Some(CanonicalizeResult {
+            canonical_source_key: SOURCE.into(),
             canonical_identifier: to_local_url(&abs),
             entry_type: entry.entry_type,
             external_type: EXTERNAL_TYPE_ENTRY.into(),
@@ -194,10 +199,14 @@ impl CanonicalizeProvider for Provider {
 impl FetchProvider for Provider {
     async fn fetch_entry(
         self: Arc<Self>,
+        source_key: &str,
         identifier: &str,
         pool: Arc<EntryFetchOptionsPool>,
         root_id: OptionsId,
     ) -> Result<EntityResult, Error> {
+        if source_key != SOURCE {
+            return Err(Error::UnsupportedSourceKey(source_key.to_string()));
+        }
         let path = match_local_url(identifier, &self.base_dir)
             .ok_or_else(|| Error::InvalidUrl(identifier.to_string()))?;
         let entry = read_entry(&path)?;

@@ -135,10 +135,21 @@ pub struct EntityResult<T: Clone + Send + Sync + 'static = ChildFetchOptions> {
     pub aliases: Vec<Alias>,
 }
 
-// result of canonicalizing an identifier, with canonical identifier, entry type, and external type
+// result of canonicalizing an identifier, with canonical source key, canonical identifier, entry
+// type, and external type
 pub struct CanonicalizeResult {
+    /// The provider that owns this identifier — e.g. `"youtube"`, `"musicbrainz"`,
+    /// `"spotify"`. This is the provider's plain source key, not an entity-kind
+    /// label. The pair `(canonical_source_key, canonical_identifier)` is the
+    /// canonical identity used downstream (`entry_source.source` /
+    /// `entry_source.identifier`).
+    pub canonical_source_key: Cow<'static, str>,
     pub canonical_identifier: String,
     pub entry_type: EntryType,
+    /// Backend-specific entity-kind label (e.g. `"youtube:video"`,
+    /// `"musicbrainz:recording"`). Callers pass this as the `external_type`
+    /// argument to `fetch_entry` / `raw_fetch` so the backend knows what kind
+    /// of entity to fetch.
     pub external_type: Cow<'static, str>,
 }
 
@@ -146,6 +157,8 @@ pub struct CanonicalizeResult {
 pub enum Error {
     #[error("Invalid URL: {0}")]
     InvalidUrl(String),
+    #[error("Unsupported source key: {0}")]
+    UnsupportedSourceKey(String),
     #[error("HTTP error: {0}")]
     Http(#[from] crate::http::Error),
     #[error("Invalid credentials: {0}")]

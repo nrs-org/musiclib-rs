@@ -12,10 +12,7 @@ use crate::{
                 get_artist, get_artist_raw, get_artist_recordings_raw,
                 get_artist_release_groups_raw, get_artist_releases_raw,
             },
-            canonicalize::{
-                canonicalize, match_artist_url, match_recording_url, match_release_group_url,
-                match_release_url,
-            },
+            canonicalize::canonicalize,
             client::MusicBrainzClient,
             recording::{get_recording, get_recording_raw},
             release::{get_release, get_release_raw},
@@ -67,8 +64,8 @@ impl TryDefault for Provider {
 
 #[async_trait]
 impl CanonicalizeProvider for Provider {
-    async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult> {
-        canonicalize(url)
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        canonicalize(source_key, identifier)
     }
 }
 
@@ -76,20 +73,28 @@ impl CanonicalizeProvider for Provider {
 impl FetchProvider for Provider {
     async fn fetch_entry(
         self: Arc<Self>,
+        source_key: &str,
         identifier: &str,
         pool: Arc<EntryFetchOptionsPool>,
         root_id: OptionsId,
     ) -> Result<EntityResult, Error> {
-        let result = if match_recording_url(identifier).is_some() {
+        let external_type = canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| Error::UnsupportedSourceKey(source_key.to_string()))?;
+        let external_type: &str = &external_type;
+        let result = if external_type == EXTERNAL_TYPE_RECORDING {
             get_recording(&self.client, identifier).await?
-        } else if match_release_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_RELEASE {
             get_release(&self.client, identifier).await?
-        } else if match_release_group_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_RELEASE_GROUP {
             get_release_group(&self.client, identifier).await?
-        } else if match_artist_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_ARTIST {
             get_artist(&self.client, identifier).await?
         } else {
-            return Err(Error::InvalidUrl(identifier.to_string()));
+            return Err(Error::UnsupportedSourceKey(external_type.to_string()));
         };
 
         Ok(EntityResult {
@@ -149,7 +154,8 @@ impl RawFetchProvider for Provider {
 
     async fn raw_fetch<F, E, FR, R>(
         &self,
-        url: &str,
+        source_key: &str,
+        identifier: &str,
         _fetch_options: crate::providers::types::EntryFetchOptions,
         path_key: &str,
         callback: F,
@@ -160,56 +166,73 @@ impl RawFetchProvider for Provider {
         FR: Future<Output = Result<R, E>> + Send + 'static,
         R: Send,
     {
-        if match_recording_url(url).is_some() {
-            return get_recording_raw(&self.client, url, |value: &serde_json::Value, _id| {
-                callback(value)
-            })
+        let external_type = canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| E::from(Error::UnsupportedSourceKey(source_key.to_string())))?;
+        let external_type: &str = &external_type;
+        if external_type == EXTERNAL_TYPE_RECORDING {
+            return get_recording_raw(
+                &self.client,
+                identifier,
+                |value: &serde_json::Value, _id| callback(value),
+            )
             .await;
         }
 
-        if match_release_url(url).is_some() {
-            return get_release_raw(&self.client, url, |value: &serde_json::Value, _id| {
-                callback(value)
-            })
+        if external_type == EXTERNAL_TYPE_RELEASE {
+            return get_release_raw(
+                &self.client,
+                identifier,
+                |value: &serde_json::Value, _id| callback(value),
+            )
             .await;
         }
 
-        if match_release_group_url(url).is_some() {
-            return get_release_group_raw(&self.client, url, |value: &serde_json::Value, _id| {
-                callback(value)
-            })
+        if external_type == EXTERNAL_TYPE_RELEASE_GROUP {
+            return get_release_group_raw(
+                &self.client,
+                identifier,
+                |value: &serde_json::Value, _id| callback(value),
+            )
             .await;
         }
 
-        if match_artist_url(url).is_some() {
+        if external_type == EXTERNAL_TYPE_ARTIST {
             if path_key == "release_groups" {
                 return get_artist_release_groups_raw(
                     &self.client,
-                    url,
+                    identifier,
                     |value: &serde_json::Value| callback(value),
                 )
                 .await;
             }
             if path_key == "releases" {
-                return get_artist_releases_raw(&self.client, url, |value: &serde_json::Value| {
-                    callback(value)
-                })
+                return get_artist_releases_raw(
+                    &self.client,
+                    identifier,
+                    |value: &serde_json::Value| callback(value),
+                )
                 .await;
             }
             if path_key == "recordings" {
                 return get_artist_recordings_raw(
                     &self.client,
-                    url,
+                    identifier,
                     |value: &serde_json::Value| callback(value),
                 )
                 .await;
             }
-            return get_artist_raw(&self.client, url, |value: &serde_json::Value, _id| {
-                callback(value)
-            })
+            return get_artist_raw(
+                &self.client,
+                identifier,
+                |value: &serde_json::Value, _id| callback(value),
+            )
             .await;
         }
 
-        Err(Error::InvalidUrl(url.to_string()).into())
+        Err(Error::UnsupportedSourceKey(external_type.to_string()).into())
     }
 }

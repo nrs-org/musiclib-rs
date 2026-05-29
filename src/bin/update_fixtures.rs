@@ -3,9 +3,10 @@ use std::{collections::HashMap, env, fs, path::PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use musiclib_rs::providers::std_values::StandardProviderKeys;
 use musiclib_rs::providers::{
     RawFetchProvider, TryDefault,
-    backends::{discogs, musicbrainz, nicovideo, soundcloud, spotify, youtube_api, ytmusicapi},
+    backends::{discogs, musicbrainz, nicovideo, soundcloud, spotify, youtube_api},
     types::{EntryFetchOptions, Error},
 };
 
@@ -116,10 +117,6 @@ async fn main() -> Result<()> {
                 update_fixtures::<nicovideo::Provider>(&fixtures, EntryFetchOptions::default())
                     .await?;
             }
-            "ytmusicapi" => {
-                update_fixtures::<ytmusicapi::Provider>(&fixtures, EntryFetchOptions::default())
-                    .await?;
-            }
             other => {
                 eprintln!("Unknown backend: {other}");
             }
@@ -147,6 +144,13 @@ where
                     FixturePath::Multi(ref paths) => paths.clone(),
                 };
 
+                let canonical = provider
+                    .canonicalize(StandardProviderKeys::UNKNOWN_URL, &fixture.url)
+                    .await
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("{}: unrecognised URL: {}", P::name(), fixture.url)
+                    })?;
+
                 for (key, path) in &paths {
                     println!(
                         "{}: {} -> {} ({})",
@@ -156,9 +160,13 @@ where
                         key
                     );
                     provider
-                        .raw_fetch(&fixture.url, options.clone(), key, |value| {
-                            promisify(write_json(path, value))
-                        })
+                        .raw_fetch(
+                            &canonical.canonical_source_key,
+                            &canonical.canonical_identifier,
+                            options.clone(),
+                            key,
+                            |value| promisify(write_json(path, value)),
+                        )
                         .await?;
                 }
             }

@@ -18,10 +18,7 @@ use crate::{
         CanonicalizeProvider, FetchProvider, RawFetchProvider, TryDefault,
         backends::discogs::{
             artist::{get_artist, get_artist_raw, get_artist_releases_raw},
-            canonicalize::{
-                canonicalize, match_artist_url, match_master_url, match_release_url,
-                match_track_url,
-            },
+            canonicalize::{canonicalize, match_track_url},
             client::DiscogsClient,
             master::{get_master, get_master_raw},
             release::{get_release, get_release_raw},
@@ -67,8 +64,8 @@ impl TryDefault for Provider {
 
 #[async_trait]
 impl CanonicalizeProvider for Provider {
-    async fn canonicalize(&self, url: &str) -> Option<CanonicalizeResult> {
-        canonicalize(url)
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        canonicalize(source_key, identifier)
     }
 }
 
@@ -76,20 +73,31 @@ impl CanonicalizeProvider for Provider {
 impl FetchProvider for Provider {
     async fn fetch_entry(
         self: Arc<Self>,
+        source_key: &str,
         identifier: &str,
         pool: Arc<EntryFetchOptionsPool>,
         root_id: OptionsId,
     ) -> Result<EntityResult, Error> {
-        let result = if match_track_url(identifier).is_some() {
+        use crate::providers::backends::discogs::types::{
+            EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_MASTER, EXTERNAL_TYPE_RELEASE, EXTERNAL_TYPE_TRACK,
+        };
+        let external_type = canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| Error::UnsupportedSourceKey(source_key.to_string()))?;
+        let external_type: &str = &external_type;
+        let result = if external_type == EXTERNAL_TYPE_TRACK {
             get_track(&self.client, identifier).await?
-        } else if match_release_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_RELEASE {
             get_release(&self.client, identifier).await?
-        } else if match_master_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_MASTER {
             get_master(&self.client, identifier).await?
-        } else if match_artist_url(identifier).is_some() {
+        } else if external_type == EXTERNAL_TYPE_ARTIST {
             get_artist(&self.client, identifier).await?
         } else {
-            return Err(Error::InvalidUrl(identifier.to_string()));
+            return Err(Error::UnsupportedSourceKey(source_key.to_string()));
         };
 
         Ok(EntityResult {
@@ -121,7 +129,8 @@ impl RawFetchProvider for Provider {
 
     async fn raw_fetch<F, E, FR, R>(
         &self,
-        url: &str,
+        source_key: &str,
+        identifier: &str,
         _fetch_options: EntryFetchOptions,
         path_key: &str,
         callback: F,
@@ -132,35 +141,52 @@ impl RawFetchProvider for Provider {
         FR: Future<Output = Result<R, E>> + Send + 'static,
         R: Send,
     {
-        if match_track_url(url).is_some() {
+        use crate::providers::backends::discogs::types::{
+            EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_MASTER, EXTERNAL_TYPE_RELEASE, EXTERNAL_TYPE_TRACK,
+        };
+        let external_type = canonicalize(
+            crate::providers::std_values::StandardProviderKeys::UNKNOWN_URL,
+            identifier,
+        )
+        .map(|c| c.external_type)
+        .ok_or_else(|| E::from(Error::UnsupportedSourceKey(source_key.to_string())))?;
+        let external_type: &str = &external_type;
+        if external_type == EXTERNAL_TYPE_TRACK {
             // A track pseudo-URL is backed by the parent release endpoint.
-            let release_url = {
-                let (release_id, _) = match_track_url(url).unwrap();
-                format!("https://www.discogs.com/release/{release_id}")
-            };
+            let (release_id, _) = match_track_url(identifier)
+                .ok_or_else(|| Error::InvalidUrl(identifier.to_string()))?;
+            let release_url = format!("https://www.discogs.com/release/{release_id}");
             return get_release_raw(&self.client, &release_url, |v: &serde_json::Value, _id| {
                 callback(v)
             })
             .await;
         }
-        if match_release_url(url).is_some() {
-            return get_release_raw(&self.client, url, |v: &serde_json::Value, _id| callback(v))
-                .await;
+        if external_type == EXTERNAL_TYPE_RELEASE {
+            return get_release_raw(&self.client, identifier, |v: &serde_json::Value, _id| {
+                callback(v)
+            })
+            .await;
         }
-        if match_master_url(url).is_some() {
-            return get_master_raw(&self.client, url, |v: &serde_json::Value, _id| callback(v))
-                .await;
+        if external_type == EXTERNAL_TYPE_MASTER {
+            return get_master_raw(&self.client, identifier, |v: &serde_json::Value, _id| {
+                callback(v)
+            })
+            .await;
         }
-        if match_artist_url(url).is_some() {
+        if external_type == EXTERNAL_TYPE_ARTIST {
             if path_key == "releases" {
-                return get_artist_releases_raw(&self.client, url, |v: &serde_json::Value| {
-                    callback(v)
-                })
+                return get_artist_releases_raw(
+                    &self.client,
+                    identifier,
+                    |v: &serde_json::Value| callback(v),
+                )
                 .await;
             }
-            return get_artist_raw(&self.client, url, |v: &serde_json::Value, _id| callback(v))
-                .await;
+            return get_artist_raw(&self.client, identifier, |v: &serde_json::Value, _id| {
+                callback(v)
+            })
+            .await;
         }
-        Err(Error::InvalidUrl(url.to_string()).into())
+        Err(Error::UnsupportedSourceKey(source_key.to_string()).into())
     }
 }
