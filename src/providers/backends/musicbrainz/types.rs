@@ -14,6 +14,7 @@ use crate::{
             },
             canonicalize::canonicalize,
             client::MusicBrainzClient,
+            isrc::lookup_isrc,
             recording::{get_recording, get_recording_raw},
             release::{get_release, get_release_raw},
             release_group::{get_release_group, get_release_group_raw},
@@ -125,13 +126,18 @@ impl FetchProvider for Provider {
     ) -> Result<Option<ExternalSources>, Error> {
         let mut result = ExternalSources::default();
 
-        for (source_key, urls) in sources.0.iter() {
+        for (source_key, ids) in sources.0.iter() {
             // Skip MB sources — no need to look ourselves up
             if source_key.as_ref() == SOURCE {
                 continue;
             }
-            for url in urls {
-                if let Some(found) = lookup_url(&self.client, url).await? {
+            for id in ids {
+                let found = if source_key.as_ref() == "isrc" {
+                    lookup_isrc(&self.client, id).await?
+                } else {
+                    lookup_url(&self.client, id).await?
+                };
+                if let Some(found) = found {
                     for (k, v) in found.0 {
                         result.0.entry(k).or_default().extend(v);
                     }

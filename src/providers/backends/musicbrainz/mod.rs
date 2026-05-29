@@ -2,6 +2,7 @@ pub mod artist;
 pub mod artist_credit;
 pub mod canonicalize;
 pub mod client;
+pub mod isrc;
 pub mod matcher;
 pub mod recording;
 pub mod release;
