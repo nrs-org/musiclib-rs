@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use futures::future::join_all;
 use musiclib_rs::providers::{
@@ -32,7 +32,9 @@ pub fn import(
 ) -> BoxFuture<()> {
     Box::pin(async move {
         // 1. Canonicalize the input URL via the first provider that recognises it.
-        let Some((canonical, provider)) = canonicalize_first(&providers, &input.1).await else {
+        let Some((canonical, provider, provider_idx)) =
+            canonicalize_first(&providers, &input.1).await
+        else {
             warn!("no provider recognised {}:{}", input.0, input.1);
             return;
         };
@@ -68,7 +70,7 @@ pub fn import(
 
         let EntityResult {
             release_date,
-            sources,
+            mut sources,
             extra,
             specific_data,
             children,
@@ -87,6 +89,51 @@ pub fn import(
                 aliases,
             },
         );
+
+        // 5b. Cross-link: ask every other provider to enrich `sources` with
+        //     IDs in its own namespace. Fixed-point: each pass calls every
+        //     provider that (a) hasn't been called yet and (b) doesn't already
+        //     own a namespace present in `sources`. Loop until no IDs are
+        //     added. HTTP-layer cache makes repeats cheap.
+        let mut called: HashSet<usize> = HashSet::new();
+        called.insert(provider_idx);
+        loop {
+            let mut changed = false;
+            for (i, p) in providers.iter().enumerate() {
+                if called.contains(&i) {
+                    continue;
+                }
+                if provider_owns_any(p.as_ref(), &sources).await {
+                    called.insert(i);
+                    continue;
+                }
+                match p.resolve_external_source(entry_type, &sources).await {
+                    Ok(new) => {
+                        called.insert(i);
+                        if let Some(new) = new {
+                            for (k, ids) in new.0 {
+                                let entry = sources.0.entry(k).or_default();
+                                let before = entry.len();
+                                entry.extend(ids);
+                                if entry.len() > before {
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "resolve_external_source failed for {}:{}: {e}",
+                            canonical.0, canonical.1
+                        );
+                        called.insert(i);
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
 
         let mut subs: Vec<BoxFuture<()>> = vec![];
 
@@ -162,8 +209,8 @@ pub fn import(
 async fn canonicalize_first(
     providers: &[Arc<dyn FetchProvider>],
     url: &str,
-) -> Option<(Pair, Arc<dyn FetchProvider>)> {
-    for provider in providers {
+) -> Option<(Pair, Arc<dyn FetchProvider>, usize)> {
+    for (i, provider) in providers.iter().enumerate() {
         if let Some(canon) = provider
             .canonicalize(StandardProviderKeys::UNKNOWN_URL, url)
             .await
@@ -174,10 +221,25 @@ async fn canonicalize_first(
                     canon.canonical_identifier,
                 ),
                 Arc::clone(provider),
+                i,
             ));
         }
     }
     None
+}
+
+/// True if `provider` claims any (key, id) pair currently in `sources` —
+/// i.e. it owns one of those namespaces. canonicalize is a sync pattern
+/// match, so this is cheap.
+async fn provider_owns_any(provider: &dyn FetchProvider, sources: &ExternalSources) -> bool {
+    for (key, ids) in &sources.0 {
+        for id in ids {
+            if provider.canonicalize(key.as_ref(), id).await.is_some() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn entry_type_of(data: &EntrySpecificData) -> EntryType {
