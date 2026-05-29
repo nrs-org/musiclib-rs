@@ -99,11 +99,19 @@ impl Default for SpotifyConfig {
 pub struct MusicBrainzConfig {
     #[serde(default = "MusicBrainzConfig::default_token")]
     pub token: Option<Credential>,
+    /// Override the MusicBrainz API base URL (e.g. for a self-hosted server).
+    /// Defaults to the `MUSICBRAINZ_BASE_URL` env var; falls back to the
+    /// public musicbrainz.org endpoint when unset.
+    #[serde(default = "MusicBrainzConfig::default_base_url")]
+    pub base_url: Option<Credential>,
 }
 
 impl MusicBrainzConfig {
     fn default_token() -> Option<Credential> {
         Some(Credential::from_env("MUSICBRAINZ_TOKEN"))
+    }
+    fn default_base_url() -> Option<Credential> {
+        Some(Credential::from_env("MUSICBRAINZ_BASE_URL"))
     }
 }
 
@@ -111,6 +119,7 @@ impl Default for MusicBrainzConfig {
     fn default() -> Self {
         Self {
             token: Self::default_token(),
+            base_url: Self::default_base_url(),
         }
     }
 }
@@ -264,10 +273,14 @@ pub fn build_providers(
 
     if let Some(cfg) = &config.musicbrainz {
         let token = cfg.token.as_ref().and_then(|c| c.resolve());
-        providers.push(Arc::new(musicbrainz::types::Provider::new_with_client(
-            Arc::clone(&http),
-            token,
-        )?));
+        let base_url = cfg.base_url.as_ref().and_then(|c| c.resolve());
+        providers.push(Arc::new(
+            musicbrainz::types::Provider::new_with_client_and_base_url(
+                Arc::clone(&http),
+                token,
+                base_url,
+            )?,
+        ));
     }
 
     if let Some(cfg) = &config.discogs {

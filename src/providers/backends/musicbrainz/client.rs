@@ -11,6 +11,7 @@ pub struct MusicBrainzClient {
     client: Arc<dyn HttpClient>,
     user_agent: HeaderValue,
     token: Option<HeaderValue>,
+    base_url: Arc<str>,
 }
 
 impl Clone for MusicBrainzClient {
@@ -19,6 +20,7 @@ impl Clone for MusicBrainzClient {
             client: self.client.clone(),
             user_agent: self.user_agent.clone(),
             token: self.token.clone(),
+            base_url: self.base_url.clone(),
         }
     }
 }
@@ -26,7 +28,7 @@ impl Clone for MusicBrainzClient {
 // Default User-Agent as required by the MusicBrainz API ToS.
 const DEFAULT_USER_AGENT: &str = "musiclib-rs/0.1.0 ( https://github.com/nrs-org/musiclib-rs )";
 
-const BASE_URL: &str = "https://musicbrainz.org/ws/2";
+pub const DEFAULT_BASE_URL: &str = "https://musicbrainz.org/ws/2";
 
 /// Wraps an API response so that unexpected JSON shapes still deserialize,
 /// letting us inspect the status code before deciding what to do.
@@ -55,6 +57,14 @@ impl MusicBrainzClient {
         client: Arc<dyn HttpClient>,
         token: Option<String>,
     ) -> Result<Self, Error> {
+        Self::new_with_client_and_base_url(client, token, None)
+    }
+
+    pub fn new_with_client_and_base_url(
+        client: Arc<dyn HttpClient>,
+        token: Option<String>,
+        base_url: Option<String>,
+    ) -> Result<Self, Error> {
         let user_agent = HeaderValue::from_str(DEFAULT_USER_AGENT)
             .map_err(|_| Error::InvalidCredentials("Invalid User-Agent header value".into()))?;
         let token = token
@@ -63,15 +73,24 @@ impl MusicBrainzClient {
                     .map_err(|_| Error::InvalidCredentials("Invalid token header value".into()))
             })
             .transpose()?;
+        let base_url: Arc<str> = base_url
+            .map(|u| u.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+            .into();
         Ok(Self {
             client,
             user_agent,
             token,
+            base_url,
         })
     }
 
     pub fn build_url(endpoint: &str, params: &[(&str, &str)]) -> String {
-        let url = format!("{BASE_URL}/{endpoint}");
+        Self::build_url_with_base(DEFAULT_BASE_URL, endpoint, params)
+    }
+
+    pub fn build_url_with_base(base: &str, endpoint: &str, params: &[(&str, &str)]) -> String {
+        let url = format!("{base}/{endpoint}");
         // Always include fmt=json.
         let mut all_params: Vec<(&str, &str)> = vec![("fmt", "json")];
         all_params.extend_from_slice(params);
@@ -90,7 +109,7 @@ impl MusicBrainzClient {
         E: From<Error> + Send + 'static,
         FR: Future<Output = Result<R, E>> + Send + 'static,
     {
-        let url = Self::build_url(endpoint, params);
+        let url = Self::build_url_with_base(&self.base_url, endpoint, params);
 
         let mut headers = vec![(
             HeaderName::from_static("user-agent"),
@@ -127,9 +146,89 @@ impl MusicBrainzClient {
                     .map_err(E::from)?;
                 callback(&data).await
             }
-            status => Err(E::from(Error::InvalidUrl(format!(
-                "MusicBrainz returned HTTP {status} for {url}"
+            404 => Err(E::from(Error::NotFound(url))),
+            _ => Err(E::from(Error::Http(crate::http::Error::HttpStatus(
+                response.status,
             )))),
         }
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    //! Live smoke tests against a self-hosted MusicBrainz server.
+    //! Run with: MUSICBRAINZ_BASE_URL=http://localhost:5000/ws/2 \
+    //!     cargo test -p musiclib-rs mb_live -- --ignored --nocapture
+    use crate::http::default_http_client;
+    use crate::providers::backends::musicbrainz::{
+        artist::get_artist, canonicalize::canonicalize, client::MusicBrainzClient,
+        isrc::lookup_isrc, url::lookup_url,
+    };
+    use crate::providers::std_values::StandardProviderKeys;
+
+    const WATAME_MBID: &str = "201500bb-d0b7-49bf-9869-50e6496350b8";
+
+    fn client_from_env() -> anyhow::Result<MusicBrainzClient> {
+        let base = std::env::var("MUSICBRAINZ_BASE_URL")
+            .map_err(|_| anyhow::anyhow!("MUSICBRAINZ_BASE_URL not set"))?;
+        Ok(MusicBrainzClient::new_with_client_and_base_url(
+            default_http_client(),
+            None,
+            Some(base),
+        )?)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable MusicBrainz server at MUSICBRAINZ_BASE_URL"]
+    async fn mb_live_canonicalize() {
+        let url = format!("https://musicbrainz.org/artist/{WATAME_MBID}");
+        let result =
+            canonicalize(StandardProviderKeys::UNKNOWN_URL, &url).expect("canonicalize artist URL");
+        println!(
+            "[canonicalize] source={} identifier={} type={:?} external_type={}",
+            result.canonical_source_key,
+            result.canonical_identifier,
+            result.entry_type,
+            result.external_type,
+        );
+        assert_eq!(result.canonical_identifier, url);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable MusicBrainz server at MUSICBRAINZ_BASE_URL"]
+    async fn mb_live_get_artist() -> anyhow::Result<()> {
+        let client = client_from_env()?;
+        let url = format!("https://musicbrainz.org/artist/{WATAME_MBID}");
+        let artist = get_artist(&client, &url).await?;
+        println!(
+            "[get_artist] aliases={} sources={} children={}",
+            artist.aliases.len(),
+            artist.sources.0.len(),
+            artist.children.len(),
+        );
+        assert!(!artist.aliases.is_empty(), "expected at least one alias");
+        assert_eq!(artist.children.len(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable MusicBrainz server at MUSICBRAINZ_BASE_URL"]
+    async fn mb_live_lookup_url() -> anyhow::Result<()> {
+        let client = client_from_env()?;
+        let resource = "https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA";
+        let found = lookup_url(&client, resource).await?;
+        println!("[lookup_url] {resource} -> {found:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable MusicBrainz server at MUSICBRAINZ_BASE_URL"]
+    async fn mb_live_lookup_isrc() -> anyhow::Result<()> {
+        let client = client_from_env()?;
+        // ISRC for "Beautiful Circle" — already used in the fixture suite.
+        let isrc = "JPB602202407";
+        let found = lookup_isrc(&client, isrc).await?;
+        println!("[lookup_isrc] {isrc} -> {found:?}");
+        Ok(())
     }
 }

@@ -8,13 +8,6 @@ use crate::providers::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub(crate) enum IsrcLookupResponse {
-    Found(IsrcResponse),
-    NotFound { error: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct IsrcResponse {
     #[serde(default)]
     pub recordings: Vec<IsrcRecording>,
@@ -31,16 +24,13 @@ pub async fn lookup_isrc(
     isrc: &str,
 ) -> Result<Option<ExternalSources>, Error> {
     let endpoint = format!("isrc/{isrc}");
-    client
-        .get::<IsrcLookupResponse, _, _, Error, _>(&endpoint, &[], |resp| {
-            let mb_urls: HashSet<String> = match resp {
-                IsrcLookupResponse::NotFound { .. } => HashSet::new(),
-                IsrcLookupResponse::Found(r) => r
-                    .recordings
-                    .iter()
-                    .map(|rec| recording_url(&rec.id))
-                    .collect(),
-            };
+    let result = client
+        .get::<IsrcResponse, _, _, Error, _>(&endpoint, &[], |resp| {
+            let mb_urls: HashSet<String> = resp
+                .recordings
+                .iter()
+                .map(|rec| recording_url(&rec.id))
+                .collect();
             async move {
                 Ok(if mb_urls.is_empty() {
                     None
@@ -49,5 +39,10 @@ pub async fn lookup_isrc(
                 })
             }
         })
-        .await
+        .await;
+    match result {
+        Ok(found) => Ok(found),
+        Err(Error::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }

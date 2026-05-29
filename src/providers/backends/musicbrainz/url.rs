@@ -49,16 +49,6 @@ pub(crate) fn url_source_key(url: &str) -> &'static str {
 // --- API response types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub(crate) enum UrlLookupResponse {
-    Found(UrlResponse),
-    /// MusicBrainz returns `{"error": "..."}` for unknown URLs (404).
-    NotFound {
-        error: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct UrlResponse {
     pub id: String,
     pub resource: String,
@@ -93,27 +83,24 @@ pub async fn lookup_url(
     client: &MusicBrainzClient,
     resource_url: &str,
 ) -> Result<Option<ExternalSources>, Error> {
-    client
-        .get::<UrlLookupResponse, _, _, Error, _>(
+    let result = client
+        .get::<UrlResponse, _, _, Error, _>(
             "url",
             &[("resource", resource_url), ("inc", PARTS)],
             |resp| {
-                let mb_urls: HashSet<String> = match resp {
-                    UrlLookupResponse::NotFound { .. } => HashSet::new(),
-                    UrlLookupResponse::Found(r) => r
-                        .relations
-                        .iter()
-                        .filter_map(|rel| match rel.target_type.as_str() {
-                            "artist" => rel.artist.as_ref().map(|e| artist_url(&e.id)),
-                            "recording" => rel.recording.as_ref().map(|e| recording_url(&e.id)),
-                            "release" => rel.release.as_ref().map(|e| release_url(&e.id)),
-                            "release-group" => {
-                                rel.release_group.as_ref().map(|e| release_group_url(&e.id))
-                            }
-                            _ => None,
-                        })
-                        .collect(),
-                };
+                let mb_urls: HashSet<String> = resp
+                    .relations
+                    .iter()
+                    .filter_map(|rel| match rel.target_type.as_str() {
+                        "artist" => rel.artist.as_ref().map(|e| artist_url(&e.id)),
+                        "recording" => rel.recording.as_ref().map(|e| recording_url(&e.id)),
+                        "release" => rel.release.as_ref().map(|e| release_url(&e.id)),
+                        "release-group" => {
+                            rel.release_group.as_ref().map(|e| release_group_url(&e.id))
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 async move {
                     Ok(if mb_urls.is_empty() {
                         None
@@ -123,5 +110,10 @@ pub async fn lookup_url(
                 }
             },
         )
-        .await
+        .await;
+    match result {
+        Ok(found) => Ok(found),
+        Err(Error::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }

@@ -52,6 +52,16 @@ impl Provider {
             client: MusicBrainzClient::new_with_client(client, token)?,
         })
     }
+
+    pub fn new_with_client_and_base_url(
+        client: Arc<dyn HttpClient>,
+        token: Option<String>,
+        base_url: Option<String>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            client: MusicBrainzClient::new_with_client_and_base_url(client, token, base_url)?,
+        })
+    }
 }
 
 impl TryDefault for Provider {
