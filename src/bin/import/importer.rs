@@ -9,11 +9,25 @@ use musiclib_rs::providers::{
         OptionsId, child_next,
     },
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::state::{ChildEdge, Pair, PairMetadata, State};
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'static>>;
+
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let top = e.to_string();
+    let mut src = e.source();
+    let mut root = None;
+    while let Some(cause) = src {
+        root = Some(cause.to_string());
+        src = cause.source();
+    }
+    match root {
+        Some(r) if !top.contains(&r) => format!("{top}: {r}"),
+        _ => top,
+    }
+}
 
 /// Fetch the entity referred to by `input`, record metadata + relations, recurse
 /// into sources and children. Structured concurrency: every spawned subtask is
@@ -56,14 +70,19 @@ pub fn import(
         }
 
         // 4. Fetch. On failure we log and bail.
-        info!("fetching {}:{}", canonical.0, canonical.1);
+        debug!("fetching {}:{}", canonical.0, canonical.1);
         let result = match provider
             .fetch_entry(&canonical.0, &canonical.1, pool.clone(), options_id)
             .await
         {
             Ok(r) => r,
             Err(e) => {
-                warn!("fetch failed for {}:{}: {e}", canonical.0, canonical.1);
+                warn!(
+                    "fetch failed for {}:{}: {}",
+                    canonical.0,
+                    canonical.1,
+                    error_chain(&e)
+                );
                 return;
             }
         };
@@ -123,8 +142,10 @@ pub fn import(
                     }
                     Err(e) => {
                         warn!(
-                            "resolve_external_source failed for {}:{}: {e}",
-                            canonical.0, canonical.1
+                            "resolve_external_source failed for {}:{}: {}",
+                            canonical.0,
+                            canonical.1,
+                            error_chain(&e)
                         );
                         called.insert(i);
                     }
@@ -194,7 +215,7 @@ pub fn import(
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        warn!("child cursor error: {e}");
+                        warn!("child cursor error: {}", error_chain(&e));
                         break;
                     }
                 }

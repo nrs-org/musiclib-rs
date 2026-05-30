@@ -66,7 +66,14 @@ impl HttpClient for CacheHttpClient {
         body_extractor: super::BodyExtractorCow<'static>,
     ) -> Result<Arc<Response>, super::Error> {
         if !req.force_refetch
-            && let Some(cached) = self.cache.get_req(&req, body_extractor.as_ref()).await?
+            && let Some(cached) = self
+                .cache
+                .get_req(&req, body_extractor.as_ref())
+                .await
+                .map_err(|source| super::Error::Cache {
+                    url: req.url.clone(),
+                    source,
+                })?
         {
             return Ok(cached);
         }
@@ -75,7 +82,13 @@ impl HttpClient for CacheHttpClient {
             .make_request(req.clone(), body_extractor)
             .await?;
         let policy = self.config.resolve_policy(&req.url);
-        self.cache.set_req(&req, policy, res.clone()).await?;
+        self.cache
+            .set_req(&req, policy, res.clone())
+            .await
+            .map_err(|source| super::Error::Cache {
+                url: req.url.clone(),
+                source,
+            })?;
         Ok(res)
     }
 }

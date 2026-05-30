@@ -1,5 +1,6 @@
 mod flush;
 mod importer;
+mod progress;
 mod state;
 
 use std::{path::Path, sync::Arc};
@@ -51,7 +52,6 @@ async fn load_config<T: Default + serde::de::DeserializeOwned>(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
-    tracing_subscriber::fmt::init();
 
     let args = Args::parse();
 
@@ -59,6 +59,15 @@ async fn main() -> anyhow::Result<()> {
     let http_config: HttpClientConfig = load_config(args.http_config.as_deref()).await?;
 
     let http = http_config.build().await?;
+    let http = progress::ProgressHttpClient::new(http);
+
+    tracing_subscriber::fmt()
+        .with_writer(progress::MultiProgressMakeWriter::new(Arc::clone(
+            &http.multi,
+        )))
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let providers = build_providers(&registry_config, http)?;
     if providers.is_empty() {
         anyhow::bail!("No providers available -- check your credential env vars");

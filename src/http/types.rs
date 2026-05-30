@@ -113,6 +113,7 @@ impl TryFrom<ResponseBody> for reqwest::Body {
 pub enum ResponseBodyState {
     Extracted(ResponseBody),
     Unextracted(BodyExtractorCow<'static>, reqwest::Body),
+    Failed(Arc<BodyExtractError>),
 }
 
 impl Debug for ResponseBodyState {
@@ -123,6 +124,7 @@ impl Debug for ResponseBodyState {
                 .debug_tuple("Unextracted")
                 .field(&"<body extractor + body stream>")
                 .finish(),
+            Self::Failed(e) => f.debug_tuple("Failed").field(e).finish(),
         }
     }
 }
@@ -174,17 +176,27 @@ impl Response {
 
     async fn extract(&self) -> Result<(), Error> {
         let mut body_state = self.body.write().await;
-        if let ResponseBodyState::Unextracted(extractor, body) = &mut *body_state {
-            let extracted_body = extractor
-                .extract(RawResponse {
-                    status: self.status,
-                    headers: Cow::Borrowed(&self.headers),
-                    body: std::mem::take(body),
-                })
-                .await?;
-            *body_state = ResponseBodyState::Extracted(extracted_body);
+        match &mut *body_state {
+            ResponseBodyState::Extracted(_) => {}
+            ResponseBodyState::Failed(arc) => return Err(Error::BodyExtract(arc.clone())),
+            ResponseBodyState::Unextracted(extractor, body) => {
+                match extractor
+                    .extract(RawResponse {
+                        status: self.status,
+                        headers: Cow::Borrowed(&self.headers),
+                        body: std::mem::take(body),
+                    })
+                    .await
+                {
+                    Ok(extracted) => *body_state = ResponseBodyState::Extracted(extracted),
+                    Err(e) => {
+                        let arc = Arc::new(e);
+                        *body_state = ResponseBodyState::Failed(arc.clone());
+                        return Err(Error::BodyExtract(arc));
+                    }
+                }
+            }
         }
-
         Ok(())
     }
 
@@ -265,18 +277,28 @@ pub struct Request {
 pub enum Error {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("HTTP cache error: {0}")]
-    Cache(#[from] crate::httpcache::Error),
+    #[error("HTTP cache error for {url}: {source}")]
+    Cache {
+        url: String,
+        #[source]
+        source: crate::httpcache::Error,
+    },
     #[error("Invalid cached type")]
     InvalidCachedType,
     #[error("Body extraction failed: {0}")]
-    BodyExtract(#[from] BodyExtractError),
+    BodyExtract(Arc<BodyExtractError>),
     #[error("Wrong body type")]
     WrongBodyType,
     #[error("Status code indicates error: {0}")]
     HttpStatus(reqwest::StatusCode),
     #[error("Serialization error (erased_serde): {0}")]
     ErasedSerialization(#[from] erased_serde::Error),
+}
+
+impl From<BodyExtractError> for Error {
+    fn from(e: BodyExtractError) -> Self {
+        Error::BodyExtract(Arc::new(e))
+    }
 }
 
 #[derive(Debug, Error)]

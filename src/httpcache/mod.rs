@@ -1,3 +1,4 @@
+use crate::http::BodyExtractError;
 use std::{borrow::Cow, sync::Arc};
 
 use async_trait::async_trait;
@@ -17,11 +18,17 @@ pub enum Error {
     #[error("Database error: {0}")]
     Database(#[from] db::Error),
     #[error("Error extracting response body: {0}")]
-    BodyExtract(#[from] crate::http::BodyExtractError),
+    BodyExtract(Arc<BodyExtractError>),
     #[error("Error reading bytes from response body: {0}")]
     BodyRead(#[from] Box<crate::http::Error>),
     #[error("Reserialization error: {0}")]
     Reserialization(#[from] erased_serde::Error),
+}
+
+impl From<BodyExtractError> for Error {
+    fn from(e: BodyExtractError) -> Self {
+        Error::BodyExtract(Arc::new(e))
+    }
 }
 
 #[async_trait]

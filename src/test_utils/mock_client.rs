@@ -124,7 +124,7 @@ impl HttpClient for MockHttpClient {
                 body: reqwest::Body::from(raw.body),
             })
             .await
-            .map_err(crate::http::Error::BodyExtract)?;
+            .map_err(crate::http::Error::from)?;
 
         Ok(Arc::new(response))
     }

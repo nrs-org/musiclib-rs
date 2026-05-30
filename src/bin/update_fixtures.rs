@@ -2,6 +2,7 @@ use std::{collections::HashMap, env, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use tracing::{info, warn};
 
 use musiclib_rs::providers::std_values::StandardProviderKeys;
 use musiclib_rs::providers::{
@@ -118,7 +119,7 @@ async fn main() -> Result<()> {
                     .await?;
             }
             other => {
-                eprintln!("Unknown backend: {other}");
+                warn!("Unknown backend: {other}");
             }
         }
     }
@@ -152,7 +153,7 @@ where
                     })?;
 
                 for (key, path) in &paths {
-                    println!(
+                    info!(
                         "{}: {} -> {} ({})",
                         P::name(),
                         fixture.url,
@@ -174,7 +175,7 @@ where
             Ok(())
         }
         Err(Error::MissingCredentials(msg)) => {
-            eprintln!(
+            warn!(
                 "Skipping {} fixture due to missing credentials: {}",
                 P::name(),
                 msg

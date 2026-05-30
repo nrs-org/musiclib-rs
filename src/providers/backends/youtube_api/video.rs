@@ -52,7 +52,7 @@ struct VideoSnippet {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VideoContentDetails {
-    duration: String,
+    duration: Option<String>,
     #[serde(flatten)]
     extra: ExtraJSON,
 }
@@ -121,7 +121,11 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                         dt.second(),
                     )
                 });
-            let duration_ms = parse_iso_duration_ms(&v.content_details.duration);
+            let duration_ms = v
+                .content_details
+                .duration
+                .as_deref()
+                .and_then(parse_iso_duration_ms);
             Ok(EntityResult {
                 release_date,
                 sources: [(SOURCE.into(), HashSet::from([url]))].into(),

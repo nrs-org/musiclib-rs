@@ -4,6 +4,7 @@ use hyper_util::rt::TokioIo;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{net::TcpListener, select};
 use tokio_util::sync::{CancellationToken, DropGuard};
+use tracing::error;
 
 pub struct MockServer {
     _guard: DropGuard,
@@ -74,7 +75,7 @@ impl MockServer {
                                 .serve_connection(io, service_fn(handler_ref.as_ref()))
                                 .await
                             {
-                                eprintln!("Error serving connection: {:?}", err);
+                                error!("Error serving connection: {:?}", err);
                             }
                         });
                     }

@@ -2,13 +2,15 @@ use std::sync::Arc;
 
 use http::HeaderValue;
 use serde::Deserialize;
+use tracing::warn;
 
 use crate::{
     http::HttpClient,
     providers::{
-        FetchProvider,
+        CanonicalizeProvider, FetchProvider,
         backends::{discogs, local, musicbrainz, nicovideo, soundcloud, spotify, youtube_api},
-        types::Error,
+        std_values::StandardProviderKeys,
+        types::{CanonicalizeResult, Error},
     },
 };
 
@@ -104,6 +106,12 @@ pub struct MusicBrainzConfig {
     /// public musicbrainz.org endpoint when unset.
     #[serde(default = "MusicBrainzConfig::default_base_url")]
     pub base_url: Option<Credential>,
+    /// Path to a local `mb_mirror.db` SQLite file produced by `mb_extract_urls`
+    /// / `mb_sync_replication`. When set, `lookup_url` skips the network call
+    /// for URLs that are absent from the mirror. Defaults to the
+    /// `MUSICBRAINZ_MIRROR_DB` env var.
+    #[serde(default = "MusicBrainzConfig::default_mirror_db")]
+    pub mirror_db: Option<Credential>,
 }
 
 impl MusicBrainzConfig {
@@ -113,6 +121,9 @@ impl MusicBrainzConfig {
     fn default_base_url() -> Option<Credential> {
         Some(Credential::from_env("MUSICBRAINZ_BASE_URL"))
     }
+    fn default_mirror_db() -> Option<Credential> {
+        Some(Credential::from_env("MUSICBRAINZ_MIRROR_DB"))
+    }
 }
 
 impl Default for MusicBrainzConfig {
@@ -120,6 +131,7 @@ impl Default for MusicBrainzConfig {
         Self {
             token: Self::default_token(),
             base_url: Self::default_base_url(),
+            mirror_db: Self::default_mirror_db(),
         }
     }
 }
@@ -229,7 +241,7 @@ impl Default for RegistryConfig {
 // ── Builder ───────────────────────────────────────────────────────────────────
 
 fn skip_missing(name: &str, msg: &str) {
-    eprintln!("[registry] skipping {name}: missing credentials ({msg})");
+    warn!("[registry] skipping {name}: missing credentials ({msg})");
 }
 
 /// Build the list of enabled providers from `config`, sharing a single HTTP client
@@ -274,13 +286,22 @@ pub fn build_providers(
     if let Some(cfg) = &config.musicbrainz {
         let token = cfg.token.as_ref().and_then(|c| c.resolve());
         let base_url = cfg.base_url.as_ref().and_then(|c| c.resolve());
-        providers.push(Arc::new(
-            musicbrainz::types::Provider::new_with_client_and_base_url(
-                Arc::clone(&http),
-                token,
-                base_url,
-            )?,
-        ));
+        let mut provider = musicbrainz::types::Provider::new_with_client_and_base_url(
+            Arc::clone(&http),
+            token,
+            base_url,
+        )?;
+        if let Some(path) = cfg.mirror_db.as_ref().and_then(|c| c.resolve()) {
+            match rusqlite::Connection::open(&path) {
+                Ok(conn) => {
+                    provider = provider.with_mirror_db(Arc::new(std::sync::Mutex::new(conn)));
+                }
+                Err(e) => {
+                    warn!("[registry] musicbrainz: could not open mirror_db {path:?}: {e}");
+                }
+            }
+        }
+        providers.push(Arc::new(provider));
     }
 
     if let Some(cfg) = &config.discogs {
@@ -315,6 +336,40 @@ pub fn build_providers(
     }
 
     Ok(providers)
+}
+
+// ── URL canonicalization ──────────────────────────────────────────────────────
+
+/// Return one `CanonicalizeProvider` per backend, in match-priority order.
+/// These are zero-cost unit structs — no credentials required.
+pub fn all_canonicalize_providers() -> Vec<Arc<dyn CanonicalizeProvider>> {
+    vec![
+        Arc::new(youtube_api::canonicalize::Canonicalizer),
+        Arc::new(spotify::canonicalize::Canonicalizer),
+        Arc::new(soundcloud::canonicalize::Canonicalizer),
+        Arc::new(nicovideo::canonicalize::Canonicalizer),
+        Arc::new(discogs::canonicalize::Canonicalizer),
+        Arc::new(musicbrainz::canonicalize::Canonicalizer),
+    ]
+}
+
+/// Run `raw` through every backend canonicalizer; return the first hit.
+pub fn canonicalize(raw: &str) -> Option<CanonicalizeResult> {
+    let k = StandardProviderKeys::UNKNOWN_URL;
+    youtube_api::canonicalize::canonicalize(k, raw)
+        .or_else(|| spotify::canonicalize::canonicalize(k, raw))
+        .or_else(|| soundcloud::canonicalize::canonicalize(k, raw))
+        .or_else(|| nicovideo::canonicalize::canonicalize(k, raw))
+        .or_else(|| discogs::canonicalize::canonicalize(k, raw))
+        .or_else(|| musicbrainz::canonicalize::canonicalize(k, raw))
+}
+
+/// Canonicalize a URL to its lookup key. Falls back to the raw input when no
+/// backend recognizes the shape.
+pub fn normalize(raw: &str) -> String {
+    canonicalize(raw)
+        .map(|r| r.canonical_identifier)
+        .unwrap_or_else(|| raw.to_owned())
 }
 
 #[cfg(test)]
@@ -354,5 +409,88 @@ mod tests {
             serde_yaml_ng::from_str("youtube_api:\n  api_key: { env: PATH }").unwrap();
         let cfg = config.youtube_api.unwrap();
         assert!(cfg.api_key.resolve().is_some()); // PATH is always set
+    }
+
+    #[test]
+    fn youtube_video_variants_collapse() {
+        let canonical = "https://youtu.be/dQw4w9WgXcQ";
+        assert_eq!(normalize("https://youtu.be/dQw4w9WgXcQ"), canonical);
+        assert_eq!(
+            normalize("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            canonical
+        );
+        assert_eq!(
+            normalize("https://m.youtube.com/watch?v=dQw4w9WgXcQ"),
+            canonical
+        );
+        assert_eq!(
+            normalize("https://music.youtube.com/watch?v=dQw4w9WgXcQ"),
+            canonical
+        );
+        assert_eq!(
+            normalize("https://www.youtube.com/shorts/dQw4w9WgXcQ"),
+            canonical
+        );
+        assert_eq!(
+            normalize("https://www.youtube.com/embed/dQw4w9WgXcQ"),
+            canonical
+        );
+        assert_eq!(
+            normalize("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s&feature=share"),
+            canonical
+        );
+    }
+
+    #[test]
+    fn spotify_track_canonical() {
+        let id = "4uLU6hMCjMI75M1A2tKUQC";
+        let canonical = format!("https://open.spotify.com/track/{id}");
+        assert_eq!(
+            normalize(&format!("https://open.spotify.com/track/{id}?si=abc")),
+            canonical
+        );
+    }
+
+    #[test]
+    fn unknown_url_passes_through() {
+        let url = "https://example.com/some/page";
+        assert_eq!(normalize(url), url);
+    }
+
+    #[test]
+    fn youtu_be_with_query_canonicalizes() {
+        assert_eq!(
+            normalize("https://youtu.be/dQw4w9WgXcQ?si=abc&t=42"),
+            "https://youtu.be/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn spotify_intl_prefix_canonicalizes() {
+        let id = "4uLU6hMCjMI75M1A2tKUQC";
+        let canonical = format!("https://open.spotify.com/track/{id}");
+        assert_eq!(
+            normalize(&format!(
+                "https://open.spotify.com/intl-de/track/{id}?si=abc"
+            )),
+            canonical
+        );
+        assert_eq!(
+            normalize(&format!("https://open.spotify.com/intl-pt-br/track/{id}")),
+            canonical
+        );
+    }
+
+    #[test]
+    fn normalize_idempotent() {
+        for raw in [
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://example.com/foo",
+        ] {
+            let once = normalize(raw);
+            let twice = normalize(&once);
+            assert_eq!(once, twice, "not idempotent for {raw:?}");
+        }
     }
 }
