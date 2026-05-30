@@ -69,7 +69,9 @@ impl TryDefault for Provider {
 #[async_trait]
 impl CanonicalizeProvider for Provider {
     async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
-        canonicalize(source_key, identifier)
+        canonicalize::Canonicalizer
+            .canonicalize(source_key, identifier)
+            .await
     }
 }
 

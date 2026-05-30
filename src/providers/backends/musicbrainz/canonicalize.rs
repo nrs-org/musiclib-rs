@@ -106,3 +106,15 @@ pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeRe
     }
     None
 }
+
+use crate::providers::CanonicalizeProvider;
+use async_trait::async_trait;
+
+pub struct Canonicalizer;
+
+#[async_trait]
+impl CanonicalizeProvider for Canonicalizer {
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        canonicalize(source_key, identifier)
+    }
+}

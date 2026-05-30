@@ -1,4 +1,4 @@
-mod canonicalize;
+pub mod canonicalize;
 mod channel;
 mod client;
 pub mod matcher;

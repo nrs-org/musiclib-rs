@@ -16,7 +16,7 @@ macro_rules! spotify_url_regex {
     ($entity:literal) => {
         LazyLock::new(|| {
             Regex::new(&format!(
-                r"^https?://open\.spotify\.com/{}/({})(?:[/?#].*)?$",
+                r"^https?://open\.spotify\.com/(?:intl-[a-z\-]+/)?{}/({})(?:[/?#].*)?$",
                 $entity, SPOTIFY_ID_PATTERN
             ))
             .unwrap()
@@ -104,4 +104,16 @@ pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeRe
         });
     }
     None
+}
+
+use crate::providers::CanonicalizeProvider;
+use async_trait::async_trait;
+
+pub struct Canonicalizer;
+
+#[async_trait]
+impl CanonicalizeProvider for Canonicalizer {
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        canonicalize(source_key, identifier)
+    }
 }

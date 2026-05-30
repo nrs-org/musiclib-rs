@@ -39,7 +39,7 @@ static VIDEO_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
             https?://music\.youtube\.com/watch\?(?:.*?[&;])??v=
         )
         (?P<id>[0-9A-Za-z_\-]{11})
-        (?:[\#&].*)?
+        (?:[?\#&].*)?
         $
         ",
     )
@@ -214,7 +214,7 @@ pub fn channel_url(kind: ChannelKind, id: &str) -> String {
     }
 }
 
-pub(super) fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
     // Only accept unresolved URLs; canonical source keys are passed straight to fetch_entry.
     if source_key != StandardProviderKeys::UNKNOWN_URL {
         return None;
@@ -398,5 +398,17 @@ mod tests {
                 url, got, expected
             );
         }
+    }
+}
+
+use crate::providers::CanonicalizeProvider;
+use async_trait::async_trait;
+
+pub struct Canonicalizer;
+
+#[async_trait]
+impl CanonicalizeProvider for Canonicalizer {
+    async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
+        canonicalize(source_key, identifier)
     }
 }
