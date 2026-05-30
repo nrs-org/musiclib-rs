@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::sync::Mutex;
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::providers::std_values::StandardProviderKeys;
@@ -79,10 +81,33 @@ const PARTS: &str = "artist-rels+recording-rels+release-rels+release-group-rels"
 // --- Public API ---
 
 /// Look up a single external URL in MusicBrainz and return any linked MB entity URLs.
+///
+/// If `mirror_db` is provided the function first checks the local `mb_url`
+/// table (keyed by `url_norm`). A miss means MusicBrainz has no record of
+/// this URL, so the API call is skipped entirely. A hit (or absent mirror)
+/// falls through to the live API.
 pub async fn lookup_url(
     client: &MusicBrainzClient,
     resource_url: &str,
+    mirror_db: Option<&Mutex<rusqlite::Connection>>,
 ) -> Result<Option<ExternalSources>, Error> {
+    if let Some(db) = mirror_db {
+        let norm = crate::providers::registry::normalize(resource_url);
+        let present = db.lock().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM mb_url WHERE url_norm = ?1 LIMIT 1",
+                rusqlite::params![norm],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        });
+        if present.is_none() {
+            return Ok(None);
+        }
+    }
+
     let result = client
         .get::<UrlResponse, _, _, Error, _>(
             "url",

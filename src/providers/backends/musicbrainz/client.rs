@@ -165,6 +165,7 @@ mod live_tests {
         isrc::lookup_isrc, url::lookup_url,
     };
     use crate::providers::std_values::StandardProviderKeys;
+    use tracing::info;
 
     const WATAME_MBID: &str = "201500bb-d0b7-49bf-9869-50e6496350b8";
 
@@ -184,7 +185,7 @@ mod live_tests {
         let url = format!("https://musicbrainz.org/artist/{WATAME_MBID}");
         let result =
             canonicalize(StandardProviderKeys::UNKNOWN_URL, &url).expect("canonicalize artist URL");
-        println!(
+        info!(
             "[canonicalize] source={} identifier={} type={:?} external_type={}",
             result.canonical_source_key,
             result.canonical_identifier,
@@ -200,7 +201,7 @@ mod live_tests {
         let client = client_from_env()?;
         let url = format!("https://musicbrainz.org/artist/{WATAME_MBID}");
         let artist = get_artist(&client, &url).await?;
-        println!(
+        info!(
             "[get_artist] aliases={} sources={} children={}",
             artist.aliases.len(),
             artist.sources.0.len(),
@@ -216,8 +217,8 @@ mod live_tests {
     async fn mb_live_lookup_url() -> anyhow::Result<()> {
         let client = client_from_env()?;
         let resource = "https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA";
-        let found = lookup_url(&client, resource).await?;
-        println!("[lookup_url] {resource} -> {found:?}");
+        let found = lookup_url(&client, resource, None).await?;
+        info!("[lookup_url] {resource} -> {found:?}");
         Ok(())
     }
 
@@ -228,7 +229,7 @@ mod live_tests {
         // ISRC for "Beautiful Circle" — already used in the fixture suite.
         let isrc = "JPB602202407";
         let found = lookup_isrc(&client, isrc).await?;
-        println!("[lookup_isrc] {isrc} -> {found:?}");
+        info!("[lookup_isrc] {isrc} -> {found:?}");
         Ok(())
     }
 }

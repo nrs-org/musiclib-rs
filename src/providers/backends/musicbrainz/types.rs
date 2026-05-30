@@ -1,4 +1,8 @@
-use std::{env, future::Future, sync::Arc};
+use std::{
+    env,
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 
@@ -35,12 +39,14 @@ pub const EXTERNAL_TYPE_RECORDING: &str = "musicbrainz:recording";
 
 pub struct Provider {
     client: MusicBrainzClient,
+    mirror_db: Option<Arc<Mutex<rusqlite::Connection>>>,
 }
 
 impl Provider {
     pub fn new(token: Option<String>) -> Result<Self, Error> {
         Ok(Self {
             client: MusicBrainzClient::new(token)?,
+            mirror_db: None,
         })
     }
 
@@ -50,6 +56,7 @@ impl Provider {
     ) -> Result<Self, Error> {
         Ok(Self {
             client: MusicBrainzClient::new_with_client(client, token)?,
+            mirror_db: None,
         })
     }
 
@@ -60,7 +67,15 @@ impl Provider {
     ) -> Result<Self, Error> {
         Ok(Self {
             client: MusicBrainzClient::new_with_client_and_base_url(client, token, base_url)?,
+            mirror_db: None,
         })
+    }
+
+    /// Attach a local MusicBrainz URL mirror so that `lookup_url` can skip the
+    /// API call for URLs that are not in the MB database.
+    pub fn with_mirror_db(mut self, conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
+        self.mirror_db = Some(conn);
+        self
     }
 }
 
@@ -76,7 +91,9 @@ impl TryDefault for Provider {
 #[async_trait]
 impl CanonicalizeProvider for Provider {
     async fn canonicalize(&self, source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
-        canonicalize(source_key, identifier)
+        super::canonicalize::Canonicalizer
+            .canonicalize(source_key, identifier)
+            .await
     }
 }
 
@@ -145,7 +162,7 @@ impl FetchProvider for Provider {
                 let found = if source_key.as_ref() == "isrc" {
                     lookup_isrc(&self.client, id).await?
                 } else {
-                    lookup_url(&self.client, id).await?
+                    lookup_url(&self.client, id, self.mirror_db.as_deref()).await?
                 };
                 if let Some(found) = found {
                     for (k, v) in found.0 {
