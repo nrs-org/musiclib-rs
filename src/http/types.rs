@@ -271,6 +271,7 @@ pub struct Request {
     // cache HTTP client only
     pub cache_key: Option<String>,
     pub force_refetch: bool,
+    pub no_cache: bool,
 }
 
 #[derive(Debug, Error)]

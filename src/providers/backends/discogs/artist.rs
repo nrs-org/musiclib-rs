@@ -128,6 +128,14 @@ fn release_or_release_group_eval(expr: &CompiledMatcherExpr) -> Tribool {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
             (*t == EntryType::Release || *t == EntryType::ReleaseGroup).into()
         }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            // Items are always one of these two; can never be True (mixed), but can be False.
+            if t != EXTERNAL_TYPE_RELEASE && t != EXTERNAL_TYPE_MASTER {
+                Tribool::False
+            } else {
+                Tribool::Indeterminate
+            }
+        }
         _ => default_eval_leaf(matcher),
     })
 }

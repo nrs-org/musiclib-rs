@@ -191,6 +191,9 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
             CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
                 (*t == EntryType::Track).into()
             }
+            CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+                (t == EXTERNAL_TYPE_VIDEO).into()
+            }
             _ => default_eval_leaf(matcher),
         })
     });

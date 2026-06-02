@@ -123,6 +123,9 @@ fn release_eval(expr: &CompiledMatcherExpr) -> Tribool {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
             (*t == EntryType::Release).into()
         }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            (t == EXTERNAL_TYPE_RELEASE).into()
+        }
         _ => default_eval_leaf(matcher),
     })
 }

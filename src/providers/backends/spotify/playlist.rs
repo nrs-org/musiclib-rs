@@ -144,6 +144,9 @@ fn track_eval(expr: &CompiledMatcherExpr) -> Tribool {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
             (*t == EntryType::Track).into()
         }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            (t == EXTERNAL_TYPE_TRACK).into()
+        }
         _ => default_eval_leaf(matcher),
     })
 }

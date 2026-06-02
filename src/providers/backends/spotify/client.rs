@@ -137,6 +137,7 @@ impl SpotifyClient {
                         ),
                     ],
                     body: Some("grant_type=client_credentials".into()),
+                    no_cache: true,
                     ..Default::default()
                 },
                 json_body_extractor::<TokenResponse>().into(),
@@ -187,6 +188,8 @@ impl SpotifyClient {
                 .get_json::<ApiResponse<T>>(Request {
                     url: url.clone(),
                     headers: vec![(HeaderName::from_static("authorization"), token)],
+                    // bypass cache on retry so a cached 401 doesn't loop forever
+                    force_refetch: attempt > 0,
                     ..Default::default()
                 })
                 .await
@@ -198,16 +201,21 @@ impl SpotifyClient {
                 continue;
             }
 
-            let inner = response
+            let guard = response
                 .json::<ApiResponse<T>>()
                 .await
-                .expect("should be ApiResponse<T>")
-                .clone()
-                .into_inner()
-                .expect("should be T");
+                .map_err(Error::from)
+                .map_err(E::from)?;
+            let inner = guard.clone().into_inner().ok_or_else(|| {
+                E::from(Error::AuthenticationFailed(
+                    format!("Spotify API returned an error for {url}").into(),
+                ))
+            })?;
             return callback(&inner).await;
         }
 
-        unreachable!()
+        Err(E::from(Error::AuthenticationFailed(
+            "Spotify API: still unauthorized after token refresh".into(),
+        )))
     }
 }

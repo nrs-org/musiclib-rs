@@ -354,12 +354,26 @@ pub fn static_eval_expr(
     match expr {
         CompiledMatcherExpr::Matcher(m) => eval_leaf(m),
         CompiledMatcherExpr::Not(inner) => !static_eval_expr(inner, eval_leaf),
-        CompiledMatcherExpr::All(exprs) => exprs.iter().fold(Tribool::True, |acc, e| {
-            acc.and(static_eval_expr(e, eval_leaf))
-        }),
-        CompiledMatcherExpr::Any(exprs) => exprs.iter().fold(Tribool::False, |acc, e| {
-            acc.or(static_eval_expr(e, eval_leaf))
-        }),
+        CompiledMatcherExpr::All(exprs) => {
+            let mut result = Tribool::True;
+            for e in exprs {
+                result = result.and(static_eval_expr(e, eval_leaf));
+                if result == Tribool::False {
+                    return Tribool::False;
+                }
+            }
+            result
+        }
+        CompiledMatcherExpr::Any(exprs) => {
+            let mut result = Tribool::False;
+            for e in exprs {
+                result = result.or(static_eval_expr(e, eval_leaf));
+                if result == Tribool::True {
+                    return Tribool::True;
+                }
+            }
+            result
+        }
     }
 }
 
@@ -772,14 +786,20 @@ fn cached_evaluate_expr<T: Clone + Send + Sync + 'static>(
 
     // Check whether all / none of the buffered remaining items match.
     // Both are vacuously true for an empty slice.
-    let buf_all_match = buf_slice
-        .iter()
-        .enumerate()
-        .all(|(i, (child, _))| eval_expr_on_child_ref(expr, child, index + i) == Tribool::True);
-    let buf_none_match = buf_slice
-        .iter()
-        .enumerate()
-        .all(|(i, (child, _))| eval_expr_on_child_ref(expr, child, index + i) == Tribool::False);
+    let mut buf_all_match = true;
+    let mut buf_none_match = true;
+    for (i, (child, _)) in buf_slice.iter().enumerate() {
+        let result = eval_expr_on_child_ref(expr, child, index + i);
+        if result != Tribool::True {
+            buf_all_match = false;
+        }
+        if result != Tribool::False {
+            buf_none_match = false;
+        }
+        if !buf_all_match && !buf_none_match {
+            break;
+        }
+    }
 
     // Ask the live source for its portion.
     let live = state

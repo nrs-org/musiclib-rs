@@ -290,6 +290,9 @@ fn release_group_eval(expr: &CompiledMatcherExpr) -> Tribool {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
             (*t == EntryType::ReleaseGroup).into()
         }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            (t == EXTERNAL_TYPE_RELEASE_GROUP).into()
+        }
         _ => default_eval_leaf(matcher),
     })
 }
@@ -299,6 +302,9 @@ fn release_eval(expr: &CompiledMatcherExpr) -> Tribool {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
             (*t == EntryType::Release).into()
         }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            (t == EXTERNAL_TYPE_RELEASE).into()
+        }
         _ => default_eval_leaf(matcher),
     })
 }
@@ -307,6 +313,9 @@ fn recording_eval(expr: &CompiledMatcherExpr) -> Tribool {
     static_eval_expr(expr, &|matcher| match matcher {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
             (*t == EntryType::Track).into()
+        }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            (t == EXTERNAL_TYPE_RECORDING).into()
         }
         _ => default_eval_leaf(matcher),
     })

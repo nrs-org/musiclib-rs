@@ -49,7 +49,7 @@ pub fn import(
         let Some((canonical, provider, provider_idx)) =
             canonicalize_first(&providers, &input.1).await
         else {
-            warn!("no provider recognised {}:{}", input.0, input.1);
+            info!("no provider recognised {}:{}", input.0, input.1);
             return;
         };
 

@@ -436,6 +436,9 @@ fn release_eval(expr: &CompiledMatcherExpr) -> Tribool {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
             (*t == EntryType::Release).into()
         }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            (t == EXTERNAL_TYPE_PLAYLIST).into()
+        }
         _ => default_eval_leaf(matcher),
     })
 }
@@ -444,6 +447,9 @@ fn track_eval(expr: &CompiledMatcherExpr) -> Tribool {
     static_eval_expr(expr, &|matcher| match matcher {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
             (*t == EntryType::Track).into()
+        }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            (t == EXTERNAL_TYPE_VIDEO).into()
         }
         _ => default_eval_leaf(matcher),
     })
