@@ -9,6 +9,7 @@ use crate::providers::{
         client::DiscogsClient,
         types::{EXTERNAL_TYPE_MASTER, EXTERNAL_TYPE_RELEASE},
     },
+    std_values::StandardProviderKeys,
     types::{
         Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
         CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData, EntryType,
@@ -216,7 +217,7 @@ pub async fn get_artist(client: &DiscogsClient, url: &str) -> Result<EntityResul
         for url in &a.urls {
             sources
                 .0
-                .entry("url".into())
+                .entry(StandardProviderKeys::UNKNOWN_URL.into())
                 .or_default()
                 .insert(url.clone());
         }
@@ -236,7 +237,7 @@ pub async fn get_artist(client: &DiscogsClient, url: &str) -> Result<EntityResul
 
 #[cfg(test)]
 mod tests {
-    use crate::providers::types::child_next;
+    use crate::providers::{std_values::StandardProviderKeys, types::child_next};
     use std::{collections::HashSet, sync::Arc};
 
     use http::Method;
@@ -297,7 +298,10 @@ mod tests {
             artist.sources.get(SOURCE).unwrap(),
             &HashSet::from(["https://www.discogs.com/artist/11811530".to_string()])
         );
-        let url_sources = artist.sources.get("url").unwrap();
+        let url_sources = artist
+            .sources
+            .get(StandardProviderKeys::UNKNOWN_URL)
+            .unwrap();
         assert!(url_sources.contains("https://twitter.com/tsunomakiwatame"));
         assert!(url_sources.contains("https://www.youtube.com/channel/UCqm3BQLlJfvkTsX_hvm0UmA"));
 
