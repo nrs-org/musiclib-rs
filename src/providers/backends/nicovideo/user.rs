@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::{collections::HashSet, future::Future, sync::Arc};
 
 use serde::{Deserialize, de::DeserializeOwned};
 
@@ -27,47 +27,6 @@ pub struct FlatVideoEntry {
     pub url: String,
 }
 
-impl UserResponse {
-    pub fn into_entity_result(self, _url: &str) -> EntityResult<()> {
-        let mut sources = ExternalSources::default();
-        sources
-            .0
-            .entry(SOURCE.into())
-            .or_default()
-            .insert(self.webpage_url);
-
-        let video_refs: Vec<ChildRef> = self
-            .entries
-            .into_iter()
-            .map(|entry| ChildRef {
-                entry_type: EntryType::Track,
-                external_type: EXTERNAL_TYPE_VIDEO.into(),
-                sources: [(SOURCE.into(), std::collections::HashSet::from([entry.url]))].into(),
-                ..Default::default()
-            })
-            .collect();
-
-        EntityResult {
-            release_date: None,
-            sources,
-            extra: self.extra,
-            specific_data: EntrySpecificData::Artist,
-            children: vec![Arc::new(CachedChildSource::from_children(video_refs))],
-            aliases: self
-                .title
-                .map(|name| {
-                    vec![Alias {
-                        name,
-                        source: SOURCE.into(),
-                        primary: true,
-                        ..Default::default()
-                    }]
-                })
-                .unwrap_or_default(),
-        }
-    }
-}
-
 pub async fn get_user_raw<T, F, E, FR, R>(
     client: &YtdlpClient,
     url: &str,
@@ -84,12 +43,52 @@ where
     callback(&value).await
 }
 
-pub async fn get_user(client: &YtdlpClient, url: &str) -> Result<EntityResult<()>, Error> {
-    get_user_raw::<UserResponse, _, Error, _, _>(client, url, |u| {
-        let result = Ok(u.clone().into_entity_result(url));
-        async move { result }
+/// Fetches user metadata without entries (fast), then returns an `EntityResult`
+/// whose video children are loaded lazily on first iteration.
+pub async fn get_user(client: Arc<YtdlpClient>, url: &str) -> Result<EntityResult<()>, Error> {
+    let meta: UserResponse = serde_json::from_value(client.fetch_no_children(url).await?)
+        .map_err(|e| Error::InvalidUrl(format!("failed to deserialize user metadata: {e}")))?;
+
+    let mut sources = ExternalSources::default();
+    sources
+        .0
+        .entry(SOURCE.into())
+        .or_default()
+        .insert(meta.webpage_url);
+
+    let video_source = client.lazy_children(url.to_string(), |value| {
+        let response: UserResponse = serde_json::from_value(value)
+            .map_err(|e| Error::InvalidUrl(format!("failed to deserialize user videos: {e}")))?;
+        Ok(response
+            .entries
+            .into_iter()
+            .map(|entry| ChildRef {
+                entry_type: EntryType::Track,
+                external_type: EXTERNAL_TYPE_VIDEO.into(),
+                sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
+                ..Default::default()
+            })
+            .collect())
+    });
+
+    Ok(EntityResult {
+        release_date: None,
+        sources,
+        extra: meta.extra,
+        specific_data: EntrySpecificData::Artist,
+        children: vec![Arc::new(CachedChildSource::new(Box::new(video_source)))],
+        aliases: meta
+            .title
+            .map(|name| {
+                vec![Alias {
+                    name,
+                    source: SOURCE.into(),
+                    primary: true,
+                    ..Default::default()
+                }]
+            })
+            .unwrap_or_default(),
     })
-    .await
 }
 
 #[cfg(test)]
@@ -101,7 +100,7 @@ mod tests {
         http::Method,
         providers::{
             backends::{nicovideo::SOURCE, ytdlp::YtdlpClient},
-            types::{ChildSource, EntrySpecificData, EntryType},
+            types::{EntrySpecificData, EntryType},
         },
         test_utils::MockHttpClient,
     };
@@ -114,17 +113,22 @@ mod tests {
         format!("{}/entities/{}", SERVER, urlencoding::encode(url))
     }
 
-    fn make_client(url: &str, fixture: &'static str) -> YtdlpClient {
+    fn make_client(url: &str, fixture: &'static str) -> Arc<YtdlpClient> {
         let mut http = MockHttpClient::new();
+        http.add_route_json::<serde_json::Value>(
+            Method::GET,
+            &format!("{}?no_entries", entity_url(url)),
+            fixture,
+        );
         http.add_route_json::<serde_json::Value>(Method::GET, &entity_url(url), fixture);
-        YtdlpClient::new(Arc::new(http), SERVER.to_string())
+        Arc::new(YtdlpClient::new(Arc::new(http), SERVER.to_string()))
     }
 
     #[tokio::test]
     async fn test_get_user() -> anyhow::Result<()> {
         let url = "https://www.nicovideo.jp/user/67047227";
         let client = make_client(url, include_str!("./user_67047227.json"));
-        let user = get_user(&client, url).await?;
+        let user = get_user(client, url).await?;
 
         assert!(matches!(user.specific_data, EntrySpecificData::Artist));
 

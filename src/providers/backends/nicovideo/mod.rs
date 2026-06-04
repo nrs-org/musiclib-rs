@@ -34,13 +34,13 @@ pub const EXTERNAL_TYPE_SERIES: &str = "nicovideo:series";
 pub const EXTERNAL_TYPE_ARTIST: &str = "nicovideo:artist";
 
 pub struct Provider {
-    client: YtdlpClient,
+    client: Arc<YtdlpClient>,
 }
 
 impl Provider {
     pub fn new(http: Arc<dyn HttpClient>, server_url: String) -> Self {
         Self {
-            client: YtdlpClient::new(http, server_url),
+            client: Arc::new(YtdlpClient::new(http, server_url)),
         }
     }
 }
@@ -83,11 +83,11 @@ impl FetchProvider for Provider {
         let result = if external_type == EXTERNAL_TYPE_VIDEO {
             get_video(&self.client, identifier).await?
         } else if external_type == EXTERNAL_TYPE_SERIES {
-            get_series(&self.client, identifier).await?
+            get_series(Arc::clone(&self.client), identifier).await?
         } else if external_type == EXTERNAL_TYPE_MYLIST {
-            get_mylist(&self.client, identifier).await?
+            get_mylist(Arc::clone(&self.client), identifier).await?
         } else if external_type == EXTERNAL_TYPE_ARTIST {
-            get_user(&self.client, identifier).await?
+            get_user(Arc::clone(&self.client), identifier).await?
         } else {
             return Err(Error::UnsupportedSourceKey(external_type.to_string()));
         };

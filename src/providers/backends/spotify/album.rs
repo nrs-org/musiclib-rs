@@ -77,6 +77,7 @@ fn simplified_track_to_child_ref(track: &SimplifiedTrack) -> ChildRef {
                 None
             },
             track_no: track.track_number,
+            synthetic: false,
         }),
         contributions: vec![],
     }

@@ -191,7 +191,7 @@ async fn dispatch_with_retry(
         }
         retry_after_remaining -= 1;
 
-        tracing::warn!(
+        tracing::debug!(
             remaining = retry_after_remaining,
             delay_ms = delay.as_millis(),
             "429 with Retry-After, waiting before retry (phase 1)",
@@ -214,7 +214,7 @@ async fn dispatch_with_retry(
             return Ok(res);
         }
 
-        tracing::warn!(
+        tracing::debug!(
             remaining,
             backoff_ms = backoff.as_millis(),
             "429 received, exponential backoff (phase 2)",

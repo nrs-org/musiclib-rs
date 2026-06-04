@@ -1,6 +1,7 @@
 use std::{collections::HashSet, future::Future, sync::Arc};
 
 use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::Value;
 
 use crate::providers::{
     backends::{
@@ -93,10 +94,27 @@ where
     callback(&value).await
 }
 
-pub async fn get_artist(client: &YtdlpClient, url: &str) -> Result<EntityResult<()>, Error> {
-    let artist: ArtistResponse = client.fetch_as(url).await?;
-    let sets: SetsResponse = client.fetch_as(&artist_sets_url(url)).await?;
-    let albums: SetsResponse = client.fetch_as(&artist_albums_url(url)).await?;
+fn sets_value_to_child_refs(value: Value) -> Result<Vec<ChildRef>, Error> {
+    let sets: SetsResponse = serde_json::from_value(value)
+        .map_err(|e| Error::InvalidUrl(format!("failed to deserialize sets: {e}")))?;
+    Ok(sets
+        .entries
+        .into_iter()
+        .map(|entry| ChildRef {
+            entry_type: EntryType::Release,
+            external_type: EXTERNAL_TYPE_PLAYLIST.into(),
+            sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
+            name: entry.title,
+            ..Default::default()
+        })
+        .collect())
+}
+
+/// Fetches artist metadata without entries (fast) for the main URL, then returns
+/// an `EntityResult` whose albums, sets, and track children are all lazy.
+pub async fn get_artist(client: Arc<YtdlpClient>, url: &str) -> Result<EntityResult<()>, Error> {
+    let artist: ArtistResponse = serde_json::from_value(client.fetch_no_children(url).await?)
+        .map_err(|e| Error::InvalidUrl(format!("failed to deserialize artist metadata: {e}")))?;
 
     let mut sources = ExternalSources::default();
     sources
@@ -105,29 +123,24 @@ pub async fn get_artist(client: &YtdlpClient, url: &str) -> Result<EntityResult<
         .or_default()
         .insert(artist.webpage_url);
 
-    let track_refs: Vec<ChildRef> = artist
-        .entries
-        .into_iter()
-        .map(|entry| ChildRef {
-            entry_type: EntryType::Track,
-            external_type: EXTERNAL_TYPE_TRACK.into(),
-            sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
-            ..Default::default()
-        })
-        .collect();
-
-    let flat_set_refs = |entries: Vec<FlatSetEntry>| -> Vec<ChildRef> {
-        entries
+    let track_source = Arc::clone(&client).lazy_children(url.to_string(), |value| {
+        let a: ArtistResponse = serde_json::from_value(value)
+            .map_err(|e| Error::InvalidUrl(format!("failed to deserialize artist tracks: {e}")))?;
+        Ok(a.entries
             .into_iter()
             .map(|entry| ChildRef {
-                entry_type: EntryType::Release,
-                external_type: EXTERNAL_TYPE_PLAYLIST.into(),
+                entry_type: EntryType::Track,
+                external_type: EXTERNAL_TYPE_TRACK.into(),
                 sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
-                name: entry.title,
                 ..Default::default()
             })
-            .collect()
-    };
+            .collect())
+    });
+
+    let albums_source =
+        Arc::clone(&client).lazy_children(artist_albums_url(url), sets_value_to_child_refs);
+    let sets_source =
+        Arc::clone(&client).lazy_children(artist_sets_url(url), sets_value_to_child_refs);
 
     Ok(EntityResult {
         release_date: None,
@@ -135,13 +148,9 @@ pub async fn get_artist(client: &YtdlpClient, url: &str) -> Result<EntityResult<
         extra: artist.extra,
         specific_data: EntrySpecificData::Artist,
         children: vec![
-            Arc::new(CachedChildSource::from_children(flat_set_refs(
-                albums.entries,
-            ))),
-            Arc::new(CachedChildSource::from_children(flat_set_refs(
-                sets.entries,
-            ))),
-            Arc::new(CachedChildSource::from_children(track_refs)),
+            Arc::new(CachedChildSource::new(Box::new(albums_source))),
+            Arc::new(CachedChildSource::new(Box::new(sets_source))),
+            Arc::new(CachedChildSource::new(Box::new(track_source))),
         ],
         aliases: vec![Alias {
             name: artist.title,
@@ -167,7 +176,7 @@ mod tests {
                 },
                 ytdlp::YtdlpClient,
             },
-            types::{ChildSource, EntrySpecificData, EntryType},
+            types::{EntrySpecificData, EntryType},
         },
         test_utils::MockHttpClient,
     };
@@ -180,13 +189,21 @@ mod tests {
         format!("{}/entities/{}", SERVER, urlencoding::encode(url))
     }
 
-    fn make_artist_client(url: &str) -> YtdlpClient {
+    fn make_artist_client(url: &str) -> Arc<YtdlpClient> {
         let mut http = MockHttpClient::new();
+        // metadata-only fetch for the main artist URL
+        http.add_route_json::<serde_json::Value>(
+            Method::GET,
+            &format!("{}?no_entries", entity_url(url)),
+            include_str!("./artist_laserimouto.json"),
+        );
+        // lazy track fetch (full)
         http.add_route_json::<serde_json::Value>(
             Method::GET,
             &entity_url(url),
             include_str!("./artist_laserimouto.json"),
         );
+        // lazy sets/albums fetches (always full)
         http.add_route_json::<serde_json::Value>(
             Method::GET,
             &entity_url(&artist_sets_url(url)),
@@ -197,14 +214,14 @@ mod tests {
             &entity_url(&artist_albums_url(url)),
             include_str!("./artist_laserimouto_albums.json"),
         );
-        YtdlpClient::new(Arc::new(http), SERVER.to_string())
+        Arc::new(YtdlpClient::new(Arc::new(http), SERVER.to_string()))
     }
 
     #[tokio::test]
     async fn test_get_artist() -> anyhow::Result<()> {
         let url = "https://soundcloud.com/laserimouto";
         let client = make_artist_client(url);
-        let artist = get_artist(&client, url).await?;
+        let artist = get_artist(client, url).await?;
 
         assert_eq!(artist.aliases.len(), 1);
         assert_eq!(artist.aliases[0].name, "Laser Imouto (All)");

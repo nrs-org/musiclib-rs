@@ -31,79 +31,22 @@ pub struct FlatEntry {
     pub url: String,
 }
 
-impl SeriesResponse {
-    pub fn into_entity_result(self) -> EntityResult<()> {
-        let mut sources = ExternalSources::default();
-        sources
-            .0
-            .entry(SOURCE.into())
-            .or_default()
-            .insert(self.webpage_url);
-
-        let mut uploader_sources = ExternalSources::default();
-        if let Some(ref uid) = self.uploader_id {
-            uploader_sources
-                .0
-                .entry(SOURCE.into())
-                .or_default()
-                .insert(user_url(uid));
-        }
-        let uploader_ref = ChildRef {
-            entry_type: EntryType::Artist,
-            external_type: EXTERNAL_TYPE_ARTIST.into(),
-            sources: uploader_sources,
-            name: self.uploader,
-            contributions: vec![Contribution {
-                role: StandardRoleNames::UPLOADER.into(),
-                main_artist: false,
-                source: SOURCE.into(),
-                extra: serde_json::Value::Null,
-            }],
+fn entries_to_track_refs(entries: Vec<FlatEntry>) -> Vec<ChildRef> {
+    entries
+        .into_iter()
+        .enumerate()
+        .map(|(i, entry)| ChildRef {
+            entry_type: EntryType::Track,
+            external_type: EXTERNAL_TYPE_VIDEO.into(),
+            sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
+            position: Some(TrackPosition {
+                disc_no: None,
+                track_no: (i + 1) as i32,
+                synthetic: false,
+            }),
             ..Default::default()
-        };
-
-        let track_refs: Vec<ChildRef> = self
-            .entries
-            .into_iter()
-            .enumerate()
-            .map(|(i, entry)| ChildRef {
-                entry_type: EntryType::Track,
-                external_type: EXTERNAL_TYPE_VIDEO.into(),
-                sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
-                position: Some(TrackPosition {
-                    disc_no: None,
-                    track_no: (i + 1) as i32,
-                }),
-                ..Default::default()
-            })
-            .collect();
-
-        EntityResult {
-            release_date: None,
-            sources,
-            extra: self.extra,
-            specific_data: EntrySpecificData::Release {
-                release_type: Some("series".into()),
-                num_discs: None,
-                num_tracks: self.playlist_count,
-            },
-            children: vec![
-                Arc::new(CachedChildSource::from_children(vec![uploader_ref])),
-                Arc::new(CachedChildSource::from_children(track_refs)),
-            ],
-            aliases: self
-                .title
-                .map(|name| {
-                    vec![Alias {
-                        name,
-                        source: SOURCE.into(),
-                        primary: true,
-                        ..Default::default()
-                    }]
-                })
-                .unwrap_or_default(),
-        }
-    }
+        })
+        .collect()
 }
 
 pub async fn get_series_raw<T, F, E, FR, R>(
@@ -122,12 +65,72 @@ where
     callback(&value).await
 }
 
-pub async fn get_series(client: &YtdlpClient, url: &str) -> Result<EntityResult<()>, Error> {
-    get_series_raw::<SeriesResponse, _, Error, _, _>(client, url, |s| {
-        let result = Ok(s.clone().into_entity_result());
-        async move { result }
+/// Fetches series metadata without entries (fast), then returns an `EntityResult`
+/// whose track children are loaded lazily on first iteration.
+pub async fn get_series(client: Arc<YtdlpClient>, url: &str) -> Result<EntityResult<()>, Error> {
+    let meta: SeriesResponse = serde_json::from_value(client.fetch_no_children(url).await?)
+        .map_err(|e| Error::InvalidUrl(format!("failed to deserialize series metadata: {e}")))?;
+
+    let mut sources = ExternalSources::default();
+    sources
+        .0
+        .entry(SOURCE.into())
+        .or_default()
+        .insert(meta.webpage_url);
+
+    let mut uploader_sources = ExternalSources::default();
+    if let Some(ref uid) = meta.uploader_id {
+        uploader_sources
+            .0
+            .entry(SOURCE.into())
+            .or_default()
+            .insert(user_url(uid));
+    }
+    let uploader_ref = ChildRef {
+        entry_type: EntryType::Artist,
+        external_type: EXTERNAL_TYPE_ARTIST.into(),
+        sources: uploader_sources,
+        name: meta.uploader,
+        contributions: vec![Contribution {
+            role: StandardRoleNames::UPLOADER.into(),
+            main_artist: false,
+            source: SOURCE.into(),
+            extra: serde_json::Value::Null,
+        }],
+        ..Default::default()
+    };
+
+    let track_source = client.lazy_children(url.to_string(), |value| {
+        let response: SeriesResponse = serde_json::from_value(value)
+            .map_err(|e| Error::InvalidUrl(format!("failed to deserialize series entries: {e}")))?;
+        Ok(entries_to_track_refs(response.entries))
+    });
+
+    Ok(EntityResult {
+        release_date: None,
+        sources,
+        extra: meta.extra,
+        specific_data: EntrySpecificData::Release {
+            release_type: Some("series".into()),
+            num_discs: None,
+            num_tracks: meta.playlist_count,
+        },
+        children: vec![
+            Arc::new(CachedChildSource::from_children(vec![uploader_ref])),
+            Arc::new(CachedChildSource::new(Box::new(track_source))),
+        ],
+        aliases: meta
+            .title
+            .map(|name| {
+                vec![Alias {
+                    name,
+                    source: SOURCE.into(),
+                    primary: true,
+                    ..Default::default()
+                }]
+            })
+            .unwrap_or_default(),
     })
-    .await
 }
 
 #[cfg(test)]
@@ -152,17 +155,22 @@ mod tests {
         format!("{}/entities/{}", SERVER, urlencoding::encode(url))
     }
 
-    fn make_client(url: &str, fixture: &'static str) -> YtdlpClient {
+    fn make_client(url: &str, fixture: &'static str) -> Arc<YtdlpClient> {
         let mut http = MockHttpClient::new();
+        http.add_route_json::<serde_json::Value>(
+            Method::GET,
+            &format!("{}?no_entries", entity_url(url)),
+            fixture,
+        );
         http.add_route_json::<serde_json::Value>(Method::GET, &entity_url(url), fixture);
-        YtdlpClient::new(Arc::new(http), SERVER.to_string())
+        Arc::new(YtdlpClient::new(Arc::new(http), SERVER.to_string()))
     }
 
     #[tokio::test]
     async fn test_get_series() -> anyhow::Result<()> {
         let url = "https://www.nicovideo.jp/series/396348";
         let client = make_client(url, include_str!("./series_396348.json"));
-        let series = get_series(&client, url).await?;
+        let series = get_series(client, url).await?;
 
         assert_eq!(series.aliases[0].name, "ヒカル＆店長シリーズ2018");
         assert!(series.aliases[0].primary);

@@ -33,6 +33,12 @@ static TRACK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^https?://(?:www\.)?discogs\.com/release/(\d+)\?track=(\d+)(?:-(\d+))?$").unwrap()
 });
 
+// Matches synthetic track pseudo-URLs (index-based fallback for unparseable positions):
+//   https://www.discogs.com/release/123?track=S-3
+static TRACK_SYNTHETIC_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^https?://(?:www\.)?discogs\.com/release/(\d+)\?track=S-(\d+)$").unwrap()
+});
+
 fn match_url<'a>(re: &Regex, url: &'a str) -> Option<&'a str> {
     re.captures(url)
         .and_then(|c| c.get(1))
@@ -40,9 +46,9 @@ fn match_url<'a>(re: &Regex, url: &'a str) -> Option<&'a str> {
 }
 
 pub fn match_release_url(url: &str) -> Option<&str> {
-    // A track URL also contains a release ID — check for track first so release
+    // Track URLs also contain a release ID — check for tracks first so release
     // matching doesn't swallow track pseudo-URLs.
-    if TRACK_RE.is_match(url) {
+    if TRACK_RE.is_match(url) || TRACK_SYNTHETIC_RE.is_match(url) {
         return None;
     }
     match_url(&RELEASE_RE, url)
@@ -58,21 +64,33 @@ pub fn match_artist_url(url: &str) -> Option<&str> {
 
 /// Returns `(release_id, TrackPosition)` for a track pseudo-URL, or `None`.
 pub fn match_track_url(url: &str) -> Option<(String, TrackPosition)> {
+    if let Some(caps) = TRACK_SYNTHETIC_RE.captures(url) {
+        let release_id = caps.get(1)?.as_str().to_string();
+        let track_no: i32 = caps.get(2)?.as_str().parse().ok()?;
+        return Some((
+            release_id,
+            TrackPosition {
+                disc_no: None,
+                track_no,
+                synthetic: true,
+            },
+        ));
+    }
     let caps = TRACK_RE.captures(url)?;
     let release_id = caps.get(1)?.as_str().to_string();
     let a: i32 = caps.get(2)?.as_str().parse().ok()?;
     let position = if let Some(b) = caps.get(3) {
-        // ?track=disc-track
         let track_no: i32 = b.as_str().parse().ok()?;
         TrackPosition {
             disc_no: Some(a),
             track_no,
+            synthetic: false,
         }
     } else {
-        // ?track=track
         TrackPosition {
             disc_no: None,
             track_no: a,
+            synthetic: false,
         }
     };
     Some((release_id, position))
@@ -91,6 +109,12 @@ pub fn artist_url(id: &str) -> String {
 }
 
 pub fn track_url(release_id: &str, position: &TrackPosition) -> String {
+    if position.synthetic {
+        return format!(
+            "https://www.discogs.com/release/{release_id}?track=S-{}",
+            position.track_no
+        );
+    }
     match position.disc_no {
         None => format!(
             "https://www.discogs.com/release/{release_id}?track={}",

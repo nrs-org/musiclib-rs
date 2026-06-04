@@ -31,13 +31,13 @@ pub const EXTERNAL_TYPE_PLAYLIST: &str = "soundcloud:playlist";
 pub const EXTERNAL_TYPE_ARTIST: &str = "soundcloud:artist";
 
 pub struct Provider {
-    client: YtdlpClient,
+    client: Arc<YtdlpClient>,
 }
 
 impl Provider {
     pub fn new(http: Arc<dyn HttpClient>, server_url: String) -> Self {
         Self {
-            client: YtdlpClient::new(http, server_url),
+            client: Arc::new(YtdlpClient::new(http, server_url)),
         }
     }
 }
@@ -80,9 +80,9 @@ impl FetchProvider for Provider {
         let result = if external_type == EXTERNAL_TYPE_TRACK {
             get_track(&self.client, identifier).await?
         } else if external_type == EXTERNAL_TYPE_PLAYLIST {
-            get_playlist(&self.client, identifier).await?
+            get_playlist(Arc::clone(&self.client), identifier).await?
         } else if external_type == EXTERNAL_TYPE_ARTIST {
-            get_artist(&self.client, identifier).await?
+            get_artist(Arc::clone(&self.client), identifier).await?
         } else {
             return Err(Error::UnsupportedSourceKey(external_type.to_string()));
         };

@@ -158,6 +158,7 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
                                 None
                             },
                             track_no: track.position,
+                            synthetic: false,
                         }),
                         contributions,
                     }

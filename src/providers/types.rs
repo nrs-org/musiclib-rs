@@ -56,6 +56,8 @@ where
 pub struct TrackPosition {
     pub disc_no: Option<i32>,
     pub track_no: i32,
+    /// True when position was synthesized from track index (unparseable Discogs position string).
+    pub synthetic: bool,
 }
 
 // specific data for different entry types

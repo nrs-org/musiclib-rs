@@ -117,6 +117,7 @@ fn build_child_ref(child: &LocalChild, base: &std::path::Path) -> ChildRef {
     let position = child.position.as_ref().map(|p| TrackPosition {
         track_no: p.track_no,
         disc_no: p.disc_no,
+        synthetic: false,
     });
 
     ChildRef {

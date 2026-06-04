@@ -20,14 +20,22 @@ pub async fn get_track(client: &DiscogsClient, url: &str) -> Result<EntityResult
         client,
         &format!("https://www.discogs.com/release/{release_id}"),
         |r, id| {
-            let track = r
-                .tracklist
-                .iter()
-                .filter(|t| t.track_type != "heading")
-                .find(|t| {
-                    parse_track_position(&t.position)
-                        .is_some_and(|p| positions_match(&p, &target_pos))
-                });
+            let track = if target_pos.synthetic {
+                // Index-based fallback for tracks whose position string couldn't be parsed.
+                let index = (target_pos.track_no - 1) as usize;
+                r.tracklist
+                    .iter()
+                    .filter(|t| t.track_type != "heading")
+                    .nth(index)
+            } else {
+                r.tracklist
+                    .iter()
+                    .filter(|t| t.track_type != "heading")
+                    .find(|t| {
+                        parse_track_position(&t.position)
+                            .is_some_and(|p| positions_match(&p, &target_pos))
+                    })
+            };
 
             let result = match track {
                 None => Err(Error::InvalidUrl(url.to_string())),

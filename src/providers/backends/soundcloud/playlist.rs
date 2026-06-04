@@ -30,66 +30,22 @@ pub struct FlatEntry {
     pub url: String,
 }
 
-impl PlaylistResponse {
-    pub fn into_entity_result(self) -> EntityResult<()> {
-        let mut sources = ExternalSources::default();
-        sources
-            .0
-            .entry(SOURCE.into())
-            .or_default()
-            .insert(self.webpage_url);
-
-        let uploader_ref = ChildRef {
-            entry_type: EntryType::Artist,
-            external_type: EXTERNAL_TYPE_ARTIST.into(),
-            sources: ExternalSources::default(),
-            name: self.uploader,
-            contributions: vec![Contribution {
-                role: StandardRoleNames::UPLOADER.into(),
-                main_artist: false,
-                source: SOURCE.into(),
-                extra: serde_json::Value::Null,
-            }],
+fn entries_to_track_refs(entries: Vec<FlatEntry>) -> Vec<ChildRef> {
+    entries
+        .into_iter()
+        .enumerate()
+        .map(|(i, entry)| ChildRef {
+            entry_type: EntryType::Track,
+            external_type: EXTERNAL_TYPE_TRACK.into(),
+            sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
+            position: Some(TrackPosition {
+                disc_no: None,
+                track_no: (i + 1) as i32,
+                synthetic: false,
+            }),
             ..Default::default()
-        };
-
-        let track_refs: Vec<ChildRef> = self
-            .entries
-            .into_iter()
-            .enumerate()
-            .map(|(i, entry)| ChildRef {
-                entry_type: EntryType::Track,
-                external_type: EXTERNAL_TYPE_TRACK.into(),
-                sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
-                position: Some(TrackPosition {
-                    disc_no: None,
-                    track_no: (i + 1) as i32,
-                }),
-                ..Default::default()
-            })
-            .collect();
-
-        EntityResult {
-            release_date: None,
-            sources,
-            extra: self.extra,
-            specific_data: EntrySpecificData::Release {
-                release_type: Some("playlist".into()),
-                num_discs: None,
-                num_tracks: self.playlist_count,
-            },
-            children: vec![
-                Arc::new(CachedChildSource::from_children(vec![uploader_ref])),
-                Arc::new(CachedChildSource::from_children(track_refs)),
-            ],
-            aliases: vec![Alias {
-                name: self.title,
-                source: SOURCE.into(),
-                primary: true,
-                ..Default::default()
-            }],
-        }
-    }
+        })
+        .collect()
 }
 
 pub async fn get_playlist_raw<T, F, E, FR, R>(
@@ -108,12 +64,61 @@ where
     callback(&value).await
 }
 
-pub async fn get_playlist(client: &YtdlpClient, url: &str) -> Result<EntityResult<()>, Error> {
-    get_playlist_raw::<PlaylistResponse, _, Error, _, _>(client, url, |p| {
-        let result = Ok(p.clone().into_entity_result());
-        async move { result }
+/// Fetches playlist metadata without entries (fast), then returns an `EntityResult`
+/// whose track children are loaded lazily on first iteration.
+pub async fn get_playlist(client: Arc<YtdlpClient>, url: &str) -> Result<EntityResult<()>, Error> {
+    let meta: PlaylistResponse = serde_json::from_value(client.fetch_no_children(url).await?)
+        .map_err(|e| Error::InvalidUrl(format!("failed to deserialize playlist metadata: {e}")))?;
+
+    let mut sources = ExternalSources::default();
+    sources
+        .0
+        .entry(SOURCE.into())
+        .or_default()
+        .insert(meta.webpage_url);
+
+    let uploader_ref = ChildRef {
+        entry_type: EntryType::Artist,
+        external_type: EXTERNAL_TYPE_ARTIST.into(),
+        sources: ExternalSources::default(),
+        name: meta.uploader,
+        contributions: vec![Contribution {
+            role: StandardRoleNames::UPLOADER.into(),
+            main_artist: false,
+            source: SOURCE.into(),
+            extra: serde_json::Value::Null,
+        }],
+        ..Default::default()
+    };
+
+    let url_owned = url.to_string();
+    let track_source = client.lazy_children(url_owned, |value| {
+        let response: PlaylistResponse = serde_json::from_value(value).map_err(|e| {
+            Error::InvalidUrl(format!("failed to deserialize playlist entries: {e}"))
+        })?;
+        Ok(entries_to_track_refs(response.entries))
+    });
+
+    Ok(EntityResult {
+        release_date: None,
+        sources,
+        extra: meta.extra,
+        specific_data: EntrySpecificData::Release {
+            release_type: Some("playlist".into()),
+            num_discs: None,
+            num_tracks: meta.playlist_count,
+        },
+        children: vec![
+            Arc::new(CachedChildSource::from_children(vec![uploader_ref])),
+            Arc::new(CachedChildSource::new(Box::new(track_source))),
+        ],
+        aliases: vec![Alias {
+            name: meta.title,
+            source: SOURCE.into(),
+            primary: true,
+            ..Default::default()
+        }],
     })
-    .await
 }
 
 #[cfg(test)]
@@ -138,17 +143,24 @@ mod tests {
         format!("{}/entities/{}", SERVER, urlencoding::encode(url))
     }
 
-    fn make_client(url: &str, fixture: &'static str) -> YtdlpClient {
+    fn make_client(url: &str, fixture: &'static str) -> Arc<YtdlpClient> {
         let mut http = MockHttpClient::new();
+        // metadata-only request (lazy init)
+        http.add_route_json::<serde_json::Value>(
+            Method::GET,
+            &format!("{}?no_entries", entity_url(url)),
+            fixture,
+        );
+        // full request (lazy child fetch)
         http.add_route_json::<serde_json::Value>(Method::GET, &entity_url(url), fixture);
-        YtdlpClient::new(Arc::new(http), SERVER.to_string())
+        Arc::new(YtdlpClient::new(Arc::new(http), SERVER.to_string()))
     }
 
     #[tokio::test]
     async fn test_get_playlist() -> anyhow::Result<()> {
         let url = "https://soundcloud.com/laserimouto/sets/anime-hardcore-bootleg";
         let client = make_client(url, include_str!("./playlist_anime_hardcore_bootleg.json"));
-        let playlist = get_playlist(&client, url).await?;
+        let playlist = get_playlist(client, url).await?;
 
         assert_eq!(playlist.aliases.len(), 1);
         assert_eq!(playlist.aliases[0].name, "Otaku Hardcore Bootlegs");

@@ -136,6 +136,7 @@ pub async fn get_track(client: &SpotifyClient, url: &str) -> Result<EntityResult
                 None
             },
             track_no: t.track_number,
+            synthetic: false,
         });
 
         let result = Ok(EntityResult {

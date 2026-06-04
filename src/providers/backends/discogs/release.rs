@@ -104,6 +104,7 @@ pub(crate) fn parse_track_position(position: &str) -> Option<TrackPosition> {
         return Some(TrackPosition {
             disc_no: None,
             track_no: n,
+            synthetic: false,
         });
     }
 
@@ -122,6 +123,7 @@ pub(crate) fn parse_track_position(position: &str) -> Option<TrackPosition> {
             return Some(TrackPosition {
                 disc_no: Some(disc_no),
                 track_no,
+                synthetic: false,
             });
         }
     }
@@ -135,6 +137,7 @@ pub(crate) fn parse_track_position(position: &str) -> Option<TrackPosition> {
                 return Some(TrackPosition {
                     disc_no: Some(disc),
                     track_no: track,
+                    synthetic: false,
                 });
             }
         }
@@ -204,7 +207,8 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
             .tracklist
             .iter()
             .filter(|t| t.track_type != "heading")
-            .map(|t| {
+            .enumerate()
+            .map(|(i, t)| {
                 let position = parse_track_position(&t.position);
                 if let Some(ref pos) = position
                     && let Some(d) = pos.disc_no
@@ -223,15 +227,21 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
                     .chain(extra_artists.iter())
                     .flat_map(|c| c.contributions.clone())
                     .collect();
-                let sources = if let Some(ref pos) = position {
-                    [(SOURCE.into(), HashSet::from([track_url(id, pos)]))].into()
-                } else {
-                    Default::default()
-                };
+                // Fall back to an index-based synthetic position (disc_no=0 is the sentinel)
+                // when the Discogs position string can't be parsed (e.g. "Video", "").
+                let effective_pos = position.clone().unwrap_or(TrackPosition {
+                    disc_no: None,
+                    track_no: (i + 1) as i32,
+                    synthetic: true,
+                });
                 ChildRef {
                     entry_type: EntryType::Track,
                     external_type: EXTERNAL_TYPE_TRACK.into(),
-                    sources,
+                    sources: [(
+                        SOURCE.into(),
+                        HashSet::from([track_url(id, &effective_pos)]),
+                    )]
+                    .into(),
                     name: Some(t.title.clone()),
                     position,
                     contributions,

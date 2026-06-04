@@ -130,6 +130,7 @@ fn playlist_items_to_child_refs(items: &[PlaylistItem]) -> Vec<ChildRef> {
                         None
                     },
                     track_no: track.track_number,
+                    synthetic: false,
                 }),
                 contributions,
             }

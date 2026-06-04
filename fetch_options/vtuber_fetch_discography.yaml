@@ -1,0 +1,62 @@
+# Fetch the full discography of a VTuber artist.
+#
+# - YouTube videos are skipped at channel level; only playlists are traversed.
+# - Playlists are whitelisted/blacklisted by title (priority order, first match wins).
+# - Whitelisted playlists fetch all their tracks via `playlist_all`.
+# - Non-YouTube children (MusicBrainz releases, etc.) recurse normally via `main`.
+# - Artist children are stored as leaves (no recursive discography fetch).
+
+main:
+  child_rules:
+    # Skip all YouTube videos at channel level — only playlists are wanted
+    - match: { external_type: "youtube:video" }
+      fetch: null
+
+    # Playlist title filters (priority order, first match wins)
+
+    # Priority 50 — blacklist singing streams
+    - match:
+        all:
+          - { external_type: "youtube:playlist" }
+          - { name_regex: "歌枠" }
+      fetch: null
+
+    # Priority 20 — per-artist whitelists/blacklists
+    - match:
+        all:
+          - { external_type: "youtube:playlist" }
+          - { name_regex: "歌🎶" }              # Usada Pekora
+      fetch: playlist_all
+    - match:
+        all:
+          - { external_type: "youtube:playlist" }
+          - { name_regex: "Song Introduction" } # AZKi
+      fetch: null
+    - match:
+        all:
+          - { external_type: "youtube:playlist" }
+          - { name_regex: "お歌の動画だよ" }    # Tokino Sora
+      fetch: playlist_all
+
+    # Priority 10 — generic music keywords whitelist
+    - match:
+        all:
+          - { external_type: "youtube:playlist" }
+          - { name_regex: "(?i)(original song|cover song|楽曲|歌唱|うた動画|歌ってみた|オリジナル曲|オリ曲|music video|カバー曲|covers|オリジナル|MV|歌動画|official music)" }
+      fetch: playlist_all
+
+    # Priority 0 — drop all other playlists
+    - match: { external_type: "youtube:playlist" }
+      fetch: null
+
+    - match: { not: { entry_type: artist } }
+      fetch: main                               # non-YouTube children recurse
+    - match: { entry_type: artist }
+      fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
+
+playlist_all:
+  child_rules:
+    - match: { entry_type: artist }
+      fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
+    - match: { not: { entry_type: artist } }
+      fetch: playlist_all                       # fetch all tracks, no filtering

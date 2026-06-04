@@ -10,6 +10,8 @@
 ///   PROVIDER_SERVER_ADDR — listen address (default: "127.0.0.1:3000")
 use std::{net::SocketAddr, sync::Arc};
 
+use regex::Regex;
+
 use http_body_util::Full;
 use hyper::{
     Method, Request, Response, StatusCode,
@@ -37,6 +39,20 @@ fn json_response(status: StatusCode, body: Value) -> HyperResponse {
         .expect("response builder")
 }
 
+/// Extract an HTTP status code from yt-dlp stderr lines like
+/// `HTTP Error 404: Not Found` or `<HTTPError 404: Not Found>`.
+fn http_status_from_stderr(stderr: &str) -> Option<StatusCode> {
+    let re = Regex::new(r"HTTP\s*Error\s+(\d{3})").unwrap();
+    let code: u16 = re
+        .captures_iter(stderr)
+        .last()?
+        .get(1)?
+        .as_str()
+        .parse()
+        .ok()?;
+    StatusCode::from_u16(code).ok()
+}
+
 async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperResponse, BoxError> {
     if req.method() != Method::GET {
         return Ok(json_response(
@@ -57,24 +73,34 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
 
     let query = req.uri().query().unwrap_or("");
     let full = query.split('&').any(|p| p == "full");
+    let no_entries = query.split('&').any(|p| p == "no_entries");
 
+    let mut args: Vec<&str> = vec![
+        "--dump-single-json",
+        "--flat-playlist",
+        "--lazy-playlist",
+        "--no-check-formats",
+        "--extractor-retries",
+        "0",
+    ];
+    if no_entries {
+        args.extend_from_slice(&["--playlist-items", "0"]);
+    }
+
+    tracing::debug!(cmd = %state.ytdlp_path, args = ?args, id = %id, "running yt-dlp");
     let output = Command::new(&state.ytdlp_path)
-        .args([
-            "--dump-single-json",
-            "--flat-playlist",
-            "--no-check-formats",
-            "--extractor-retries",
-            "0",
-            &id,
-        ])
+        .args(&args)
+        .arg(&id)
         .output()
         .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("yt-dlp exited with {}: {stderr}", output.status);
+        // Forward the upstream HTTP status when yt-dlp reports one explicitly.
+        let status = http_status_from_stderr(&stderr).unwrap_or(StatusCode::BAD_GATEWAY);
         return Ok(json_response(
-            StatusCode::BAD_GATEWAY,
+            status,
             serde_json::json!({
                 "error": "upstream_error",
                 "message": stderr.trim(),
