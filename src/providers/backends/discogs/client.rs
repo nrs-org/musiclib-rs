@@ -3,7 +3,7 @@ use std::{future::Future, sync::Arc};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    http::{HeaderName, HeaderValue, HttpClient, Request, default_http_client},
+    http::{self, HeaderName, HeaderValue, HttpClient, Request, default_http_client},
     providers::{backends::build_url, types::Error},
 };
 
@@ -87,8 +87,13 @@ impl DiscogsClient {
             .await
             .map_err(Error::from)?;
 
-        response.error_for_status_ref().map_err(Error::from)?;
-        let result = response.json::<T>().await.map_err(Error::from)?;
-        callback(&result).await
+        match response.status.as_u16() {
+            200..=299 => {
+                let result = response.json::<T>().await.map_err(Error::from)?;
+                callback(&result).await
+            }
+            404 => Err(Error::NotFound("Discogs resource not found".into()).into()),
+            _ => Err(Error::Http(http::Error::HttpStatus(response.status)).into()),
+        }
     }
 }

@@ -338,6 +338,22 @@ pub fn build_providers(
     Ok(providers)
 }
 
+// ── HTTP coalesce rules ───────────────────────────────────────────────────────
+
+/// Coalesce rules contributed by all backends. Pass this into
+/// `HttpClientConfig::coalescer_rules` before calling `build()` to enable
+/// batched upstream calls for endpoints that support it.
+pub fn coalesce_rules() -> Vec<Arc<dyn crate::http::CoalesceRule>> {
+    vec![
+        youtube_api::YouTubeListRule::videos(),
+        youtube_api::YouTubeListRule::channels(),
+        youtube_api::YouTubeListRule::playlists(),
+        spotify::SpotifyBatchRule::tracks(),
+        spotify::SpotifyBatchRule::albums(),
+        spotify::SpotifyBatchRule::artists(),
+    ]
+}
+
 // ── URL canonicalization ──────────────────────────────────────────────────────
 
 /// Return one `CanonicalizeProvider` per backend, in match-priority order.

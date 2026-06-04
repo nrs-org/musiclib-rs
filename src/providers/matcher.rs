@@ -161,58 +161,75 @@ fn filtering_stream(
     pool: Arc<EntryFetchOptionsPool>,
     provider: Arc<dyn FetchProvider>,
 ) -> BoxStream<'static, Result<(ChildRef, ChildFetchOptions), Error>> {
-    futures::stream::unfold(
-        (cursor, rules, pool, provider, 0usize),
-        |(mut cursor, rules, pool, provider, mut index)| async move {
-            loop {
-                if !rules
-                    .iter()
-                    .any(|r| can_future_items_match(&r.matcher, index))
-                {
-                    return None;
-                }
-                let (child, _) = match child_next(&mut cursor).await {
-                    Ok(Some(item)) => item,
-                    Ok(None) => return None,
-                    Err(e) => return Some((Err(e), (cursor, rules, pool, provider, index))),
-                };
+    // Matcher eval may fetch the child's entity (duration_range, youtube/MB
+    // data matchers). Serial eval = one fetch RTT per child, which collapses
+    // request-batching downstream (the coalescer only ever sees a single
+    // in-flight call). Drive up to this many evals at once so per-child
+    // fetches reach the coalescer in parallel.
+    const CONCURRENCY: usize = 50;
 
+    let rules = Arc::new(rules);
+    let rules_pull = Arc::clone(&rules);
+
+    // Sequential cursor walk (fast — no matcher eval here). Tags each child
+    // with its index so out-of-order eval below still gets a stable
+    // `child_index` for `IndexRange` matchers. Early-exits via
+    // `can_future_items_match` once no rule could ever match further items.
+    let child_stream = futures::stream::unfold((cursor, 0usize), move |(mut cursor, index)| {
+        let rules = Arc::clone(&rules_pull);
+        async move {
+            if !rules
+                .iter()
+                .any(|r| can_future_items_match(&r.matcher, index))
+            {
+                return None;
+            }
+            match child_next(&mut cursor).await {
+                Ok(Some((child, _))) => Some((Ok((child, index)), (cursor, index + 1))),
+                Ok(None) => None,
+                Err(e) => Some((Err(e), (cursor, index))),
+            }
+        }
+    });
+
+    child_stream
+        .map(move |item| {
+            let rules = Arc::clone(&rules);
+            let pool = Arc::clone(&pool);
+            let provider = Arc::clone(&provider);
+            async move {
+                let (child, child_index) = item?;
                 let entity_cell = OnceCell::new();
-                let child_index = index;
-                index += 1;
-                let mut matched_id: Option<Option<OptionsId>> = None;
-                {
+                let matched_id: Option<Option<OptionsId>> = {
                     let ctx = MatchContext {
                         child: &child,
                         child_index,
                         entity_cell: &entity_cell,
                     };
-                    for rule in &rules {
-                        match evaluate_expr(&rule.matcher, &ctx, provider.clone()).await {
-                            Err(e) => {
-                                return Some((Err(e), (cursor, rules, pool, provider, index)));
-                            }
-                            Ok(true) => {
-                                matched_id = Some(rule.options_id);
-                                break;
-                            }
-                            Ok(false) => {}
+                    let mut found = None;
+                    for rule in rules.iter() {
+                        if evaluate_expr(&rule.matcher, &ctx, provider.clone()).await? {
+                            found = Some(rule.options_id);
+                            break;
                         }
                     }
-                }
-                match matched_id {
-                    Some(Some(id)) => {
-                        return Some((
-                            Ok((child, ChildFetchOptions::new(pool.clone(), id))),
-                            (cursor, rules, pool, provider, index),
-                        ));
-                    }
-                    Some(None) | None => continue, // skip or no rule matched
-                }
+                    found
+                };
+                Ok::<_, Error>(match matched_id {
+                    Some(Some(id)) => Some((child, ChildFetchOptions::new(pool, id))),
+                    Some(None) | None => None,
+                })
             }
-        },
-    )
-    .boxed()
+        })
+        .buffer_unordered(CONCURRENCY)
+        .filter_map(|res| async move {
+            match res {
+                Ok(Some(item)) => Some(Ok(item)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .boxed()
 }
 
 impl Stream for FilteringChildSource {

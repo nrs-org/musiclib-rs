@@ -4,7 +4,7 @@ use http::{HeaderName, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    http::{HttpClient, Request, default_http_client},
+    http::{self, HttpClient, Request, default_http_client},
     providers::{backends::build_url, types::Error},
 };
 
@@ -80,7 +80,13 @@ impl YoutubeClient {
             .await
             .map_err(Error::from)?;
 
-        let result = response.json::<T>().await.expect("should be T");
-        callback(&result).await
+        match response.status.as_u16() {
+            200..=299 => {
+                let result = response.json::<T>().await.expect("should be T");
+                callback(&result).await
+            }
+            404 => Err(Error::NotFound("YouTube video/playlist/channel not found".into()).into()),
+            _ => Err(Error::Http(http::Error::HttpStatus(response.status)).into()),
+        }
     }
 }

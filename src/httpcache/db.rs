@@ -3,13 +3,15 @@ use std::{borrow::Cow, str::FromStr, sync::Arc};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use sea_orm::{
-    ActiveValue::Set, Database, DatabaseConnection, DbErr, EntityTrait, FromJsonQueryResult,
-    sea_query,
+    ActiveValue::Set, ConnectOptions, Database, DatabaseConnection, DbErr, EntityTrait,
+    FromJsonQueryResult, sea_query,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    http::{BodyExtractor, HeaderName, HeaderValue, RawResponse, Response},
+    http::{
+        BodyExtractorCow, HeaderName, HeaderValue, RawResponse, Response, bytes_body_extractor,
+    },
     httpcache::{CachePolicy, HttpCache},
 };
 
@@ -68,12 +70,46 @@ impl DbHttpCache {
     }
 
     async fn init_db(db_url: String) -> Result<DatabaseConnection, Error> {
+        // A `:memory:` database is private per connection, so it must use a
+        // single pooled connection or every cursor sees an empty DB.
+        let is_memory = db_url.contains(":memory:") || db_url.contains("mode=memory");
+
         let db_url = if db_url.starts_with("sqlite://") && !db_url.contains('?') {
             format!("{db_url}?mode=rwc")
         } else {
             db_url
         };
-        let db = Database::connect(db_url).await.unwrap();
+
+        let mut opts = ConnectOptions::new(db_url);
+        opts.sqlx_logging(false);
+        if is_memory {
+            opts.max_connections(1);
+        } else {
+            // A real connection pool (not a single serialized connection) is
+            // required: the importer fans out cache reads/writes via
+            // `buffer_unordered`, and funnelling them all through one connection
+            // — or, worse, a global mutex held across body extraction —
+            // deadlocks. sqlx applies a 5s `busy_timeout` per connection by
+            // default, so concurrent writers wait rather than erroring.
+            opts.max_connections(32)
+                .acquire_timeout(std::time::Duration::from_secs(30));
+        }
+
+        let db = Database::connect(opts).await?;
+
+        if !is_memory {
+            // WAL is a persistent, DB-level setting; enabling it once lets many
+            // readers and one writer proceed concurrently (cache hits are reads).
+            // busy_timeout tells SQLite how long to spin-wait for the write lock
+            // before returning SQLITE_BUSY; 30 s covers worst-case write queues
+            // when buffer_unordered fans out many concurrent cache writes.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000;",
+            )
+            .await?;
+        }
+
         db.get_schema_registry("musiclib_rs::httpcache::db::*")
             .sync(&db)
             .await?;
@@ -199,7 +235,7 @@ impl HttpCache for DbHttpCache {
     async fn get(
         &self,
         key: &str,
-        extractor: &dyn BodyExtractor,
+        extractor: BodyExtractorCow<'static>,
     ) -> Result<Option<Arc<Response>>, super::Error> {
         match cache_entry::Entity::find_by_id(key)
             .one(&self.db)
@@ -208,8 +244,8 @@ impl HttpCache for DbHttpCache {
         {
             None => Ok(None),
             Some(model) => {
-                let response = Self::map_response(model)?;
-                Ok(Some(Arc::new(extractor.extract_response(response).await?)))
+                let raw = Self::map_response(model)?;
+                Ok(Some(Arc::new(Response::from_raw(raw, extractor))))
             }
         }
     }

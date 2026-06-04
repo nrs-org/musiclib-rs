@@ -3,7 +3,7 @@ use std::{borrow::Cow, sync::Arc};
 
 use async_trait::async_trait;
 
-use crate::http::{BodyExtractor, Method, Request, Response};
+use crate::http::{BodyExtractorCow, Method, Request, Response};
 
 pub use db::DbHttpCache;
 pub use memory::MemoryHttpCache;
@@ -43,7 +43,7 @@ pub trait HttpCache: Send + Sync {
     async fn get(
         &self,
         key: &str,
-        extractor: &dyn BodyExtractor,
+        extractor: BodyExtractorCow<'static>,
     ) -> Result<Option<Arc<Response>>, Error>;
 
     fn default_cache_key(&self, method: &Method, url: &str) -> String {
@@ -53,7 +53,7 @@ pub trait HttpCache: Send + Sync {
     async fn get_req(
         &self,
         req: &Request,
-        extractor: &dyn BodyExtractor,
+        extractor: BodyExtractorCow<'static>,
     ) -> Result<Option<Arc<Response>>, Error> {
         let key = req
             .cache_key

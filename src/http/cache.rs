@@ -69,7 +69,7 @@ impl HttpClient for CacheHttpClient {
             && !req.force_refetch
             && let Some(cached) = self
                 .cache
-                .get_req(&req, body_extractor.as_ref())
+                .get_req(&req, body_extractor.clone())
                 .await
                 .map_err(|source| super::Error::Cache {
                     url: req.url.clone(),

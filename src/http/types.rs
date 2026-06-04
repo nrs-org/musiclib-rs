@@ -1,5 +1,7 @@
 use std::{any::Any, borrow::Cow, fmt::Debug, sync::Arc};
 
+use http_body_util::BodyExt as _;
+
 use bytes::Bytes;
 use serde::Serialize;
 use thiserror::Error;
@@ -144,6 +146,17 @@ pub struct Response {
 }
 
 impl Response {
+    pub fn from_raw(
+        raw: RawResponse<'static>,
+        extractor: super::BodyExtractorCow<'static>,
+    ) -> Self {
+        Self {
+            status: raw.status,
+            headers: raw.headers.into_owned(),
+            body: RwLock::new(ResponseBodyState::Unextracted(extractor, raw.body)),
+        }
+    }
+
     pub fn from(
         res: reqwest::Response,
         extractor: super::BodyExtractorCow<'static>,
@@ -234,12 +247,22 @@ impl Response {
     }
 
     pub async fn body_to_bytes(&self) -> Result<Bytes, Error> {
-        if let Ok(body) = self.bytes().await {
-            return Ok(Bytes::copy_from_slice(&body));
+        let mut state = self.body.write().await;
+        match &mut *state {
+            ResponseBodyState::Unextracted(_, body) => {
+                let bytes = body
+                    .collect()
+                    .await
+                    .map_err(|e| Error::BodyExtract(Arc::new(BodyExtractError::Http(e))))?
+                    .to_bytes();
+                *body = reqwest::Body::from(bytes.clone());
+                Ok(bytes)
+            }
+            ResponseBodyState::Extracted(body) => {
+                body.to_bytes().map_err(Error::ErasedSerialization)
+            }
+            ResponseBodyState::Failed(e) => Err(Error::BodyExtract(e.clone())),
         }
-
-        let body = self.body().await?;
-        body.to_bytes().map_err(Error::ErasedSerialization)
     }
 
     pub async fn bytes(&self) -> Result<RwLockReadGuard<'_, [u8]>, Error> {
@@ -294,6 +317,10 @@ pub enum Error {
     HttpStatus(reqwest::StatusCode),
     #[error("Serialization error (erased_serde): {0}")]
     ErasedSerialization(#[from] erased_serde::Error),
+    #[error("Coalesced batch failed: {0}")]
+    Batch(Arc<Error>),
+    #[error("Coalescer internal error: {0}")]
+    CoalescerInternal(&'static str),
 }
 
 impl From<BodyExtractError> for Error {

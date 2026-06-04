@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    future::Future,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -676,6 +677,7 @@ impl<T: Clone + Send + Sync + 'static> CachedChildSource<T> {
         CachedChildCursor {
             cache: self,
             index: 0,
+            fut: None,
         }
     }
 
@@ -684,6 +686,7 @@ impl<T: Clone + Send + Sync + 'static> CachedChildSource<T> {
         OwnedCachedChildCursor {
             cache: Arc::clone(self),
             index: 0,
+            fut: None,
         }
     }
 }
@@ -698,12 +701,16 @@ impl CachedChildSource<()> {
 pub struct CachedChildCursor<'a, T: Clone + Send + Sync + 'static = ()> {
     cache: &'a CachedChildSource<T>,
     index: usize,
+    /// In-progress advance future, persisted across polls. See [`CachedNextFut`].
+    fut: Option<CachedNextFut<'a, T>>,
 }
 
 /// An owned cursor over `CachedChildSource<T>` (holds an `Arc`). Implements `ChildSource<T>`.
 pub struct OwnedCachedChildCursor<T: Clone + Send + Sync + 'static = ()> {
     cache: Arc<CachedChildSource<T>>,
     index: usize,
+    /// In-progress advance future, persisted across polls. See [`CachedNextFut`].
+    fut: Option<CachedNextFut<'static, T>>,
 }
 
 fn cached_size_hint<T: Clone + Send + Sync + 'static>(
@@ -843,20 +850,43 @@ async fn cached_next_owned<T: Clone + Send + Sync + 'static>(
     None
 }
 
+/// Owned-Arc variant of [`cached_next_owned`], producing a `'static` future so
+/// an [`OwnedCachedChildCursor`] can store it across polls.
+async fn cached_next_arc<T: Clone + Send + Sync + 'static>(
+    cache: Arc<CachedChildSource<T>>,
+    index: usize,
+) -> Option<(Result<(ChildRef, T), Error>, usize)> {
+    cached_next_owned(&cache, index).await
+}
+
+/// In-progress `cached_next_*` future, persisted inside a cursor across polls.
+///
+/// Recreating this future on every `poll_next` would drop the pending
+/// `state.lock()` waiter (de-registering this task from the mutex wait queue),
+/// so a contended lock would never wake the task again — a hard deadlock.
+type CachedNextFut<'a, T> =
+    Pin<Box<dyn Future<Output = Option<(Result<(ChildRef, T), Error>, usize)>> + Send + 'a>>;
+
 impl<T: Clone + Send + Sync + 'static> Stream for CachedChildCursor<'_, T> {
     type Item = Result<(ChildRef, T), Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let cache = this.cache;
-        let index = this.index;
-        let mut fut = Box::pin(cached_next_owned(cache, index));
+        // Persist the advance future across polls; recreating it each poll would
+        // drop the pending `state.lock()` waiter and deadlock under contention.
+        let fut = this
+            .fut
+            .get_or_insert_with(|| Box::pin(cached_next_owned(this.cache, this.index)));
         match fut.as_mut().poll(cx) {
             Poll::Ready(Some((item, new_index))) => {
                 this.index = new_index;
+                this.fut = None;
                 Poll::Ready(Some(item))
             }
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                this.fut = None;
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -879,15 +909,21 @@ impl<T: Clone + Send + Sync + 'static> Stream for OwnedCachedChildCursor<T> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let cache = Arc::clone(&this.cache);
-        let index = this.index;
-        let mut fut = Box::pin(cached_next_owned(&cache, index));
+        // Persist the advance future across polls; recreating it each poll would
+        // drop the pending `state.lock()` waiter and deadlock under contention.
+        let fut = this
+            .fut
+            .get_or_insert_with(|| Box::pin(cached_next_arc(Arc::clone(&this.cache), this.index)));
         match fut.as_mut().poll(cx) {
             Poll::Ready(Some((item, new_index))) => {
                 this.index = new_index;
+                this.fut = None;
                 Poll::Ready(Some(item))
             }
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                this.fut = None;
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -902,5 +938,84 @@ impl<T: Clone + Send + Sync + 'static> Unpin for OwnedCachedChildCursor<T> {}
 impl<T: Clone + Send + Sync + 'static> ChildSource<T> for OwnedCachedChildCursor<T> {
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
         cached_evaluate_expr(&self.cache, self.index, expr)
+    }
+}
+
+#[cfg(test)]
+mod cached_source_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Live source that yields `n` named children, sleeping 1ms before each to
+    /// simulate async I/O. The sleep makes `poll_next` return `Pending` with the
+    /// wake-up owned by a single `tokio::time::Sleep` waker slot — the condition
+    /// that orphaned a cursor task when `poll_next` recreated (and dropped) its
+    /// in-progress future every poll.
+    struct SleepySource {
+        stream: BoxStream<'static, Result<(ChildRef, ()), Error>>,
+    }
+
+    impl SleepySource {
+        fn new(n: usize) -> Self {
+            let stream = futures::stream::unfold(0usize, move |i| async move {
+                if i >= n {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                let child = ChildRef {
+                    name: Some(i.to_string()),
+                    ..Default::default()
+                };
+                Some((Ok((child, ())), i + 1))
+            })
+            .boxed();
+            Self { stream }
+        }
+    }
+
+    impl Stream for SleepySource {
+        type Item = Result<(ChildRef, ()), Error>;
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.stream.as_mut().poll_next(cx)
+        }
+    }
+    impl Unpin for SleepySource {}
+    impl ChildSource for SleepySource {}
+
+    async fn drain(cache: Arc<CachedChildSource>) -> Vec<String> {
+        let mut cursor = cache.owned_cursor();
+        let mut out = Vec::new();
+        while let Some(item) = StreamExt::next(&mut cursor).await {
+            out.push(item.expect("no error").0.name.unwrap_or_default());
+        }
+        out
+    }
+
+    /// Regression test: two cursors over the *same* `CachedChildSource`, driven
+    /// on separate tasks (so they have distinct wakers), must both fully drain.
+    ///
+    /// Before the fix, `CachedChildCursor::poll_next` rebuilt the advance future
+    /// every poll and dropped it on `Pending`, discarding the pending
+    /// `state.lock()` waiter. Once the shared `state` mutex was contended, the
+    /// losing task was never woken again — a hard deadlock. With the future
+    /// persisted across polls, both cursors complete.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_cursors_over_shared_source_dont_deadlock() {
+        let cache = Arc::new(CachedChildSource::new(Box::new(SleepySource::new(8))));
+
+        let a = tokio::spawn(drain(Arc::clone(&cache)));
+        let b = tokio::spawn(drain(Arc::clone(&cache)));
+
+        let joined = futures::future::try_join(a, b);
+        let (a, b) = tokio::time::timeout(Duration::from_secs(10), joined)
+            .await
+            .expect("cursors deadlocked")
+            .expect("tasks panicked");
+
+        let expected: Vec<String> = (0..8).map(|i| i.to_string()).collect();
+        assert_eq!(a, expected);
+        // The second cursor replays the same buffered children from index 0.
+        assert_eq!(b, expected);
     }
 }

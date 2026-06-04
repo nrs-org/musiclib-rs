@@ -3,7 +3,13 @@ mod importer;
 mod progress;
 mod state;
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use clap::Parser;
 use musiclib_rs::{
@@ -56,7 +62,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let registry_config: RegistryConfig = load_config(args.registry_config.as_deref()).await?;
-    let http_config: HttpClientConfig = load_config(args.http_config.as_deref()).await?;
+    let mut http_config: HttpClientConfig = load_config(args.http_config.as_deref()).await?;
+    http_config.coalescer_rules = musiclib_rs::providers::registry::coalesce_rules();
+
+    let youtube_quota = Arc::new(AtomicU64::new(0));
+    http_config.youtube_quota_counter = Some(Arc::clone(&youtube_quota));
 
     let http = http_config.build().await?;
     let http = progress::ProgressHttpClient::new(http);
@@ -108,6 +118,10 @@ async fn main() -> anyhow::Result<()> {
     .await;
 
     flush(state, &db).await?;
+    info!(
+        "YouTube Data API quota used: {} unit(s)",
+        youtube_quota.load(Ordering::Relaxed),
+    );
     info!("Done.");
     Ok(())
 }

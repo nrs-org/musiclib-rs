@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 
-use crate::http::{BodyExtractor, Response};
+use crate::http::{BodyExtractorCow, Response};
 
 #[derive(Default)]
 pub struct MemoryHttpCache {
@@ -28,7 +28,7 @@ impl super::HttpCache for MemoryHttpCache {
     async fn get(
         &self,
         key: &str,
-        _extractor: &dyn BodyExtractor,
+        _extractor: BodyExtractorCow<'static>,
     ) -> Result<Option<Arc<Response>>, super::Error> {
         Ok(self.storage.get(key).map(|v| v.value().clone()))
     }

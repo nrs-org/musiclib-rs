@@ -2,9 +2,12 @@ pub mod album;
 pub mod artist;
 pub mod canonicalize;
 pub mod client;
+pub mod coalesce;
 pub mod playlist;
 pub mod track;
 pub mod types;
+
+pub use coalesce::SpotifyBatchRule;
 
 pub const SOURCE: &str = "spotify";
 

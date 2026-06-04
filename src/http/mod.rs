@@ -5,10 +5,14 @@ use http_body_util::BodyExt;
 use serde::{Serialize, de::DeserializeOwned};
 
 mod cache;
+pub mod coalescer;
 mod default;
+pub mod quota;
 pub mod scheduler;
 mod types;
 
+pub use coalescer::{CoalesceKey, CoalesceRule, Coalescer, SplitResponse};
+pub use quota::QuotaCounter;
 use tokio::sync::RwLock;
 pub use types::{
     BodyExtractError, Error, HeaderName, HeaderValue, Method, RawResponse, Request, Response,
@@ -37,6 +41,15 @@ pub trait BodyExtractor: Send + Sync {
 pub enum BodyExtractorCow<'a> {
     Borrowed(&'a dyn BodyExtractor),
     Owned(Arc<dyn BodyExtractor>),
+}
+
+impl<'a> Clone for BodyExtractorCow<'a> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Borrowed(b) => Self::Borrowed(*b),
+            Self::Owned(o) => Self::Owned(Arc::clone(o)),
+        }
+    }
 }
 
 impl<'a> BodyExtractorCow<'a> {
@@ -258,6 +271,19 @@ pub struct HttpClientConfig {
     pub db_cache: Option<DbCacheConfig>,
     /// Wrap the outermost layer in an in-process memory cache.
     pub memory_cache: bool,
+
+    /// Coalesce rules applied between the scheduler and the cache layers.
+    /// Not deserialised from YAML — populated programmatically by the caller
+    /// (e.g. via `providers::registry::coalesce_rules()`).
+    #[serde(skip)]
+    pub coalescer_rules: Vec<Arc<dyn CoalesceRule>>,
+
+    /// When `Some`, every outgoing YouTube Data API request increments this
+    /// counter. Cache hits don't count (the counter sits below the cache
+    /// layers); scheduler retries each count as a separate request, matching
+    /// YouTube's quota billing. Read the value after the run to get the total.
+    #[serde(skip)]
+    pub youtube_quota_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Default for HttpClientConfig {
@@ -266,6 +292,8 @@ impl Default for HttpClientConfig {
             schedulers: std::collections::HashMap::new(),
             db_cache: None,
             memory_cache: false,
+            coalescer_rules: Vec::new(),
+            youtube_quota_counter: None,
         }
     }
 }
@@ -275,26 +303,42 @@ impl HttpClientConfig {
         use crate::httpcache::{DbHttpCache, HttpCache, MemoryHttpCache};
         use cache::IntoCachedHttpClient;
 
-        // Base → scheduler
+        // Base → (optional) quota counter → scheduler.
+        // Counter sits below the scheduler so retries are billed individually,
+        // matching YouTube's quota accounting.
         let base = default_http_client();
+        let counted_base: Arc<dyn HttpClient> = match self.youtube_quota_counter {
+            Some(c) => QuotaCounter::new(base, c),
+            None => base,
+        };
         let mut schedulers = self.schedulers;
         let default_config = schedulers
             .remove("*")
             .unwrap_or_else(scheduler::SchedulerConfig::unlimited);
-        let scheduled: Arc<dyn HttpClient> =
-            scheduler::DomainScheduler::with_domain_configs(base, default_config, schedulers);
+        let scheduled: Arc<dyn HttpClient> = scheduler::DomainScheduler::with_domain_configs(
+            counted_base,
+            default_config,
+            schedulers,
+        );
+
+        // Optional coalescer layer (above scheduler, below caches).
+        let with_coalescer: Arc<dyn HttpClient> = if self.coalescer_rules.is_empty() {
+            scheduled
+        } else {
+            Coalescer::new(scheduled, self.coalescer_rules)
+        };
 
         // Optional DB cache layer
         let with_db: Arc<dyn HttpClient> = match self.db_cache {
             Some(DbCacheConfig { path, cache_policy }) => {
                 let db = Arc::new(DbHttpCache::new(path).await?) as Arc<dyn HttpCache>;
                 Arc::new(cache::CacheHttpClient {
-                    client: scheduled,
+                    client: with_coalescer,
                     cache: db,
                     config: cache_policy,
                 })
             }
-            None => scheduled,
+            None => with_coalescer,
         };
 
         // Optional memory cache layer (outermost)

@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     http::{
-        HeaderName, HeaderValue, HttpClient, Method, Request, default_http_client,
+        self, HeaderName, HeaderValue, HttpClient, Method, Request, default_http_client,
         json_body_extractor,
     },
     providers::{backends::build_url, types::Error},
@@ -201,17 +201,29 @@ impl SpotifyClient {
                 continue;
             }
 
-            let guard = response
-                .json::<ApiResponse<T>>()
-                .await
-                .map_err(Error::from)
-                .map_err(E::from)?;
-            let inner = guard.clone().into_inner().ok_or_else(|| {
-                E::from(Error::AuthenticationFailed(
-                    format!("Spotify API returned an error for {url}").into(),
-                ))
-            })?;
-            return callback(&inner).await;
+            match response.status.as_u16() {
+                200..=299 => {
+                    let inner = response
+                        .json::<ApiResponse<T>>()
+                        .await
+                        .map_err(Error::from)
+                        .map_err(E::from)?
+                        .clone()
+                        .into_inner()
+                        .ok_or_else(|| {
+                            E::from(Error::AuthenticationFailed(
+                                format!("Spotify API returned an error for {url}").into(),
+                            ))
+                        })?;
+                    return callback(&inner).await;
+                }
+                404 => return Err(E::from(Error::NotFound(url.clone()))),
+                _ => {
+                    return Err(E::from(Error::Http(http::Error::HttpStatus(
+                        response.status,
+                    ))));
+                }
+            }
         }
 
         Err(E::from(Error::AuthenticationFailed(
