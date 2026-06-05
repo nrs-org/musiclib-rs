@@ -58,7 +58,7 @@ pub fn artist_albums_url(artist_url: &str) -> String {
 }
 
 pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
-    if source_key != StandardProviderKeys::UNKNOWN_URL {
+    if source_key != StandardProviderKeys::UNKNOWN_URL && source_key != SOURCE {
         return None;
     }
     if let Some(id) = match_track_url(identifier) {
@@ -86,6 +86,48 @@ pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeRe
         });
     }
     None
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    fn via_unknown(url: &str) -> Option<CanonicalizeResult> {
+        canonicalize(StandardProviderKeys::UNKNOWN_URL, url)
+    }
+
+    fn via_source(canonical_id: &str) -> Option<CanonicalizeResult> {
+        canonicalize(SOURCE, canonical_id)
+    }
+
+    #[test]
+    fn track_roundtrip() {
+        let url = "https://soundcloud.com/laserimouto/prismatix";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn playlist_roundtrip() {
+        let url = "https://soundcloud.com/laserimouto/sets/anime-hardcore-bootleg";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn artist_roundtrip() {
+        let url = "https://soundcloud.com/laserimouto";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn foreign_source_key_rejected() {
+        assert!(canonicalize("youtube", "https://soundcloud.com/laserimouto/prismatix").is_none());
+    }
 }
 
 use crate::providers::CanonicalizeProvider;

@@ -26,6 +26,7 @@ mod entry {
     pub struct Model {
         #[sea_orm(primary_key)]
         pub id: i64,
+        pub entry_type: String,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -43,7 +44,6 @@ mod entry_source {
         #[sea_orm(primary_key, auto_increment = false)]
         pub identifier: String,
         pub entry_id: i64,
-        pub entry_type: String,
         pub release_date: Option<String>,
         pub extra: Option<String>,
         pub fetched_at: i64,
@@ -156,13 +156,27 @@ impl MusicDb {
     }
 
     /// Allocate a fresh `entry` row and return its auto-assigned id.
-    pub async fn insert_entry(&self) -> Result<i64, Error> {
+    pub async fn insert_entry(&self, entry_type: Option<EntryType>) -> Result<i64, Error> {
         let result = entry::Entity::insert(entry::ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
+            entry_type: Set(entry_type_str(entry_type).to_string()),
         })
         .exec(&self.db)
         .await?;
         Ok(result.last_insert_id)
+    }
+
+    /// Update the `entry_type` column for an existing entry.
+    pub async fn set_entry_type(&self, entry_id: i64, entry_type: EntryType) -> Result<(), Error> {
+        entry::Entity::update_many()
+            .col_expr(
+                entry::Column::EntryType,
+                sea_query::Expr::value(entry_type_str(Some(entry_type))),
+            )
+            .filter(entry::Column::Id.eq(entry_id))
+            .exec(&self.db)
+            .await?;
+        Ok(())
     }
 
     /// Re-point every `entry_source` row from `loser` to `winner` and delete the
@@ -187,13 +201,11 @@ impl MusicDb {
     /// Insert or update the metadata row for a pair. Updates every metadata
     /// column on conflict — the importer is the only writer and its final
     /// observation wins.
-    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_pair(
         &self,
         source: &str,
         identifier: &str,
         entry_id: i64,
-        entry_type: EntryType,
         release_date: Option<&str>,
         extra: Option<String>,
         specific_data: &EntrySpecificData,
@@ -216,18 +228,10 @@ impl MusicDb {
             EntrySpecificData::Artist => (None, None, None, None, None),
         };
 
-        let entry_type_str = match entry_type {
-            EntryType::Artist => "artist",
-            EntryType::ReleaseGroup => "release_group",
-            EntryType::Release => "release",
-            EntryType::Track => "track",
-        };
-
         entry_source::Entity::insert(entry_source::ActiveModel {
             source: Set(source.to_string()),
             identifier: Set(identifier.to_string()),
             entry_id: Set(entry_id),
-            entry_type: Set(entry_type_str.to_string()),
             release_date: Set(release_date.map(|s| s.to_string())),
             extra: Set(extra),
             fetched_at: Set(now),
@@ -244,7 +248,6 @@ impl MusicDb {
             ])
             .update_columns([
                 entry_source::Column::EntryId,
-                entry_source::Column::EntryType,
                 entry_source::Column::ReleaseDate,
                 entry_source::Column::Extra,
                 entry_source::Column::FetchedAt,
@@ -281,7 +284,6 @@ impl MusicDb {
                 source: Set(source.to_string()),
                 identifier: Set(identifier.to_string()),
                 entry_id: Set(entry_id),
-                entry_type: Set("unknown".to_string()),
                 release_date: Set(None),
                 extra: Set(None),
                 fetched_at: Set(now),
@@ -390,6 +392,16 @@ impl MusicDb {
         .exec(&self.db)
         .await?;
         Ok(())
+    }
+}
+
+fn entry_type_str(entry_type: Option<EntryType>) -> &'static str {
+    match entry_type {
+        Some(EntryType::Artist) => "artist",
+        Some(EntryType::ReleaseGroup) => "release_group",
+        Some(EntryType::Release) => "release",
+        Some(EntryType::Track) => "track",
+        None => "unknown",
     }
 }
 

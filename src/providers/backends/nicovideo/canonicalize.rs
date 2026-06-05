@@ -51,7 +51,7 @@ pub fn match_series_url(url: &str) -> Option<&str> {
 }
 
 pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
-    if source_key != StandardProviderKeys::UNKNOWN_URL {
+    if source_key != StandardProviderKeys::UNKNOWN_URL && source_key != SOURCE {
         return None;
     }
     if let Some(id) = match_video_url(identifier) {
@@ -87,6 +87,56 @@ pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeRe
         });
     }
     None
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    fn via_unknown(url: &str) -> Option<CanonicalizeResult> {
+        canonicalize(StandardProviderKeys::UNKNOWN_URL, url)
+    }
+
+    fn via_source(canonical_id: &str) -> Option<CanonicalizeResult> {
+        canonicalize(SOURCE, canonical_id)
+    }
+
+    #[test]
+    fn video_roundtrip() {
+        let url = "https://www.nicovideo.jp/watch/sm12345";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn series_roundtrip() {
+        let url = "https://www.nicovideo.jp/series/12345";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn mylist_roundtrip() {
+        let url = "https://www.nicovideo.jp/user/21254075/mylist/25488373";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn user_roundtrip() {
+        let url = "https://www.nicovideo.jp/user/21254075";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn foreign_source_key_rejected() {
+        assert!(canonicalize("youtube", "https://www.nicovideo.jp/watch/sm12345").is_none());
+    }
 }
 
 use crate::providers::CanonicalizeProvider;

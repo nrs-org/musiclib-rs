@@ -140,6 +140,7 @@ pub struct EntityResult<T: Clone + Send + Sync + 'static = ChildFetchOptions> {
 
 // result of canonicalizing an identifier, with canonical source key, canonical identifier, entry
 // type, and external type
+#[derive(Debug, PartialEq)]
 pub struct CanonicalizeResult {
     /// The provider that owns this identifier — e.g. `"youtube"`, `"musicbrainz"`,
     /// `"spotify"`. This is the provider's plain source key, not an entity-kind

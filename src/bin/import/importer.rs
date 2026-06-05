@@ -36,7 +36,9 @@ fn error_chain(e: &dyn std::error::Error) -> String {
 /// `input` is the pair the caller knows about. It will be linked via `is_rel`
 /// to the canonical pair returned by the URL provider, so equivalence classes
 /// span both the source-emitted form (e.g. `(youtube, long_url)`) and the
-/// provider's canonical form (e.g. `(youtube:video, short_url)`).
+/// provider's canonical form (e.g. `(youtube, short_url)`). The source key is
+/// the provider's plain key (`youtube`); `youtube:video` is the `external_type`
+/// label, used only for child-type filtering, not as a source key.
 pub fn import(
     state: Arc<State>,
     providers: Arc<Vec<Arc<dyn FetchProvider>>>,
@@ -161,21 +163,33 @@ pub fn import(
         // 6. is_rel + recursive import for every other source returned by this
         //    fetch. Passing the full pair (not just the URL) lets the recursive
         //    call link its own canonicalisation back to what we observed.
+        //    Cross-type sources (e.g. a Release linking to a Track URL) are
+        //    dropped: they would fuse entries of different types in union-find.
         for src in flatten_pairs(&sources) {
-            if src != canonical {
-                state
-                    .is_rel
-                    .lock()
-                    .unwrap()
-                    .push((canonical.clone(), src.clone()));
-                subs.push(import(
-                    Arc::clone(&state),
-                    Arc::clone(&providers),
-                    Arc::clone(&pool),
-                    src,
-                    options_id,
-                ));
+            if src == canonical {
+                continue;
             }
+            if let Some(t) = pair_entry_type(&providers, &src).await
+                && t != entry_type
+            {
+                debug!(
+                    "skip cross-type source {}:{} ({:?} != {:?})",
+                    src.0, src.1, t, entry_type
+                );
+                continue;
+            }
+            state
+                .is_rel
+                .lock()
+                .unwrap()
+                .push((canonical.clone(), src.clone()));
+            subs.push(import(
+                Arc::clone(&state),
+                Arc::clone(&providers),
+                Arc::clone(&pool),
+                src,
+                options_id,
+            ));
         }
 
         // 7. has_rel for every child. Pick one pair from the child's sources
@@ -225,6 +239,18 @@ pub fn import(
         // 8. Await all sub-tasks. Each handles its own errors.
         join_all(subs).await;
     })
+}
+
+/// Resolve the entry type for a pair by asking each provider to canonicalize it
+/// using its own source key. Returns `None` for unrecognised domains (which can
+/// never carry typed metadata, so keeping them is safe).
+async fn pair_entry_type(providers: &[Arc<dyn FetchProvider>], pair: &Pair) -> Option<EntryType> {
+    for p in providers {
+        if let Some(c) = p.canonicalize(&pair.0, &pair.1).await {
+            return Some(c.entry_type);
+        }
+    }
+    None
 }
 
 async fn canonicalize_first(

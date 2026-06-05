@@ -28,6 +28,10 @@ path = "src/bin/mb_apply_replication.rs"
 name = "mb_sync_replication"
 path = "src/bin/mb_sync_replication.rs"
 
+[[bin]]
+name = "ytdlp_server"
+path = "src/bin/ytdlp_server.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"

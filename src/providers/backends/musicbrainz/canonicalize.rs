@@ -69,7 +69,7 @@ pub fn recording_url(mbid: &str) -> String {
 }
 
 pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
-    if source_key != StandardProviderKeys::UNKNOWN_URL {
+    if source_key != StandardProviderKeys::UNKNOWN_URL && source_key != SOURCE {
         return None;
     }
     if let Some(mbid) = match_recording_url(identifier) {
@@ -105,6 +105,64 @@ pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeRe
         });
     }
     None
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    fn via_unknown(url: &str) -> Option<CanonicalizeResult> {
+        canonicalize(StandardProviderKeys::UNKNOWN_URL, url)
+    }
+
+    fn via_source(canonical_id: &str) -> Option<CanonicalizeResult> {
+        canonicalize(SOURCE, canonical_id)
+    }
+
+    const MBID: &str = "ab4266ab-0e5c-4a2d-9bb4-b3a416efca3e";
+
+    #[test]
+    fn recording_roundtrip() {
+        let url = format!("https://musicbrainz.org/recording/{MBID}");
+        let via_url = via_unknown(&url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn release_roundtrip() {
+        let url = format!("https://musicbrainz.org/release/{MBID}");
+        let via_url = via_unknown(&url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn release_group_roundtrip() {
+        let url = format!("https://musicbrainz.org/release-group/{MBID}");
+        let via_url = via_unknown(&url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn artist_roundtrip() {
+        let url = format!("https://musicbrainz.org/artist/{MBID}");
+        let via_url = via_unknown(&url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn foreign_source_key_rejected() {
+        assert!(
+            canonicalize(
+                "youtube",
+                &format!("https://musicbrainz.org/recording/{MBID}")
+            )
+            .is_none()
+        );
+    }
 }
 
 use crate::providers::CanonicalizeProvider;

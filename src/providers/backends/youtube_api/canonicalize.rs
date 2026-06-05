@@ -215,8 +215,7 @@ pub fn channel_url(kind: ChannelKind, id: &str) -> String {
 }
 
 pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
-    // Only accept unresolved URLs; canonical source keys are passed straight to fetch_entry.
-    if source_key != StandardProviderKeys::UNKNOWN_URL {
+    if source_key != StandardProviderKeys::UNKNOWN_URL && source_key != SOURCE {
         return None;
     }
     if let Some(video_id) = match_video_url(identifier) {
@@ -398,6 +397,64 @@ mod tests {
                 url, got, expected
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    fn via_unknown(url: &str) -> Option<CanonicalizeResult> {
+        canonicalize(StandardProviderKeys::UNKNOWN_URL, url)
+    }
+
+    fn via_source(canonical_id: &str) -> Option<CanonicalizeResult> {
+        canonicalize(SOURCE, canonical_id)
+    }
+
+    #[test]
+    fn video_roundtrip() {
+        let url = "https://www.youtube.com/watch?v=BaW_jenozKc";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn video_short_url_roundtrip() {
+        let short = "https://youtu.be/BaW_jenozKc";
+        let via_url = via_unknown(short).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn playlist_roundtrip() {
+        let url = "https://www.youtube.com/playlist?list=PLBB231211A4F62143";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn channel_id_roundtrip() {
+        let url = "https://www.youtube.com/channel/UCXuqSBlHAE6Xw-yeJA0Tunw";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn channel_handle_roundtrip() {
+        let url = "https://www.youtube.com/@kurzgesagt";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn foreign_source_key_rejected() {
+        assert!(canonicalize("spotify", "https://youtu.be/BaW_jenozKc").is_none());
     }
 }
 

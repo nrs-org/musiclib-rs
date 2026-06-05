@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
-    flush(state, &db).await?;
+    flush(state, providers.as_slice(), &db).await?;
     info!(
         "YouTube Data API quota used: {} unit(s)",
         youtube_quota.load(Ordering::Relaxed),

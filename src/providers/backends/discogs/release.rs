@@ -252,15 +252,8 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
         let num_tracks = track_refs.len() as i32;
         let num_discs = max_disc;
 
-        let mut sources: crate::providers::types::ExternalSources =
+        let sources: crate::providers::types::ExternalSources =
             [(SOURCE.into(), HashSet::from([canonical]))].into();
-        if let Some(master_id) = r.master_id {
-            sources
-                .0
-                .entry(SOURCE.into())
-                .or_default()
-                .insert(master_url(&master_id.to_string()));
-        }
 
         let mut children: Vec<Arc<CachedChildSource<()>>> = vec![
             Arc::new(CachedChildSource::from_children(artist_refs)),

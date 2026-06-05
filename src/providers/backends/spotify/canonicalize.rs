@@ -68,7 +68,7 @@ pub fn artist_url(id: &str) -> String {
 }
 
 pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeResult> {
-    if source_key != StandardProviderKeys::UNKNOWN_URL {
+    if source_key != StandardProviderKeys::UNKNOWN_URL && source_key != SOURCE {
         return None;
     }
     if let Some(id) = match_track_url(identifier) {
@@ -104,6 +104,62 @@ pub fn canonicalize(source_key: &str, identifier: &str) -> Option<CanonicalizeRe
         });
     }
     None
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    fn via_unknown(url: &str) -> Option<CanonicalizeResult> {
+        canonicalize(StandardProviderKeys::UNKNOWN_URL, url)
+    }
+
+    fn via_source(canonical_id: &str) -> Option<CanonicalizeResult> {
+        canonicalize(SOURCE, canonical_id)
+    }
+
+    #[test]
+    fn track_roundtrip() {
+        let url = "https://open.spotify.com/track/4iV5W9uYEdYUVa79Axb7Rh";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn album_roundtrip() {
+        let url = "https://open.spotify.com/album/4iV5W9uYEdYUVa79Axb7Rh";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn playlist_roundtrip() {
+        let url = "https://open.spotify.com/playlist/4iV5W9uYEdYUVa79Axb7Rh";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn artist_roundtrip() {
+        let url = "https://open.spotify.com/artist/4iV5W9uYEdYUVa79Axb7Rh";
+        let via_url = via_unknown(url).unwrap();
+        let via_canon = via_source(&via_url.canonical_identifier).unwrap();
+        assert_eq!(via_url, via_canon);
+    }
+
+    #[test]
+    fn foreign_source_key_rejected() {
+        assert!(
+            canonicalize(
+                "youtube",
+                "https://open.spotify.com/track/4iV5W9uYEdYUVa79Axb7Rh"
+            )
+            .is_none()
+        );
+    }
 }
 
 use crate::providers::CanonicalizeProvider;
