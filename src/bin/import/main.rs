@@ -1,8 +1,3 @@
-mod flush;
-mod importer;
-mod progress;
-mod state;
-
 use std::{
     path::Path,
     sync::{
@@ -15,6 +10,13 @@ use clap::Parser;
 use musiclib_rs::{
     http::HttpClientConfig,
     musicdb::MusicDb,
+    pipeline::{
+        dedup::{DedupConfig, dedup_db, merge_configs, reconcile_tags},
+        flush::flush,
+        importer::import,
+        progress,
+        state::State,
+    },
     providers::{
         fetch_options_yaml::load_from_file,
         registry::{RegistryConfig, build_providers},
@@ -25,10 +27,6 @@ use musiclib_rs::{
     },
 };
 use tracing::info;
-
-use flush::flush;
-use importer::import;
-use state::State;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -42,6 +40,13 @@ struct Args {
     registry_config: Option<String>,
     #[arg(long)]
     http_config: Option<String>,
+    /// Barrier config file(s). Repeatable; each file is tracked independently.
+    #[arg(long)]
+    dedup_config: Vec<String>,
+    /// Skip the pre-import dedup pass (which re-applies the barrier to the
+    /// existing DB before importing the new URL).
+    #[arg(long)]
+    skip_dedup: bool,
 }
 
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
@@ -62,6 +67,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let registry_config: RegistryConfig = load_config(args.registry_config.as_deref()).await?;
+    let mut dedup_configs: Vec<(String, DedupConfig)> = Vec::new();
+    for path in &args.dedup_config {
+        let cfg: DedupConfig = load_config(Some(path)).await?;
+        dedup_configs.push((path.clone(), cfg));
+    }
     let mut http_config: HttpClientConfig = load_config(args.http_config.as_deref()).await?;
     http_config.coalescer_rules = musiclib_rs::providers::registry::coalesce_rules();
 
@@ -86,6 +96,13 @@ async fn main() -> anyhow::Result<()> {
     let providers = Arc::new(providers);
 
     let db = MusicDb::new(&format!("sqlite://{}?mode=rwc", args.db)).await?;
+
+    // Re-apply the dedup barrier to the existing DB before importing, so the new
+    // content merges into an already-clean library. Skipped when no barriers are
+    // declared (nothing to do) or via --skip-dedup.
+    if !args.skip_dedup && !dedup_configs.is_empty() {
+        dedup_db(Arc::clone(&providers), &db, &dedup_configs).await?;
+    }
 
     let (pool, root_id) = match args.fetch_options.as_deref() {
         Some(path) => {
@@ -117,7 +134,13 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
-    flush(state, providers.as_slice(), &db).await?;
+    let merged = merge_configs(&dedup_configs);
+    flush(state, providers.as_slice(), &db, &merged).await?;
+    // The ingest may have grown/merged entries containing anchors; refresh the
+    // tags so the next dedup run sees the current grouping.
+    if !dedup_configs.is_empty() {
+        reconcile_tags(providers.as_slice(), &db, &dedup_configs).await?;
+    }
     info!(
         "YouTube Data API quota used: {} unit(s)",
         youtube_quota.load(Ordering::Relaxed),

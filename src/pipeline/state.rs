@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use musiclib_rs::providers::types::{Alias, Contribution, EntrySpecificData, EntryType};
+use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType};
 
 /// A `(source_key, identifier)` pair. The only unit of identity during import.
 pub type Pair = (String, String);
@@ -34,6 +34,12 @@ pub struct State {
     pub metadata: Mutex<HashMap<Pair, PairMetadata>>,
     pub is_rel: Mutex<Vec<(Pair, Pair)>>,
     pub has_rel: Mutex<Vec<ChildEdge>>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl State {

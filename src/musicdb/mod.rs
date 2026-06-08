@@ -123,6 +123,43 @@ mod contribution {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+// Dedup bookkeeping. `dedup_state` records the last-applied mtime of each barrier
+// config file (the cheap "did it change" gate). `entry_dedup` is a many-to-many
+// tag table recording which config files currently affect which entries, so when
+// a config is changed or removed we can recover the entries it used to touch
+// (needed to re-merge after a barrier is relaxed — its anchors are gone from the
+// new config, so only the persisted tag knows which entries to re-import).
+mod dedup_state {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "dedup_state")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub config_path: String,
+        pub mtime_ns: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+mod entry_dedup {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "entry_dedup")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub config_path: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub struct MusicDb {
     db: DatabaseConnection,
 }
@@ -153,6 +190,25 @@ impl MusicDb {
                 .await?
                 .map(|m| m.entry_id),
         )
+    }
+
+    /// Every `(source, identifier)` pair belonging to one of `entry_ids`. Used
+    /// by the lazy dedup pass to re-import only the entries that contain a
+    /// declared barrier anchor.
+    pub async fn pairs_by_entry_ids(
+        &self,
+        entry_ids: &[i64],
+    ) -> Result<Vec<(String, String)>, Error> {
+        if entry_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(entry_source::Entity::find()
+            .filter(entry_source::Column::EntryId.is_in(entry_ids.iter().copied()))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| (m.source, m.identifier))
+            .collect())
     }
 
     /// Allocate a fresh `entry` row and return its auto-assigned id.
@@ -195,6 +251,43 @@ impl MusicDb {
             .exec(&self.db)
             .await?;
         entry::Entity::delete_by_id(loser).exec(&self.db).await?;
+        Ok(())
+    }
+
+    /// Re-point a single existing pair to a different entry. Used by the
+    /// importer's split path to move a stub pair (no fresh metadata) off a
+    /// contaminated entry; `upsert_pair` already re-points pairs that do carry
+    /// fresh metadata. No-op if the pair row doesn't exist.
+    pub async fn set_pair_entry(
+        &self,
+        source: &str,
+        identifier: &str,
+        entry_id: i64,
+    ) -> Result<(), Error> {
+        entry_source::Entity::update_many()
+            .col_expr(
+                entry_source::Column::EntryId,
+                sea_query::Expr::value(entry_id),
+            )
+            .filter(entry_source::Column::Source.eq(source))
+            .filter(entry_source::Column::Identifier.eq(identifier))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Delete `entry` rows no longer referenced by any `entry_source` row — e.g.
+    /// an entry emptied when a split moved all its pairs elsewhere. Idempotent.
+    pub async fn delete_orphan_entries(&self) -> Result<(), Error> {
+        let referenced = sea_query::Query::select()
+            .distinct()
+            .column(entry_source::Column::EntryId)
+            .from(entry_source::Entity)
+            .to_owned();
+        entry::Entity::delete_many()
+            .filter(entry::Column::Id.not_in_subquery(referenced))
+            .exec(&self.db)
+            .await?;
         Ok(())
     }
 
@@ -391,6 +484,86 @@ impl MusicDb {
         })
         .exec(&self.db)
         .await?;
+        Ok(())
+    }
+
+    /// Last-applied mtime (ns since epoch) of a barrier config file, if recorded.
+    pub async fn get_dedup_mtime(&self, config_path: &str) -> Result<Option<i64>, Error> {
+        Ok(dedup_state::Entity::find_by_id(config_path.to_string())
+            .one(&self.db)
+            .await?
+            .map(|m| m.mtime_ns))
+    }
+
+    /// Record (upsert) the last-applied mtime for a barrier config file.
+    pub async fn set_dedup_mtime(&self, config_path: &str, mtime_ns: i64) -> Result<(), Error> {
+        dedup_state::Entity::insert(dedup_state::ActiveModel {
+            config_path: Set(config_path.to_string()),
+            mtime_ns: Set(mtime_ns),
+        })
+        .on_conflict(
+            sea_query::OnConflict::column(dedup_state::Column::ConfigPath)
+                .update_column(dedup_state::Column::MtimeNs)
+                .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// Forget a barrier config file's recorded mtime (used when the file is gone).
+    pub async fn delete_dedup_mtime(&self, config_path: &str) -> Result<(), Error> {
+        dedup_state::Entity::delete_by_id(config_path.to_string())
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Entry ids currently tagged as affected by a given barrier config file.
+    pub async fn entries_for_config(&self, config_path: &str) -> Result<Vec<i64>, Error> {
+        Ok(entry_dedup::Entity::find()
+            .filter(entry_dedup::Column::ConfigPath.eq(config_path))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| m.entry_id)
+            .collect())
+    }
+
+    /// Every config path that currently tags at least one entry. Used to spot
+    /// config files that were removed since the last run.
+    pub async fn tagged_config_paths(&self) -> Result<Vec<String>, Error> {
+        let mut paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for m in entry_dedup::Entity::find().all(&self.db).await? {
+            paths.insert(m.config_path);
+        }
+        Ok(paths.into_iter().collect())
+    }
+
+    /// Replace the set of entries tagged for `config_path` with `entry_ids`.
+    /// Called after every flush so the tags reflect the latest grouping.
+    pub async fn set_config_entries(
+        &self,
+        config_path: &str,
+        entry_ids: &[i64],
+    ) -> Result<(), Error> {
+        entry_dedup::Entity::delete_many()
+            .filter(entry_dedup::Column::ConfigPath.eq(config_path))
+            .exec(&self.db)
+            .await?;
+        if entry_ids.is_empty() {
+            return Ok(());
+        }
+        let models: Vec<entry_dedup::ActiveModel> = entry_ids
+            .iter()
+            .map(|id| entry_dedup::ActiveModel {
+                entry_id: Set(*id),
+                config_path: Set(config_path.to_string()),
+            })
+            .collect();
+        entry_dedup::Entity::insert_many(models)
+            .exec(&self.db)
+            .await?;
         Ok(())
     }
 }

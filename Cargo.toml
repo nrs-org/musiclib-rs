@@ -13,6 +13,10 @@ name = "import"
 path = "src/bin/import/main.rs"
 
 [[bin]]
+name = "dedup"
+path = "src/bin/dedup.rs"
+
+[[bin]]
 name = "mb_extract_urls"
 path = "src/bin/mb_extract_urls.rs"
 

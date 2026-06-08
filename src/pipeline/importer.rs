@@ -1,7 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use futures::future::join_all;
-use musiclib_rs::providers::{
+use crate::providers::{
     FetchProvider,
     std_values::StandardProviderKeys,
     types::{
@@ -9,7 +8,8 @@ use musiclib_rs::providers::{
         OptionsId, child_next,
     },
 };
-use tracing::{debug, info, warn};
+use futures::future::join_all;
+use tracing::{debug, warn};
 
 use super::state::{ChildEdge, Pair, PairMetadata, State};
 
@@ -172,7 +172,7 @@ pub fn import(
             if let Some(t) = pair_entry_type(&providers, &src).await
                 && t != entry_type
             {
-                debug!(
+                warn!(
                     "skip cross-type source {}:{} ({:?} != {:?})",
                     src.0, src.1, t, entry_type
                 );

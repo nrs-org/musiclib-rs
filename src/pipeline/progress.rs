@@ -5,10 +5,10 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::http::{BodyExtractorCow, Error, HttpClient, Request, Response};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use musiclib_rs::http::{BodyExtractorCow, Error, HttpClient, Request, Response};
 
 struct DomainStats {
     bar: ProgressBar,

@@ -107,7 +107,7 @@ for src in flatten_pairs(&sources) {
     if let Some(t) = pair_entry_type(&providers, &src).await
         && t != entry_type
     {
-        debug!("skip cross-type source {}:{} ({:?} != {:?})", src.0, src.1, t, entry_type);
+        warn!("skip cross-type source {}:{} ({:?} != {:?})", src.0, src.1, t, entry_type);
         continue;            // drop link AND skip recursion
     }
     state.is_rel.lock().unwrap().push((canonical.clone(), src.clone()));
