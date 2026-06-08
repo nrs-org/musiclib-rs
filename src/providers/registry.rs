@@ -291,7 +291,18 @@ pub fn build_providers(
             token,
             base_url,
         )?;
-        if let Some(path) = cfg.mirror_db.as_ref().and_then(|c| c.resolve()) {
+        let default_mirror_db = crate::app_dirs::data_dir().join("mb_mirror.db");
+        let mirror_db_path = cfg
+            .mirror_db
+            .as_ref()
+            .and_then(|c| c.resolve())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                default_mirror_db
+                    .exists()
+                    .then(|| default_mirror_db.clone())
+            });
+        if let Some(path) = mirror_db_path {
             match rusqlite::Connection::open(&path) {
                 Ok(conn) => {
                     provider = provider.with_mirror_db(Arc::new(std::sync::Mutex::new(conn)));
@@ -300,6 +311,12 @@ pub fn build_providers(
                     warn!("[registry] musicbrainz: could not open mirror_db {path:?}: {e}");
                 }
             }
+        } else {
+            warn!(
+                "[registry] musicbrainz: no mirror_db configured and {} not found; \
+                 URL lookups will hit the network",
+                default_mirror_db.display()
+            );
         }
         providers.push(Arc::new(provider));
     }

@@ -256,9 +256,19 @@ pub fn cache_http_client() -> Arc<dyn HttpClient> {
 /// ```
 #[derive(serde::Deserialize)]
 pub struct DbCacheConfig {
+    #[serde(default = "DbCacheConfig::default_path")]
     pub path: String,
     #[serde(default)]
     pub cache_policy: cache::CacheClientConfig,
+}
+
+impl DbCacheConfig {
+    fn default_path() -> String {
+        format!(
+            "sqlite://{}",
+            crate::app_dirs::cache_dir().join("http_cache.db").display()
+        )
+    }
 }
 
 #[derive(serde::Deserialize)]

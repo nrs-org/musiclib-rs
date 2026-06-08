@@ -1,0 +1,64 @@
+memory_cache: true
+
+db_cache:
+  cache_policy:
+    default_policy:
+      status_rules:
+        - status: 200
+          policy: { ttl: "7d", swr: "1d" }
+        - status: 404
+          policy:
+            ttl: { initial: "1h", multiplier: 2.0, max: "7d" }
+            swr: "0s"
+    domains:
+      # YouTube data changes frequently
+      www.googleapis.com:
+        status_rules:
+          - status: 200
+            policy: { ttl: "1h", swr: "6h" }
+          - status: 404
+            policy:
+              ttl: { initial: "30m", multiplier: 2.0, max: "1d" }
+              swr: "0s"
+      # MusicBrainz data is stable; be a good citizen and cache aggressively
+      musicbrainz.org:
+        status_rules:
+          - status: 200
+            policy: { ttl: "30d", swr: "7d" }
+          - status: 404
+            policy:
+              ttl: { initial: "7d", multiplier: 2.0, max: "30d" }
+              swr: "0s"
+
+schedulers:
+  "*":
+    max_concurrent: ~  # unlimited
+    retry:
+      retry_after_attempts: 5
+      backoff_attempts: 3
+      initial_backoff: "1s"
+      backoff_multiplier: 2.0
+      max_backoff: "1m"
+    channel_capacity: 64
+
+  # MusicBrainz enforces 1 req/s without a token, slightly more with one.
+  # Uses 503 instead of 429 for rate limiting.
+  musicbrainz.org:
+    max_concurrent: 1
+    retry:
+      retry_after_attempts: 5
+      backoff_attempts: 3
+      initial_backoff: "1s"
+      backoff_multiplier: 2.0
+      max_backoff: "1m"
+      rate_limit_statuses: [503]
+
+  # Discogs: 60 req/min unauthenticated, 240 req/min with token
+  api.discogs.com:
+    max_concurrent: 1
+    retry:
+      retry_after_attempts: 0 # no retry-after
+      backoff_attempts: 10
+      initial_backoff: "1s"
+      backoff_multiplier: 2.0
+      max_backoff: "1m"

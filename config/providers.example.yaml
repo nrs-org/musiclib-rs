@@ -1,0 +1,22 @@
+youtube_api:
+  api_key: { env: YOUTUBE_API_KEY }
+  ytmusicapi_server_url: http://localhost:9001
+
+spotify:
+  client_id: { env: SPOTIFY_CLIENT_ID }
+  client_secret: { env: SPOTIFY_CLIENT_SECRET }
+
+discogs:
+  user_token: { env: DISCOGS_USER_TOKEN }  # optional, raises rate limit
+
+soundcloud:
+  server_url: { env: YTDLP_SERVER_URL }
+
+nicovideo:
+  server_url: { env: YTDLP_SERVER_URL }
+
+musicbrainz:
+  base_url: "http://localhost:5000/ws/2"
+
+# local:
+#   base_dir: .  # resolve relative local:// paths from here

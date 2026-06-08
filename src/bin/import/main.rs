@@ -1,13 +1,16 @@
 use std::{
-    path::Path,
+    ffi::OsStr,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
+use anyhow::Context as _;
 use clap::Parser;
 use musiclib_rs::{
+    app_dirs,
     http::HttpClientConfig,
     musicdb::MusicDb,
     pipeline::{
@@ -32,31 +35,65 @@ use tracing::info;
 #[command(version, about)]
 struct Args {
     url: String,
+    /// Fetch-options YAML file. A bare filename (no path separator) is resolved
+    /// relative to <config_dir>/fetch_options/.
     #[arg(long)]
     fetch_options: Option<String>,
-    #[arg(long, default_value = "musiclib.db")]
-    db: String,
+    /// Music library database. Defaults to <state_dir>/musiclib.db.
+    #[arg(long)]
+    db: Option<String>,
+    /// Provider credentials config. Defaults to <config_dir>/providers.yaml.
     #[arg(long)]
     registry_config: Option<String>,
+    /// HTTP client config. Defaults to <config_dir>/http.yaml.
     #[arg(long)]
     http_config: Option<String>,
-    /// Barrier config file(s). Repeatable; each file is tracked independently.
+    /// Barrier config file(s). Repeatable; overrides auto-loading from
+    /// <config_dir>/dedup_barriers/*.yaml.
     #[arg(long)]
     dedup_config: Vec<String>,
-    /// Skip the pre-import dedup pass (which re-applies the barrier to the
-    /// existing DB before importing the new URL).
+    /// Skip the pre-import dedup pass.
     #[arg(long)]
     skip_dedup: bool,
 }
 
+/// Load YAML config from an explicit path (errors if missing) or a default
+/// path (silently falls back to T::default() if missing).
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
-    path: Option<&str>,
+    explicit: Option<&str>,
+    default: &Path,
 ) -> anyhow::Result<T> {
-    match path {
-        Some(p) => Ok(serde_yaml_ng::from_str(
-            &tokio::fs::read_to_string(p).await?,
-        )?),
-        None => Ok(T::default()),
+    let path = match explicit {
+        Some(p) => PathBuf::from(p),
+        None if default.exists() => default.to_owned(),
+        None => return Ok(T::default()),
+    };
+    let text = tokio::fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(serde_yaml_ng::from_str(&text)?)
+}
+
+fn dedup_paths_from_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == OsStr::new("yaml")))
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+fn resolve_fetch_options(s: &str) -> PathBuf {
+    let p = Path::new(s);
+    if p.is_absolute() || p.components().count() > 1 {
+        p.to_owned()
+    } else {
+        app_dirs::config_dir().join("fetch_options").join(p)
     }
 }
 
@@ -65,14 +102,30 @@ async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     let args = Args::parse();
+    let config_dir = app_dirs::config_dir();
 
-    let registry_config: RegistryConfig = load_config(args.registry_config.as_deref()).await?;
+    let registry_config: RegistryConfig = load_config(
+        args.registry_config.as_deref(),
+        &config_dir.join("providers.yaml"),
+    )
+    .await?;
+
+    let dedup_paths: Vec<PathBuf> = if args.dedup_config.is_empty() {
+        dedup_paths_from_dir(&config_dir.join("dedup_barriers"))?
+    } else {
+        args.dedup_config.iter().map(PathBuf::from).collect()
+    };
     let mut dedup_configs: Vec<(String, DedupConfig)> = Vec::new();
-    for path in &args.dedup_config {
-        let cfg: DedupConfig = load_config(Some(path)).await?;
-        dedup_configs.push((path.clone(), cfg));
+    for path in &dedup_paths {
+        let text = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))?;
+        let cfg: DedupConfig = serde_yaml_ng::from_str(&text)?;
+        dedup_configs.push((path.display().to_string(), cfg));
     }
-    let mut http_config: HttpClientConfig = load_config(args.http_config.as_deref()).await?;
+
+    let mut http_config: HttpClientConfig =
+        load_config(args.http_config.as_deref(), &config_dir.join("http.yaml")).await?;
     http_config.coalescer_rules = musiclib_rs::providers::registry::coalesce_rules();
 
     let youtube_quota = Arc::new(AtomicU64::new(0));
@@ -95,19 +148,22 @@ async fn main() -> anyhow::Result<()> {
     info!("Loaded {} provider(s)", providers.len());
     let providers = Arc::new(providers);
 
-    let db = MusicDb::new(&format!("sqlite://{}?mode=rwc", args.db)).await?;
+    let db_path = args
+        .db
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_dirs::state_dir().join("musiclib.db"));
+    tokio::fs::create_dir_all(db_path.parent().unwrap()).await?;
+    let db = MusicDb::new(&format!("sqlite://{}?mode=rwc", db_path.display())).await?;
 
-    // Re-apply the dedup barrier to the existing DB before importing, so the new
-    // content merges into an already-clean library. Skipped when no barriers are
-    // declared (nothing to do) or via --skip-dedup.
     if !args.skip_dedup && !dedup_configs.is_empty() {
         dedup_db(Arc::clone(&providers), &db, &dedup_configs).await?;
     }
 
     let (pool, root_id) = match args.fetch_options.as_deref() {
-        Some(path) => {
-            let (pool, root_id, _hash) = load_from_file(Path::new(path)).await?;
-            info!("Fetch options: {path}");
+        Some(s) => {
+            let path = resolve_fetch_options(s);
+            let (pool, root_id, _hash) = load_from_file(&path).await?;
+            info!("Fetch options: {}", path.display());
             (pool, root_id)
         }
         None => {
@@ -136,8 +192,6 @@ async fn main() -> anyhow::Result<()> {
 
     let merged = merge_configs(&dedup_configs);
     flush(state, providers.as_slice(), &db, &merged).await?;
-    // The ingest may have grown/merged entries containing anchors; refresh the
-    // tags so the next dedup run sees the current grouping.
     if !dedup_configs.is_empty() {
         reconcile_tags(providers.as_slice(), &db, &dedup_configs).await?;
     }
