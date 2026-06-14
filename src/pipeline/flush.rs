@@ -233,7 +233,6 @@ pub async fn flush(
                 &pair.1,
                 entry_id,
                 meta.release_date.as_deref(),
-                Some(meta.extra.to_string()),
                 &meta.specific_data,
             )
             .await?;

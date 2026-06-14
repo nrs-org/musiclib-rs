@@ -30,8 +30,9 @@ const DEFAULT_BASE_URL: &str = "https://metabrainz.org/api/musicbrainz";
 )]
 struct Cli {
     /// SQLite database file (must already be bootstrapped via mb_extract_urls).
-    #[arg(short, long, default_value = "mb_mirror.db")]
-    db: PathBuf,
+    /// Defaults to <data_dir>/mb_mirror.db.
+    #[arg(short, long)]
+    db: Option<PathBuf>,
 
     /// Base URL for the replication-packets endpoint.
     #[arg(long, default_value = DEFAULT_BASE_URL)]
@@ -47,8 +48,14 @@ fn main() -> Result<()> {
          (get one at https://metabrainz.org/profile/applications)",
     )?;
 
-    let mut conn =
-        Connection::open(&cli.db).with_context(|| format!("opening {}", cli.db.display()))?;
+    let db = cli
+        .db
+        .unwrap_or_else(|| musiclib_rs::app_dirs::data_dir().join("mb_mirror.db"));
+    if let Some(parent) = db.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut conn = Connection::open(&db).with_context(|| format!("opening {}", db.display()))?;
 
     let (mut current_seq, db_schema) = read_db_state(&conn)?;
     info!("db: replication_sequence={current_seq}, schema_sequence={db_schema}");

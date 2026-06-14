@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
     let db_path = args
         .db
         .map(PathBuf::from)
-        .unwrap_or_else(|| app_dirs::state_dir().join("musiclib.db"));
+        .unwrap_or_else(|| app_dirs::data_dir().join("musiclib.db"));
     tokio::fs::create_dir_all(db_path.parent().unwrap()).await?;
     let db = MusicDb::new(&format!("sqlite://{}?mode=rwc", db_path.display())).await?;
 

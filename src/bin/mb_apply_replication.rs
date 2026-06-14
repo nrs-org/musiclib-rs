@@ -41,8 +41,9 @@ struct Cli {
     packet: PathBuf,
 
     /// SQLite database file (must already be bootstrapped via mb_extract_urls).
-    #[arg(short, long, default_value = "mb_mirror.db")]
-    db: PathBuf,
+    /// Defaults to <data_dir>/mb_mirror.db.
+    #[arg(short, long)]
+    db: Option<PathBuf>,
 
     /// Reverse the packet instead of applying it. The packet must be the last
     /// one applied (replication_sequence must equal the db's current value).
@@ -53,8 +54,14 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut conn =
-        Connection::open(&cli.db).with_context(|| format!("opening {}", cli.db.display()))?;
+    let db = cli
+        .db
+        .unwrap_or_else(|| musiclib_rs::app_dirs::data_dir().join("mb_mirror.db"));
+    if let Some(parent) = db.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut conn = Connection::open(&db).with_context(|| format!("opening {}", db.display()))?;
 
     let (db_replication, db_schema) = read_db_state(&conn)?;
     info!("db state: replication_sequence={db_replication}, schema_sequence={db_schema}");

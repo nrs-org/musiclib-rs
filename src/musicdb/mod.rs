@@ -45,7 +45,6 @@ mod entry_source {
         pub identifier: String,
         pub entry_id: i64,
         pub release_date: Option<String>,
-        pub extra: Option<String>,
         pub fetched_at: i64,
         // Track-specific
         pub duration_ms: Option<i64>,
@@ -300,7 +299,6 @@ impl MusicDb {
         identifier: &str,
         entry_id: i64,
         release_date: Option<&str>,
-        extra: Option<String>,
         specific_data: &EntrySpecificData,
     ) -> Result<(), Error> {
         let now = std::time::SystemTime::now()
@@ -326,7 +324,6 @@ impl MusicDb {
             identifier: Set(identifier.to_string()),
             entry_id: Set(entry_id),
             release_date: Set(release_date.map(|s| s.to_string())),
-            extra: Set(extra),
             fetched_at: Set(now),
             duration_ms: Set(duration_ms),
             release_type: Set(release_type),
@@ -342,7 +339,6 @@ impl MusicDb {
             .update_columns([
                 entry_source::Column::EntryId,
                 entry_source::Column::ReleaseDate,
-                entry_source::Column::Extra,
                 entry_source::Column::FetchedAt,
                 entry_source::Column::DurationMs,
                 entry_source::Column::ReleaseType,
@@ -378,7 +374,6 @@ impl MusicDb {
                 identifier: Set(identifier.to_string()),
                 entry_id: Set(entry_id),
                 release_date: Set(None),
-                extra: Set(None),
                 fetched_at: Set(now),
                 duration_ms: Set(None),
                 release_type: Set(None),

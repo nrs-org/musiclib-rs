@@ -1,15 +1,16 @@
 //! Stream-extract the `url` table from a MusicBrainz `mbdump.tar.bz2`
 //! into a local SQLite mirror.
 //!
-//! Reads the bz2-compressed tarball (from a file or stdin), locates
-//! `mbdump/url`, parses its Postgres COPY TEXT TSV, and inserts each row into
-//! `mb_url(id, url)` in the target SQLite database. The rest of the archive is
-//! streamed past without being materialized.
+//! With no arguments, downloads the latest full export from MetaBrainz and
+//! streams it directly — nothing is written to disk except the SQLite mirror.
+//! Can also read from a local file, a pre-untarred directory, or stdin (`-`).
 //!
 //! Usage:
-//!   cargo run --release --bin mb_extract_urls -- /path/to/mbdump.tar.bz2 -d mb_mirror.db
-//!   curl -L 'https://.../mbdump.tar.bz2?token=...' \
-//!     | cargo run --release --bin mb_extract_urls -- - -d mb_mirror.db
+//!   cargo run --release --bin mb_extract_urls                          # auto-download
+//!   cargo run --release --bin mb_extract_urls -- /path/to/mbdump.tar.bz2
+//!   cargo run --release --bin mb_extract_urls -- /path/to/untarred-dir
+//!   curl -L 'https://.../mbdump.tar.bz2' \
+//!     | cargo run --release --bin mb_extract_urls -- -
 
 use std::{
     fs::File,
@@ -22,51 +23,140 @@ use std::{
 use anyhow::{Context, Result};
 use bzip2::read::MultiBzDecoder;
 use clap::Parser;
-use musiclib_rs::providers::registry;
+use musiclib_rs::providers::registry::{self, RegistryConfig};
 use rusqlite::{Connection, params};
 use tar::Archive;
 use tracing::info;
 
 const URL_TABLE_PATH: &str = "mbdump/url";
+const DUMP_BASE_URL: &str = "https://data.metabrainz.org/pub/musicbrainz/data/fullexport";
 
 #[derive(Parser, Debug)]
 #[command(about = "Extract the `url` table from a MusicBrainz dump into SQLite")]
 struct Cli {
-    /// Path to `mbdump.tar.bz2`, an already-untarred dump directory (one
-    /// containing `REPLICATION_SEQUENCE`, `SCHEMA_SEQUENCE`, and `mbdump/url`),
-    /// or `-` to stream the tarball from stdin.
-    dump: PathBuf,
+    /// Path to `mbdump.tar.bz2`, an already-untarred dump directory, or `-`
+    /// for stdin. If omitted, the latest export is downloaded automatically.
+    dump: Option<PathBuf>,
 
     /// SQLite database file. Created if it does not exist.
-    #[arg(short, long, default_value = "mb_mirror.db")]
-    db: PathBuf,
+    /// Defaults to <data_dir>/mb_mirror.db.
+    #[arg(short, long)]
+    db: Option<PathBuf>,
+
+    /// Provider credentials config. Defaults to <config_dir>/providers.yaml.
+    #[arg(long)]
+    registry_config: Option<PathBuf>,
+
+    /// Base URL for the MusicBrainz full-export server. Overrides
+    /// `dump_base_url` in providers.yaml and the `MUSICBRAINZ_DUMP_BASE_URL`
+    /// env var.
+    #[arg(long)]
+    base_url: Option<String>,
 }
 
 const REPLICATION_SEQUENCE_PATH: &str = "REPLICATION_SEQUENCE";
 const SCHEMA_SEQUENCE_PATH: &str = "SCHEMA_SEQUENCE";
 
+fn build_client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!(
+            "musiclib-rs/",
+            env!("CARGO_PKG_VERSION"),
+            " (mb-extract-urls)"
+        ))
+        .build()
+        .context("building HTTP client")
+}
+
+fn latest_dump_date(client: &reqwest::blocking::Client, base_url: &str) -> Result<String> {
+    let url = format!("{base_url}/LATEST");
+    let text = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("fetching {url}"))?
+        .error_for_status()
+        .with_context(|| format!("fetching {url}"))?
+        .text()
+        .context("reading LATEST response")?;
+    Ok(text.trim().to_owned())
+}
+
+fn load_registry_config(path: Option<&Path>) -> Result<RegistryConfig> {
+    let default = musiclib_rs::app_dirs::config_dir().join("providers.yaml");
+    let path = match path {
+        Some(p) => p.to_owned(),
+        None if default.exists() => default,
+        None => return Ok(RegistryConfig::default()),
+    };
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(serde_yaml_ng::from_str(&text)?)
+}
+
 fn main() -> Result<()> {
+    dotenv::dotenv().ok();
     let cli = Cli::parse();
 
-    let mut conn =
-        Connection::open(&cli.db).with_context(|| format!("opening {}", cli.db.display()))?;
+    let registry_config = load_registry_config(cli.registry_config.as_deref())?;
+
+    let base_url = cli
+        .base_url
+        .or_else(|| {
+            registry_config
+                .musicbrainz
+                .as_ref()
+                .and_then(|mb| mb.dump_base_url.as_ref())
+                .and_then(|c| c.resolve())
+        })
+        .unwrap_or_else(|| DUMP_BASE_URL.to_owned());
+
+    let db = cli
+        .db
+        .unwrap_or_else(|| musiclib_rs::app_dirs::data_dir().join("mb_mirror.db"));
+    if let Some(parent) = db.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut conn = Connection::open(&db).with_context(|| format!("opening {}", db.display()))?;
     init_db(&conn)?;
 
-    let is_stdin = cli.dump.as_os_str() == "-";
-    if !is_stdin && cli.dump.is_dir() {
-        run_from_dir(&cli.dump, &mut conn)
-    } else {
-        let input: Box<dyn Read> = if is_stdin {
-            Box::new(io::stdin().lock())
-        } else {
-            let f =
-                File::open(&cli.dump).with_context(|| format!("opening {}", cli.dump.display()))?;
-            Box::new(f)
-        };
-        // MultiBzDecoder handles single- and multi-stream bz2 (mbdump is
-        // single-stream, but this is the safe default).
-        let decompressed = MultiBzDecoder::new(BufReader::with_capacity(1 << 20, input));
-        run(decompressed, &mut conn)
+    match cli.dump.as_deref() {
+        Some(p) if p.as_os_str() != "-" && p.is_dir() => run_from_dir(p, &mut conn),
+        Some(p) => {
+            let input: Box<dyn Read> = if p.as_os_str() == "-" {
+                Box::new(io::stdin().lock())
+            } else {
+                Box::new(File::open(p).with_context(|| format!("opening {}", p.display()))?)
+            };
+            let decompressed = MultiBzDecoder::new(BufReader::with_capacity(1 << 20, input));
+            run(decompressed, &mut conn)
+        }
+        None => {
+            let client = build_client()?;
+            let date = latest_dump_date(&client, &base_url)?;
+            let url = format!("{base_url}/{date}/mbdump.tar.bz2");
+            info!("downloading {url}");
+            let resp = client
+                .get(&url)
+                .send()
+                .with_context(|| format!("fetching {url}"))?
+                .error_for_status()
+                .with_context(|| format!("fetching {url}"))?;
+            let total = resp.content_length();
+            let pb = indicatif::ProgressBar::new(total.unwrap_or(0));
+            pb.set_style(
+                indicatif::ProgressStyle::with_template(
+                    "{spinner} [{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta})",
+                )
+                .unwrap()
+                .progress_chars("=>-"),
+            );
+            let decompressed =
+                MultiBzDecoder::new(BufReader::with_capacity(1 << 20, pb.wrap_read(resp)));
+            let result = run(decompressed, &mut conn);
+            pb.finish_and_clear();
+            result
+        }
     }
 }
 

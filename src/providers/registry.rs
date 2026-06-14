@@ -112,6 +112,11 @@ pub struct MusicBrainzConfig {
     /// `MUSICBRAINZ_MIRROR_DB` env var.
     #[serde(default = "MusicBrainzConfig::default_mirror_db")]
     pub mirror_db: Option<Credential>,
+    /// Base URL for the MusicBrainz full-export download server, used by
+    /// `mb_extract_urls`. Defaults to `MUSICBRAINZ_DUMP_BASE_URL` env var;
+    /// falls back to the public MetaBrainz server when unset.
+    #[serde(default = "MusicBrainzConfig::default_dump_base_url")]
+    pub dump_base_url: Option<Credential>,
 }
 
 impl MusicBrainzConfig {
@@ -124,6 +129,9 @@ impl MusicBrainzConfig {
     fn default_mirror_db() -> Option<Credential> {
         Some(Credential::from_env("MUSICBRAINZ_MIRROR_DB"))
     }
+    fn default_dump_base_url() -> Option<Credential> {
+        Some(Credential::from_env("MUSICBRAINZ_DUMP_BASE_URL"))
+    }
 }
 
 impl Default for MusicBrainzConfig {
@@ -132,6 +140,7 @@ impl Default for MusicBrainzConfig {
             token: Self::default_token(),
             base_url: Self::default_base_url(),
             mirror_db: Self::default_mirror_db(),
+            dump_base_url: Self::default_dump_base_url(),
         }
     }
 }

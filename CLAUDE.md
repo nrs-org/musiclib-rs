@@ -17,19 +17,42 @@ cargo run --bin update_fixtures -- fixtures.yaml <filter>   # filter by path/url
 
 # End-to-end import (see import.sh for the canonical invocation)
 RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url> \
-  --db musiclib.db \
-  --fetch-options fetch_options/fetch_discography.yaml \
-  --http-config .temp/http.yaml \
-  --registry-config .temp/providers.yaml
+  --fetch-options config/fetch_options/fetch_discography.yaml
+
+# Re-apply dedup barrier to an existing DB (no new URLs ingested)
+RUST_LOG=musiclib_rs=info,dedup=info cargo run --bin dedup
 
 # MusicBrainz local mirror (URL table only)
 cargo run --release --bin mb_extract_urls -- <mbdump.tar.bz2|-> -d mb_mirror.db
 cargo run --bin mb_sync_replication -- -d mb_mirror.db   # incremental catch-up
+cargo run --bin mb_apply_replication -- replication-<N>-v2.tar.bz2   # apply one packet
+cargo run --bin mb_apply_replication -- --undo replication-<N>-v2.tar.bz2  # undo last packet
 ```
 
 A `flake.nix` provides a dev shell with rustc/cargo/clippy/sqlite + pre-commit hooks (rustfmt, nixfmt, statix, EOL/whitespace fixers).
 
-Credentials live in `.env` (gitignored). The relevant keys are read via the `Credential::Env` defaults in `src/providers/registry.rs`: `YOUTUBE_API_KEY`, `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET`, `MUSICBRAINZ_TOKEN`, `MUSICBRAINZ_BASE_URL`, `MUSICBRAINZ_MIRROR_DB`, `DISCOGS_USER_TOKEN`, `YTDLP_SERVER_URL`, `YTMUSICAPI_SERVER_URL`, plus `METABRAINZ_ACCESS_TOKEN` for replication.
+### App directories
+
+Default paths follow XDG / OS conventions via the `directories` crate (`src/app_dirs.rs`):
+
+| Purpose | Function | Typical Linux path |
+|---|---|---|
+| Config files | `app_dirs::config_dir()` | `~/.config/musiclib-rs/` |
+| Cache | `app_dirs::cache_dir()` | `~/.cache/musiclib-rs/` |
+| Data / DB | `app_dirs::data_dir()` | `~/.local/share/musiclib-rs/` |
+
+Default paths for each binary:
+
+| Binary | Default path |
+|---|---|
+| `import` / `dedup` — music DB | `<data_dir>/musiclib.db` |
+| `mb_extract_urls` / `mb_apply_replication` — MB mirror | `<data_dir>/mb_mirror.db` |
+| `providers.yaml` | `<config_dir>/providers.yaml` |
+| `http.yaml` | `<config_dir>/http.yaml` |
+| fetch-options (name only) | `<config_dir>/fetch_options/<name>` |
+| dedup barriers (auto-loaded) | `<config_dir>/dedup_barriers/*.yaml` |
+
+Copy `config/providers.example.yaml` → `<config_dir>/providers.yaml` and `config/http.example.yaml` → `<config_dir>/http.yaml`, then edit. The relevant env vars are: `YOUTUBE_API_KEY`, `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET`, `MUSICBRAINZ_TOKEN`, `MUSICBRAINZ_BASE_URL`, `MUSICBRAINZ_MIRROR_DB`, `DISCOGS_USER_TOKEN`, `YTDLP_SERVER_URL`, `YTMUSICAPI_SERVER_URL`, plus `METABRAINZ_ACCESS_TOKEN` for replication.
 
 ## Architecture
 
@@ -59,7 +82,7 @@ Children are exposed as `ChildSource<T>: Stream<Item = Result<(ChildRef, T), Err
 
 `EntryFetchOptions` is a list of `ChildRule { matcher, options_id }`. Options live in a flat arena `EntryFetchOptionsPool` and reference each other by `OptionsId`, so rules can recurse (e.g. `main → main`) without `Arc` cycles. Entry 0 is the no-rules sentinel.
 
-The human-facing format is YAML, parsed in `providers/fetch_options_yaml.rs`: a flat map of named option sets where `main` is the root and other keys are reusable. A two-pass deserializer pre-allocates slot IDs so named sets can reference themselves before their body is parsed (the `EntryFetchOptionsPool::patch` API exists for this). See `fetch_options/fetch_discography.yaml` for a worked example, including the `./other.yaml::name` cross-file reference syntax.
+The human-facing format is YAML, parsed in `providers/fetch_options_yaml.rs`: a flat map of named option sets where `main` is the root and other keys are reusable. A two-pass deserializer pre-allocates slot IDs so named sets can reference themselves before their body is parsed (the `EntryFetchOptionsPool::patch` API exists for this). See `config/fetch_options/fetch_discography.yaml` for a worked example, including the `./other.yaml::name` cross-file reference syntax.
 
 Matchers (`ChildMatcher` / `ChildMatcherExpr`) are config-shaped; before evaluation they're compiled to `CompiledChildMatcher` / `CompiledMatcherExpr` with regexes pre-compiled and `All`/`Any` arms sorted cheapest-first. Evaluation uses **Tribool** (True/False/Indeterminate) Kleene logic so matchers that depend on un-fetched entity data (duration, YouTube description) can still drive early-exit decisions.
 
@@ -89,9 +112,40 @@ Cache hits at an outer layer bypass scheduling. `DomainScheduler` (`http/schedul
 
 `HttpCache` (`src/httpcache/`) has two impls: `MemoryHttpCache` (in-process) and `DbHttpCache` (SQLite/SeaORM). Cache keys default to `"{METHOD}:{url}"` but can be overridden per-request via `Request::cache_key`.
 
-### Importer (`src/bin/import/`)
+### Import pipeline (`src/pipeline/`)
 
-The importer is a structured-concurrency traversal that turns a starting URL into a populated `musiclib.db`. Identity throughout is the `Pair = (source_key, identifier)`. Per-pair operation in `importer.rs::import`:
+Shared by the `import` and `dedup` binaries. Modules:
+
+- `importer.rs` — structured-concurrency traversal (see below).
+- `state.rs` — in-memory `State` accumulator; `claim` prevents duplicate processing.
+- `flush.rs` — persists `State` into SeaORM/SQLite.
+- `dedup.rs` — re-imports already-stored entities shallow (no new URLs) to re-apply the dedup barrier.
+- `progress.rs` — wraps `HttpClient` in `indicatif` bars; routes `tracing` through `MultiProgressMakeWriter`.
+
+#### Dedup barriers (`pipeline/dedup.rs`)
+
+A barrier declares that two (or more) entities must never be merged into one DB entry even if the importer would normally unify them (e.g. two tracks sharing an ISRC). Configuration lives in `DedupConfig` (loaded from `<config_dir>/dedup_barriers/*.yaml`, or overridden via `--dedup-config`).
+
+```yaml
+groups:
+  - name: "human label (logs only)"
+    anchors:
+      anchor_a:
+        members:    # canonical pairs that define this entity
+          - "spotify:track:abc"
+          - "isrc:USRC12345678"
+        claim:      # ambiguous pairs that belong exclusively to this anchor
+          - "isrc:USRC12345678"
+      anchor_b:
+        members:
+          - "spotify:track:xyz"
+```
+
+Each string is `source:identifier` (split on the first `:`). Pairs are canonicalized at load time so any URL form works. Two pairs assigned to different anchors within the same group can never share an entry; the `dedup` binary re-runs the barrier against an existing DB without ingesting new URLs.
+
+### Importer (`src/pipeline/importer.rs`)
+
+The importer is a structured-concurrency traversal that turns a starting URL into a populated `musiclib.db`. Identity throughout is the `Pair = (source_key, identifier)`. Per-pair operation:
 
 1. Canonicalize via the first matching provider.
 2. Record an `is_rel` edge from input pair → canonical pair if they differ.
@@ -104,14 +158,15 @@ The importer is a structured-concurrency traversal that turns a starting URL int
 
 `flush.rs` persists the collected `State` (metadata, `is_rel`, `has_rel`) into the SeaORM schema defined in `src/musicdb/mod.rs`. That schema is **pair-centric**: all metadata, aliases, child edges, and contributions are keyed by `(source, identifier)`; the `entry` table is just a grouping primitive whose `id` is referenced from `entry_source.entry_id`. A DB-level entry merge therefore only needs to re-point `entry_source` rows.
 
-`progress.rs` wraps the `HttpClient` in an `indicatif` progress bar and routes `tracing` output through `MultiProgressMakeWriter` so log lines don't tear the bars.
-
 ### Tests and fixtures
 
 Each backend ships checked-in JSON fixtures next to its source (e.g. `youtube_api/channel_watame.json`). Tests use `test_utils::MockHttpClient` (`(Method, url) → Response` map) to replay these. `fixtures.yaml` is the manifest the `update_fixtures` binary uses to re-record from real APIs when an upstream schema changes.
 
 ## Notes
 
-- The repo currently has uncommitted state: `CLAUDE.md` is staged for deletion and there's an untracked `OLD_CLAUDE.md` retained as a reference snapshot.
-- `import.sh` is a convenience wrapper — it deletes `musiclib.db` and re-runs the importer against a fixed MusicBrainz artist with `.temp/http.yaml` + `.temp/providers.yaml` config paths.
+- `scripts/import.sh` is a convenience wrapper — it re-runs the importer against a fixed example URL with vtuber fetch options, relying on the default config directory for `http.yaml` and `providers.yaml`.
+- `scripts/dedup.sh` and `scripts/clear_yt_cache.sh` are similar convenience wrappers.
 - Edition: 2024.
+- `docs/BATCHING_PROVIDERS.md` documents a planned coalescer layer in the HTTP stack for batching multi-ID API calls (YouTube, Spotify) — not yet implemented.
+- `docs/CONFIG_REFERENCE.md` has full annotated examples for `providers.yaml`, `http.yaml`, fetch-options files, and dedup barrier files.
+- `docs/DEV.md` covers dev environment setup (Nix and non-Nix paths).
