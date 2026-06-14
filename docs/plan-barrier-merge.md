@@ -1,6 +1,6 @@
 # Barrier System Upgrade — Unify `members`/`claim`, give anchors merge power
 
-Status: **design settled, not yet implemented.**
+Status: **implemented** (2026-06-14). Both changes shipped; all tests pass.
 
 ## Goal
 

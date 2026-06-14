@@ -385,8 +385,7 @@ files instead.
 
 A barrier file is a list of **groups**. Each group contains two or more named
 **anchors** — the distinct entities that must never be merged. Each anchor
-declares which pairs identify it (`members`) and which ambiguous pairs it
-exclusively owns (`claim`).
+declares all the pairs it owns under `members`.
 
 ```yaml
 groups:
@@ -395,13 +394,11 @@ groups:
       honeyworks:
         members:
           - musicbrainz:https://musicbrainz.org/artist/1dc670f7-...
-        claim:
           - unknown_url:http://www.honeyworks.jp/
           - unknown_url:https://ja.wikipedia.org/wiki/HoneyWorks
       chico:
         members:
           - musicbrainz:https://musicbrainz.org/artist/dbd0f795-...
-        claim:
           - unknown_url:http://www.chicoxxx.com/
 ```
 
@@ -421,8 +418,7 @@ In practice you will always have at least two anchors per group.
 
 | Field | Type | Notes |
 |---|---|---|
-| `members` | list\<pair\> | Pairs that uniquely identify this entity. The anchor is authoritative for these. |
-| `claim` | list\<pair\> | Ambiguous pairs that belong exclusively to this anchor. The same pair must not appear in two anchors within the same group. |
+| `members` | list\<pair\> | All pairs that belong to this anchor. Two effects: (1) positive — all listed pairs are force-merged together even if no URL cross-linking connects them; (2) negative — no listed pair may share a DB entry with a pair from a sibling anchor in the same group. |
 
 #### Pair format
 
@@ -468,5 +464,6 @@ causes the importer to merge them. Typical cases:
 - Two MusicBrainz artists that share a Discogs or SoundCloud page.
 
 The `members` list should contain the most authoritative, unambiguous pairs for
-each entity (MusicBrainz URLs are ideal). The `claim` list captures the
-ambiguous pairs you want attributed to a specific anchor rather than merged.
+each entity (MusicBrainz URLs are ideal), followed by any ambiguous pairs you
+want attributed exclusively to that anchor. All pairs in `members` are treated
+identically: they are force-merged together and kept apart from sibling anchors.

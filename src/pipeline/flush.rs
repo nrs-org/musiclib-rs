@@ -118,6 +118,23 @@ pub async fn flush(
         uf.make_set(pair);
         uf.set_label(pair, id.clone());
     }
+    // Force-union every pair that shares an anchor label and is present in
+    // all_pairs. This makes an anchor a positive merge directive: listing two
+    // pairs under one anchor merges them even when no URL cross-linking
+    // connects them. Pairs in the barrier but not yet imported are skipped so
+    // no phantom entries are created.
+    let mut by_anchor: HashMap<AnchorId, Vec<Pair>> = HashMap::new();
+    for (pair, id) in &barrier {
+        if all_pairs.contains(pair) {
+            by_anchor.entry(id.clone()).or_default().push(pair.clone());
+        }
+    }
+    for mates in by_anchor.values() {
+        for i in 1..mates.len() {
+            // Same label → union always succeeds (never Err).
+            let _ = uf.union(&mates[0], &mates[i]);
+        }
+    }
     // Process is_rel in a stable order so the (arbitrary) assignment of any
     // unclaimed shared node is deterministic across runs.
     let mut is_rel_sorted = is_rel.clone();
@@ -518,5 +535,53 @@ mod tests {
         uf.set_label(&m2, chico.clone());
         assert!(uf.union(&m1, &m2).is_ok());
         assert_eq!(uf.find(&m1), uf.find(&m2));
+    }
+
+    /// The force-union loop merges same-anchor pairs that are in all_pairs even
+    /// when no is_rel edge connects them — this is the chico two-MBID case.
+    /// A pair listed in the barrier but absent from all_pairs is not unioned
+    /// (no phantom entry created).
+    #[test]
+    fn force_union_merges_same_anchor_without_is_rel() {
+        let chico: AnchorId = (0, "chico".into());
+
+        let m1 = p("chico_mbid_1");
+        let m2 = p("chico_mbid_2");
+        let absent = p("chico_mbid_not_imported");
+
+        let all_pairs: HashSet<Pair> = [m1.clone(), m2.clone()].into();
+        let barrier: HashMap<Pair, AnchorId> = [
+            (m1.clone(), chico.clone()),
+            (m2.clone(), chico.clone()),
+            (absent.clone(), chico.clone()),
+        ]
+        .into();
+
+        let mut uf = UnionFind::new();
+        for pair in &all_pairs {
+            uf.make_set(pair);
+        }
+        for (pair, id) in &barrier {
+            uf.make_set(pair);
+            uf.set_label(pair, id.clone());
+        }
+
+        // Simulate the force-union loop.
+        let mut by_anchor: HashMap<AnchorId, Vec<Pair>> = HashMap::new();
+        for (pair, id) in &barrier {
+            if all_pairs.contains(pair) {
+                by_anchor.entry(id.clone()).or_default().push(pair.clone());
+            }
+        }
+        for mates in by_anchor.values() {
+            for i in 1..mates.len() {
+                let _ = uf.union(&mates[0], &mates[i]);
+            }
+        }
+
+        // m1 and m2 are in the same class despite no is_rel edge.
+        assert_eq!(uf.find(&m1), uf.find(&m2));
+        // The absent pair is NOT in the same class as m1/m2 (skipped by loop).
+        assert_ne!(uf.find(&absent), uf.find(&m1));
     }
 }

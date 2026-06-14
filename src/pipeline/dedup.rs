@@ -33,12 +33,13 @@ pub struct BarrierGroup {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Anchor {
-    /// Pairs that define this entity (`source:identifier`, split on first `:`).
+    /// Pairs that identify this entity (`source:identifier`, split on first `:`).
+    /// All listed pairs are assigned to this anchor: they are positive members
+    /// (force-merged together) and negative constraints (kept apart from sibling
+    /// anchors in the same group). No `claim` distinction — every pair listed
+    /// here is treated identically.
     #[serde(default)]
     pub members: Vec<String>,
-    /// Ambiguous/shared pairs that belong exclusively to this anchor.
-    #[serde(default)]
-    pub claim: Vec<String>,
 }
 
 /// Split a `source:identifier` config string on the first colon. The identifier
@@ -66,7 +67,7 @@ impl DedupConfig {
             });
             for (key, anchor) in &group.anchors {
                 let id = (gi, key.clone());
-                for s in anchor.members.iter().chain(anchor.claim.iter()) {
+                for s in &anchor.members {
                     let Some(p) = parse_pair(s) else {
                         warn!("dedup: invalid pair string {s:?} (need 'source:identifier')");
                         continue;
