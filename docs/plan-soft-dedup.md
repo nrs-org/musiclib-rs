@@ -49,11 +49,14 @@ New table (entity-level, parallels `entry_child`):
 
 ```
 entry_relation(entry_a, entry_b, kind, confidence, origin, enabled, extra)
-  kind:    same_recording | alt_version | live | remix | instrumental |
-           cover | release_variant | in_release_group | same_artist
+  kind:    alt_version | live | remix | instrumental | cover
+         | release_variant | in_release_group
+         | same_artist
   origin:  'heuristic' (later: 'manual')
   enabled: bool   -- tombstone: disabling reverses one decision, keeps history
 ```
+
+`same_recording` is **not** a kind — it is the output of a MERGE decision, which writes no relation row (it goes through `merge_entries` instead). Only RELATE outcomes land in this table.
 
 `same_*` rows above a merge threshold are promoted to merges by the apply pass;
 everything else stays as a reversible edge. This **is** the persistent positive-edge
@@ -67,8 +70,9 @@ A new `match` binary + `src/pipeline/match.rs` module, sibling to `dedup`:
 - **dry-run by default** → emits a ranked report (cluster, entities, decision,
   confidence, reason); `--apply` commits.
 - Idempotent; never ingests new URLs.
-- Config in `<config_dir>/match/{track,release,release_group,artist}.rhai` plus a
-  thresholds YAML.
+- Config in `<config_dir>/match.rhai`. One script handles all entity types;
+  type dispatch is the script writer's responsibility. Thresholds are constants
+  in the script itself, not a separate file.
 
 ## Candidate generation (blocking)
 
@@ -102,22 +106,34 @@ these; it only decides):
 ## Scripting layer (Rhai)
 
 Policy lives in **Rhai** (pure-Rust, no C dep, matches the existing config-matcher
-style). One script per entity type; each receives two entity structs + a feature
-struct and returns `merge(conf, reason)` / `relate(kind, conf, reason)` / `distinct()`.
-The script can do nothing but classify, so it's safe to iterate weekly against the
-dry-run report. Expensive ops stay in Rust.
+style). One script handles all entity types; it receives two entity structs + a
+feature struct and returns `merge(conf, reason)` / `relate(kind, conf, reason)` /
+`distinct()`. Type dispatch is done inside the script with a branch on
+`a.entry_type`. The script can do nothing but classify, so it's safe to iterate
+against the dry-run report. Expensive ops stay in Rust.
 
 ```rhai
-// track.rhai (illustrative)
+// match.rhai (illustrative — one script, script writer dispatches on type)
+const TRACK_MERGE_MIN = 0.90;
+const TRACK_RELATE_MIN = 0.82;
+
 fn decide(a, b, f) {
+    if a.entry_type == "track" { return decide_track(a, b, f); }
+    if a.entry_type == "artist" { return decide_artist(a, b, f); }
+    // ...
+    distinct()
+}
+
+fn decide_track(a, b, f) {
     let t = max(f.title_exact ? 1.0 : 0.0, f.title_jaccard);   // + title_embed_sim in phase 3
-    if t < 0.82 { return distinct(); }
+    if t < TRACK_RELATE_MIN { return distinct(); }
     let marked = version_tokens(a.title) != version_tokens(b.title);
     if f.dur_known && f.dur_delta_ms <= 2000 && !marked {
         let conf = t - (f.distinct_authoritative_ids > 0 ? 0.1 : 0.0); // soft penalty, not veto
-        return merge(conf, "title + duration ±2s");
+        return merge(conf, "title + duration ±2s");   // MERGE → merge_entries, no relation row
     }
     if f.artist_overlap >= 0.5 { return relate(classify_version(a, b), t, "title match, duration differs"); }
+    // classify_version returns one of: alt_version | live | remix | instrumental | cover
     distinct()
 }
 ```
@@ -125,7 +141,7 @@ fn decide(a, b, f) {
 ## Per-type heuristic strategies
 
 ### Tracks  (primary signal: duration)
-- title match **+** `dur ≤ ±2s` **+** no version marker → **MERGE** `same_recording`.
+- title match **+** `dur ≤ ±2s` **+** no version marker → **MERGE** (no relation row written).
 - title match **+** dur differs OR a version marker → **RELATE** as the classified
   kind (`live`/`remix`/`instrumental`/`alt_version`).
 - no-duration discogs clusters (61 of them) → fall back to **release-group context**:
@@ -176,10 +192,23 @@ fn decide(a, b, f) {
 4. **Enable `--apply`** with merges behind union-find + barriers; relations on from the
    start (non-destructive).
 
-## Open questions
+## Resolved design decisions
 
-- Exact merge/relate thresholds per type (tune against the report in phase 2).
-- Whether `entry_relation` should also absorb the persisted URL `is_rel` edges so the
-  *entire* grouping becomes recomputable offline (the full signed-edge upgrade) — a
-  larger follow-up, not required for v1.
-- Version-kind taxonomy (`alt_version` vs `live`/`remix`/…) — start coarse, refine.
+**Thresholds** — empirical; cannot be fixed without data. Since policy already
+lives in Rhai, thresholds are simply constants at the top of each script (e.g.
+`const MERGE_MIN = 0.90;`). No separate config file needed — editing the script
+is the tuning step. Phase 2 tunes them against the three known clusters
+(飛んでk, hololive-summer ×9, 桐生ココ) using the dry-run report.
+
+**`entry_relation` absorbing URL `is_rel`** — **closed as out of scope,
+permanently.** URL-based edges are derived (they fall out of shared identifiers
+every import run) and need no persistent store. Reversibility is already
+covered: URL merges reverse by re-import; barriers reverse by config edit +
+`dedup`; heuristic edges reverse by `enabled = false`. Persisting URL edges as
+explicit rows would couple the import pipeline to the relation store for no gain.
+
+**Version-kind taxonomy** — 8 values, finalized above in the schema. `alt_version`
+is the catch-all for anything `version_tokens` can't classify more specifically;
+fine-grained kinds (`live`, `remix`, `instrumental`, `cover`) are in the schema
+from day one but Rhai scripts may emit only `alt_version` in phase 2 and graduate
+to the specific kinds as `version_tokens` matures.

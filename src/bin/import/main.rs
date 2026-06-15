@@ -18,6 +18,7 @@ use musiclib_rs::{
         flush::flush,
         importer::import,
         progress,
+        softmatch::{SoftMatchConfig, match_new_entries},
         state::State,
     },
     providers::{
@@ -191,9 +192,21 @@ async fn main() -> anyhow::Result<()> {
     .await;
 
     let merged = merge_configs(&dedup_configs);
-    flush(state, providers.as_slice(), &db, &merged).await?;
+    let touched_ids = flush(state, providers.as_slice(), &db, &merged).await?;
     if !dedup_configs.is_empty() {
         reconcile_tags(providers.as_slice(), &db, &dedup_configs).await?;
+    }
+
+    // Online soft-match: if match.rhai exists, compare newly-imported entries
+    // against the rest of the library and apply decisions immediately.
+    let script_path = config_dir.join("match.rhai");
+    if script_path.exists() {
+        let soft_cfg = SoftMatchConfig {
+            script_path: script_path.display().to_string(),
+            apply_relates: true,
+            csv_path: None,
+        };
+        match_new_entries(&db, &touched_ids, &merged, providers.as_slice(), &soft_cfg).await?;
     }
     info!(
         "YouTube Data API quota used: {} unit(s)",

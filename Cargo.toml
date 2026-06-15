@@ -36,6 +36,10 @@ path = "src/bin/mb_sync_replication.rs"
 name = "ytdlp_server"
 path = "src/bin/ytdlp_server.rs"
 
+[[bin]]
+name = "softmatch"
+path = "src/bin/softmatch.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
@@ -71,6 +75,8 @@ bzip2 = "0.5"
 tar = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 directories = "6.0.0"
+rhai = "1"
+strsim = "0.11"
 
 [dev-dependencies]
 tokio-util = "0.7.18"

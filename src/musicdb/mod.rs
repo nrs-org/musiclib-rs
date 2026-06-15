@@ -122,6 +122,33 @@ mod contribution {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+// Soft-dedup relation edges. Each row is a heuristic (or manual) assertion
+// that two entries are related in some way. `entry_a < entry_b` is enforced
+// at insertion time so there is at most one row per (entry_a, entry_b, kind)
+// triple regardless of which side was passed first. Disabling a row (enabled=0)
+// tombstones the decision without losing history.
+mod entry_relation {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "entry_relation")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_a: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_b: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub kind: String,
+        pub confidence: f64,
+        pub origin: String,
+        pub enabled: bool,
+        pub extra: Option<String>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 // Dedup bookkeeping. `dedup_state` records the last-applied mtime of each barrier
 // config file (the cheap "did it change" gate). `entry_dedup` is a many-to-many
 // tag table recording which config files currently affect which entries, so when
@@ -561,6 +588,200 @@ impl MusicDb {
             .await?;
         Ok(())
     }
+
+    // ── Bulk-fetch helpers (used by the soft-match pipeline) ──────────────────
+
+    /// Every entry row (id, entry_type). Used to seed the match candidate set.
+    pub async fn all_entry_rows(&self) -> Result<Vec<EntryRow>, Error> {
+        Ok(entry::Entity::find()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| EntryRow {
+                id: m.id,
+                entry_type: m.entry_type,
+            })
+            .collect())
+    }
+
+    /// Every entry_source row. Used to build alias / metadata views per entry.
+    pub async fn all_source_rows(&self) -> Result<Vec<SourceRow>, Error> {
+        Ok(entry_source::Entity::find()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| SourceRow {
+                source: m.source,
+                identifier: m.identifier,
+                entry_id: m.entry_id,
+                duration_ms: m.duration_ms,
+                release_type: m.release_type,
+                primary_type: m.primary_type,
+                release_date: m.release_date,
+            })
+            .collect())
+    }
+
+    /// Every alias row. Used to build the alias list per pair.
+    pub async fn all_alias_rows(&self) -> Result<Vec<AliasRow>, Error> {
+        Ok(entry_alias::Entity::find()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| AliasRow {
+                source: m.source,
+                identifier: m.identifier,
+                name: m.name,
+                locale: m.locale,
+                primary_alias: m.primary,
+            })
+            .collect())
+    }
+
+    /// Every contribution row. Used to build credited-artist sets per entry.
+    pub async fn all_contrib_rows(&self) -> Result<Vec<ContribRow>, Error> {
+        Ok(contribution::Entity::find()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| ContribRow {
+                source: m.source,
+                identifier: m.identifier,
+                artist_source: m.artist_source,
+                artist_identifier: m.artist_identifier,
+            })
+            .collect())
+    }
+
+    // ── entry_relation ────────────────────────────────────────────────────────
+
+    /// Insert or update a relation between two entries. Enforces `entry_a <
+    /// entry_b` so there is exactly one row per unordered pair + kind.
+    pub async fn upsert_relation(
+        &self,
+        entry_a: i64,
+        entry_b: i64,
+        kind: &str,
+        confidence: f64,
+        origin: &str,
+        extra: Option<&str>,
+    ) -> Result<(), Error> {
+        let (a, b) = if entry_a < entry_b {
+            (entry_a, entry_b)
+        } else {
+            (entry_b, entry_a)
+        };
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(a),
+            entry_b: Set(b),
+            kind: Set(kind.to_string()),
+            confidence: Set(confidence),
+            origin: Set(origin.to_string()),
+            enabled: Set(true),
+            extra: Set(extra.map(|s| s.to_string())),
+        })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                entry_relation::Column::EntryA,
+                entry_relation::Column::EntryB,
+                entry_relation::Column::Kind,
+            ])
+            .update_columns([
+                entry_relation::Column::Confidence,
+                entry_relation::Column::Origin,
+                entry_relation::Column::Enabled,
+                entry_relation::Column::Extra,
+            ])
+            .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// Every entry_child row. Used by soft-match to compute release-position features.
+    pub async fn all_child_rows(&self) -> Result<Vec<ChildRow>, Error> {
+        Ok(entry_child::Entity::find()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| ChildRow {
+                parent_source: m.parent_source,
+                parent_identifier: m.parent_identifier,
+                child_source: m.child_source,
+                child_identifier: m.child_identifier,
+                disc_no: m.disc_no,
+                track_no: m.track_no,
+            })
+            .collect())
+    }
+
+    /// All enabled relation rows, for reporting.
+    pub async fn all_relations(&self) -> Result<Vec<RelationRow>, Error> {
+        Ok(entry_relation::Entity::find()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| RelationRow {
+                entry_a: m.entry_a,
+                entry_b: m.entry_b,
+                kind: m.kind,
+                confidence: m.confidence,
+                origin: m.origin,
+                enabled: m.enabled,
+            })
+            .collect())
+    }
+}
+
+// ── Public data structs for bulk queries ──────────────────────────────────────
+
+pub struct EntryRow {
+    pub id: i64,
+    pub entry_type: String,
+}
+
+pub struct SourceRow {
+    pub source: String,
+    pub identifier: String,
+    pub entry_id: i64,
+    pub duration_ms: Option<i64>,
+    pub release_type: Option<String>,
+    pub primary_type: Option<String>,
+    pub release_date: Option<String>,
+}
+
+pub struct AliasRow {
+    pub source: String,
+    pub identifier: String,
+    pub name: String,
+    pub locale: Option<String>,
+    pub primary_alias: bool,
+}
+
+pub struct ContribRow {
+    pub source: String,
+    pub identifier: String,
+    pub artist_source: String,
+    pub artist_identifier: String,
+}
+
+pub struct ChildRow {
+    pub parent_source: String,
+    pub parent_identifier: String,
+    pub child_source: String,
+    pub child_identifier: String,
+    pub disc_no: Option<i32>,
+    pub track_no: Option<i32>,
+}
+
+pub struct RelationRow {
+    pub entry_a: i64,
+    pub entry_b: i64,
+    pub kind: String,
+    pub confidence: f64,
+    pub origin: String,
+    pub enabled: bool,
 }
 
 fn entry_type_str(entry_type: Option<EntryType>) -> &'static str {

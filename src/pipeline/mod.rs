@@ -6,4 +6,5 @@ pub mod dedup;
 pub mod flush;
 pub mod importer;
 pub mod progress;
+pub mod softmatch;
 pub mod state;

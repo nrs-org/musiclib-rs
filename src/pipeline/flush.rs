@@ -20,12 +20,15 @@ use super::state::{ChildEdge, Pair, PairMetadata, State};
 ///    merges when a class spans more than one existing entry.
 /// 4. Write pair metadata (real rows for fetched pairs, stub rows for the
 ///    rest), aliases, child edges, contributions.
+/// Returns the set of entry_ids written or surviving after merges in this flush.
+/// The caller can pass this set to `softmatch::match_new_entries` for online
+/// soft-dedup without re-scanning previously compared pairs.
 pub async fn flush(
     state: Arc<State>,
     providers: &[Arc<dyn FetchProvider>],
     db: &MusicDb,
     dedup: &DedupConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<std::collections::HashSet<i64>> {
     let metadata = std::mem::take(&mut *state.metadata.lock().unwrap());
     let is_rel = std::mem::take(&mut *state.is_rel.lock().unwrap());
     let has_rel = std::mem::take(&mut *state.has_rel.lock().unwrap());
@@ -290,7 +293,8 @@ pub async fn flush(
     // 11. GC entries left empty by a split (their pairs were re-pointed above).
     db.delete_orphan_entries().await?;
 
-    Ok(())
+    let touched: std::collections::HashSet<i64> = class_to_entry.values().copied().collect();
+    Ok(touched)
 }
 
 async fn write_edge_contributions(db: &MusicDb, edge: &ChildEdge) -> anyhow::Result<()> {
