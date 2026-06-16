@@ -47,6 +47,29 @@ struct Args {
     /// file for manual quality review.
     #[arg(long)]
     csv: Option<String>,
+    /// SQLite file for the embedding cache. Defaults to <data_dir>/embeddings.db.
+    /// Requires the Rhai script to define embed(text) -> array.
+    #[arg(long)]
+    embed_db: Option<String>,
+    /// Disable semantic (embedding-based) blocking even if embed() is defined.
+    #[arg(long)]
+    no_embed: bool,
+    /// Embedding vector dimension. Must match the model used in embed(). [default: 384]
+    #[arg(long, default_value_t = 384)]
+    embed_dim: usize,
+    /// Number of KNN neighbours per entry for semantic blocking. [default: 20]
+    #[arg(long, default_value_t = 20)]
+    embed_k: usize,
+    /// Minimum cosine similarity to treat a KNN pair as a blocking candidate. [default: 0.5]
+    #[arg(long, default_value_t = 0.5)]
+    embed_threshold: f64,
+    /// Max KNN pages to walk per entry type; each page widens the neighbour window
+    /// by one k step and is only fetched if the previous page merged enough. [default: 4]
+    #[arg(long, default_value_t = 4)]
+    embed_max_pages: usize,
+    /// Per-type page merge rate (merges/scored) required to fetch the next page. [default: 0.5]
+    #[arg(long, default_value_t = 0.5)]
+    embed_page_merge_rate: f64,
 }
 
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
@@ -137,10 +160,27 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| app_dirs::data_dir().join("musiclib.db"));
     let db = MusicDb::new(&format!("sqlite://{}?mode=rwc", db_path.display())).await?;
 
+    let embed_db_path: Option<String> = if args.no_embed {
+        None
+    } else {
+        Some(args.embed_db.unwrap_or_else(|| {
+            app_dirs::data_dir()
+                .join("embeddings.db")
+                .display()
+                .to_string()
+        }))
+    };
+
     let soft_cfg = SoftMatchConfig {
         script_path: script_path.display().to_string(),
         apply_relates: args.apply,
         csv_path: args.csv,
+        embed_db_path,
+        embed_dim: args.embed_dim,
+        embed_k: args.embed_k,
+        embed_sim_threshold: args.embed_threshold,
+        embed_max_pages: args.embed_max_pages,
+        embed_page_merge_rate: args.embed_page_merge_rate,
     };
 
     match_db(&db, &merged_dedup, providers.as_slice(), &soft_cfg).await?;

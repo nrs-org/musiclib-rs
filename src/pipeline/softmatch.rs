@@ -6,6 +6,8 @@ use anyhow::Context as _;
 use rhai::{AST, Dynamic, Engine, ImmutableString, Map as RhaiMap, Scope};
 use tracing::{info, warn};
 
+use crate::pipeline::embedding::{EmbeddingCache, embed_stale_entries, register_http_fns};
+
 use crate::musicdb::{AliasRow, ChildRow, ContribRow, MusicDb, SourceRow};
 use crate::pipeline::dedup::DedupConfig;
 use crate::providers::FetchProvider;
@@ -59,6 +61,27 @@ pub struct SoftMatchConfig {
     /// If set, write a CSV row for every candidate pair (including DISTINCT)
     /// to this path for manual quality review.
     pub csv_path: Option<String>,
+    /// Path to the SQLite file used as the embedding cache.
+    /// `None` disables semantic blocking entirely.
+    pub embed_db_path: Option<String>,
+    /// Embedding vector dimension — must match the model used in the Rhai `embed()`
+    /// function. Default: 384 (paraphrase-multilingual-MiniLM-L12-v2).
+    pub embed_dim: usize,
+    /// Base number of semantic KNN neighbours per entry for blocking (applies to
+    /// tracks/releases; artists and release groups are capped lower via
+    /// `k_for_type`). Default: 20.
+    pub embed_k: usize,
+    /// Minimum cosine similarity to include a semantic pair as a blocking candidate.
+    /// Default: 0.5 (permissive — the Rhai script does the real filtering).
+    pub embed_sim_threshold: f64,
+    /// Maximum number of KNN pages to walk per entry type. Each page widens the
+    /// neighbour window by one `k_for_type` step; paging stops early once a type's
+    /// per-page merge rate falls below `embed_page_merge_rate`. Default: 4.
+    pub embed_max_pages: usize,
+    /// Per-type page merge rate (merges / scored) required to fetch the next page.
+    /// A high first-page merge rate suggests the `k` window is too small and more
+    /// neighbours are worth scoring. Default: 0.5.
+    pub embed_page_merge_rate: f64,
 }
 
 // ── Source classification ─────────────────────────────────────────────────────
@@ -180,9 +203,16 @@ impl LazyFeatures {
     }
     fn same_release_position(&mut self) -> bool {
         *self.c_same_release_position.get_or_insert_with(|| {
-            let a_set: HashSet<(i64, Option<i32>, Option<i32>)> =
-                self.a_positions.iter().copied().collect();
-            self.b_positions.iter().any(|pos| a_set.contains(pos))
+            let a_set: HashSet<(i64, Option<i32>, Option<i32>)> = self
+                .a_positions
+                .iter()
+                .filter(|(_, _, t)| t.is_some())
+                .copied()
+                .collect();
+            self.b_positions
+                .iter()
+                .filter(|(_, _, t)| t.is_some())
+                .any(|pos| a_set.contains(pos))
         })
     }
 }
@@ -204,7 +234,7 @@ fn get_or_compile(
     Ok(re)
 }
 
-fn build_rhai_engine(regex_cache: RegexCache) -> Engine {
+fn build_rhai_engine(regex_cache: RegexCache, embed_cache: Option<Arc<EmbeddingCache>>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(0, 0); // no limit on expression or function-body nesting depth
 
@@ -247,10 +277,44 @@ fn build_rhai_engine(regex_cache: RegexCache) -> Engine {
     engine.register_fn("str_sim", |a: String, b: String| -> f64 {
         strsim::normalized_levenshtein(&a, &b).max(token_jaccard(&a, &b))
     });
+    engine.register_fn("join", |arr: Vec<Dynamic>, sep: String| -> String {
+        arr.iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(&sep)
+    });
+    engine.register_fn(
+        "any",
+        |arr: Vec<Dynamic>, f: rhai::FnPtr| -> Result<bool, Box<rhai::EvalAltResult>> {
+            Ok(arr.into_iter().any(|x| {
+                f.call::<bool>(&Engine::new(), &AST::empty(), (x,))
+                    .unwrap_or(false)
+            }))
+        },
+    );
+    engine.register_fn(
+        "all",
+        |arr: Vec<Dynamic>, f: rhai::FnPtr| -> Result<bool, Box<rhai::EvalAltResult>> {
+            Ok(arr.into_iter().all(|x| {
+                f.call::<bool>(&Engine::new(), &AST::empty(), (x,))
+                    .unwrap_or(false)
+            }))
+        },
+    );
 
-    // TODO: load dylib extensions from a plugin directory so callers can register
-    // additional Rhai functions (e.g. ML-based embedding similarity) without
-    // touching this file.
+    // HTTP primitive — used by the Rhai embed() function to call the embedding server.
+    register_http_fns(&mut engine);
+
+    // semantic_sim(a_entry_id, b_entry_id) → f64
+    // Returns cosine similarity [0, 1] between two cached embeddings.
+    // Returns 0.0 when either entry has no stored embedding or no cache is configured.
+    if let Some(cache) = embed_cache {
+        engine.register_fn("semantic_sim", move |a: i64, b: i64| -> f64 {
+            cache.cosine_similarity(a, b).unwrap_or(0.0).max(0.0)
+        });
+    } else {
+        engine.register_fn("semantic_sim", |_a: i64, _b: i64| -> f64 { 0.0 });
+    }
 
     // ── Regex primitives ──────────────────────────────────────────────────────
     // `compile_re(pattern)` — compile once, store in a variable, reuse in decide().
@@ -529,6 +593,82 @@ fn generate_candidates(entries: &[EntryInfo], focus: Option<&HashSet<i64>>) -> V
     pairs
 }
 
+/// Per-entry-type KNN fan-out for semantic blocking.
+///
+/// Higher-cardinality, more-distinctive types (tracks, releases) tolerate a large
+/// neighbour count, but coarse types (artists, release groups) have few true
+/// duplicates and a large `k` only floods the scorer with noise, so they are
+/// capped well below the base. `base_k` is the configured `embed_k` and applies
+/// to tracks/releases and any unrecognised type.
+fn k_for_type(entry_type: &str, base_k: usize) -> usize {
+    match entry_type {
+        "artist" => 3.min(base_k),
+        "release_group" => 5.min(base_k),
+        _ => base_k,
+    }
+}
+
+/// Semantic blocking, one KNN *page* at a time. A page covers neighbour ranks
+/// `[page * page_k, (page + 1) * page_k)` for each entry, where `page_k =
+/// k_for_type(type, base_k)`. Only entries whose type is in `active` are walked,
+/// and pairs already emitted on an earlier page (tracked in `already`) are
+/// skipped, so callers can keep requesting pages until merge rate drops off.
+///
+/// `sim_threshold` is a cosine *similarity* lower bound (≥ 0); distance in vec0 is
+/// L2 on unit vectors, which has the same ordering as cosine distance. Because
+/// neighbours come back sorted by distance, the first one past the threshold ends
+/// the walk for that entry — any further (and any later page's) neighbours are
+/// strictly farther.
+fn generate_semantic_candidates(
+    entries: &[EntryInfo],
+    cache: &EmbeddingCache,
+    focus: Option<&HashSet<i64>>,
+    base_k: usize,
+    sim_threshold: f64,
+    page: usize,
+    active: &HashSet<String>,
+    already: &mut HashSet<(i64, i64)>,
+) -> Vec<(i64, i64)> {
+    // Convert cosine similarity threshold → L2 distance threshold.
+    // For unit vectors: L2² = 2(1 − cos_sim), so L2 = √(2(1 − cos_sim)).
+    let l2_threshold = (2.0 * (1.0 - sim_threshold)).sqrt();
+
+    let mut pairs: Vec<(i64, i64)> = Vec::new();
+    for e in entries {
+        if e.best_title.is_none() {
+            continue;
+        }
+        if !active.contains(&e.entry_type) {
+            continue;
+        }
+        if focus.is_some_and(|f| !f.contains(&e.entry_id)) {
+            continue;
+        }
+        let page_k = k_for_type(&e.entry_type, base_k);
+        let want = (page + 1) * page_k;
+        // KNN is now type-local: all k slots go to same-type neighbours.
+        let neighbors = match cache.knn(e.entry_id, want, &e.entry_type) {
+            Ok(n) => n,
+            Err(err) => {
+                warn!("semantic KNN failed for entry {}: {err}", e.entry_id);
+                continue;
+            }
+        };
+        // Skip the ranks already revealed on earlier pages.
+        for (neighbor_id, dist) in neighbors.into_iter().skip(page * page_k) {
+            if dist > l2_threshold {
+                break;
+            }
+            let a = e.entry_id.min(neighbor_id);
+            let b = e.entry_id.max(neighbor_id);
+            if already.insert((a, b)) {
+                pairs.push((a, b));
+            }
+        }
+    }
+    pairs
+}
+
 // ── Barrier veto check ────────────────────────────────────────────────────────
 
 fn barrier_blocks(
@@ -685,14 +825,7 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<Vec<EntryInfo>> {
 fn fmt_pairs(pairs: &[Pair]) -> String {
     pairs
         .iter()
-        .map(|(s, id)| {
-            let short_id = if id.len() > 40 {
-                &id[..40]
-            } else {
-                id.as_str()
-            };
-            format!("{s}:{short_id}")
-        })
+        .map(|(s, id)| format!("{s}:{id}"))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -705,14 +838,7 @@ fn csv_field(s: &str) -> String {
 fn fmt_pairs_csv(pairs: &[Pair]) -> String {
     pairs
         .iter()
-        .map(|(s, id)| {
-            let short_id = if id.len() > 32 {
-                &id[..32]
-            } else {
-                id.as_str()
-            };
-            format!("{s}:{short_id}")
-        })
+        .map(|(s, id)| format!("{s}:{id}"))
         .collect::<Vec<_>>()
         .join(" | ")
 }
@@ -734,12 +860,15 @@ impl Drop for ScriptCtx<'_> {
     }
 }
 
-async fn load_script(path: &str) -> anyhow::Result<ScriptCtx<'static>> {
+async fn load_script(
+    path: &str,
+    embed_cache: Option<Arc<EmbeddingCache>>,
+) -> anyhow::Result<ScriptCtx<'static>> {
     let script = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("reading script {path}"))?;
     let regex_cache: RegexCache = Arc::new(Mutex::new(HashMap::new()));
-    let engine = build_rhai_engine(regex_cache);
+    let engine = build_rhai_engine(regex_cache, embed_cache);
     let ast = engine
         .compile(&script)
         .map_err(|e| anyhow::anyhow!("Rhai compile error in {path}: {e}"))?;
@@ -767,10 +896,9 @@ async fn score_candidates(
     ctx: &ScriptCtx<'_>,
     barrier: &HashMap<Pair, crate::pipeline::dedup::AnchorId>,
     config: &SoftMatchConfig,
+    embed_cache: Option<&EmbeddingCache>,
 ) -> anyhow::Result<HashMap<String, [usize; 3]>> {
     let entry_map: HashMap<i64, &EntryInfo> = entries.iter().map(|e| (e.entry_id, e)).collect();
-    let candidates = generate_candidates(entries, focus);
-    info!("Scoring {} candidate pair(s)", candidates.len());
 
     // Optional CSV output for manual quality review.
     let mut csv: Option<std::io::BufWriter<std::fs::File>> = if let Some(path) = &config.csv_path {
@@ -792,113 +920,182 @@ async fn score_candidates(
 
     let mut stats: HashMap<String, [usize; 3]> = HashMap::new();
 
-    for (id_a, id_b) in &candidates {
-        let ea = match entry_map.get(id_a) {
-            Some(e) => e,
-            None => continue,
-        };
-        let eb = match entry_map.get(id_b) {
-            Some(e) => e,
-            None => continue,
-        };
+    let Some(cache) = embed_cache else {
+        info!("Semantic blocking disabled (no embedding cache); no candidates to score.");
+        return Ok(stats);
+    };
 
-        // Barrier-separated pairs: no RELATE between deliberately distinct entities.
-        if barrier_blocks(&ea.pairs, &eb.pairs, barrier) {
-            if let Some(w) = &mut csv {
-                write_csv_row(w, "BARRIER", "", 0.0, "", ea, eb, ctx)?;
-            }
-            continue;
+    // Types still worth paging deeper into. Seeded with every concrete type
+    // present; a type drops out once a page's merge rate falls below the
+    // configured floor (or the page yields nothing new).
+    let mut active: HashSet<String> = entries
+        .iter()
+        .map(|e| e.entry_type.clone())
+        .filter(|t| t != "unknown")
+        .collect();
+
+    let mut already: HashSet<(i64, i64)> = HashSet::new();
+    let mut total_scored = 0usize;
+
+    for page in 0..config.embed_max_pages.max(1) {
+        if active.is_empty() {
+            break;
         }
+        let page_pairs = generate_semantic_candidates(
+            entries,
+            cache,
+            focus,
+            config.embed_k,
+            config.embed_sim_threshold,
+            page,
+            &active,
+            &mut already,
+        );
+        if page_pairs.is_empty() {
+            break;
+        }
+        info!(
+            "Semantic page {page}: scoring {} candidate pair(s) across {} active type(s)",
+            page_pairs.len(),
+            active.len()
+        );
+        total_scored += page_pairs.len();
 
-        let verdict = call_script(&ctx.engine, &ctx.ast, &ctx.base_scope, ea, eb)?;
+        // Per-type (merges, scored) for this page only — drives whether the type
+        // is paged further.
+        let mut page_rate: HashMap<String, (usize, usize)> = HashMap::new();
 
-        if let Some(w) = &mut csv {
-            let (vname, kind, conf, reason) = match &verdict {
-                Verdict::Merge { confidence, reason } => {
-                    ("MERGE", "", *confidence, reason.as_str())
-                }
-                Verdict::Relate {
-                    kind,
-                    confidence,
-                    reason,
-                } => ("RELATE", kind.as_str(), *confidence, reason.as_str()),
-                Verdict::Distinct => ("DISTINCT", "", 0.0, ""),
+        for (id_a, id_b) in page_pairs {
+            let (Some(ea), Some(eb)) = (entry_map.get(&id_a), entry_map.get(&id_b)) else {
+                continue;
             };
-            write_csv_row(w, vname, kind, conf, reason, ea, eb, ctx)?;
+
+            // Barrier-separated pairs: no RELATE between deliberately distinct entities.
+            if barrier_blocks(&ea.pairs, &eb.pairs, barrier) {
+                if let Some(w) = &mut csv {
+                    write_csv_row(w, "BARRIER", "", 0.0, "", ea, eb, ctx)?;
+                }
+                continue;
+            }
+
+            let verdict = apply_candidate(db, ea, eb, ctx, config, &mut csv, &mut stats).await?;
+            let rate = page_rate.entry(ea.entry_type.clone()).or_insert((0, 0));
+            rate.1 += 1;
+            if matches!(verdict, Verdict::Merge { .. }) {
+                rate.0 += 1;
+            }
         }
 
-        let et = ea.entry_type.clone();
-        let counters = stats.entry(et).or_insert([0; 3]);
-
-        match &verdict {
-            Verdict::Distinct => {
-                counters[2] += 1;
+        // Continue paging only the types whose merge rate this page held up.
+        active.retain(|t| match page_rate.get(t) {
+            Some(&(merges, scored)) if scored > 0 => {
+                merges as f64 / scored as f64 >= config.embed_page_merge_rate
             }
-            Verdict::Merge { confidence, reason } => {
-                counters[0] += 1;
-                println!("[MERGE] conf={:.2}  type={}", confidence, ea.entry_type);
-                println!(
-                    "  A: {:?} (entry {})\n     {}",
-                    ea.best_title.as_deref().unwrap_or("?"),
-                    ea.entry_id,
-                    fmt_pairs(&ea.pairs)
-                );
-                println!(
-                    "  B: {:?} (entry {})\n     {}",
-                    eb.best_title.as_deref().unwrap_or("?"),
-                    eb.entry_id,
-                    fmt_pairs(&eb.pairs)
-                );
-                println!("  reason: {reason}\n");
+            _ => false,
+        });
+    }
 
-                if config.apply_relates {
-                    db.merge_entries(ea.entry_id, eb.entry_id)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    info!("Merged entry {} into {}", ea.entry_id, eb.entry_id);
-                }
-            }
+    info!("Scored {total_scored} candidate pair(s)");
+    Ok(stats)
+}
+
+/// Score one candidate pair with the Rhai script, emit its CSV row and console
+/// log, apply the DB write when `apply_relates` is set, and bump `stats`. Returns
+/// the verdict so the caller can measure per-page merge rate for adaptive paging.
+async fn apply_candidate(
+    db: &MusicDb,
+    ea: &EntryInfo,
+    eb: &EntryInfo,
+    ctx: &ScriptCtx<'_>,
+    config: &SoftMatchConfig,
+    csv: &mut Option<std::io::BufWriter<std::fs::File>>,
+    stats: &mut HashMap<String, [usize; 3]>,
+) -> anyhow::Result<Verdict> {
+    let verdict = call_script(&ctx.engine, &ctx.ast, &ctx.base_scope, ea, eb)?;
+
+    if let Some(w) = csv {
+        let (vname, kind, conf, reason) = match &verdict {
+            Verdict::Merge { confidence, reason } => ("MERGE", "", *confidence, reason.as_str()),
             Verdict::Relate {
                 kind,
                 confidence,
                 reason,
-            } => {
-                counters[1] += 1;
-                println!(
-                    "[RELATE {}] conf={:.2}  type={}",
-                    kind, confidence, ea.entry_type
-                );
-                println!(
-                    "  A: {:?} (entry {})\n     {}",
-                    ea.best_title.as_deref().unwrap_or("?"),
-                    ea.entry_id,
-                    fmt_pairs(&ea.pairs)
-                );
-                println!(
-                    "  B: {:?} (entry {})\n     {}",
-                    eb.best_title.as_deref().unwrap_or("?"),
-                    eb.entry_id,
-                    fmt_pairs(&eb.pairs)
-                );
-                println!("  reason: {reason}\n");
+            } => ("RELATE", kind.as_str(), *confidence, reason.as_str()),
+            Verdict::Distinct => ("DISTINCT", "", 0.0, ""),
+        };
+        write_csv_row(w, vname, kind, conf, reason, ea, eb, ctx)?;
+    }
 
-                if config.apply_relates {
-                    db.upsert_relation(
-                        ea.entry_id,
-                        eb.entry_id,
-                        kind,
-                        *confidence,
-                        "heuristic",
-                        None,
-                    )
+    let counters = stats.entry(ea.entry_type.clone()).or_insert([0; 3]);
+
+    match &verdict {
+        Verdict::Distinct => {
+            counters[2] += 1;
+        }
+        Verdict::Merge { confidence, reason } => {
+            counters[0] += 1;
+            println!("[MERGE] conf={:.2}  type={}", confidence, ea.entry_type);
+            println!(
+                "  A: {:?} (entry {})\n     {}",
+                ea.best_title.as_deref().unwrap_or("?"),
+                ea.entry_id,
+                fmt_pairs(&ea.pairs)
+            );
+            println!(
+                "  B: {:?} (entry {})\n     {}",
+                eb.best_title.as_deref().unwrap_or("?"),
+                eb.entry_id,
+                fmt_pairs(&eb.pairs)
+            );
+            println!("  reason: {reason}\n");
+
+            if config.apply_relates {
+                db.merge_entries(ea.entry_id, eb.entry_id)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
+                info!("Merged entry {} into {}", ea.entry_id, eb.entry_id);
+            }
+        }
+        Verdict::Relate {
+            kind,
+            confidence,
+            reason,
+        } => {
+            counters[1] += 1;
+            println!(
+                "[RELATE {}] conf={:.2}  type={}",
+                kind, confidence, ea.entry_type
+            );
+            println!(
+                "  A: {:?} (entry {})\n     {}",
+                ea.best_title.as_deref().unwrap_or("?"),
+                ea.entry_id,
+                fmt_pairs(&ea.pairs)
+            );
+            println!(
+                "  B: {:?} (entry {})\n     {}",
+                eb.best_title.as_deref().unwrap_or("?"),
+                eb.entry_id,
+                fmt_pairs(&eb.pairs)
+            );
+            println!("  reason: {reason}\n");
+
+            if config.apply_relates {
+                db.upsert_relation(
+                    ea.entry_id,
+                    eb.entry_id,
+                    kind,
+                    *confidence,
+                    "heuristic",
+                    None,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
         }
     }
 
-    Ok(stats)
+    Ok(verdict)
 }
 
 fn write_csv_row(
@@ -979,10 +1176,22 @@ pub async fn match_db(
     let entries = build_entry_infos(db).await?;
     info!("Loaded {} entries", entries.len());
 
-    let ctx = load_script(&config.script_path).await?;
     let (barrier, _) = dedup.compile(providers).await;
 
-    let stats = score_candidates(db, &entries, None, &ctx, &barrier, config).await?;
+    let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries).await;
+
+    let ctx = load_script(&config.script_path, embed_cache.clone()).await?;
+
+    let stats = score_candidates(
+        db,
+        &entries,
+        None,
+        &ctx,
+        &barrier,
+        config,
+        embed_cache.as_deref(),
+    )
+    .await?;
 
     println!("=== Summary ===");
     for t in ["track", "release", "release_group", "artist"] {
@@ -1013,8 +1222,67 @@ pub async fn match_new_entries(
         return Ok(());
     }
     let entries = build_entry_infos(db).await?;
-    let ctx = load_script(&config.script_path).await?;
     let (barrier, _) = dedup.compile(providers).await;
-    score_candidates(db, &entries, Some(new_entry_ids), &ctx, &barrier, config).await?;
+    let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries).await;
+    let ctx = load_script(&config.script_path, embed_cache.clone()).await?;
+    score_candidates(
+        db,
+        &entries,
+        Some(new_entry_ids),
+        &ctx,
+        &barrier,
+        config,
+        embed_cache.as_deref(),
+    )
+    .await?;
     Ok(())
+}
+
+// ── Embedding cache helper ────────────────────────────────────────────────────
+
+/// Open the embedding cache (if configured), run `embed()` for stale entries,
+/// and return an `Arc<EmbeddingCache>` ready for KNN queries.
+/// Returns `None` if embedding is disabled or fails to open.
+async fn open_embed_cache(
+    config: &SoftMatchConfig,
+    entries: &[EntryInfo],
+) -> Option<Arc<EmbeddingCache>> {
+    let path = config.embed_db_path.as_deref()?;
+    let cache = match EmbeddingCache::open(path, config.embed_dim) {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            warn!("Failed to open embedding cache at {path}: {e} — skipping semantic blocking");
+            return None;
+        }
+    };
+
+    // Load or compile the Rhai script just to call embed() — we build a temporary
+    // engine with HTTP support. The main script is re-loaded afterward with the
+    // populated cache bound into semantic_sim.
+    let embed_script = match tokio::fs::read_to_string(&config.script_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Could not read script for embed phase: {e}");
+            return Some(cache);
+        }
+    };
+    let tmp_engine = build_rhai_engine(Arc::new(Mutex::new(HashMap::new())), None);
+    let tmp_ast = match tmp_engine.compile(&embed_script) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("Script compile error (embed phase): {e}");
+            return Some(cache);
+        }
+    };
+    let mut tmp_scope = Scope::new();
+    let _ = tmp_engine.run_ast_with_scope(&mut tmp_scope, &tmp_ast);
+    let _ = tmp_engine.call_fn::<Dynamic>(&mut tmp_scope, &tmp_ast, "init", ());
+
+    let cache_clone = cache.clone();
+    let entries_ref = entries;
+    tokio::task::block_in_place(|| {
+        embed_stale_entries(entries_ref, &tmp_engine, &tmp_ast, &tmp_scope, &cache_clone);
+    });
+
+    Some(cache)
 }

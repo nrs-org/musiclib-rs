@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Softmatch Labeler</title>
+<style>
+  :root {
+    --bg: #0f172a; --surface: #1e293b; --border: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8;
+    --merge-bg: #14532d; --merge-border: #22c55e; --merge-text: #86efac;
+    --relate-bg: #451a03; --relate-border: #f59e0b; --relate-text: #fcd34d;
+    --distinct-bg: #1e293b; --distinct-border: #475569; --distinct-text: #94a3b8;
+    --barrier-bg: #450a0a; --barrier-border: #ef4444; --barrier-text: #fca5a5;
+    --approved-ring: #22c55e; --overridden-ring: #f59e0b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'JetBrains Mono', 'Fira Mono', monospace; font-size: 13px; }
+
+  /* ── Header ── */
+  #sticky-top { position: sticky; top: 0; z-index: 100; background: #0f172a; }
+  #header { border-bottom: 1px solid var(--border); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  #header h1 { font-size: 15px; color: var(--accent); font-weight: 700; margin-right: 8px; }
+  .stat-pill { background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 11px; color: var(--muted); }
+  .stat-pill b { color: var(--text); }
+  #progress-bar-wrap { width: 100%; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  #progress-bar { height: 4px; background: var(--accent); transition: width 0.3s; }
+
+  /* ── Filters ── */
+  #filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+  .filter-group { display: flex; gap: 4px; align-items: center; }
+  .filter-group label { color: var(--muted); font-size: 11px; margin-right: 2px; }
+  .filter-btn { background: var(--surface); border: 1px solid var(--border); color: var(--muted); border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px; font-family: inherit; transition: all 0.15s; }
+  .filter-btn:hover { border-color: var(--accent); color: var(--text); }
+  .filter-btn.active { background: var(--accent); border-color: var(--accent); color: #0f172a; font-weight: 700; }
+  #search { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 10px; font-size: 11px; font-family: inherit; outline: none; width: 180px; }
+  #search:focus { border-color: var(--accent); }
+  .spacer { flex: 1; }
+  #approve-all-btn { background: #14532d; border: 1px solid #22c55e; color: #86efac; border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 12px; font-family: inherit; font-weight: 700; }
+  #approve-all-btn:hover { background: #166534; }
+  #export-btn { background: #1d4ed8; border: none; color: white; border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 12px; font-family: inherit; font-weight: 700; }
+  #export-btn:hover { background: #2563eb; }
+
+  /* ── List ── */
+  #list { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  #empty { text-align: center; color: var(--muted); padding: 60px; }
+
+  /* ── Card ── */
+  .card { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: border-color 0.15s; }
+  .card.approved { border-color: var(--approved-ring); box-shadow: 0 0 0 1px var(--approved-ring); }
+  .card.overridden { border-color: var(--overridden-ring); box-shadow: 0 0 0 1px var(--overridden-ring); }
+  .card.focused { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #cursor-hint { position: fixed; bottom: 12px; right: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 10px; color: var(--muted); line-height: 1.8; pointer-events: none; opacity: 0.85; }
+  #cursor-hint kbd { background: #0f172a; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--text); font-family: inherit; }
+
+  .card-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+  .verdict-badge { font-size: 11px; font-weight: 700; border-radius: 4px; padding: 2px 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .badge-MERGE    { background: var(--merge-bg);    border: 1px solid var(--merge-border);    color: var(--merge-text); }
+  .badge-RELATE   { background: var(--relate-bg);   border: 1px solid var(--relate-border);   color: var(--relate-text); }
+  .badge-DISTINCT { background: var(--distinct-bg); border: 1px solid var(--distinct-border); color: var(--distinct-text); }
+  .badge-BARRIER  { background: var(--barrier-bg);  border: 1px solid var(--barrier-border);  color: var(--barrier-text); }
+
+  .verdict-kind { color: var(--muted); font-size: 11px; }
+  .conf { color: var(--muted); font-size: 11px; }
+  .reason-text { font-size: 11px; color: var(--accent); font-style: italic; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry-type-badge { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px; }
+
+  .label-status { font-size: 10px; font-weight: 700; border-radius: 3px; padding: 2px 7px; }
+  .label-approved { background: #14532d; color: #86efac; }
+  .label-overridden { background: #451a03; color: #fcd34d; }
+  .label-pending { background: var(--surface); color: var(--muted); }
+
+  .card-body { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--border); }
+  .entry-col { padding: 10px 12px; }
+  .entry-col + .entry-col { border-left: 1px solid var(--border); }
+  .entry-label { font-size: 10px; color: var(--muted); font-weight: 700; text-transform: uppercase; margin-bottom: 3px; }
+  .entry-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .entry-id { font-size: 10px; color: var(--muted); margin-bottom: 6px; }
+  .source-list { display: flex; flex-direction: column; gap: 3px; }
+  .source-chip { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .source-key { font-weight: 700; }
+  .src-youtube,.src-nicovideo,.src-soundcloud { color: #fb923c; }
+  .src-musicbrainz { color: #60a5fa; }
+  .src-spotify { color: #4ade80; }
+  .src-discogs { color: #a78bfa; }
+  .src-isrc { color: #f472b6; }
+
+  .features-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px; border-top: 1px solid var(--border); background: rgba(255,255,255,0.02); }
+  .feat { font-size: 10px; border-radius: 3px; padding: 1px 7px; border: 1px solid var(--border); color: var(--muted); }
+  .feat.yes  { border-color: #22c55e44; color: #86efac; background: #14532d44; }
+  .feat.warn { border-color: #ef444444; color: #fca5a5; background: #450a0a44; }
+  .feat.info { border-color: #38bdf844; color: #7dd3fc; }
+
+  .card-actions { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+  .action-btn { border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 11px; font-family: inherit; background: var(--surface); color: var(--muted); transition: all 0.15s; }
+  .action-btn:hover { color: var(--text); border-color: var(--text); }
+  .btn-approve { border-color: var(--merge-border); color: var(--merge-text); }
+  .btn-approve:hover { background: var(--merge-bg); }
+  .btn-approve.active { background: var(--merge-bg); color: var(--merge-text); font-weight: 700; }
+  .btn-merge  { color: #86efac; }
+  .btn-merge:hover  { background: var(--merge-bg);  border-color: var(--merge-border); }
+  .btn-relate { color: #fcd34d; }
+  .btn-relate:hover { background: var(--relate-bg); border-color: var(--relate-border); }
+  .btn-distinct { color: var(--muted); }
+  .btn-distinct:hover { background: #1e293b; border-color: #475569; }
+  .btn-active { font-weight: 700; outline: 2px solid var(--overridden-ring); }
+
+  .relate-kind-select { background: var(--surface); border: 1px solid var(--relate-border); color: var(--relate-text); border-radius: 4px; padding: 3px 6px; font-size: 11px; font-family: inherit; outline: none; display: none; }
+  .relate-kind-select.show { display: inline-block; }
+  .note-input { flex: 1; min-width: 160px; background: var(--surface); border: 1px solid var(--border); color: var(--muted); border-radius: 4px; padding: 3px 8px; font-size: 11px; font-family: inherit; outline: none; }
+  .note-input:focus { border-color: var(--accent); color: var(--text); }
+  .note-input::placeholder { color: #475569; }
+  .skip-btn { margin-left: auto; color: #475569; font-size: 10px; }
+  .skip-btn:hover { color: var(--muted); border-color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div id="sticky-top">
+<div id="header">
+  <h1>🎵 Softmatch Labeler</h1>
+  <span class="stat-pill">Total: <b id="stat-total">–</b></span>
+  <span class="stat-pill">Labeled: <b id="stat-labeled">0</b></span>
+  <span class="stat-pill">Approved: <b id="stat-approved">0</b></span>
+  <span class="stat-pill">Overridden: <b id="stat-overridden">0</b></span>
+  <span class="stat-pill">Pending: <b id="stat-pending">–</b></span>
+  <span class="stat-pill" id="orphan-pill" style="display:none">Orphaned: <b id="stat-orphaned">0</b></span>
+  <div style="flex:1"></div>
+  <div id="progress-bar-wrap" style="width:200px"><div id="progress-bar" style="width:0%"></div></div>
+</div>
+
+<div id="filters">
+  <div class="filter-group">
+    <label>Verdict:</label>
+    <button class="filter-btn active" data-filter="verdict" data-value="">All</button>
+    <button class="filter-btn" data-filter="verdict" data-value="MERGE">MERGE</button>
+    <button class="filter-btn" data-filter="verdict" data-value="RELATE">RELATE</button>
+    <button class="filter-btn" data-filter="verdict" data-value="DISTINCT">DISTINCT</button>
+    <button class="filter-btn" data-filter="verdict" data-value="BARRIER">BARRIER</button>
+  </div>
+  <div class="filter-group">
+    <label>Type:</label>
+    <button class="filter-btn active" data-filter="type" data-value="">All</button>
+    <button class="filter-btn" data-filter="type" data-value="track">track</button>
+    <button class="filter-btn" data-filter="type" data-value="release">release</button>
+    <button class="filter-btn" data-filter="type" data-value="release_group">release_group</button>
+    <button class="filter-btn" data-filter="type" data-value="artist">artist</button>
+  </div>
+  <div class="filter-group">
+    <label>Status:</label>
+    <button class="filter-btn active" data-filter="status" data-value="">All</button>
+    <button class="filter-btn" data-filter="status" data-value="pending">Pending</button>
+    <button class="filter-btn" data-filter="status" data-value="approved">Approved</button>
+    <button class="filter-btn" data-filter="status" data-value="overridden">Overridden</button>
+  </div>
+  <div class="spacer"></div>
+  <input id="search" type="text" placeholder="Search title / source…" autocomplete="off">
+  <button id="approve-all-btn">Approve All Visible</button>
+  <button id="export-btn">Export Labels JSON</button>
+</div>
+</div>
+
+<div id="empty" style="display:none;text-align:center;color:var(--muted);padding:60px">No pairs match the current filters.</div>
+<div id="list">
+  <div id="spacer-top" style="contain:strict"></div>
+  <div id="spacer-bottom" style="contain:strict"></div>
+</div>
+
+<div id="cursor-hint">
+  <kbd>j</kbd>/<kbd>k</kbd> next/prev &nbsp; <kbd>]</kbd>/<kbd>[</kbd> next/prev unlabeled<br>
+  <kbd>a</kbd> approve &nbsp; <kbd>m</kbd> MERGE &nbsp; <kbd>d</kbd> DISTINCT<br>
+  <kbd>r</kbd> RELATE (cycle kind with <kbd>R</kbd>) &nbsp; <kbd>x</kbd> clear<br>
+  <kbd>g</kbd><kbd>g</kbd> top &nbsp; <kbd>G</kbd> bottom &nbsp; <kbd>/</kbd> search &nbsp; <kbd>Esc</kbd> blur
+</div>
+
+<script>
+// ── CSV parser (RFC 4180) ──────────────────────────────────────────────────
+function parseCSV(text) {
+  const rows = [];
+  let i = 0, n = text.length;
+  while (i < n) {
+    const row = [];
+    while (true) {
+      if (i < n && text[i] === '"') {
+        i++; let field = '';
+        while (i < n) {
+          if (text[i] === '"') {
+            i++;
+            if (i < n && text[i] === '"') { field += '"'; i++; }
+            else break;
+          } else { field += text[i++]; }
+        }
+        row.push(field);
+      } else {
+        let field = '';
+        while (i < n && text[i] !== ',' && text[i] !== '\n' && text[i] !== '\r') field += text[i++];
+        row.push(field);
+      }
+      if (i >= n || text[i] === '\n' || text[i] === '\r') break;
+      i++; // comma
+    }
+    if (text[i] === '\r') i++;
+    if (text[i] === '\n') i++;
+    if (row.length > 1 || row[0] !== '') rows.push(row);
+  }
+  return rows;
+}
+
+function csvToObjects(text) {
+  const rows = parseCSV(text);
+  if (rows.length < 2) return [];
+  const headers = rows[0];
+  return rows.slice(1).map(r => {
+    const o = {};
+    headers.forEach((h, i) => o[h] = r[i] ?? '');
+    return o;
+  });
+}
+
+// ── State ─────────────────────────────────────────────────────────────────
+const LS_KEY = 'softmatch_labels_v1';
+let allPairs = [];
+let labels = {};   // key → { verdict, kind, note, approved }
+let filters = { verdict: '', type: '', status: '' };
+let searchQ = '';
+
+function pairKey(p) { return `${p.entry_a}-${p.entry_b}`; }
+
+function loadLabels() {
+  try { labels = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch { labels = {}; }
+}
+function saveLabels() { localStorage.setItem(LS_KEY, JSON.stringify(labels)); }
+
+// ── Source formatting ─────────────────────────────────────────────────────
+function parseSources(raw) {
+  return raw.split(' | ').map(s => s.trim()).filter(Boolean).map(s => {
+    const colon = s.indexOf(':');
+    return colon === -1 ? { key: s, url: '' } : { key: s.slice(0, colon), url: s.slice(colon + 1) };
+  });
+}
+
+function renderSources(raw) {
+  return parseSources(raw).map(({ key, url }) => {
+    const cls = `src-${key.replace(/[^a-z]/g, '')}`;
+    const display = url.length > 55 ? url.slice(0, 52) + '…' : url;
+    const link = url.startsWith('http') ? `<a href="${url}" target="_blank" style="color:inherit;text-decoration:none">${display}</a>` : url;
+    return `<div class="source-chip"><span class="source-key ${cls}">${key}</span>:${link}</div>`;
+  }).join('');
+}
+
+// ── Render ────────────────────────────────────────────────────────────────
+const RELATE_KINDS = ['alt_version','release_variant','live_version','instrumental','edit','remix','cover','compilation_version','other'];
+
+function featBadge(label, value, opts = {}) {
+  let cls = '';
+  if (opts.bool) cls = value === 'true' ? 'yes' : '';
+  else if (opts.warnBool) cls = value === 'true' ? 'warn' : '';
+  else cls = 'info';
+  return `<span class="feat ${cls}">${label}: ${value}</span>`;
+}
+
+function renderCard(p, key, label) {
+  const verdict = p.verdict;
+  const isLabeled = !!label;
+  const isApproved = isLabeled && label.approved && !label.verdict;
+  const isOverridden = isLabeled && !!label.verdict;
+  const effectiveVerdict = label?.verdict || verdict;
+  const effectiveKind = label?.kind || p.kind;
+
+  const cardCls = isApproved ? 'card approved' : isOverridden ? 'card overridden' : 'card';
+
+  const statusBadge = isApproved
+    ? `<span class="label-status label-approved">✓ Approved</span>`
+    : isOverridden
+    ? `<span class="label-status label-overridden">→ ${label.verdict}${label.kind ? ` (${label.kind})` : ''}</span>`
+    : `<span class="label-status label-pending">Pending</span>`;
+
+  const durDelta = parseInt(p.dur_delta_ms);
+  const durStr = isNaN(durDelta) || durDelta === 0
+    ? (p.dur_known === 'true' ? '0ms' : 'n/a')
+    : durDelta > 60000 ? `${(durDelta/60000).toFixed(1)}min` : durDelta > 1000 ? `${(durDelta/1000).toFixed(1)}s` : `${durDelta}ms`;
+
+  const kindStr = p.kind ? ` <span class="verdict-kind">${p.kind}</span>` : '';
+  const confStr = `<span class="conf">conf=${parseFloat(p.confidence).toFixed(2)}</span>`;
+  const approveActive = isApproved ? 'active' : '';
+
+  const noteVal = (label?.note || '').replace(/"/g, '&quot;');
+
+  return `<div class="${cardCls}" data-key="${key}" data-verdict="${verdict}">
+  <div class="card-header">
+    <span class="verdict-badge badge-${verdict}">${verdict}</span>${kindStr}
+    <span class="entry-type-badge">${p.type}</span>
+    ${confStr}
+    <span class="reason-text">"${p.reason || '—'}"</span>
+    ${statusBadge}
+  </div>
+  <div class="card-body">
+    <div class="entry-col">
+      <div class="entry-label">A</div>
+      <div class="entry-title" title="${(p.title_a||'').replace(/"/g,'&quot;')}">${p.title_a || '(no title)'}</div>
+      <div class="entry-id">entry ${p.entry_a}</div>
+      <div class="source-list">${renderSources(p.sources_a)}</div>
+    </div>
+    <div class="entry-col">
+      <div class="entry-label">B</div>
+      <div class="entry-title" title="${(p.title_b||'').replace(/"/g,'&quot;')}">${p.title_b || '(no title)'}</div>
+      <div class="entry-id">entry ${p.entry_b}</div>
+      <div class="source-list">${renderSources(p.sources_b)}</div>
+    </div>
+  </div>
+  <div class="features-row">
+    ${featBadge('sim', parseFloat(p.main_title_sim).toFixed(2), {info:true})}
+    ${p.dur_known === 'true' ? featBadge('Δdur', durStr, {}) : featBadge('dur', 'unknown', {})}
+    ${featBadge('same_rel', p.same_release, {bool:true})}
+    ${featBadge('same_pos', p.same_release_position, {bool:true})}
+    ${featBadge('artists', parseFloat(p.artist_overlap).toFixed(2), {info:true})}
+    ${p.markers_conflict === 'true' ? featBadge('markers', 'conflict', {warnBool:true}) : ''}
+  </div>
+  <div class="card-actions">
+    <button class="action-btn btn-approve ${approveActive}" onclick="doApprove('${key}',this)">✓ Approve</button>
+    <button class="action-btn btn-merge${effectiveVerdict==='MERGE'&&isOverridden?' btn-active':''}" onclick="doSet('${key}','MERGE','',this)">MERGE</button>
+    <button class="action-btn btn-relate${effectiveVerdict==='RELATE'&&isOverridden?' btn-active':''}" onclick="doRelate('${key}',this)">RELATE</button>
+    <select class="relate-kind-select" id="kind-${key}" onchange="doSetKind('${key}',this)">
+      ${RELATE_KINDS.map(k => `<option value="${k}"${effectiveKind===k?' selected':''}>${k}</option>`).join('')}
+    </select>
+    <button class="action-btn btn-distinct${effectiveVerdict==='DISTINCT'&&isOverridden?' btn-active':''}" onclick="doSet('${key}','DISTINCT','',this)">DISTINCT</button>
+    <input class="note-input" type="text" placeholder="note…" value="${noteVal}"
+      onchange="doNote('${key}',this.value)" onblur="doNote('${key}',this.value)">
+    <button class="action-btn skip-btn" onclick="doClear('${key}',this)">clear</button>
+  </div>
+</div>`;
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────
+function doApprove(key, btn) {
+  const pIdx = currentFP.findIndex(p => pairKey(p) === key);
+  if (pIdx >= 0) currentIdx = pIdx;
+  const existing = labels[key] || {};
+  labels[key] = { ...existing, approved: true, verdict: null, kind: null };
+  saveLabels(); updateStats(); rerenderCard(key);
+  nextUnlabeled(+1);
+}
+function doSet(key, verdict, kind, btn) {
+  const pIdx = currentFP.findIndex(p => pairKey(p) === key);
+  if (pIdx >= 0) currentIdx = pIdx;
+  const existing = labels[key] || {};
+  labels[key] = { ...existing, approved: false, verdict, kind: kind || null };
+  saveLabels(); updateStats(); rerenderCard(key);
+  if (verdict === 'MERGE' || verdict === 'DISTINCT') nextUnlabeled(+1);
+}
+function doRelate(key, btn) {
+  const existing = labels[key] || {};
+  const sel = document.getElementById('kind-' + key);
+  const kind = sel ? sel.value : 'alt_version';
+  labels[key] = { ...existing, approved: false, verdict: 'RELATE', kind };
+  saveLabels(); updateStats(); rerenderCard(key);
+}
+function doSetKind(key, sel) {
+  const existing = labels[key] || {};
+  if (existing.verdict === 'RELATE') {
+    labels[key] = { ...existing, kind: sel.value };
+    saveLabels(); updateStats();
+  }
+}
+function doNote(key, note) {
+  const existing = labels[key] || {};
+  labels[key] = { ...existing, note };
+  saveLabels();
+}
+function doClear(key, btn) {
+  delete labels[key];
+  saveLabels(); updateStats(); rerenderCard(key);
+}
+
+function rerenderCard(key) {
+  const pIdx = currentFP.findIndex(p => pairKey(p) === key);
+  const p = pIdx >= 0 ? currentFP[pIdx] : allPairs.find(a => pairKey(a) === key);
+  if (!p) return;
+
+  const shouldShow = filteredPairs().some(fp => pairKey(fp) === key);
+
+  if (!shouldShow) {
+    if (pIdx >= 0) {
+      currentFP.splice(pIdx, 1);
+      rebuildCumH();
+      if (currentIdx > pIdx) currentIdx--;
+      else if (currentIdx === pIdx) currentIdx = Math.min(currentIdx, currentFP.length - 1);
+    }
+    document.querySelector(`.card[data-key="${key}"]`)?.remove();
+    updateSpacers();
+    document.getElementById('empty').style.display = currentFP.length === 0 ? 'block' : 'none';
+    return;
+  }
+
+  // Card stays — only update DOM if it's inside the current render window.
+  if (pIdx < wStart || pIdx >= wStart + WINDOW_SIZE) return;
+
+  const el = document.querySelector(`.card[data-key="${key}"]`);
+  if (!el) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = renderCard(p, key, labels[key]);
+  el.parentNode.replaceChild(tmp.firstElementChild, el);
+  if (labels[key]?.verdict === 'RELATE') {
+    const sel = document.getElementById('kind-' + key);
+    if (sel) sel.classList.add('show');
+  }
+  const newEl = document.querySelector(`.card[data-key="${key}"]`);
+  if (newEl) { hMeas[key] = newEl.offsetHeight + 8; rebuildCumH(); updateSpacers(); }
+}
+
+// ── Stats & progress ──────────────────────────────────────────────────────
+function updateStats() {
+  const total = allPairs.length;
+  const activeKeys = new Set(allPairs.map(pairKey));
+  let labeled = 0, approved = 0, overridden = 0, orphaned = 0;
+  allPairs.forEach(p => {
+    const l = labels[pairKey(p)];
+    if (!l) return;
+    labeled++;
+    if (l.approved && !l.verdict) approved++;
+    else if (l.verdict) overridden++;
+  });
+  Object.keys(labels).forEach(k => { if (!activeKeys.has(k)) orphaned++; });
+  document.getElementById('stat-total').textContent = total;
+  document.getElementById('stat-labeled').textContent = labeled;
+  document.getElementById('stat-approved').textContent = approved;
+  document.getElementById('stat-overridden').textContent = overridden;
+  document.getElementById('stat-pending').textContent = total - labeled;
+  document.getElementById('progress-bar').style.width = total ? `${(labeled/total*100).toFixed(1)}%` : '0%';
+  document.getElementById('stat-orphaned').textContent = orphaned;
+  document.getElementById('orphan-pill').style.display = orphaned > 0 ? '' : 'none';
+}
+
+// ── Filtering ─────────────────────────────────────────────────────────────
+function getLabelStatus(p) {
+  const l = labels[pairKey(p)];
+  if (!l) return 'pending';
+  if (l.approved && !l.verdict) return 'approved';
+  if (l.verdict) return 'overridden';
+  return 'pending';
+}
+
+function matchesSearch(p) {
+  if (!searchQ) return true;
+  const q = searchQ.toLowerCase();
+  return (p.title_a||'').toLowerCase().includes(q)
+    || (p.title_b||'').toLowerCase().includes(q)
+    || (p.sources_a||'').toLowerCase().includes(q)
+    || (p.sources_b||'').toLowerCase().includes(q)
+    || (p.reason||'').toLowerCase().includes(q);
+}
+
+function filteredPairs() {
+  return allPairs.filter(p => {
+    if (filters.verdict && p.verdict !== filters.verdict) return false;
+    if (filters.type && p.type !== filters.type) return false;
+    if (filters.status && getLabelStatus(p) !== filters.status) return false;
+    if (!matchesSearch(p)) return false;
+    return true;
+  });
+}
+
+// ── Virtual list ─────────────────────────────────────────────────────────
+const WINDOW_SIZE = 150;
+const OVERSCAN    = 30;
+const EST_H       = 230;  // estimated card height + gap
+
+let currentFP = [];   // cached filteredPairs()
+let wStart    = 0;    // index of first rendered card in currentFP
+let hMeas     = {};   // pairKey → measured (height + gap) in px
+let cumH      = [];   // cumH[i] = total height of items [0, i)
+
+function getH(i) { return hMeas[pairKey(currentFP[i])] ?? EST_H; }
+
+function rebuildCumH() {
+  cumH = new Array(currentFP.length + 1).fill(0);
+  for (let i = 0; i < currentFP.length; i++) cumH[i + 1] = cumH[i] + getH(i);
+}
+
+function measureHeights() {
+  let changed = false;
+  document.querySelectorAll('#list .card').forEach((el, i) => {
+    const h = el.offsetHeight + 8;
+    const k = pairKey(currentFP[wStart + i]);
+    if (k && hMeas[k] !== h) { hMeas[k] = h; changed = true; }
+  });
+  if (changed) rebuildCumH();
+}
+
+// Binary search: largest i where cumH[i] <= target
+function indexAtScroll(target) {
+  let lo = 0, hi = currentFP.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    cumH[mid] <= target ? lo = mid + 1 : hi = mid;
+  }
+  return Math.max(0, lo - 1);
+}
+
+function updateSpacers() {
+  const wEnd = Math.min(currentFP.length, wStart + WINDOW_SIZE);
+  document.getElementById('spacer-top').style.height  = (cumH[wStart] || 0) + 'px';
+  document.getElementById('spacer-bottom').style.height = Math.max(0, (cumH[currentFP.length] || 0) - (cumH[wEnd] || 0)) + 'px';
+}
+
+function paintWindow(start) {
+  start = Math.max(0, Math.min(start, Math.max(0, currentFP.length - WINDOW_SIZE)));
+  const end = Math.min(currentFP.length, start + WINDOW_SIZE);
+  wStart = start;
+  document.getElementById('empty').style.display = currentFP.length === 0 ? 'block' : 'none';
+  updateSpacers();
+
+  const list = document.getElementById('list');
+  const spacerBottom = document.getElementById('spacer-bottom');
+  list.querySelectorAll('.card').forEach(c => c.remove());
+
+  if (end > start) {
+    const frag = document.createDocumentFragment();
+    for (let i = start; i < end; i++) {
+      const p = currentFP[i], key = pairKey(p);
+      const tmp = document.createElement('div');
+      tmp.innerHTML = renderCard(p, key, labels[key]);
+      frag.appendChild(tmp.firstElementChild);
+    }
+    list.insertBefore(frag, spacerBottom);
+    for (let i = start; i < end; i++) {
+      const key = pairKey(currentFP[i]);
+      if (labels[key]?.verdict === 'RELATE') {
+        const sel = document.getElementById('kind-' + key);
+        if (sel) sel.classList.add('show');
+      }
+    }
+    measureHeights();
+    updateSpacers();
+  }
+}
+
+let scrollLocked = false;
+let rafPending = false;
+window.addEventListener('scroll', () => {
+  if (scrollLocked || rafPending || !currentFP.length) return;
+  rafPending = true;
+  requestAnimationFrame(() => {
+    rafPending = false;
+    const stickyH = document.getElementById('sticky-top').offsetHeight;
+    const scrollTop = Math.max(0, window.scrollY - stickyH);
+    const first = indexAtScroll(scrollTop);
+    const target = Math.max(0, first - OVERSCAN);
+    if (Math.abs(target - wStart) >= Math.floor(OVERSCAN / 2)) paintWindow(target);
+  });
+}, { passive: true });
+
+function render() {
+  currentIdx = -1;
+  currentFP = filteredPairs();
+  rebuildCumH();
+  paintWindow(0);
+  window.scrollTo({ top: 0, behavior: 'instant' });
+}
+
+// ── Bulk approve ──────────────────────────────────────────────────────────
+document.getElementById('approve-all-btn').onclick = () => {
+  const visible = filteredPairs();
+  const pending = visible.filter(p => getLabelStatus(p) === 'pending');
+  if (pending.length === 0) return;
+  if (!confirm(`Approve all ${pending.length} visible pending pair(s)?`)) return;
+  pending.forEach(p => {
+    const key = pairKey(p);
+    const existing = labels[key] || {};
+    labels[key] = { ...existing, approved: true, verdict: null, kind: null };
+  });
+  saveLabels(); updateStats(); render();
+};
+
+// ── Export ────────────────────────────────────────────────────────────────
+document.getElementById('export-btn').onclick = () => {
+  const activeKeys = new Set(allPairs.map(pairKey));
+  const out = {};
+  allPairs.forEach(p => {
+    const key = pairKey(p);
+    const l = labels[key];
+    out[key] = {
+      entry_a: p.entry_a, entry_b: p.entry_b,
+      title_a: p.title_a, title_b: p.title_b,
+      ai_verdict: p.verdict, ai_kind: p.kind,
+      label: l ? (l.approved && !l.verdict ? 'approved' : l.verdict ? `override:${l.verdict}${l.kind?':'+l.kind:''}` : 'pending') : 'pending',
+      note: l?.note || ''
+    };
+  });
+  // include orphaned labels (pairs no longer in CSV but already reviewed)
+  Object.entries(labels).forEach(([key, l]) => {
+    if (activeKeys.has(key) || !l) return;
+    out[key] = {
+      orphaned: true,
+      label: l.approved && !l.verdict ? 'approved' : l.verdict ? `override:${l.verdict}${l.kind?':'+l.kind:''}` : 'pending',
+      note: l.note || ''
+    };
+  });
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'softmatch_labels.json'; a.click();
+};
+
+// ── Cursor / keyboard nav ─────────────────────────────────────────────────
+// currentIdx is now an index into currentFP (all filtered pairs), not DOM.
+let currentIdx = -1;
+let lastG = 0;
+
+function moveCursor(idx) {
+  if (!currentFP.length) return;
+  idx = Math.max(0, Math.min(idx, currentFP.length - 1));
+  currentIdx = idx;
+
+  // Shift the render window if the target card isn't in it.
+  if (idx < wStart || idx >= wStart + WINDOW_SIZE) {
+    const newStart = Math.max(0, idx - Math.floor(WINDOW_SIZE / 3));
+    scrollLocked = true;
+    paintWindow(newStart);
+    const stickyH = document.getElementById('sticky-top').offsetHeight;
+    window.scrollTo({ top: (cumH[idx] || 0) + stickyH, behavior: 'instant' });
+    requestAnimationFrame(() => { scrollLocked = false; });
+  }
+
+  document.querySelectorAll('#list .card').forEach(c => c.classList.remove('focused'));
+  const key = pairKey(currentFP[idx]);
+  const card = document.querySelector(`.card[data-key="${key}"]`);
+  if (!card) return;
+  card.classList.add('focused');
+
+  const stickyH = document.getElementById('sticky-top').offsetHeight;
+  const pad = 8;
+  const rect = card.getBoundingClientRect();
+  const viewH = window.innerHeight;
+  if (rect.top < stickyH + pad) {
+    window.scrollBy({ top: rect.top - stickyH - pad, behavior: 'smooth' });
+  } else if (rect.bottom > viewH - pad) {
+    window.scrollBy({ top: Math.min(rect.top - stickyH - pad, rect.bottom - viewH + pad), behavior: 'smooth' });
+  }
+}
+
+function currentKey() {
+  if (currentIdx < 0 || currentIdx >= currentFP.length) return null;
+  return pairKey(currentFP[currentIdx]);
+}
+
+function nextUnlabeled(dir) {
+  if (!currentFP.length) return;
+  const start = currentIdx < 0 ? (dir > 0 ? -1 : currentFP.length) : currentIdx;
+  for (let i = 1; i <= currentFP.length; i++) {
+    const idx = ((start + dir * i) % currentFP.length + currentFP.length) % currentFP.length;
+    if (!labels[pairKey(currentFP[idx])]) { moveCursor(idx); return; }
+  }
+}
+
+document.addEventListener('keydown', e => {
+  const tag = document.activeElement?.tagName;
+  const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+  if (e.key === 'Escape') { document.activeElement?.blur(); currentIdx = -1; return; }
+  if (!inInput && e.key === '/') { e.preventDefault(); document.getElementById('search').focus(); return; }
+  if (inInput) return;
+
+  switch (e.key) {
+    case 'j': moveCursor(currentIdx < 0 ? 0 : currentIdx + 1); break;
+    case 'k': moveCursor(currentIdx < 0 ? 0 : currentIdx - 1); break;
+    case ']': nextUnlabeled(+1); break;
+    case '[': nextUnlabeled(-1); break;
+    case 'G': moveCursor(currentFP.length - 1); break;
+    case 'g': {
+      const now = Date.now();
+      if (now - lastG < 500) moveCursor(0);
+      lastG = now;
+      break;
+    }
+    case 'a': { const k = currentKey(); if (k) doApprove(k); break; }
+    case 'm': { const k = currentKey(); if (k) doSet(k, 'MERGE', ''); break; }
+    case 'd': { const k = currentKey(); if (k) doSet(k, 'DISTINCT', ''); break; }
+    case 'x': { const k = currentKey(); if (k) doClear(k); break; }
+    case 'r': {
+      const k = currentKey(); if (!k) break;
+      const existing = labels[k];
+      const curKind = existing?.verdict === 'RELATE' ? existing.kind : null;
+      const idx = curKind ? RELATE_KINDS.indexOf(curKind) : -1;
+      doSet(k, 'RELATE', RELATE_KINDS[(idx + 1) % RELATE_KINDS.length]);
+      break;
+    }
+    case 'R': {
+      const k = currentKey(); if (!k) break;
+      const existing = labels[k];
+      const curKind = existing?.verdict === 'RELATE' ? existing.kind : null;
+      const idx = curKind ? RELATE_KINDS.indexOf(curKind) : 0;
+      doSet(k, 'RELATE', RELATE_KINDS[(idx - 1 + RELATE_KINDS.length) % RELATE_KINDS.length]);
+      break;
+    }
+  }
+});
+
+// ── Filter buttons ────────────────────────────────────────────────────────
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const f = btn.dataset.filter;
+    const v = btn.dataset.value;
+    filters[f] = v;
+    document.querySelectorAll(`.filter-btn[data-filter="${f}"]`).forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    render();
+  });
+});
+
+let searchTimer;
+document.getElementById('search').addEventListener('input', e => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { searchQ = e.target.value.trim(); render(); }, 200);
+});
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────
+loadLabels();
+fetch('../data/softmatch.csv')
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
+  .then(text => {
+    allPairs = csvToObjects(text);
+    updateStats();
+    render();
+  })
+  .catch(err => {
+    document.getElementById('list').innerHTML =
+      `<div id="empty" style="display:block;color:#fca5a5">
+        Failed to load data/softmatch.csv: ${err}<br><br>
+        Run from the project root: <code style="background:#1e293b;padding:4px 8px;border-radius:4px">python3 -m http.server 8081</code><br>
+        Then open: <a href="http://localhost:8081/scripts/softmatch.html" style="color:#38bdf8">http://localhost:8081/scripts/softmatch.html</a>
+      </div>`;
+  });
+</script>
+</body>
+</html>

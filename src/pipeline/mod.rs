@@ -3,6 +3,7 @@
 //! `import` and `dedup` binaries.
 
 pub mod dedup;
+pub mod embedding;
 pub mod flush;
 pub mod importer;
 pub mod progress;

@@ -201,10 +201,17 @@ async fn main() -> anyhow::Result<()> {
     // against the rest of the library and apply decisions immediately.
     let script_path = config_dir.join("match.rhai");
     if script_path.exists() {
+        let embed_db = app_dirs::data_dir().join("embeddings.db");
         let soft_cfg = SoftMatchConfig {
             script_path: script_path.display().to_string(),
             apply_relates: true,
             csv_path: None,
+            embed_db_path: Some(embed_db.display().to_string()),
+            embed_dim: 384,
+            embed_k: 20,
+            embed_sim_threshold: 0.5,
+            embed_max_pages: 4,
+            embed_page_merge_rate: 0.5,
         };
         match_new_entries(&db, &touched_ids, &merged, providers.as_slice(), &soft_cfg).await?;
     }
