@@ -1,0 +1,55 @@
+[package]
+name = "inference"
+version = "0.1.1"
+edition = "2024"
+
+[lib]
+# cdylib exporting the stable C ABI (bound at runtime via the host's generic
+# `ffi` module); rlib so the crate stays unit-testable and can be linked
+# directly by the host if desired.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Baseline build is the lightweight Model2Vec static-embedding path (always on):
+# no candle, no MKL, no transformer. The heavyweight MiniLM path is opt-in via
+# `minilm`.
+default = []
+
+# Full MiniLM transformer embeddings via candle (CPU). Heavyweight: pulls candle
+# (core/nn/transformers). When enabled, this becomes the active backend behind
+# `embed`/`embed_batch`.
+minilm = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
+
+# CPU BLAS backends for candle's float GEMMs (MiniLM) — CPU-only, no CUDA. `mkl`
+# links Intel MKL (Linux/Windows), `accelerate` links Apple's Accelerate (macOS).
+# Both imply `minilm` (they only accelerate the MiniLM matmuls).
+mkl = ["minilm", "candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+accelerate = [
+    "minilm",
+    "candle-core/accelerate",
+    "candle-nn/accelerate",
+    "candle-transformers/accelerate",
+]
+# Route the LangID int8 FullyConnected layers through MKL's int8 GEMM
+# (cblas_gemm_s8u8s32) instead of the pure-Rust loop. Bit-exact with the Rust
+# path, ~2.5x faster on the batched workload. NOTE: MKL is currently linked via
+# candle's `intel-mkl-src`, so this implies `mkl` (and thus `minilm`/candle).
+# Decoupling it would mean a direct intel-mkl-src dep; not done yet.
+mkl-langid = ["mkl"]
+
+[dependencies]
+fancy-regex = "0.13"
+# Shared by both embedding paths: tokenization and model download/caching.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+hf-hub = "0.4"
+anyhow = "1"
+serde_json = "1"
+
+# MiniLM embeddings — CPU-only candle (feature `minilm`; BLAS via `mkl`/`accelerate`).
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+
+# Model2Vec static-embedding path (baseline): read the F16 embedding table
+# directly, no candle/MKL needed.
+safetensors = "0.7"

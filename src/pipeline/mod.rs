@@ -4,6 +4,8 @@
 
 pub mod dedup;
 pub mod embedding;
+#[cfg(feature = "ffi")]
+pub(crate) mod ffi;
 pub mod flush;
 pub mod importer;
 pub mod progress;

@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use rhai::{AST, Dynamic, Engine, ImmutableString, Map as RhaiMap, Scope};
+use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::pipeline::embedding::{EmbeddingCache, embed_stale_entries, register_http_fns};
@@ -65,7 +67,8 @@ pub struct SoftMatchConfig {
     /// `None` disables semantic blocking entirely.
     pub embed_db_path: Option<String>,
     /// Embedding vector dimension — must match the model used in the Rhai `embed()`
-    /// function. Default: 384 (paraphrase-multilingual-MiniLM-L12-v2).
+    /// function. Default script + default inference backend is 256 (Model2Vec);
+    /// use 384 when the inference cdylib is built with `--features minilm`.
     pub embed_dim: usize,
     /// Base number of semantic KNN neighbours per entry for blocking (applies to
     /// tracks/releases; artists and release groups are capped lower via
@@ -234,9 +237,38 @@ fn get_or_compile(
     Ok(re)
 }
 
-fn build_rhai_engine(regex_cache: RegexCache, embed_cache: Option<Arc<EmbeddingCache>>) -> Engine {
+fn build_rhai_engine(
+    script_dir: &Path,
+    regex_cache: RegexCache,
+    embed_cache: Option<Arc<EmbeddingCache>>,
+) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(0, 0); // no limit on expression or function-body nesting depth
+
+    // Generic FFI (feature `ffi`): the script binds any cdylib's C symbols
+    // itself via `ffi::open(...)` / `.func(...)` / `.invoke(...)` (see
+    // `pipeline::ffi`). Registered as a STATIC module so it's visible in every
+    // call context, including `call_fn` from Rust (which builds a fresh
+    // GlobalRuntimeState without dynamic imports). All values cross as plain C
+    // types, so there's no rhai-version/TypeId coupling between host and plugin.
+    #[cfg(feature = "ffi")]
+    engine.register_static_module(
+        "ffi",
+        crate::pipeline::ffi::module(script_dir.to_path_buf()).into(),
+    );
+
+    // Let scripts detect at runtime whether the `ffi` module is available, so a
+    // script can pick a backend (e.g. real embeddings vs a naive fallback)
+    // without being edited per build. Pairs with a `try { ffi::open(...) }` guard
+    // for the library-actually-loads case.
+    let ffi_on = cfg!(feature = "ffi");
+    engine.register_fn("ffi_available", move || ffi_on);
+
+    // Enable `import` for plain `.rhai` modules, resolved relative to the
+    // script's directory (not the process CWD).
+    engine.set_module_resolver(rhai::module_resolvers::FileModuleResolver::new_with_path(
+        script_dir,
+    ));
 
     // Verdict constructors — the script calls these to return its decision.
     engine.register_fn("merge", |conf: f64, reason: String| -> RhaiMap {
@@ -493,6 +525,7 @@ fn call_script(
     engine: &Engine,
     ast: &AST,
     base_scope: &Scope,
+    user_ctx: &Dynamic,
     a: &EntryInfo,
     b: &EntryInfo,
 ) -> anyhow::Result<Verdict> {
@@ -501,7 +534,7 @@ fn call_script(
     let b_dyn = Dynamic::from_map(entry_to_rhai(b));
 
     let result: Dynamic = engine
-        .call_fn(&mut scope, ast, "decide", (a_dyn, b_dyn))
+        .call_fn(&mut scope, ast, "decide", (user_ctx.clone(), a_dyn, b_dyn))
         .unwrap_or_else(|e| {
             warn!("Rhai decide() error: {e}");
             Dynamic::from_map(RhaiMap::new())
@@ -849,14 +882,21 @@ struct ScriptCtx<'a> {
     engine: Engine,
     ast: AST,
     base_scope: Scope<'a>,
+    /// Opaque context object returned by the script's `init()` and threaded back
+    /// as the first argument of every script entry point (`decide`, `embed_batch`,
+    /// …). The script decides what it holds — e.g. a handle to an `ffi`-opened
+    /// inference library — and keeping it alive here keeps that state alive for
+    /// the whole run. `()` when the script defines no `init()`.
+    user_ctx: Dynamic,
 }
 
 impl Drop for ScriptCtx<'_> {
     fn drop(&mut self) {
-        // Call optional destroy() hook; silently ignore "function not found".
+        // Call optional destroy(ctx) hook; silently ignore "function not found".
+        let ctx = self.user_ctx.clone();
         let _ = self
             .engine
-            .call_fn::<Dynamic>(&mut self.base_scope, &self.ast, "destroy", ());
+            .call_fn::<Dynamic>(&mut self.base_scope, &self.ast, "destroy", (ctx,));
     }
 }
 
@@ -867,8 +907,12 @@ async fn load_script(
     let script = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("reading script {path}"))?;
+    let script_dir = Path::new(path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_owned();
     let regex_cache: RegexCache = Arc::new(Mutex::new(HashMap::new()));
-    let engine = build_rhai_engine(regex_cache, embed_cache);
+    let engine = build_rhai_engine(&script_dir, regex_cache, embed_cache);
     let ast = engine
         .compile(&script)
         .map_err(|e| anyhow::anyhow!("Rhai compile error in {path}: {e}"))?;
@@ -876,12 +920,16 @@ async fn load_script(
     engine
         .run_ast_with_scope(&mut base_scope, &ast)
         .map_err(|e| anyhow::anyhow!("Script init error in {path}: {e}"))?;
-    // Call optional init() hook; silently ignore "function not found".
-    let _ = engine.call_fn::<Dynamic>(&mut base_scope, &ast, "init", ());
+    // Call optional init() hook; its return value is the opaque context object
+    // threaded into every entry point. Missing/erroring init → unit context.
+    let user_ctx = engine
+        .call_fn::<Dynamic>(&mut base_scope, &ast, "init", ())
+        .unwrap_or(Dynamic::UNIT);
     Ok(ScriptCtx {
         engine,
         ast,
         base_scope,
+        user_ctx,
     })
 }
 
@@ -1011,7 +1059,14 @@ async fn apply_candidate(
     csv: &mut Option<std::io::BufWriter<std::fs::File>>,
     stats: &mut HashMap<String, [usize; 3]>,
 ) -> anyhow::Result<Verdict> {
-    let verdict = call_script(&ctx.engine, &ctx.ast, &ctx.base_scope, ea, eb)?;
+    let verdict = call_script(
+        &ctx.engine,
+        &ctx.ast,
+        &ctx.base_scope,
+        &ctx.user_ctx,
+        ea,
+        eb,
+    )?;
 
     if let Some(w) = csv {
         let (vname, kind, conf, reason) = match &verdict {
@@ -1118,13 +1173,14 @@ fn write_csv_row(
     // Policy-level diagnostics delegate to the script so no logic is duplicated.
     let a_dyn = Dynamic::from_map(entry_to_rhai(ea));
     let b_dyn = Dynamic::from_map(entry_to_rhai(eb));
+    let uc = ctx.user_ctx.clone();
     let main_sim: f64 = ctx
         .engine
         .call_fn::<f64>(
             &mut ctx.base_scope.clone(),
             &ctx.ast,
             "main_title_sim",
-            (a_dyn.clone(), b_dyn.clone()),
+            (uc.clone(), a_dyn.clone(), b_dyn.clone()),
         )
         .unwrap_or(0.0);
     let markers_conf: bool = ctx
@@ -1133,7 +1189,7 @@ fn write_csv_row(
             &mut ctx.base_scope.clone(),
             &ctx.ast,
             "markers_conflict",
-            (a_dyn, b_dyn),
+            (uc, a_dyn, b_dyn),
         )
         .unwrap_or(false);
 
@@ -1172,16 +1228,29 @@ pub async fn match_db(
     providers: &[Arc<dyn FetchProvider>],
     config: &SoftMatchConfig,
 ) -> anyhow::Result<()> {
+    let t0 = Instant::now();
+
     info!("Loading entry data from DB...");
     let entries = build_entry_infos(db).await?;
-    info!("Loaded {} entries", entries.len());
+    let t_load = t0.elapsed();
+    info!("Loaded {} entries in {t_load:.2?}", entries.len());
 
+    let t1 = Instant::now();
     let (barrier, _) = dedup.compile(providers).await;
+    let t_dedup = t1.elapsed();
+    info!("Compiled dedup barrier in {t_dedup:.2?}");
 
+    let t2 = Instant::now();
     let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries).await;
+    let t_embed = t2.elapsed();
+    info!("Embedding phase in {t_embed:.2?}");
 
+    let t3 = Instant::now();
     let ctx = load_script(&config.script_path, embed_cache.clone()).await?;
+    let t_script = t3.elapsed();
+    info!("Script loaded in {t_script:.2?}");
 
+    let t4 = Instant::now();
     let stats = score_candidates(
         db,
         &entries,
@@ -1192,7 +1261,17 @@ pub async fn match_db(
         embed_cache.as_deref(),
     )
     .await?;
+    let t_score = t4.elapsed();
+    info!("Scoring in {t_score:.2?}");
 
+    let t_total = t0.elapsed();
+    println!("=== Timing ===");
+    println!("  load entries : {t_load:.2?}");
+    println!("  dedup barrier: {t_dedup:.2?}");
+    println!("  embed phase  : {t_embed:.2?}");
+    println!("  script load  : {t_script:.2?}");
+    println!("  scoring      : {t_score:.2?}");
+    println!("  total        : {t_total:.2?}");
     println!("=== Summary ===");
     for t in ["track", "release", "release_group", "artist"] {
         if let Some(c) = stats.get(t) {
@@ -1266,7 +1345,15 @@ async fn open_embed_cache(
             return Some(cache);
         }
     };
-    let tmp_engine = build_rhai_engine(Arc::new(Mutex::new(HashMap::new())), None);
+    let embed_script_dir = Path::new(&config.script_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_owned();
+    let tmp_engine = build_rhai_engine(
+        &embed_script_dir,
+        Arc::new(Mutex::new(HashMap::new())),
+        None,
+    );
     let tmp_ast = match tmp_engine.compile(&embed_script) {
         Ok(a) => a,
         Err(e) => {
@@ -1275,14 +1362,70 @@ async fn open_embed_cache(
         }
     };
     let mut tmp_scope = Scope::new();
-    let _ = tmp_engine.run_ast_with_scope(&mut tmp_scope, &tmp_ast);
-    let _ = tmp_engine.call_fn::<Dynamic>(&mut tmp_scope, &tmp_ast, "init", ());
+    if let Err(e) = tmp_engine.run_ast_with_scope(&mut tmp_scope, &tmp_ast) {
+        warn!("Script init error (embed phase): {e}");
+    }
+    // init()'s return is the context object threaded into embed_batch/embed; the
+    // embed phase holds it for the whole pass so an ffi-opened library (if any)
+    // stays mapped and loads its model only once.
+    let user_ctx = tmp_engine
+        .call_fn::<Dynamic>(&mut tmp_scope, &tmp_ast, "init", ())
+        .unwrap_or(Dynamic::UNIT);
 
     let cache_clone = cache.clone();
     let entries_ref = entries;
     tokio::task::block_in_place(|| {
-        embed_stale_entries(entries_ref, &tmp_engine, &tmp_ast, &tmp_scope, &cache_clone);
+        embed_stale_entries(
+            entries_ref,
+            &tmp_engine,
+            &tmp_ast,
+            &tmp_scope,
+            &user_ctx,
+            &cache_clone,
+        );
     });
 
     Some(cache)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped example script must compile under the real engine and run its
+    /// dependency-free naive embedding (no `ffi` feature, no inference plugin).
+    #[test]
+    fn example_script_compiles_and_embeds() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config/match.example.rhai");
+        let script = std::fs::read_to_string(path).expect("read example script");
+        let dir = Path::new(path).parent().unwrap();
+
+        let engine = build_rhai_engine(dir, Arc::new(Mutex::new(HashMap::new())), None);
+        let ast = engine.compile(&script).expect("example script compiles");
+
+        let mut scope = Scope::new();
+        // init() returns the context threaded into embed_batch; with no ffi here
+        // it's the unit context, exercising the naive fallback path.
+        let user_ctx: Dynamic = engine
+            .call_fn(&mut scope, &ast, "init", ())
+            .unwrap_or(Dynamic::UNIT);
+        let texts: rhai::Array = vec![Dynamic::from("hello world"), Dynamic::from("hello world")];
+        let rows: rhai::Array = engine
+            .call_fn(&mut scope, &ast, "embed_batch", (user_ctx, texts))
+            .expect("embed_batch runs");
+
+        assert_eq!(rows.len(), 2);
+        let v0: rhai::Array = rows[0].clone().cast();
+        assert_eq!(
+            v0.len(),
+            256,
+            "embedding dimension (must match SoftMatchConfig.embed_dim)"
+        );
+        // L2-normalized → sum of squares ≈ 1 for a non-empty title.
+        let ss: f64 = v0.iter().map(|d| d.as_float().unwrap().powi(2)).sum();
+        assert!(
+            (ss - 1.0).abs() < 1e-6,
+            "embedding should be L2-normalized, ss={ss}"
+        );
+    }
 }

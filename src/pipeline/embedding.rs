@@ -329,6 +329,7 @@ pub fn embed_stale_entries(
     engine: &rhai::Engine,
     ast: &rhai::AST,
     base_scope: &rhai::Scope<'_>,
+    user_ctx: &Dynamic,
     cache: &EmbeddingCache,
 ) -> bool {
     let stale = cache.stale_entries(entries);
@@ -337,20 +338,25 @@ pub fn embed_stale_entries(
     }
     tracing::info!("Embedding {} stale entries...", stale.len());
 
-    // Probe: call embed_batch([]) to check if the function exists without
-    // making a real HTTP request (server returns {"vectors": []} immediately).
-    let probe: Result<Dynamic, _> = engine.call_fn(
+    // Probe: call embed_batch(ctx, []) to check if the function exists without
+    // doing real work (an empty batch returns immediately).
+    // eval_ast=false: re-evaluating the AST would re-run the script's top-level
+    // statements (and any `import`); we only want to invoke the function. The
+    // context object from init() is threaded in as the first argument instead.
+    let no_eval = rhai::CallFnOptions::new().eval_ast(false);
+    let probe: Result<Dynamic, _> = engine.call_fn_with_options(
+        no_eval,
         &mut base_scope.clone(),
         ast,
         "embed_batch",
-        (Vec::<Dynamic>::new(),),
+        (user_ctx.clone(), Vec::<Dynamic>::new()),
     );
     let has_batch = !matches!(&probe, Err(e) if is_fn_not_found(e));
 
     if has_batch {
-        embed_via_batch(engine, ast, base_scope, cache, &stale)
+        embed_via_batch(engine, ast, base_scope, user_ctx, cache, &stale)
     } else {
-        embed_via_single(engine, ast, base_scope, cache, &stale)
+        embed_via_single(engine, ast, base_scope, user_ctx, cache, &stale)
     }
 }
 
@@ -358,6 +364,7 @@ fn embed_via_batch(
     engine: &rhai::Engine,
     ast: &rhai::AST,
     base_scope: &rhai::Scope<'_>,
+    user_ctx: &Dynamic,
     cache: &EmbeddingCache,
     stale: &[(i64, String, String)],
 ) -> bool {
@@ -366,8 +373,13 @@ fn embed_via_batch(
             .iter()
             .map(|(_, t, _)| Dynamic::from(t.clone()))
             .collect();
-        let result: Result<Dynamic, _> =
-            engine.call_fn(&mut base_scope.clone(), ast, "embed_batch", (texts,));
+        let result: Result<Dynamic, _> = engine.call_fn_with_options(
+            rhai::CallFnOptions::new().eval_ast(false),
+            &mut base_scope.clone(),
+            ast,
+            "embed_batch",
+            (user_ctx.clone(), texts),
+        );
         match result {
             Err(e) => {
                 warn!("embed_batch error: {e}");
@@ -403,12 +415,18 @@ fn embed_via_single(
     engine: &rhai::Engine,
     ast: &rhai::AST,
     base_scope: &rhai::Scope<'_>,
+    user_ctx: &Dynamic,
     cache: &EmbeddingCache,
     stale: &[(i64, String, String)],
 ) -> bool {
     for (entry_id, title, entry_type) in stale {
-        let result: Result<Dynamic, _> =
-            engine.call_fn(&mut base_scope.clone(), ast, "embed", (title.clone(),));
+        let result: Result<Dynamic, _> = engine.call_fn_with_options(
+            rhai::CallFnOptions::new().eval_ast(false),
+            &mut base_scope.clone(),
+            ast,
+            "embed",
+            (user_ctx.clone(), title.clone()),
+        );
         match result {
             Err(e) if is_fn_not_found(&e) => {
                 warn!("embed() not defined in Rhai script — semantic blocking disabled");

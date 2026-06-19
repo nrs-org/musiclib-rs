@@ -1,3 +1,7 @@
+[workspace]
+members = ["config/inference"]
+resolver = "3"
+
 [package]
 name = "musiclib-rs"
 version = "0.1.0"
@@ -40,7 +44,21 @@ path = "src/bin/ytdlp_server.rs"
 name = "softmatch"
 path = "src/bin/softmatch.rs"
 
+[features]
+# Generic C-ABI FFI rhai module (`pipeline::ffi`): bind/call any cdylib from a
+# match script. Off by default — enabling it pulls libffi (built from source via
+# autotools). See config/match.example.rhai for the inference-cdylib binding.
+ffi = ["dep:libffi", "dep:libc"]
+
 [dependencies]
+libloading = "0.9"
+# Runtime FFI call frames for the generic `ffi` rhai module (call any cdylib);
+# gated behind the `ffi` feature (off by default) since it pulls libffi + an
+# autotools build step. Vendored build: libffi-sys compiles + statically links
+# its bundled libffi, so end users need only a C toolchain + autotools (provided
+# by the dev shell), not a system-installed libffi.
+libffi = { version = "3", optional = true }
+libc = { version = "0.2", optional = true }
 anyhow = "1.0.102"
 async-trait = "0.1.89"
 dashmap = "6.1.0"
@@ -75,7 +93,7 @@ bzip2 = "0.5"
 tar = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 directories = "6.0.0"
-rhai = "1"
+rhai = "=1.25.1"
 strsim = "0.11"
 sqlite-vec = "0.1.9"
 ureq = { version = "3.3.0", features = ["json"] }

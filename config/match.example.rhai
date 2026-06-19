@@ -1,9 +1,18 @@
 // match.rhai — heuristic soft-dedup policy.
 // Copy to <config_dir>/match.rhai and tune thresholds as needed.
 //
-// Lifecycle:  init()         called once after the script is loaded (optional)
-//             decide(a, b)   called for each candidate pair
-//             destroy()      called when the engine shuts down (optional)
+// Lifecycle:  init()             called once after the script is loaded (optional);
+//                                its return value is `ctx` — an arbitrary context
+//                                object threaded into every hook below
+//             decide(ctx, a, b)  called for each candidate pair
+//             destroy(ctx)       called when the engine shuts down (optional)
+//
+// Context object (`ctx`): whatever init() returns, the host holds for the whole
+// run and passes back as the first argument of decide / embed_batch / embed /
+// main_title_sim / markers_conflict. Use it to carry state that must outlive a
+// single call and cross Rhai's isolated function scopes — e.g. an ffi-opened
+// library handle (this script stores the inference handle there). It's () when
+// init() is absent or returns ().
 //
 // Entity fields (a, b):
 //   entry_type          "track" | "release" | "release_group" | "artist"
@@ -44,21 +53,22 @@
 //
 // ── Semantic blocking (optional) ─────────────────────────────────────────────
 //
-// If you define embed_batch(texts) → array-of-arrays, Rust calls it in chunks
+// If you define embed_batch(ctx, texts) → array-of-arrays, Rust calls it in chunks
 // of 64 at startup for every entry with a missing or stale embedding. Falls back
-// to embed(text) → array if embed_batch is not defined. The vectors are stored
+// to embed(ctx, text) → array if embed_batch is not defined. The vectors are stored
 // in the embedding cache (default: <data_dir>/embeddings.db). Rust then uses
 // sqlite-vec KNN to find near-neighbour pairs cross-language.
 //
-// The reference embedding server is src/bin/embedding_server.py (uv script,
-// paraphrase-multilingual-MiniLM-L12-v2, 384 dimensions). It exposes two
-// ML models as plain inference endpoints: /embed_batch (sentence transformer)
-// and /detect_romaji (MediaPipe language detector). All preprocessing is below.
+// This example defines embed_batch with TWO backends chosen at runtime: the
+// local `inference` cdylib (real semantic vectors) when available, else a
+// dependency-free naive token-hash embedding. See the "Semantic embedding"
+// section below for how detection works and how to enable the cdylib.
+// Embedding dimension must match the host's `embed_dim` config (default 256).
 //
 // During decide(), semantic_sim(a.entry_id, b.entry_id) returns the pre-computed
 // cosine similarity [0, 1] from the cache — no HTTP call at scoring time:
 //
-//   fn decide_track(a, b) {
+//   fn decide_track(ctx, a, b) {
 //       let sem = semantic_sim(a.entry_id, b.entry_id);
 //       if sem >= 0.92 { return merge(sem, "high semantic similarity"); }
 //       // ...
@@ -69,29 +79,201 @@
 // NOTE: Rhai functions have their own scope — define thresholds inside each
 // function (not at the top level) so they are visible where they are used.
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
+// ── State across calls ────────────────────────────────────────────────────────
 //
-// In Rhai, neither top-level `let`/`const` nor `global::` (set in init()) are
-// visible inside nested function calls. Each function has a completely isolated
-// scope. For small lists used in helper functions, just inline them:
+// In Rhai, neither top-level `let`/`const` nor `global::` are visible inside
+// function calls — every function has a completely isolated scope. So there is no
+// hidden global state to lean on. Two patterns cover it:
 //
-//   fn is_video_source(src) {
-//       ["youtube", "nicovideo", "soundcloud"].contains(src)
-//   }
+// 1. Inline small constants where they are used (thresholds, fixed lists):
 //
-// `global::` written in init() IS visible in decide() itself (it's directly
-// called by call_fn), but NOT in helpers decide() calls. Pre-compiled regexes
-// are most useful if you inline the call in decide() rather than delegating:
+//      fn is_video_source(src) {
+//          ["youtube", "nicovideo", "soundcloud"].contains(src)
+//      }
 //
-//   fn init() {
-//       global::CLEAN_PAT = compile_re("\\(([^)]*)\\)|\\[([^\\]]*)\\]|…");
-//   }
-//   fn decide(a, b) {
-//       let caps = re_captures_all(global::CLEAN_PAT, a.title);  // works here
-//       …
-//   }
+// 2. For anything that must persist across calls or be shared with helpers,
+//    build it once in init() and let the host thread it back as `ctx`. Pass it
+//    explicitly down into the helpers that need it — exactly how this script
+//    carries the inference handle (init → embed_batch → inf_embed_batch) and how
+//    decide() forwards `ctx` to decide_track()/decide_release()/etc:
+//
+//      fn init() {
+//          #{ clean_pat: compile_re("\\(([^)]*)\\)|\\[([^\\]]*)\\]|…") }
+//      }
+//      fn decide(ctx, a, b) {
+//          let caps = re_captures_all(ctx.clean_pat, a.title);  // works anywhere
+//          …
+//      }
 
 // ── Semantic embedding ────────────────────────────────────────────────────────
+
+// Two backends, selected AT RUNTIME — no edits needed per build:
+//
+//   1. inference cdylib (real, cross-language semantic embeddings) — used when
+//      musiclib was built with `--features ffi` AND the cdylib loads.
+//   2. naive token-hash bag-of-words (dependency-free fallback) — otherwise.
+//
+// Detection: `ffi_available()` (host fn) reports whether the `ffi` module is
+// compiled in; a `try { ffi::open(...) }` guard then handles the cdylib being
+// missing/unbuilt. Build the plugin with `cargo build -p inference --release
+// --lib` and musiclib with `--features ffi` to get backend 1.
+//
+// Both backends emit EMBED_DIM-dimensional vectors so they're interchangeable
+// in the cache. Keep EMBED_DIM == the host's `embed_dim` config (default 256;
+// the inference default backend, Model2Vec, is also 256-d — set both to 384 if
+// you build inference with `--features minilm`).
+
+// ── Lifecycle: init() → context object ───────────────────────────────────────
+//
+// The host calls init() once and threads whatever it returns back as the first
+// argument (`ctx`) of every other entry point — embed_batch, embed, decide,
+// main_title_sim, markers_conflict. It's an arbitrary context object owned by
+// this script; the host keeps it alive for the whole run and never inspects it.
+//
+// We use it to open the inference library exactly once: the returned handle (a
+// map of bound C functions — see open_inference) stays mapped for the run, so
+// the model loads a single time instead of once per embedding batch. When ffi is
+// unavailable or the library can't load we return () and every hook falls back
+// to the dependency-free naive path.
+fn init() {
+    if ffi_available() {
+        try {
+            return open_inference();
+        } catch (err) {
+            print("inference unavailable, using naive embedding: " + err);
+        }
+    }
+    ()
+}
+
+// Semantic blocking hook: batch embedding (array-of-arrays). `ctx` is init()'s
+// return: the inference handle (a map) when available, else (). Rust calls this
+// in chunks at startup; vectors feed sqlite-vec KNN candidate generation.
+fn embed_batch(ctx, texts) {
+    if type_of(ctx) == "map" {
+        try {
+            let rows = inf_embed_batch(ctx, normalize_for_embedding(ctx, texts));
+            // Use inference only if it produced one vector per input; otherwise
+            // (e.g. rc != 0) fall through to the naive backend.
+            if rows.len() == texts.len() { return rows; }
+        } catch (err) {
+            print("inference embedding failed, using naive fallback: " + err);
+        }
+    }
+    texts.map(|t| naive_embed(t))
+}
+
+// Fallback hook: single-text embedding.
+fn embed(ctx, text) {
+    let r = embed_batch(ctx, [text]);
+    if r.is_empty() { [] } else { r[0] }
+}
+
+// ── Backend 1: inference cdylib via the `ffi` module ─────────────────────────
+//
+// `ffi::open` takes a full library filename (no auto extension): .so on Linux,
+// .dylib on macOS, .dll on Windows. A path with a separator is resolved relative
+// to THIS script file; a bare name goes through the system loader search path
+// (LD_LIBRARY_PATH / ldconfig). These functions reference `ffi::*`; that's fine
+// even without the feature, because `embed_batch` only calls them after
+// `ffi_available()` is true. The `ffi` module can bind ANY C library — see the
+// `pipeline::ffi` docs for the full surface (struct_type, callback, memory
+// helpers, etc.).
+//
+// Called once from init(); the returned map (the bound C handles + the mapped
+// library) becomes the context object the host threads back into every hook, so
+// the library stays open for the whole run and its model loads only once.
+fn open_inference() {
+    // Try, in order: a `libinference.so` symlink/copy next to this script (e.g.
+    // `ln -s …/target/release/libinference.so <config_dir>/`), then the repo build
+    // tree (running from the repo: config/ → ../target), then the system loader
+    // search path by bare name.
+    let candidates = [
+        "./libinference.so",
+        "../target/release/libinference.so",
+        "libinference.so",
+    ];
+    let lib = ();
+    let opened = false;
+    for path in candidates {
+        try { lib = ffi::open(path); opened = true; break; } catch (err) {}
+    }
+    if !opened {
+        throw "libinference.so not found (tried script dir, ../target/release, system path)";
+    }
+    #{
+        detect_romaji: lib.func("inference_detect_romaji", "ptr", ["ptr", "ptr"]),
+        free_strs:     lib.func("inference_free_string_array", "void", ["ptr", "u64"]),
+        embed_batch:   lib.func("inference_embed_batch", "i32", ["ptr", "u64", "ptr", "ptr"]),
+        free_floats:   lib.func("inference_free_float_array", "void", ["ptr", "u64"]),
+        lib: lib,   // keep the library mapped while this map is alive
+    }
+}
+
+// Romanised-JP tokens of `text` (marshals the char** + out-length contract).
+fn inf_detect_romaji(inf, text) {
+    let cs = ffi::cstr(text);
+    let out_len = ffi::malloc(8);
+    let arr = inf.detect_romaji.invoke([cs, out_len]);
+    let toks = [];
+    if !arr.is_null() {
+        let n = ffi::read_i64(out_len, 1)[0];
+        for i in 0..n { toks.push(ffi::read_cstr(ffi::read_ptr(arr, i))); }
+        inf.free_strs.invoke([arr, n]);
+    }
+    ffi::free(cs);
+    ffi::free(out_len);
+    toks
+}
+
+// Batch embeddings (array-of-arrays): build char*[] argv, read back flat f32.
+fn inf_embed_batch(inf, texts) {
+    let n = texts.len();
+    if n == 0 { return []; }
+    let argv = ffi::malloc(8 * n);
+    let cstrs = [];
+    for i in 0..n {
+        let cs = ffi::cstr(texts[i]);
+        cstrs.push(cs);
+        ffi::write_ptr(argv, i, cs);
+    }
+    let out_flat = ffi::malloc(8);
+    let out_dim = ffi::malloc(8);
+    let rc = inf.embed_batch.invoke([argv, n, out_flat, out_dim]);
+    let rows = [];
+    if rc == 0 {
+        let dim = ffi::read_i64(out_dim, 1)[0];
+        let flat = ffi::read_ptr(out_flat, 0);
+        if dim > 0 && !flat.is_null() {
+            let all = ffi::read_f32(flat, n * dim);
+            for i in 0..n {
+                let row = [];
+                for j in 0..dim { row.push(all[i * dim + j]); }
+                rows.push(row);
+            }
+            inf.free_floats.invoke([flat, n * dim]);
+        }
+    }
+    for cs in cstrs { ffi::free(cs); }
+    ffi::free(argv);
+    ffi::free(out_flat);
+    ffi::free(out_dim);
+    rows
+}
+
+// Romaji→hiragana so romanised JP embeds near native JP (cross-script recall).
+fn normalize_for_embedding(inf, texts) {
+    let normalized = texts;
+    for i in 0..texts.len() {
+        let t = texts[i];
+        for tok in inf_detect_romaji(inf, t) {
+            let h = romaji_to_hiragana(tok.to_lower());
+            if !re_is_match("[a-z]", h) { t.replace(tok, h); }
+        }
+        normalized[i] = t;
+    }
+    normalized
+}
 
 fn romaji_to_hiragana(r) {
     let t = r;
@@ -134,19 +316,43 @@ fn romaji_to_hiragana(r) {
     t
 }
 
-fn embed_batch(texts) {
-    let det = http_post_json("http://localhost:8082/detect_romaji", #{texts: texts});
-    let normalized = [];
-    for i in 0..texts.len() {
-        let t = texts[i];
-        for tok in det.results[i] {
-            let h = romaji_to_hiragana(tok.to_lower());
-            if !re_is_match("[a-z]", h) { t.replace(tok, h); }
-        }
-        normalized.push(t);
+// ── Backend 2: naive token-hash embedding (no dependencies) ──────────────────
+//
+// Dimension must match the host's `embed_dim` config (default 256). Rhai
+// `const` isn't visible inside functions, so the literal 256 is repeated — keep
+// them in sync if you change EMBED_DIM.
+const EMBED_DIM = 256;
+
+// Hash a normalized token into [0, EMBED_DIM) via a small FNV-style rolling hash.
+fn token_bucket(tok) {
+    let h = 2166136261;
+    for ch in tok.to_chars() {
+        h = (h * 16777619 + ch.to_int()) % 1000000007;
     }
-    let res = http_post_json("http://localhost:8082/embed_batch", #{texts: normalized});
-    res.vectors
+    h % 256   // == EMBED_DIM
+}
+
+// One naive embedding: token-frequency histogram over EMBED_DIM buckets,
+// L2-normalized so cosine similarity ≈ shared-token ratio.
+fn naive_embed(text) {
+    let v = [];
+    v.pad(256, 0.0);   // == EMBED_DIM
+    let norm = normalize(text);   // host fn: lowercase, alnum+CJK, space-collapsed
+    if norm != "" {
+        for tok in norm.split(" ") {
+            if tok != "" {
+                let b = token_bucket(tok);
+                v[b] = v[b] + 1.0;
+            }
+        }
+        let ss = 0.0;
+        for x in v { ss += x * x; }
+        if ss > 0.0 {
+            let inv = 1.0 / ss.sqrt();
+            for i in 0..256 { v[i] = v[i] * inv; }
+        }
+    }
+    v
 }
 
 // ── Source classification ─────────────────────────────────────────────────────
@@ -294,7 +500,9 @@ fn is_mv_entry(entry) {
 
 // ── Pair-level feature helpers ────────────────────────────────────────────────
 
-fn main_title_sim(a, b) {
+// `ctx` is the host context object (unused here); present so the host can call
+// this entry point with the uniform (ctx, a, b) convention.
+fn main_title_sim(ctx, a, b) {
     let ta = normalize(pick_main_title(a));
     let tb = normalize(pick_main_title(b));
     if ta == "" && tb == "" { return 1.0; }
@@ -302,7 +510,8 @@ fn main_title_sim(a, b) {
     str_sim(ta, tb)
 }
 
-fn markers_conflict(a, b) {
+// `ctx` unused (uniform host calling convention — see main_title_sim).
+fn markers_conflict(ctx, a, b) {
     let am = pick_markers(a);
     let bm = pick_markers(b);
     if am.len() == 0 || bm.len() == 0 { return false; }
@@ -376,24 +585,24 @@ fn same_release_position(a, b) {
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
-fn decide(a, b) {
-    if a.entry_type == "track"         { return decide_track(a, b); }
-    if a.entry_type == "artist"        { return decide_artist(a, b); }
-    if a.entry_type == "release"       { return decide_release(a, b); }
-    if a.entry_type == "release_group" { return decide_rg(a, b); }
+fn decide(ctx, a, b) {
+    if a.entry_type == "track"         { return decide_track(ctx, a, b); }
+    if a.entry_type == "artist"        { return decide_artist(ctx, a, b); }
+    if a.entry_type == "release"       { return decide_release(ctx, a, b); }
+    if a.entry_type == "release_group" { return decide_rg(ctx, a, b); }
     distinct()
 }
 
 // ── Tracks ────────────────────────────────────────────────────────────────────
 
-fn decide_track(a, b) {
+fn decide_track(ctx, a, b) {
     let MERGE_MIN      = 0.90;
     let RELATE_MIN     = 0.82;
     let TITLE_ONLY_MIN = 0.95;
 
-    if markers_conflict(a, b) { return distinct(); }
+    if markers_conflict(ctx, a, b) { return distinct(); }
 
-    let t = main_title_sim(a, b);
+    let t = main_title_sim(ctx, a, b);
 
     if same_release_position(a, b) {
         if t >= 0.70 { return merge(max(t, 0.90), "same release position"); }
@@ -470,7 +679,7 @@ fn classify_version(va, vb) {
 
 // ── Artists ───────────────────────────────────────────────────────────────────
 
-fn decide_artist(a, b) {
+fn decide_artist(ctx, a, b) {
     let MERGE_MIN  = 0.90;
     let RELATE_MIN = 0.80;
 
@@ -487,20 +696,20 @@ fn decide_artist(a, b) {
 
 // ── Releases ──────────────────────────────────────────────────────────────────
 
-fn decide_release(a, b) {
+fn decide_release(ctx, a, b) {
     let RELATE_MIN = 0.82;
 
-    let t = main_title_sim(a, b);
+    let t = main_title_sim(ctx, a, b);
     if t < RELATE_MIN { return distinct(); }
     relate("release_variant", t, "title match — likely release variant")
 }
 
 // ── Release groups ────────────────────────────────────────────────────────────
 
-fn decide_rg(a, b) {
+fn decide_rg(ctx, a, b) {
     let MERGE_MIN = 0.85;
 
-    let t = main_title_sim(a, b);
+    let t = main_title_sim(ctx, a, b);
     if t < MERGE_MIN { return distinct(); }
     if artist_overlap(a, b) >= 0.5 || title_exact(a, b) {
         return merge(t, "title + artist overlap");

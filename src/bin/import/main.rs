@@ -207,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
             apply_relates: true,
             csv_path: None,
             embed_db_path: Some(embed_db.display().to_string()),
-            embed_dim: 384,
+            embed_dim: 256,
             embed_k: 20,
             embed_sim_threshold: 0.5,
             embed_max_pages: 4,

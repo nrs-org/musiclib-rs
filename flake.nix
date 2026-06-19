@@ -44,6 +44,12 @@
             nativeBuildInputs = with pkgs; [
               pkg-config
               openssl
+              # autotools: only needed to build `--features ffi` (the generic FFI
+              # module), whose `libffi` crate vendors libffi and builds it from
+              # source via autoreconf. Harmless for default builds.
+              autoconf
+              automake
+              libtool
             ];
             packages =
               enabledPackages
