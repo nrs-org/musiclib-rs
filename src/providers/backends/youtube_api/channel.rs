@@ -353,9 +353,7 @@ fn discography_stream(
             }
             let queue = releases.as_mut().unwrap();
             loop {
-                let Some(release) = queue.pop_front() else {
-                    return None;
-                };
+                let release = queue.pop_front()?;
                 let playlist_id = match release.audio_playlist_id {
                     Some(id) => id,
                     None => match release.browse_id {

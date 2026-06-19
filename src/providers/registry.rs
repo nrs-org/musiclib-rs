@@ -185,16 +185,10 @@ impl Default for YtdlpConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct LocalConfig {
     /// Base directory for resolving relative `local://` paths. Defaults to CWD.
     pub base_dir: Option<std::path::PathBuf>,
-}
-
-impl Default for LocalConfig {
-    fn default() -> Self {
-        Self { base_dir: None }
-    }
 }
 
 // ── Registry config ───────────────────────────────────────────────────────────
@@ -269,10 +263,10 @@ pub fn build_providers(
                     .map_err(|e| Error::InvalidCredentials(format!("invalid api_key: {e}")))?;
                 let mut provider =
                     youtube_api::Provider::from_client_and_key(Arc::clone(&http), api_key)?;
-                if let Some(url_cred) = &cfg.ytmusicapi_server_url {
-                    if let Some(url) = url_cred.resolve() {
-                        provider = provider.with_ytmusicapi_url(url);
-                    }
+                if let Some(url_cred) = &cfg.ytmusicapi_server_url
+                    && let Some(url) = url_cred.resolve()
+                {
+                    provider = provider.with_ytmusicapi_url(url);
                 }
                 providers.push(Arc::new(provider));
             }

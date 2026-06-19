@@ -9,9 +9,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    http::{
-        BodyExtractorCow, HeaderName, HeaderValue, RawResponse, Response, bytes_body_extractor,
-    },
+    http::{BodyExtractorCow, HeaderName, HeaderValue, RawResponse, Response},
     httpcache::{CachePolicy, HttpCache},
 };
 

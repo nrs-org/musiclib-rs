@@ -14,11 +14,11 @@ pub type HeaderName = reqwest::header::HeaderName;
 pub type HeaderValue = reqwest::header::HeaderValue;
 pub type ResponseStatus = reqwest::StatusCode;
 
-pub(crate) trait AnySerializable: Debug + erased_serde::Serialize + Send + Sync {
+pub trait AnySerializable: Debug + erased_serde::Serialize + Send + Sync {
     fn as_any_ref(&self) -> &dyn Any;
     fn as_serialize_ref(&self) -> &dyn erased_serde::Serialize;
 }
-pub(crate) struct AnySerializableImpl<T: Serialize + Send + Sync + 'static>(pub T);
+pub struct AnySerializableImpl<T: Serialize + Send + Sync + 'static>(pub T);
 impl<T> Debug for AnySerializableImpl<T>
 where
     T: Serialize + Send + Sync + 'static,

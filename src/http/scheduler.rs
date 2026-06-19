@@ -142,7 +142,7 @@ fn parse_retry_after(res: &Response) -> Option<Duration> {
     let value = res
         .headers
         .iter()
-        .find(|(k, _)| k == &name)
+        .find(|(k, _)| *k == name)
         .and_then(|(_, v)| v.to_str().ok())?;
 
     // Try delay-seconds first (a plain integer).
@@ -277,8 +277,7 @@ impl DomainScheduler {
         }
 
         // Use entry API to avoid a race where two threads both see a miss.
-        let tx = self
-            .workers
+        self.workers
             .entry(host.to_string())
             .or_insert_with(|| {
                 let config = self.config_for(host);
@@ -314,9 +313,7 @@ impl DomainScheduler {
                 });
                 tx
             })
-            .clone();
-
-        tx
+            .clone()
     }
 }
 

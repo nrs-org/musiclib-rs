@@ -20,6 +20,7 @@ use super::state::{ChildEdge, Pair, PairMetadata, State};
 ///    merges when a class spans more than one existing entry.
 /// 4. Write pair metadata (real rows for fetched pairs, stub rows for the
 ///    rest), aliases, child edges, contributions.
+///
 /// Returns the set of entry_ids written or surviving after merges in this flush.
 /// The caller can pass this set to `softmatch::match_new_entries` for online
 /// soft-dedup without re-scanning previously compared pairs.

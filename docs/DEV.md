@@ -197,6 +197,39 @@ Hits the real APIs and overwrites the JSON fixture files used by tests.
 Requires live credentials. Run this when an upstream API schema changes and
 tests start failing on deserialization.
 
+### `softmatch` — heuristic soft-dedup
+
+Score candidate entry pairs with a Rhai script and optionally persist the
+results. Dry-run by default.
+
+```bash
+cargo run --features ffi --release --bin softmatch
+cargo run --features ffi --release --bin softmatch -- --apply   # write RELATE decisions to DB
+cargo run --features ffi --release --bin softmatch -- --csv out.csv  # dump all pairs for review
+```
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--db` | `<data_dir>/musiclib.db` | SQLite music library |
+| `--script` | `<config_dir>/match.rhai` | Rhai match script |
+| `--apply` | false | Persist RELATE decisions to `entry_relation` |
+| `--csv <path>` | absent | Write all scored pairs (MERGE / RELATE / DISTINCT / BARRIER) to a CSV |
+| `--embed-db` | `<data_dir>/embeddings.db` | SQLite embedding cache (sqlite-vec) |
+| `--no-embed` | false | Disable semantic blocking even if `embed_batch` is defined |
+| `--embed-dim` | `256` | Embedding dimension; must match the model (`384` for MiniLM) |
+| `--embed-k` | `20` | KNN neighbours per entry |
+| `--embed-threshold` | `0.5` | Min cosine similarity to surface a KNN pair as a candidate |
+| `--embed-max-pages` | `4` | Max KNN pages per entry type (each page widens the neighbour window) |
+| `--embed-page-merge-rate` | `0.5` | Per-type merge rate required to fetch the next page |
+| `--dedup-config` | auto from `<config_dir>/dedup_barriers/` | Barrier file(s); repeatable |
+| `--registry-config` | `<config_dir>/providers.yaml` | Provider credentials |
+| `--http-config` | `<config_dir>/http.yaml` | HTTP client config |
+
+The `--features ffi` flag is optional but required to load the native inference
+cdylib (`config/inference/`). Without it the script falls back to the
+dependency-free naive token-hash embedder. See [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
+for the `match.rhai` format.
+
 ### `ytdlp_server` — local yt-dlp HTTP server
 
 Required by the SoundCloud and NicoVideo backends.

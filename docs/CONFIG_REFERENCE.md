@@ -467,3 +467,149 @@ The `members` list should contain the most authoritative, unambiguous pairs for
 each entity (MusicBrainz URLs are ideal), followed by any ambiguous pairs you
 want attributed exclusively to that anchor. All pairs in `members` are treated
 identically: they are force-merged together and kept apart from sibling anchors.
+
+---
+
+## `match.rhai` — soft-dedup match script
+
+The `softmatch` binary evaluates candidate entry pairs using a
+[Rhai](https://rhai.rs/) script. Copy `config/match.example.rhai` to
+`<config_dir>/match.rhai` and tune thresholds as needed.
+
+### Lifecycle
+
+The host calls three optional entry points in order:
+
+| Function | Signature | Called when |
+|---|---|---|
+| `init` | `fn init() -> Dynamic` | Once after the script is loaded |
+| `decide` | `fn decide(ctx, a, b) -> verdict` | For each candidate pair |
+| `destroy` | `fn destroy(ctx)` | Once when the engine shuts down |
+
+`init()` returns an arbitrary **context object** (`ctx`). The host holds it for
+the whole run and passes it back as the first argument of every other hook. Use
+it to carry state that must persist across calls — e.g. an FFI library handle,
+a pre-compiled regex, or cached config values. Returns `()` when absent.
+
+Rhai function scopes are completely isolated (no top-level `let`/`const`/`global::`
+is visible inside a function), so the context object is the only supported way
+to share state between calls.
+
+### Entity fields (`a`, `b`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `entry_type` | string | `"track"` \| `"release"` \| `"release_group"` \| `"artist"` |
+| `entry_id` | int | Opaque DB entry ID; used with `semantic_sim` |
+| `title` | string | Best known name (raw, unprocessed) |
+| `duration_ms` | int \| `()` | Duration in milliseconds; `()` when unknown |
+| `pairs` | array of `#{source, identifier}` | Canonical DB pairs |
+| `aliases` | array of strings | All known names (case-deduplicated) |
+| `sourced_aliases` | array of `#{source, name}` | Authoritative sources first (non-video before video) |
+| `peer_ids` | array of int | For tracks: credited-artist entry IDs. For artists: credited-track entry IDs |
+| `track_positions` | array of `#{release_id, disc_no, track_no}` | Placement in releases; `disc_no`/`track_no` are `()` when unknown |
+
+### Host-provided functions
+
+#### String similarity
+
+| Function | Returns | Notes |
+|---|---|---|
+| `normalize(s)` | string | Lowercase, alphanumeric+CJK only, whitespace collapsed |
+| `jaccard(a, b)` | f64 | Token Jaccard on normalized strings |
+| `levenshtein(a, b)` | f64 | Normalized Levenshtein |
+| `jaro_winkler(a, b)` | f64 | Jaro-Winkler |
+| `str_sim(a, b)` | f64 | `max(levenshtein, jaccard)` |
+
+#### Regex
+
+| Function | Returns | Notes |
+|---|---|---|
+| `compile_re(pattern)` | Regex | Pre-compile a pattern; store in `ctx` |
+| `re_is_match(re_or_pat, text)` | bool | |
+| `re_replace_all(re_or_pat, repl, text)` | string | `repl` is literal — `$` is not special |
+| `re_captures_all(re_or_pat, text)` | `[[string]]` | Each inner array: `[full_match, group1, …]`; unmatched groups are `""` |
+
+Both `re_*` functions accept either a pre-compiled `Regex` or a pattern `String`.
+
+#### Verdict constructors
+
+```rhai
+merge(conf, reason)             // conf: f64 confidence in [0,1]
+relate(kind, conf, reason)      // kind: see below
+distinct()
+```
+
+Valid `relate` kinds: `alt_version`, `live`, `remix`, `instrumental`, `cover`,
+`medley`, `release_variant`, `in_release_group`, `same_artist`.
+
+#### Semantic similarity
+
+```rhai
+semantic_sim(a.entry_id, b.entry_id)  // → f64 cosine similarity [0,1]; 0.0 if either entry lacks an embedding
+```
+
+Returns the pre-computed value from the embedding cache — no HTTP call at scoring time.
+
+#### Feature detection
+
+```rhai
+ffi_available()   // → bool: true when musiclib was built with --features ffi
+```
+
+### Semantic embedding hooks
+
+If the script defines `embed_batch(ctx, texts) -> array-of-arrays`, the host
+calls it in chunks of 64 at startup to embed every entry with a missing or stale
+vector. Falls back to `embed(ctx, text) -> array` if `embed_batch` is not defined.
+Vectors are stored in the embedding cache (`<data_dir>/embeddings.db`) and used
+with sqlite-vec KNN for candidate generation.
+
+The embedding dimension must match the `--embed-dim` flag (default `256`).
+
+### FFI module (`ffi::`) and the `inference` cdylib
+
+When musiclib is built with `--features ffi`, the `ffi` Rhai module is available.
+It lets the script bind and call functions in any C-ABI shared library:
+
+```rhai
+let lib = ffi::open("./libinference.so");   // path relative to the script file
+let f   = lib.func("my_fn", "i32", ["ptr", "u64"]);
+let rc  = f.invoke([some_ptr, 42]);
+```
+
+Supported types: `"void"`, `"i32"`, `"u32"`, `"i64"`, `"u64"`, `"f32"`, `"f64"`,
+`"ptr"`. Memory helpers: `ffi::malloc(n)`, `ffi::free(p)`, `ffi::cstr(s)`,
+`ffi::read_cstr(p)`, `ffi::read_i64(p, n)`, `ffi::read_f32(p, n)`,
+`ffi::read_ptr(p, i)`, `ffi::write_ptr(p, i, v)`.
+
+Relative paths (containing a `/` or `\`) are resolved relative to the **script
+file**, not the process working directory.
+
+#### `config/inference/` cdylib
+
+The workspace member `config/inference` (package name `inference`) builds a
+`libinference.so` cdylib providing real semantic embeddings (Model2Vec, 256-d by
+default; `--features minilm` for MiniLM 384-d):
+
+```bash
+cargo build -p inference --release --lib
+# artifact: target/release/libinference.so
+```
+
+`config/match.example.rhai`'s `open_inference()` function tries three locations
+in order: a `libinference.so` symlink next to the script (e.g.
+`~/.config/musiclib-rs/libinference.so → <repo>/target/release/libinference.so`),
+the repo build tree (`../target/release/libinference.so`), then the system loader
+search path. The recommended setup:
+
+```bash
+ln -s /path/to/repo/target/release/libinference.so ~/.config/musiclib-rs/libinference.so
+```
+
+The library handle is opened once in `init()` and held for the whole run via the
+context object, so the model loads only once regardless of how many embedding
+batches are processed.
+
+The `ffi` feature adds a build-time dependency on `libffi` (compiled from source
+via autotools); all other features are off by default.

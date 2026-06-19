@@ -21,10 +21,10 @@ impl CacheClientConfig {
             .ok()
             .and_then(|u| u.host_str().map(str::to_owned));
 
-        if let Some(host) = host {
-            if let Some(domain_policy) = self.domains.get(&host) {
-                return domain_policy.as_ref();
-            }
+        if let Some(host) = host
+            && let Some(domain_policy) = self.domains.get(&host)
+        {
+            return domain_policy.as_ref();
         }
 
         self.default_policy.as_ref()

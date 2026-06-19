@@ -211,9 +211,9 @@ impl SpotifyClient {
                         .clone()
                         .into_inner()
                         .ok_or_else(|| {
-                            E::from(Error::AuthenticationFailed(
-                                format!("Spotify API returned an error for {url}").into(),
-                            ))
+                            E::from(Error::AuthenticationFailed(format!(
+                                "Spotify API returned an error for {url}"
+                            )))
                         })?;
                     return callback(&inner).await;
                 }

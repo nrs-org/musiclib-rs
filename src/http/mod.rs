@@ -53,6 +53,7 @@ impl<'a> Clone for BodyExtractorCow<'a> {
 }
 
 impl<'a> BodyExtractorCow<'a> {
+    #[allow(clippy::should_implement_trait)]
     pub fn as_ref(&self) -> &dyn BodyExtractor {
         match self {
             BodyExtractorCow::Borrowed(extractor) => *extractor,
@@ -271,7 +272,7 @@ impl DbCacheConfig {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Deserialize)]
 #[serde(default)]
 pub struct HttpClientConfig {
     /// Scheduling configs keyed by host. The special key `"*"` is the default
@@ -294,18 +295,6 @@ pub struct HttpClientConfig {
     /// YouTube's quota billing. Read the value after the run to get the total.
     #[serde(skip)]
     pub youtube_quota_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
-}
-
-impl Default for HttpClientConfig {
-    fn default() -> Self {
-        Self {
-            schedulers: std::collections::HashMap::new(),
-            db_cache: None,
-            memory_cache: false,
-            coalescer_rules: Vec::new(),
-            youtube_quota_counter: None,
-        }
-    }
 }
 
 impl HttpClientConfig {

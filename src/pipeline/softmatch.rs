@@ -572,6 +572,7 @@ fn call_script(
 
 // ── Candidate blocking ────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn blocking_key(entry: &EntryInfo) -> Option<String> {
     let title = entry.best_title.as_deref()?;
     let norm = normalize(title);
@@ -585,6 +586,7 @@ fn blocking_key(entry: &EntryInfo) -> Option<String> {
 /// If `focus` is Some, only emit pairs where at least one entry_id is in the set.
 /// This lets callers do incremental comparisons (new entries vs. everything in
 /// their blocking bucket) without re-scanning already-compared pairs.
+#[allow(dead_code)]
 fn generate_candidates(entries: &[EntryInfo], focus: Option<&HashSet<i64>>) -> Vec<(i64, i64)> {
     // Group by (entry_type, first_title_token). Only same-type pairs.
     let mut blocks: HashMap<(String, String), Vec<i64>> = HashMap::new();
@@ -652,6 +654,7 @@ fn k_for_type(entry_type: &str, base_k: usize) -> usize {
 /// neighbours come back sorted by distance, the first one past the threshold ends
 /// the walk for that entry — any further (and any later page's) neighbours are
 /// strictly farther.
+#[allow(clippy::too_many_arguments)]
 fn generate_semantic_candidates(
     entries: &[EntryInfo],
     cache: &EmbeddingCache,
@@ -745,6 +748,7 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<Vec<EntryInfo>> {
     }
 
     // track positions: child_entry_id → [(release_entry_id, disc_no, track_no)]
+    #[allow(clippy::type_complexity)]
     let mut positions_by_track: HashMap<i64, Vec<(i64, Option<i32>, Option<i32>)>> = HashMap::new();
     for c in &child_rows {
         let parent_key = (c.parent_source.clone(), c.parent_identifier.clone());
@@ -1153,6 +1157,7 @@ async fn apply_candidate(
     Ok(verdict)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_csv_row(
     w: &mut impl std::io::Write,
     verdict: &str,

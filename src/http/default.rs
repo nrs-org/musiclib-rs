@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::http::{BodyExtractor, BodyExtractorCow};
+use crate::http::BodyExtractorCow;
 
 use super::{HttpClient, Request, Response};
 use async_trait::async_trait;

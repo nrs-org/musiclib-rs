@@ -210,6 +210,7 @@ impl CoalesceRule for SpotifyBatchRule {
 
         // `{ "<resource>": [<obj|null>, …] }`. Build an id → bare-object lookup,
         // skipping `null`s (Spotify's marker for ids it couldn't resolve).
+        #[allow(clippy::borrowed_box)]
         let items: Vec<Option<Box<serde_json::value::RawValue>>> = root
             .get(self.resource)
             .map(|raw: &Box<serde_json::value::RawValue>| {

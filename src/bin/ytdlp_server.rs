@@ -109,11 +109,9 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
     }
 
     let mut json: Value = serde_json::from_slice(&output.stdout)?;
-    if !full {
-        if let Some(obj) = json.as_object_mut() {
-            obj.remove("formats");
-            obj.remove("requested_downloads");
-        }
+    if !full && let Some(obj) = json.as_object_mut() {
+        obj.remove("formats");
+        obj.remove("requested_downloads");
     }
     Ok(json_response(StatusCode::OK, json))
 }
