@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, Database, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
-    sea_query,
+    ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, Database, DatabaseConnection, DbErr,
+    EntityTrait, QueryFilter, TransactionTrait, sea_query,
 };
+use tracing::warn;
 
 use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType};
 
@@ -190,6 +193,156 @@ pub struct MusicDb {
     db: DatabaseConnection,
 }
 
+/// Combine the `extra` payloads of two relations being merged into one. Both are
+/// preserved when present and different: JSON values are unioned into a flat,
+/// deduplicated, sorted array (so repeated merges converge), and a lone present
+/// payload is kept verbatim. Returns `None` only when both are absent.
+///
+/// This is the focal point for handling `extra` on a merge and is deliberately
+/// kept small so it can later be replaced by richer, possibly user-defined
+/// (e.g. Rhai) logic.
+fn combine_extra(a: &Option<String>, b: &Option<String>) -> Option<String> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) | (None, Some(x)) => Some(x.clone()),
+        (Some(x), Some(y)) if x == y => Some(x.clone()),
+        (Some(x), Some(y)) => {
+            let mut items: Vec<serde_json::Value> = Vec::new();
+            for raw in [x, y] {
+                match serde_json::from_str::<serde_json::Value>(raw) {
+                    Ok(serde_json::Value::Array(arr)) => items.extend(arr),
+                    Ok(v) => items.push(v),
+                    Err(_) => items.push(serde_json::Value::String(raw.clone())),
+                }
+            }
+            items.sort_by_key(|v| v.to_string());
+            items.dedup_by_key(|v| v.to_string());
+            Some(serde_json::Value::Array(items).to_string())
+        }
+    }
+}
+
+/// Combine two relations that share the same `(entry_a, entry_b, kind)` into one.
+///
+/// This is the single seam where duplicate relations are reconciled when entries
+/// merge. The current policy is intentionally simple — keep the higher-confidence
+/// relation's scalar fields (deterministic tie-break on origin/enabled) and union
+/// the two `extra` payloads via [`combine_extra`]. It is **lossy** on the scalar
+/// fields of the discarded relation; callers log when they invoke it. Replace
+/// this with richer logic (e.g. a user-provided Rhai hook) when needed.
+fn combine_relations(
+    a: &entry_relation::Model,
+    b: &entry_relation::Model,
+) -> entry_relation::Model {
+    let a_wins = match a.confidence.partial_cmp(&b.confidence) {
+        Some(std::cmp::Ordering::Greater) => true,
+        Some(std::cmp::Ordering::Less) => false,
+        _ => (&a.origin, a.enabled) >= (&b.origin, b.enabled),
+    };
+    let primary = if a_wins { a } else { b };
+    entry_relation::Model {
+        entry_a: primary.entry_a,
+        entry_b: primary.entry_b,
+        kind: primary.kind.clone(),
+        confidence: primary.confidence,
+        origin: primary.origin.clone(),
+        enabled: primary.enabled,
+        extra: combine_extra(&a.extra, &b.extra),
+    }
+}
+
+/// Re-point every `entry_relation` row referencing `loser` onto `winner` and keep
+/// the table referentially consistent. Endpoint order is normalized
+/// (`entry_a < entry_b`). The two lossy steps are made explicit with `warn!`: a
+/// relation that becomes `winner ↔ winner` (both endpoints merged into one entry)
+/// is **dropped**, and rows that collide on `(entry_a, entry_b, kind)` are
+/// **merged** into one via [`combine_relations`]. Winner rows are included so a
+/// remapped loser relation merges against any pre-existing winner relation.
+async fn remap_relations<C: ConnectionTrait>(
+    txn: &C,
+    loser: i64,
+    winner: i64,
+) -> Result<(), Error> {
+    use entry_relation::Column as Col;
+
+    let touching = Condition::any()
+        .add(Col::EntryA.eq(loser))
+        .add(Col::EntryB.eq(loser))
+        .add(Col::EntryA.eq(winner))
+        .add(Col::EntryB.eq(winner));
+
+    let rows = entry_relation::Entity::find()
+        .filter(touching.clone())
+        .all(txn)
+        .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    // Delete the affected rows; the canonicalized survivors are re-inserted.
+    entry_relation::Entity::delete_many()
+        .filter(touching)
+        .exec(txn)
+        .await?;
+
+    let mut merged: HashMap<(i64, i64, String), entry_relation::Model> = HashMap::new();
+    for mut r in rows {
+        if r.entry_a == loser {
+            r.entry_a = winner;
+        }
+        if r.entry_b == loser {
+            r.entry_b = winner;
+        }
+        if r.entry_a == r.entry_b {
+            // Lossy: a relationship that is now internal to a single entry is
+            // dropped. Surface it so the loss is never silent.
+            warn!(
+                entry = r.entry_a,
+                kind = %r.kind,
+                confidence = r.confidence,
+                origin = %r.origin,
+                "merge dropped self-relation (both endpoints merged into one entry)"
+            );
+            continue;
+        }
+        if r.entry_a > r.entry_b {
+            std::mem::swap(&mut r.entry_a, &mut r.entry_b);
+        }
+        let key = (r.entry_a, r.entry_b, r.kind.clone());
+        match merged.remove(&key) {
+            Some(existing) => {
+                // Lossy: two relations collapse into one. Surface it.
+                warn!(
+                    entry_a = key.0,
+                    entry_b = key.1,
+                    kind = %key.2,
+                    "merge combined duplicate relations into one (see combine_relations)"
+                );
+                merged.insert(key, combine_relations(&existing, &r));
+            }
+            None => {
+                merged.insert(key, r);
+            }
+        }
+    }
+
+    for (_, r) in merged {
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(r.entry_a),
+            entry_b: Set(r.entry_b),
+            kind: Set(r.kind),
+            confidence: Set(r.confidence),
+            origin: Set(r.origin),
+            enabled: Set(r.enabled),
+            extra: Set(r.extra),
+        })
+        .exec(txn)
+        .await?;
+    }
+
+    Ok(())
+}
+
 impl MusicDb {
     pub async fn new(db_url: &str) -> Result<Self, Error> {
         let db = Database::connect(db_url).await?;
@@ -268,15 +421,26 @@ impl MusicDb {
         if loser == winner {
             return Ok(());
         }
+        let txn = self.db.begin().await?;
+
+        // Re-point all of the loser's source rows to the winner.
         entry_source::Entity::update_many()
             .col_expr(
                 entry_source::Column::EntryId,
                 sea_query::Expr::value(winner),
             )
             .filter(entry_source::Column::EntryId.eq(loser))
-            .exec(&self.db)
+            .exec(&txn)
             .await?;
-        entry::Entity::delete_by_id(loser).exec(&self.db).await?;
+
+        // Keep entry_relation referentially consistent: the loser entry is about
+        // to be deleted, so re-point every relation that referenced it onto the
+        // winner, drop the resulting self-relations, and collapse duplicates.
+        remap_relations(&txn, loser, winner).await?;
+
+        entry::Entity::delete_by_id(loser).exec(&txn).await?;
+
+        txn.commit().await?;
         Ok(())
     }
 
@@ -686,11 +850,14 @@ impl MusicDb {
                 entry_relation::Column::EntryB,
                 entry_relation::Column::Kind,
             ])
+            // Note: `Extra` is intentionally NOT updated on conflict. It may hold
+            // a payload combined by `combine_relations` when entries merged; a
+            // later re-score refreshes confidence/origin/enabled but must not wipe
+            // that combined `extra`.
             .update_columns([
                 entry_relation::Column::Confidence,
                 entry_relation::Column::Origin,
                 entry_relation::Column::Enabled,
-                entry_relation::Column::Extra,
             ])
             .to_owned(),
         )
@@ -800,5 +967,156 @@ fn ignore_not_inserted<T: sea_orm::ActiveModelTrait>(
     match result {
         Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
         Err(e) => Err(Error::Database(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn mem_db() -> MusicDb {
+        MusicDb::new("sqlite::memory:").await.unwrap()
+    }
+
+    async fn insert_entry(db: &DatabaseConnection, id: i64) {
+        entry::Entity::insert(entry::ActiveModel {
+            id: Set(id),
+            entry_type: Set("track".to_string()),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_rel(db: &DatabaseConnection, a: i64, b: i64, kind: &str, conf: f64) {
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(a),
+            entry_b: Set(b),
+            kind: Set(kind.to_string()),
+            confidence: Set(conf),
+            origin: Set("heuristic".to_string()),
+            enabled: Set(true),
+            extra: Set(None),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    /// merge_entries must leave entry_relation referentially consistent: no row
+    /// may reference the merged-away loser; a relation that becomes winner↔winner
+    /// is dropped; colliding rows are merged into one (higher confidence wins).
+    /// Unrelated relations are untouched.
+    #[tokio::test]
+    async fn merge_entries_keeps_relations_consistent() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2, 3, 4] {
+            insert_entry(db, id).await;
+        }
+        // (1,3) and (2,3) both "alt" → after 1→2 both become (2,3) → merged.
+        insert_rel(db, 1, 3, "alt", 0.9).await;
+        insert_rel(db, 2, 3, "alt", 0.5).await;
+        // (1,2) → becomes a self-relation after merge → dropped.
+        insert_rel(db, 1, 2, "same", 0.8).await;
+        // Unrelated relation, must survive verbatim.
+        insert_rel(db, 3, 4, "alt", 0.7).await;
+
+        mdb.merge_entries(1, 2).await.unwrap();
+
+        let rows = entry_relation::Entity::find().all(db).await.unwrap();
+        assert!(
+            rows.iter().all(|r| r.entry_a != 1 && r.entry_b != 1),
+            "no relation may reference the merged-away entry 1"
+        );
+        assert!(
+            !rows.iter().any(|r| r.entry_a == r.entry_b),
+            "self-relations dropped"
+        );
+        // Colliding (2,3,alt) merged into one, higher confidence wins.
+        let r23: Vec<_> = rows
+            .iter()
+            .filter(|r| r.entry_a == 2 && r.entry_b == 3 && r.kind == "alt")
+            .collect();
+        assert_eq!(r23.len(), 1, "duplicate collapsed to one row");
+        assert_eq!(r23[0].confidence, 0.9, "higher confidence wins");
+        assert!(
+            rows.iter()
+                .any(|r| r.entry_a == 3 && r.entry_b == 4 && r.kind == "alt"),
+            "unrelated relation intact"
+        );
+        assert!(
+            entry::Entity::find_by_id(1)
+                .one(db)
+                .await
+                .unwrap()
+                .is_none(),
+            "loser entry deleted"
+        );
+    }
+
+    /// combine_relations is order-independent: the higher-confidence row's scalar
+    /// fields win regardless of argument order.
+    #[test]
+    fn combine_relations_is_order_independent() {
+        let mk = |conf: f64, origin: &str| entry_relation::Model {
+            entry_a: 2,
+            entry_b: 3,
+            kind: "alt".to_string(),
+            confidence: conf,
+            origin: origin.to_string(),
+            enabled: true,
+            extra: None,
+        };
+        let a = mk(0.5, "heuristic");
+        let b = mk(0.9, "manual");
+
+        let r1 = combine_relations(&a, &b);
+        let r2 = combine_relations(&b, &a);
+        assert_eq!(r1, r2, "combine is order-independent");
+        assert_eq!(r1.confidence, 0.9);
+        assert_eq!(r1.origin, "manual", "higher-confidence scalar fields win");
+    }
+
+    /// combine_extra preserves both payloads when they differ, keeps a lone one
+    /// verbatim, and converges (no growth) when re-combined.
+    #[test]
+    fn combine_extra_preserves_both_payloads() {
+        assert_eq!(combine_extra(&None, &None), None);
+        assert_eq!(
+            combine_extra(&Some("{\"x\":1}".into()), &None),
+            Some("{\"x\":1}".into()),
+            "lone payload kept verbatim"
+        );
+
+        let a = Some("{\"src\":\"a\"}".to_string());
+        let b = Some("{\"src\":\"b\"}".to_string());
+        let combined = combine_extra(&a, &b).unwrap();
+        let arr: serde_json::Value = serde_json::from_str(&combined).unwrap();
+        assert_eq!(arr.as_array().unwrap().len(), 2, "both payloads kept");
+
+        // Re-combining with one of the originals must not grow the array.
+        let again = combine_extra(&Some(combined.clone()), &a).unwrap();
+        let arr2: serde_json::Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(arr2.as_array().unwrap().len(), 2, "converges, no growth");
+    }
+
+    /// Endpoint order is normalized: a relation stored as (loser, x) with
+    /// loser > x must come back as (x, winner) or (winner, x) with entry_a < entry_b.
+    #[tokio::test]
+    async fn merge_entries_normalizes_endpoint_order() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [5i64, 10, 20] {
+            insert_entry(db, id).await;
+        }
+        // (5, 20) where 5 will merge into 10 → becomes (10, 20).
+        insert_rel(db, 5, 20, "alt", 0.6).await;
+        mdb.merge_entries(5, 10).await.unwrap();
+
+        let rows = entry_relation::Entity::find().all(db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].entry_a, rows[0].entry_b), (10, 20));
+        assert!(rows[0].entry_a < rows[0].entry_b, "endpoints normalized");
     }
 }

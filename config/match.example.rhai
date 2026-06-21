@@ -16,8 +16,13 @@
 //
 // Entity fields (a, b):
 //   entry_type          "track" | "release" | "release_group" | "artist"
-//   title               best known name (raw, unprocessed)
-//   duration_ms         integer or ()
+//   title               deterministic display name (for logging; verdict logic
+//                       should prefer the alias set via pick_main_title)
+//   durations           array of integers — every distinct per-source duration
+//                       (an entry can carry several, e.g. MV cut vs audio cut)
+//   release_dates       array of strings — distinct per-source release dates
+//   release_types       array of strings — distinct per-source release types
+//   primary_types       array of strings — distinct per-source primary types
 //   pairs               array of #{source, identifier} — canonical DB pairs
 //   aliases             array of strings — all known names (case-dedup'd)
 //   sourced_aliases     array of #{source, name} — clean sources appear before
@@ -461,6 +466,15 @@ fn version_tokens(title) {
     tokens.join(" ")
 }
 
+// Version tokens scanned across the entry's full alias set (a marker like
+// "(short ver.)" may appear on any source, not just the display title). Order-
+// independent: `version_tokens` sorts its output.
+fn entry_version_tokens(entry) {
+    let combined = "";
+    for x in entry.aliases { combined += " "; combined += x; }
+    version_tokens(combined)
+}
+
 // ── Per-entry helpers ─────────────────────────────────────────────────────────
 
 fn pick_main_title(entry) {
@@ -521,9 +535,17 @@ fn markers_conflict(ctx, a, b) {
     true
 }
 
+// True if any alias of `a` normalizes equal to any alias of `b`. Compares the
+// full alias sets (order-independent) rather than the single display title.
 fn title_exact(a, b) {
-    let na = normalize(a.title);
-    na != "" && na == normalize(b.title)
+    for x in a.aliases {
+        let nx = normalize(x);
+        if nx == "" { continue; }
+        for y in b.aliases {
+            if nx == normalize(y) { return true; }
+        }
+    }
+    false
 }
 
 fn alias_best(a, b) {
@@ -537,10 +559,19 @@ fn alias_best(a, b) {
     best
 }
 
-fn dur_known(a, b)    { a.duration_ms != () && b.duration_ms != () }
+// Durations are multi-valued (one entry can hold an MV cut and an audio cut).
+// "known" = both sides have at least one; the delta is the closest pairing.
+fn dur_known(a, b)    { a.durations.len() > 0 && b.durations.len() > 0 }
 fn dur_delta_ms(a, b) {
     if !dur_known(a, b) { return 0; }
-    (a.duration_ms - b.duration_ms).abs()
+    let best = ();
+    for da in a.durations {
+        for db in b.durations {
+            let d = (da - db).abs();
+            if best == () || d < best { best = d; }
+        }
+    }
+    best
 }
 
 fn artist_overlap(a, b) {
@@ -611,8 +642,8 @@ fn decide_track(ctx, a, b) {
 
     if t < RELATE_MIN { return distinct(); }
 
-    let va = version_tokens(a.title);
-    let vb = version_tokens(b.title);
+    let va = entry_version_tokens(a);
+    let vb = entry_version_tokens(b);
     let version_differs = va != vb;
 
     // Detect MV pair: exactly one side is an MV entry.
@@ -620,17 +651,25 @@ fn decide_track(ctx, a, b) {
     let b_video = is_mv_entry(b);
     let is_mv_pair = (a_video || b_video) && !(a_video && b_video);
 
-    // Duration gate — MV-aware.
-    //   Normal:  ±2s.
-    //   MV pair: also accept MV longer by up to 1 min (intros/outros), but not shorter.
+    // Duration gate — MV-aware, over the full duration sets (any pair may match).
+    //   Normal:  some pair within ±2s.
+    //   MV pair: also accept some MV duration longer than some ref duration by up
+    //            to 1 min (intros/outros), but not shorter.
     let dur_ok = dur_known(a, b) && {
-        let delta = dur_delta_ms(a, b);
-        if is_mv_pair {
-            let mv_dur  = if a_video { a.duration_ms } else { b.duration_ms };
-            let ref_dur = if a_video { b.duration_ms } else { a.duration_ms };
-            delta <= 2000 || (mv_dur >= ref_dur && mv_dur - ref_dur <= 60000)
+        if dur_delta_ms(a, b) <= 2000 {
+            true
+        } else if is_mv_pair {
+            let mv_durs  = if a_video { a.durations } else { b.durations };
+            let ref_durs = if a_video { b.durations } else { a.durations };
+            let ok = false;
+            for mv in mv_durs {
+                for rf in ref_durs {
+                    if mv >= rf && mv - rf <= 60000 { ok = true; }
+                }
+            }
+            ok
         } else {
-            delta <= 2000
+            false
         }
     };
 
@@ -683,7 +722,7 @@ fn decide_artist(ctx, a, b) {
     let MERGE_MIN  = 0.90;
     let RELATE_MIN = 0.80;
 
-    let sim = max(alias_best(a, b), if title_exact(a, b) { 1.0 } else { jaccard(normalize(a.title), normalize(b.title)) });
+    let sim = max(alias_best(a, b), if title_exact(a, b) { 1.0 } else { jaccard(normalize(pick_main_title(a)), normalize(pick_main_title(b))) });
     if sim < RELATE_MIN { return distinct(); }
 
     let has_corroboration = artist_overlap(a, b) > 0.0 || shared_count_authoritative_ids(a, b) > 0;

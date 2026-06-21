@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -21,24 +21,32 @@ type Pair = (String, String);
 pub struct EntryInfo {
     pub entry_id: i64,
     pub entry_type: String,
+    /// Canonical (source, identifier) pairs, sorted by `(source, identifier)`.
     pub pairs: Vec<Pair>,
-    /// All known names, deduplicated case-insensitively.
+    /// All known names, deduplicated case-insensitively, in canonical order.
     pub aliases: Vec<String>,
-    /// Best title: primary alias if one exists, otherwise first alias.
+    /// Deterministic display/embedding title: the primary alias with the
+    /// smallest canonical key if any, otherwise the first canonical alias.
+    /// Derived purely from `sourced_aliases`; not used to drive merge verdicts
+    /// (the matcher compares the full alias set instead).
     pub best_title: Option<String>,
-    /// Best non-null duration across all pairs.
-    pub duration_ms: Option<i64>,
-    pub release_date: Option<String>,
-    pub release_type: Option<String>,
-    pub primary_type: Option<String>,
+    /// Every distinct per-source attribute, kept as a sorted set rather than
+    /// collapsed to one value — an entry legitimately carries several (e.g. an
+    /// MV cut vs an audio cut have different durations). Sorted + deduped so the
+    /// DB-reload path and the in-memory merge path always agree.
+    pub durations: Vec<i64>,
+    pub release_dates: Vec<String>,
+    pub release_types: Vec<String>,
+    pub primary_types: Vec<String>,
     /// For tracks/releases: entry IDs of credited artists.
     /// For artists: entry IDs of items this artist is credited on.
     pub peer_entry_ids: Vec<i64>,
     /// For tracks: (release_entry_id, disc_no, track_no) from entry_child edges.
     pub track_positions: Vec<(i64, Option<i32>, Option<i32>)>,
-    /// (source, alias_name) pairs. Clean sources appear before video sources so
-    /// `pick_main_title` and `pick_markers` prefer authoritative names.
-    pub sourced_aliases: Vec<(String, String)>,
+    /// (source, alias_name, is_primary) triples in canonical order: clean
+    /// sources before video sources, then by `(source, name)`. `pick_main_title`
+    /// and `pick_markers` prefer authoritative names by reading this in order.
+    pub sourced_aliases: Vec<(String, String, bool)>,
 }
 
 /// The verdict the Rhai script returns for a pair.
@@ -94,6 +102,70 @@ pub struct SoftMatchConfig {
 /// formatting: "Main Title (Marker1) [Marker2]".
 const VIDEO_SOURCES: &[&str] = &["youtube", "nicovideo", "soundcloud"];
 
+fn is_video_source(src: &str) -> bool {
+    VIDEO_SOURCES.contains(&src)
+}
+
+// ── Canonical derivation helpers ───────────────────────────────────────────────
+//
+// An entry's derived collections are produced by these helpers, applied
+// identically by `build_entry_infos` (DB-reload path) and `merge_entry_infos`
+// (in-memory path). Because both paths emit the same canonical order, no merge
+// verdict can depend on SQLite row order, which is what made soft-dedup
+// non-idempotent before.
+
+/// Sort and deduplicate a set-valued attribute (durations, release dates, …).
+fn dedup_sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> {
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Collapse duplicate `(source, name)` aliases (OR-ing the primary flag) and
+/// sort canonically: clean sources before video sources, then by source, then
+/// primary aliases first, then by name.
+fn canon_sourced_aliases(sa: Vec<(String, String, bool)>) -> Vec<(String, String, bool)> {
+    let mut by_key: HashMap<(String, String), bool> = HashMap::new();
+    for (src, name, primary) in sa {
+        let e = by_key.entry((src, name)).or_insert(false);
+        *e = *e || primary;
+    }
+    let mut out: Vec<(String, String, bool)> = by_key
+        .into_iter()
+        .map(|((src, name), primary)| (src, name, primary))
+        .collect();
+    out.sort_by(|a, b| {
+        is_video_source(&a.0)
+            .cmp(&is_video_source(&b.0))
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| (!a.2).cmp(&(!b.2)))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    out
+}
+
+/// Flat, case-insensitively deduplicated alias list in canonical order.
+fn derive_aliases(sourced: &[(String, String, bool)]) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for (_, name, _) in sourced {
+        if seen.insert(name.to_lowercase()) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// Deterministic display/embedding title: the first primary alias in canonical
+/// order, else the first alias.
+fn pick_best_title(sourced: &[(String, String, bool)]) -> Option<String> {
+    sourced
+        .iter()
+        .find(|(_, _, primary)| *primary)
+        .or_else(|| sourced.first())
+        .map(|(_, name, _)| name.clone())
+}
+
 // ── Title normalization ───────────────────────────────────────────────────────
 
 /// Lowercase, keep only alphanumeric + CJK, collapse whitespace.
@@ -148,8 +220,8 @@ fn jaccard_i64(a: &[i64], b: &[i64]) -> f64 {
 
 #[derive(Clone)]
 struct LazyFeatures {
-    a_duration: Option<i64>,
-    b_duration: Option<i64>,
+    a_durations: Vec<i64>,
+    b_durations: Vec<i64>,
     a_peers: Vec<i64>,
     b_peers: Vec<i64>,
     a_positions: Vec<(i64, Option<i32>, Option<i32>)>,
@@ -164,8 +236,8 @@ struct LazyFeatures {
 impl LazyFeatures {
     fn new(a: &EntryInfo, b: &EntryInfo) -> Self {
         Self {
-            a_duration: a.duration_ms,
-            b_duration: b.duration_ms,
+            a_durations: a.durations.clone(),
+            b_durations: b.durations.clone(),
             a_peers: a.peer_entry_ids.clone(),
             b_peers: b.peer_entry_ids.clone(),
             a_positions: a.track_positions.clone(),
@@ -179,17 +251,18 @@ impl LazyFeatures {
     }
 
     fn dur_known(&mut self) -> bool {
-        *self
-            .c_dur_known
-            .get_or_insert_with(|| self.a_duration.is_some() && self.b_duration.is_some())
+        let known = !self.a_durations.is_empty() && !self.b_durations.is_empty();
+        *self.c_dur_known.get_or_insert(known)
     }
     fn dur_delta_ms(&mut self) -> i64 {
-        *self
-            .c_dur_delta_ms
-            .get_or_insert_with(|| match (self.a_duration, self.b_duration) {
-                (Some(da), Some(db)) => (da - db).abs(),
-                _ => 0,
-            })
+        let a = &self.a_durations;
+        let b = &self.b_durations;
+        *self.c_dur_delta_ms.get_or_insert_with(|| {
+            a.iter()
+                .flat_map(|da| b.iter().map(move |db| (da - db).abs()))
+                .min()
+                .unwrap_or(0)
+        })
     }
     fn artist_overlap(&mut self) -> f64 {
         *self
@@ -456,23 +529,27 @@ fn build_rhai_engine(
 fn entry_to_rhai(e: &EntryInfo) -> RhaiMap {
     let mut m = RhaiMap::new();
     m.insert("entry_type".into(), Dynamic::from(e.entry_type.clone()));
+    // `title` is a deterministic convenience for logging/diagnostics; verdict
+    // logic should compare the full alias set instead (see pick_main_title).
     m.insert(
         "title".into(),
         Dynamic::from(e.best_title.clone().unwrap_or_default()),
     );
-    m.insert(
-        "duration_ms".into(),
-        e.duration_ms.map_or(Dynamic::UNIT, Dynamic::from),
-    );
-    m.insert(
-        "release_date".into(),
-        e.release_date.clone().map_or(Dynamic::UNIT, Dynamic::from),
-    );
+    // Multi-valued per-source attributes, exposed as arrays — an entry can carry
+    // several legitimate values (e.g. MV-cut vs audio-cut durations).
+    let durations: Vec<Dynamic> = e.durations.iter().copied().map(Dynamic::from).collect();
+    m.insert("durations".into(), Dynamic::from(durations));
+    let release_dates: Vec<Dynamic> = e.release_dates.iter().cloned().map(Dynamic::from).collect();
+    m.insert("release_dates".into(), Dynamic::from(release_dates));
+    let release_types: Vec<Dynamic> = e.release_types.iter().cloned().map(Dynamic::from).collect();
+    m.insert("release_types".into(), Dynamic::from(release_types));
+    let primary_types: Vec<Dynamic> = e.primary_types.iter().cloned().map(Dynamic::from).collect();
+    m.insert("primary_types".into(), Dynamic::from(primary_types));
     // sourced_aliases: array of #{source, name} maps, clean sources first.
     let sa: Vec<Dynamic> = e
         .sourced_aliases
         .iter()
-        .map(|(src, name)| {
+        .map(|(src, name, _primary)| {
             let mut mm = RhaiMap::new();
             mm.insert("source".into(), Dynamic::from(src.clone()));
             mm.insert("name".into(), Dynamic::from(name.clone()));
@@ -643,63 +720,54 @@ fn k_for_type(entry_type: &str, base_k: usize) -> usize {
     }
 }
 
-/// Semantic blocking, one KNN *page* at a time. A page covers neighbour ranks
-/// `[page * page_k, (page + 1) * page_k)` for each entry, where `page_k =
-/// k_for_type(type, base_k)`. Only entries whose type is in `active` are walked,
-/// and pairs already emitted on an earlier page (tracked in `already`) are
-/// skipped, so callers can keep requesting pages until merge rate drops off.
-///
-/// `sim_threshold` is a cosine *similarity* lower bound (≥ 0); distance in vec0 is
-/// L2 on unit vectors, which has the same ordering as cosine distance. Because
-/// neighbours come back sorted by distance, the first one past the threshold ends
-/// the walk for that entry — any further (and any later page's) neighbours are
-/// strictly farther.
-#[allow(clippy::too_many_arguments)]
-fn generate_semantic_candidates(
-    entries: &[EntryInfo],
+/// Semantic blocking for a single entry: walk up to `max_pages` KNN pages and
+/// return all candidate pairs not yet in `already`. Pairs with entries absent
+/// from `all_entries` (merge losers) are skipped. Because vec0 returns neighbours
+/// sorted by ascending L2 distance, the first neighbour that exceeds the
+/// threshold terminates the walk for all subsequent pages too.
+fn generate_semantic_candidates_for_entry(
+    entry: &EntryInfo,
+    all_entries: &HashMap<i64, EntryInfo>,
     cache: &EmbeddingCache,
-    focus: Option<&HashSet<i64>>,
     base_k: usize,
     sim_threshold: f64,
-    page: usize,
-    active: &HashSet<String>,
+    max_pages: usize,
     already: &mut HashSet<(i64, i64)>,
 ) -> Vec<(i64, i64)> {
-    // Convert cosine similarity threshold → L2 distance threshold.
+    if entry.best_title.is_none() || entry.entry_type == "unknown" {
+        return vec![];
+    }
     // For unit vectors: L2² = 2(1 − cos_sim), so L2 = √(2(1 − cos_sim)).
     let l2_threshold = (2.0 * (1.0 - sim_threshold)).sqrt();
+    let page_k = k_for_type(&entry.entry_type, base_k);
+    let mut pairs = Vec::new();
 
-    let mut pairs: Vec<(i64, i64)> = Vec::new();
-    for e in entries {
-        if e.best_title.is_none() {
-            continue;
-        }
-        if !active.contains(&e.entry_type) {
-            continue;
-        }
-        if focus.is_some_and(|f| !f.contains(&e.entry_id)) {
-            continue;
-        }
-        let page_k = k_for_type(&e.entry_type, base_k);
+    for page in 0..max_pages.max(1) {
         let want = (page + 1) * page_k;
-        // KNN is now type-local: all k slots go to same-type neighbours.
-        let neighbors = match cache.knn(e.entry_id, want, &e.entry_type) {
+        let neighbors = match cache.knn(entry.entry_id, want, &entry.entry_type) {
             Ok(n) => n,
             Err(err) => {
-                warn!("semantic KNN failed for entry {}: {err}", e.entry_id);
-                continue;
-            }
-        };
-        // Skip the ranks already revealed on earlier pages.
-        for (neighbor_id, dist) in neighbors.into_iter().skip(page * page_k) {
-            if dist > l2_threshold {
+                warn!("semantic KNN failed for entry {}: {err}", entry.entry_id);
                 break;
             }
-            let a = e.entry_id.min(neighbor_id);
-            let b = e.entry_id.max(neighbor_id);
+        };
+        let mut exhausted = false;
+        for (neighbor_id, dist) in neighbors.into_iter().skip(page * page_k) {
+            if dist > l2_threshold {
+                exhausted = true;
+                break;
+            }
+            if !all_entries.contains_key(&neighbor_id) {
+                continue; // already merged away
+            }
+            let a = entry.entry_id.min(neighbor_id);
+            let b = entry.entry_id.max(neighbor_id);
             if already.insert((a, b)) {
                 pairs.push((a, b));
             }
+        }
+        if exhausted {
+            break; // all further pages are strictly farther
         }
     }
     pairs
@@ -719,7 +787,7 @@ fn barrier_blocks(
 
 // ── Data loading ──────────────────────────────────────────────────────────────
 
-async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<Vec<EntryInfo>> {
+async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInfo>> {
     let entry_rows = db.all_entry_rows().await?;
     let source_rows: Vec<SourceRow> = db.all_source_rows().await?;
     let alias_rows: Vec<AliasRow> = db.all_alias_rows().await?;
@@ -784,47 +852,50 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<Vec<EntryInfo>> {
         let sources = sources_by_entry
             .get(&e.id)
             .map_or(&[][..], |v| v.as_slice());
-        let pairs: Vec<Pair> = sources
+        let mut pairs: Vec<Pair> = sources
             .iter()
             .map(|s| (s.source.clone(), s.identifier.clone()))
             .collect();
+        pairs.sort();
 
-        let duration_ms = sources.iter().find_map(|s| s.duration_ms);
-        let release_date = sources.iter().find_map(|s| s.release_date.clone());
-        let release_type = sources.iter().find_map(|s| s.release_type.clone());
-        let primary_type = sources.iter().find_map(|s| s.primary_type.clone());
+        // Each per-source attribute is kept as a sorted set rather than collapsed
+        // to one value, so the in-memory merge can reproduce it exactly.
+        let durations = dedup_sorted(sources.iter().filter_map(|s| s.duration_ms).collect());
+        let release_dates = dedup_sorted(
+            sources
+                .iter()
+                .filter_map(|s| s.release_date.clone())
+                .collect(),
+        );
+        let release_types = dedup_sorted(
+            sources
+                .iter()
+                .filter_map(|s| s.release_type.clone())
+                .collect(),
+        );
+        let primary_types = dedup_sorted(
+            sources
+                .iter()
+                .filter_map(|s| s.primary_type.clone())
+                .collect(),
+        );
 
-        // Collect aliases: prefer primary, deduplicate case-insensitively.
-        // sourced_aliases puts clean sources before video sources so that
-        // pick_main_title / pick_markers always see authoritative names first.
-        let mut seen_lower: HashSet<String> = HashSet::new();
-        let mut primary_alias: Option<String> = None;
-        let mut aliases: Vec<String> = Vec::new();
-        let mut sourced_aliases: Vec<(String, String)> = Vec::new();
-        for pass in 0..2usize {
-            for (src, id) in &pairs {
-                let is_video = VIDEO_SOURCES.contains(&src.as_str());
-                if (pass == 0) == is_video {
-                    continue; // pass 0 = clean sources, pass 1 = video sources
-                }
-                if let Some(pair_aliases) = aliases_by_pair.get(&(src.clone(), id.clone())) {
-                    let mut sorted: Vec<&&AliasRow> = pair_aliases.iter().collect();
-                    sorted.sort_by_key(|a| !a.primary_alias);
-                    for a in sorted {
-                        if primary_alias.is_none() && a.primary_alias && pass == 0 {
-                            primary_alias = Some(a.name.clone());
-                        }
-                        if seen_lower.insert(a.name.to_lowercase()) {
-                            aliases.push(a.name.clone());
-                        }
-                        sourced_aliases.push((src.clone(), a.name.clone()));
-                    }
+        // Collect every (source, name, primary) alias, then canonicalize. The
+        // canonical order (clean sources first) is what lets pick_main_title /
+        // pick_markers prefer authoritative names while staying reproducible.
+        let mut sourced_aliases: Vec<(String, String, bool)> = Vec::new();
+        for (src, id) in &pairs {
+            if let Some(pair_aliases) = aliases_by_pair.get(&(src.clone(), id.clone())) {
+                for a in pair_aliases {
+                    sourced_aliases.push((src.clone(), a.name.clone(), a.primary_alias));
                 }
             }
         }
-        let best_title = primary_alias.or_else(|| aliases.first().cloned());
+        let sourced_aliases = canon_sourced_aliases(sourced_aliases);
+        let aliases = derive_aliases(&sourced_aliases);
+        let best_title = pick_best_title(&sourced_aliases);
 
-        let peer_entry_ids: Vec<i64> = if e.entry_type == "artist" {
+        let mut peer_entry_ids: Vec<i64> = if e.entry_type == "artist" {
             artist_to_tracks
                 .get(&e.id)
                 .map(|s| s.iter().copied().collect())
@@ -835,6 +906,7 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<Vec<EntryInfo>> {
                 .map(|s| s.iter().copied().collect())
                 .unwrap_or_default()
         };
+        peer_entry_ids.sort_unstable();
 
         let track_positions = positions_by_track.get(&e.id).cloned().unwrap_or_default();
 
@@ -844,17 +916,135 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<Vec<EntryInfo>> {
             pairs,
             aliases,
             best_title,
-            duration_ms,
-            release_date,
-            release_type,
-            primary_type,
+            durations,
+            release_dates,
+            release_types,
+            primary_types,
             peer_entry_ids,
             track_positions,
             sourced_aliases,
         });
     }
 
-    Ok(infos)
+    Ok(infos.into_iter().map(|e| (e.entry_id, e)).collect())
+}
+
+// ── In-memory entry merge ─────────────────────────────────────────────────────
+
+/// Merge the loser's data into the winner in memory, mirroring what
+/// `MusicDb::merge_entries` does at the DB level (re-pointing all loser pairs
+/// to the winner). Called after the DB write so the winner's `EntryInfo` stays
+/// in sync with the DB for the remainder of the scoring pass.
+fn merge_entry_infos(winner: &mut EntryInfo, loser: &EntryInfo) {
+    // Union every collection and re-canonicalize with the same helpers
+    // build_entry_infos uses, so the merged winner is bit-identical to what a
+    // fresh DB reload would produce for the combined entry.
+    winner.pairs.extend(loser.pairs.iter().cloned());
+    winner.pairs.sort();
+    winner.pairs.dedup();
+
+    let mut sourced = std::mem::take(&mut winner.sourced_aliases);
+    sourced.extend(loser.sourced_aliases.iter().cloned());
+    winner.sourced_aliases = canon_sourced_aliases(sourced);
+    winner.aliases = derive_aliases(&winner.sourced_aliases);
+    winner.best_title = pick_best_title(&winner.sourced_aliases);
+
+    winner.durations = dedup_sorted(
+        winner
+            .durations
+            .iter()
+            .chain(&loser.durations)
+            .copied()
+            .collect(),
+    );
+    winner.release_dates = dedup_sorted(
+        winner
+            .release_dates
+            .iter()
+            .chain(&loser.release_dates)
+            .cloned()
+            .collect(),
+    );
+    winner.release_types = dedup_sorted(
+        winner
+            .release_types
+            .iter()
+            .chain(&loser.release_types)
+            .cloned()
+            .collect(),
+    );
+    winner.primary_types = dedup_sorted(
+        winner
+            .primary_types
+            .iter()
+            .chain(&loser.primary_types)
+            .cloned()
+            .collect(),
+    );
+
+    winner.peer_entry_ids = dedup_sorted(
+        winner
+            .peer_entry_ids
+            .iter()
+            .chain(&loser.peer_entry_ids)
+            .copied()
+            .collect(),
+    );
+    for &pos in &loser.track_positions {
+        if !winner.track_positions.contains(&pos) {
+            winner.track_positions.push(pos);
+        }
+    }
+}
+
+// ── Post-merge in-memory consistency helpers ──────────────────────────────────
+
+/// After merging `loser_id` into `winner_id` at the DB level, update every
+/// other entry's `peer_entry_ids` to replace `loser_id` with `winner_id`,
+/// mirroring what a DB reload would produce. Returns the IDs of every entry
+/// whose peer list was modified.
+fn propagate_peer_remap(
+    entries: &mut HashMap<i64, EntryInfo>,
+    loser_id: i64,
+    winner_id: i64,
+) -> Vec<i64> {
+    let affected: Vec<i64> = entries
+        .values()
+        .filter(|e| e.peer_entry_ids.contains(&loser_id))
+        .map(|e| e.entry_id)
+        .collect();
+    for &id in &affected {
+        if let Some(e) = entries.get_mut(&id) {
+            e.peer_entry_ids.retain(|&p| p != loser_id);
+            if !e.peer_entry_ids.contains(&winner_id) {
+                e.peer_entry_ids.push(winner_id);
+            }
+        }
+    }
+    affected
+}
+
+/// Move every pair in `scored` that involves `entry_id` back onto `work_queue`
+/// so it is re-scored after that entry was enriched with new data (duration,
+/// peer coverage) that may flip a previous DISTINCT or RELATE verdict to MERGE.
+fn drain_scored_for_entry(
+    entry_id: i64,
+    scored: &mut HashSet<(i64, i64)>,
+    queued: &mut HashSet<(i64, i64)>,
+    work_queue: &mut VecDeque<(i64, i64)>,
+) {
+    let to_revisit: Vec<(i64, i64)> = scored
+        .iter()
+        .copied()
+        .filter(|(a, b)| *a == entry_id || *b == entry_id)
+        .collect();
+    for pair in to_revisit {
+        scored.remove(&pair);
+        queued.remove(&pair);
+        work_queue.push_back(pair);
+        // Re-insert into queued so generate_semantic won't schedule it a second time.
+        queued.insert(pair);
+    }
 }
 
 // ── Report helpers ────────────────────────────────────────────────────────────
@@ -937,21 +1127,23 @@ async fn load_script(
     })
 }
 
-/// Score every candidate pair produced by `generate_candidates` with the given
-/// focus restriction. Prints each non-distinct verdict; applies DB writes when
-/// `config.apply_relates` is true. Returns `[merge, relate, distinct]` counts
-/// per entry type.
+/// Score candidate pairs with cascade: after each merge, update the winner's
+/// `EntryInfo` in memory, re-embed it if its title changed, and seed new KNN
+/// candidates for it into the work queue. This converges to a fixed point within
+/// a single call without re-scanning the full entry set.
+///
+/// `focus` restricts the initial seeding to a subset of entries (used by the
+/// incremental import path); merge cascades from those seeds are unrestricted.
+/// Returns `[merge, relate, distinct]` counts per entry type.
 async fn score_candidates(
     db: &MusicDb,
-    entries: &[EntryInfo],
+    mut entries: HashMap<i64, EntryInfo>,
     focus: Option<&HashSet<i64>>,
     ctx: &ScriptCtx<'_>,
     barrier: &HashMap<Pair, crate::pipeline::dedup::AnchorId>,
     config: &SoftMatchConfig,
     embed_cache: Option<&EmbeddingCache>,
 ) -> anyhow::Result<HashMap<String, [usize; 3]>> {
-    let entry_map: HashMap<i64, &EntryInfo> = entries.iter().map(|e| (e.entry_id, e)).collect();
-
     // Optional CSV output for manual quality review.
     let mut csv: Option<std::io::BufWriter<std::fs::File>> = if let Some(path) = &config.csv_path {
         let f = std::fs::File::create(path).with_context(|| format!("creating CSV file {path}"))?;
@@ -977,74 +1169,162 @@ async fn score_candidates(
         return Ok(stats);
     };
 
-    // Types still worth paging deeper into. Seeded with every concrete type
-    // present; a type drops out once a page's merge rate falls below the
-    // configured floor (or the page yields nothing new).
-    let mut active: HashSet<String> = entries
-        .iter()
-        .map(|e| e.entry_type.clone())
-        .filter(|t| t != "unknown")
-        .collect();
+    // `queued` tracks every pair ever added to `work_queue` or already decided,
+    // preventing duplicates. `scored` is a subset of `queued` for pairs that
+    // received a DISTINCT or RELATE verdict — they may be re-queued if one entry
+    // gains new data (duration, peer coverage) that could flip the verdict to MERGE.
+    // `loser_to_winner` lets us reroute a stale pair (A, loser) to (A, winner)
+    // when the loser has already been merged away before the pair is processed.
+    let mut queued: HashSet<(i64, i64)> = HashSet::new();
+    let mut scored: HashSet<(i64, i64)> = HashSet::new();
+    let mut loser_to_winner: HashMap<i64, i64> = HashMap::new();
+    let mut work_queue: VecDeque<(i64, i64)> = VecDeque::new();
 
-    let mut already: HashSet<(i64, i64)> = HashSet::new();
+    // Seed the queue from the focused entries (or all entries for a full scan).
+    let seed_ids: Vec<i64> = match focus {
+        Some(f) => f.iter().copied().collect(),
+        None => entries.keys().copied().collect(),
+    };
+    for id in seed_ids {
+        if let Some(entry) = entries.get(&id) {
+            let pairs = generate_semantic_candidates_for_entry(
+                entry,
+                &entries,
+                cache,
+                config.embed_k,
+                config.embed_sim_threshold,
+                config.embed_max_pages,
+                &mut queued,
+            );
+            work_queue.extend(pairs);
+        }
+    }
+    info!("Initial queue: {} candidate pair(s)", work_queue.len());
+
     let mut total_scored = 0usize;
 
-    for page in 0..config.embed_max_pages.max(1) {
-        if active.is_empty() {
-            break;
+    while let Some((orig_a, orig_b)) = work_queue.pop_front() {
+        // Fix 4: when one of the original pair members was merged away, reroute
+        // to its winner so the surviving partner is still compared against the
+        // absorbing entry.
+        let a = loser_to_winner.get(&orig_a).copied().unwrap_or(orig_a);
+        let b = loser_to_winner.get(&orig_b).copied().unwrap_or(orig_b);
+        if a == b {
+            continue; // both ended up as the same entry after rerouting
         }
-        let page_pairs = generate_semantic_candidates(
-            entries,
-            cache,
-            focus,
-            config.embed_k,
-            config.embed_sim_threshold,
-            page,
-            &active,
-            &mut already,
-        );
-        if page_pairs.is_empty() {
-            break;
+        let (id_a, id_b) = (a.min(b), a.max(b));
+        // If rerouting changed either endpoint, the resulting pair is new and may
+        // already be scheduled/decided — skip it if so. Original pairs (no rerouting)
+        // are already in `queued` from seeding and must not be re-checked here, or
+        // all of them would be skipped on the first `insert` returning false.
+        if (id_a, id_b) != (orig_a, orig_b) && !queued.insert((id_a, id_b)) {
+            continue;
         }
-        info!(
-            "Semantic page {page}: scoring {} candidate pair(s) across {} active type(s)",
-            page_pairs.len(),
-            active.len()
-        );
-        total_scored += page_pairs.len();
 
-        // Per-type (merges, scored) for this page only — drives whether the type
-        // is paged further.
-        let mut page_rate: HashMap<String, (usize, usize)> = HashMap::new();
+        let (ea, eb) = match (entries.get(&id_a), entries.get(&id_b)) {
+            (Some(a), Some(b)) => (a.clone(), b.clone()),
+            _ => continue,
+        };
 
-        for (id_a, id_b) in page_pairs {
-            let (Some(ea), Some(eb)) = (entry_map.get(&id_a), entry_map.get(&id_b)) else {
-                continue;
-            };
+        if barrier_blocks(&ea.pairs, &eb.pairs, barrier) {
+            if let Some(w) = &mut csv {
+                write_csv_row(w, "BARRIER", "", 0.0, "", &ea, &eb, ctx)?;
+            }
+            continue;
+        }
 
-            // Barrier-separated pairs: no RELATE between deliberately distinct entities.
-            if barrier_blocks(&ea.pairs, &eb.pairs, barrier) {
-                if let Some(w) = &mut csv {
-                    write_csv_row(w, "BARRIER", "", 0.0, "", ea, eb, ctx)?;
+        total_scored += 1;
+        let verdict = apply_candidate(db, &ea, &eb, ctx, config, &mut csv, &mut stats).await?;
+
+        // Track DISTINCT and RELATE verdicts: either can flip to MERGE if the
+        // entry gains new scoring-relevant data (duration, peer coverage) later.
+        if matches!(verdict, Verdict::Distinct | Verdict::Relate { .. }) {
+            scored.insert((id_a, id_b));
+        }
+
+        // On a real merge, update the winner in memory and cascade.
+        if matches!(verdict, Verdict::Merge { .. }) && config.apply_relates {
+            // apply_candidate calls merge_entries(ea, eb) → ea is loser, eb is winner.
+            let loser_id = ea.entry_id;
+            let winner_id = eb.entry_id;
+
+            loser_to_winner.insert(loser_id, winner_id);
+
+            if let Some(loser) = entries.remove(&loser_id) {
+                let winner_snapshot = {
+                    let winner = entries
+                        .get_mut(&winner_id)
+                        .expect("merge winner still in map");
+
+                    // Capture pre-merge state for enrichment detection (Fix 1).
+                    let old_duration_count = winner.durations.len();
+                    let old_peer_count = winner.peer_entry_ids.len();
+
+                    merge_entry_infos(winner, &loser);
+                    // Re-embed if the winner's best_title changed (stale check is fast).
+                    tokio::task::block_in_place(|| {
+                        embed_stale_entries(
+                            std::slice::from_ref(winner),
+                            &ctx.engine,
+                            &ctx.ast,
+                            &ctx.base_scope,
+                            &ctx.user_ctx,
+                            cache,
+                        );
+                    });
+
+                    // Fix 1+3: if the winner gained duration or peer coverage, pairs
+                    // that previously scored DISTINCT or RELATE against the winner may
+                    // now score MERGE — re-queue them for a fresh evaluation.
+                    let gained_duration = winner.durations.len() > old_duration_count;
+                    let gained_peers = winner.peer_entry_ids.len() > old_peer_count;
+                    if gained_duration || gained_peers {
+                        drain_scored_for_entry(
+                            winner_id,
+                            &mut scored,
+                            &mut queued,
+                            &mut work_queue,
+                        );
+                    }
+
+                    winner.clone()
+                };
+
+                // Fix 2: the loser's entry_id is gone from the DB, but other entries
+                // that listed it as a peer still hold the stale id. Remap them now
+                // so the in-memory view matches what a fresh DB reload would produce.
+                let affected = propagate_peer_remap(&mut entries, loser_id, winner_id);
+                for &affected_id in &affected {
+                    // Peer overlap changed → previously-scored pairs may now MERGE.
+                    drain_scored_for_entry(affected_id, &mut scored, &mut queued, &mut work_queue);
+                    // Seed new KNN candidates: embedding unchanged but peer data is richer.
+                    if let Some(entry) = entries.get(&affected_id).cloned() {
+                        let new_pairs = generate_semantic_candidates_for_entry(
+                            &entry,
+                            &entries,
+                            cache,
+                            config.embed_k,
+                            config.embed_sim_threshold,
+                            config.embed_max_pages,
+                            &mut queued,
+                        );
+                        work_queue.extend(new_pairs);
+                    }
                 }
-                continue;
-            }
 
-            let verdict = apply_candidate(db, ea, eb, ctx, config, &mut csv, &mut stats).await?;
-            let rate = page_rate.entry(ea.entry_type.clone()).or_insert((0, 0));
-            rate.1 += 1;
-            if matches!(verdict, Verdict::Merge { .. }) {
-                rate.0 += 1;
+                // Seed new KNN candidates for the winner (its embedding may have changed).
+                let new_pairs = generate_semantic_candidates_for_entry(
+                    &winner_snapshot,
+                    &entries,
+                    cache,
+                    config.embed_k,
+                    config.embed_sim_threshold,
+                    config.embed_max_pages,
+                    &mut queued,
+                );
+                work_queue.extend(new_pairs);
             }
         }
-
-        // Continue paging only the types whose merge rate this page held up.
-        active.retain(|t| match page_rate.get(t) {
-            Some(&(merges, scored)) if scored > 0 => {
-                merges as f64 / scored as f64 >= config.embed_page_merge_rate
-            }
-            _ => false,
-        });
     }
 
     info!("Scored {total_scored} candidate pair(s)");
@@ -1246,7 +1526,8 @@ pub async fn match_db(
     info!("Compiled dedup barrier in {t_dedup:.2?}");
 
     let t2 = Instant::now();
-    let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries).await;
+    let entries_slice: Vec<EntryInfo> = entries.values().cloned().collect();
+    let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries_slice).await;
     let t_embed = t2.elapsed();
     info!("Embedding phase in {t_embed:.2?}");
 
@@ -1258,7 +1539,7 @@ pub async fn match_db(
     let t4 = Instant::now();
     let stats = score_candidates(
         db,
-        &entries,
+        entries,
         None,
         &ctx,
         &barrier,
@@ -1307,11 +1588,12 @@ pub async fn match_new_entries(
     }
     let entries = build_entry_infos(db).await?;
     let (barrier, _) = dedup.compile(providers).await;
-    let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries).await;
+    let entries_slice: Vec<EntryInfo> = entries.values().cloned().collect();
+    let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries_slice).await;
     let ctx = load_script(&config.script_path, embed_cache.clone()).await?;
     score_candidates(
         db,
-        &entries,
+        entries,
         Some(new_entry_ids),
         &ctx,
         &barrier,
@@ -1396,6 +1678,203 @@ async fn open_embed_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn blank_entry(id: i64, peers: Vec<i64>) -> EntryInfo {
+        EntryInfo {
+            entry_id: id,
+            entry_type: "artist".to_string(),
+            pairs: vec![("test".to_string(), id.to_string())],
+            aliases: vec![],
+            best_title: None,
+            durations: vec![],
+            release_dates: vec![],
+            release_types: vec![],
+            primary_types: vec![],
+            peer_entry_ids: peers,
+            track_positions: vec![],
+            sourced_aliases: vec![],
+        }
+    }
+
+    /// Build a release-group entry carrying a single primary alias `title` on
+    /// source `src`, with the given durations.
+    fn titled_entry(id: i64, title: &str, src: &str, durations: Vec<i64>) -> EntryInfo {
+        let sourced_aliases = vec![(src.to_string(), title.to_string(), true)];
+        EntryInfo {
+            entry_id: id,
+            entry_type: "release_group".to_string(),
+            pairs: vec![(src.to_string(), id.to_string())],
+            aliases: derive_aliases(&sourced_aliases),
+            best_title: pick_best_title(&sourced_aliases),
+            durations: dedup_sorted(durations),
+            release_dates: vec![],
+            release_types: vec![],
+            primary_types: vec![],
+            peer_entry_ids: vec![],
+            track_positions: vec![],
+            sourced_aliases,
+        }
+    }
+
+    /// Fix 2: when a merge removes the loser, every other entry that listed it
+    /// as a peer should have the loser replaced by the winner.
+    #[test]
+    fn test_propagate_peer_remap_basic() {
+        let mut entries: HashMap<i64, EntryInfo> = HashMap::new();
+        // Artists A=1 and B=2 both credit track T10 (loser). C=3 does not.
+        entries.insert(1, blank_entry(1, vec![10, 30]));
+        entries.insert(2, blank_entry(2, vec![10, 40]));
+        entries.insert(3, blank_entry(3, vec![20, 30]));
+
+        let affected = propagate_peer_remap(&mut entries, 10, 20);
+
+        assert_eq!(affected.len(), 2);
+        assert!(affected.contains(&1));
+        assert!(affected.contains(&2));
+        assert!(!affected.contains(&3));
+
+        // A: T10 → T20; T20 was not previously listed → added.
+        let a = &entries[&1].peer_entry_ids;
+        assert!(!a.contains(&10));
+        assert!(a.contains(&20));
+        assert!(a.contains(&30));
+
+        // B: T10 → T20; T40 untouched.
+        let b = &entries[&2].peer_entry_ids;
+        assert!(!b.contains(&10));
+        assert!(b.contains(&20));
+        assert!(b.contains(&40));
+
+        // C: unchanged.
+        assert_eq!(entries[&3].peer_entry_ids, vec![20, 30]);
+    }
+
+    /// Fix 2: when the winner is already in an entry's peer list, the loser
+    /// must be removed without duplicating the winner.
+    #[test]
+    fn test_propagate_peer_remap_no_duplicate_winner() {
+        let mut entries: HashMap<i64, EntryInfo> = HashMap::new();
+        // Entry 1 already credits both loser (10) and winner (20).
+        entries.insert(1, blank_entry(1, vec![10, 20]));
+
+        propagate_peer_remap(&mut entries, 10, 20);
+
+        let peers = &entries[&1].peer_entry_ids;
+        assert!(!peers.contains(&10), "loser removed");
+        assert_eq!(
+            peers.iter().filter(|&&p| p == 20).count(),
+            1,
+            "winner not duplicated"
+        );
+    }
+
+    /// Fixes 1+3: DISTINCT- and RELATE-scored pairs involving the enriched entry
+    /// must be moved back onto the work queue for re-evaluation with the new data.
+    #[test]
+    fn test_drain_scored_for_entry_selective() {
+        let mut queued: HashSet<(i64, i64)> = HashSet::new();
+        let mut scored: HashSet<(i64, i64)> = HashSet::new();
+        let mut work_queue: VecDeque<(i64, i64)> = VecDeque::new();
+
+        let pair_13 = (1i64, 3i64);
+        let pair_14 = (1i64, 4i64);
+        let pair_25 = (2i64, 5i64); // unrelated — must not be touched
+        for &p in &[pair_13, pair_14, pair_25] {
+            queued.insert(p);
+            scored.insert(p);
+        }
+
+        drain_scored_for_entry(1, &mut scored, &mut queued, &mut work_queue);
+
+        // Only entry-1 pairs leave `scored`.
+        assert!(!scored.contains(&pair_13));
+        assert!(!scored.contains(&pair_14));
+        assert!(scored.contains(&pair_25));
+
+        // Those same pairs land in the work queue.
+        let in_queue: Vec<_> = work_queue.iter().copied().collect();
+        assert!(in_queue.contains(&pair_13));
+        assert!(in_queue.contains(&pair_14));
+        assert!(!in_queue.contains(&pair_25));
+
+        // Pairs remain in `queued` so generate_semantic won't schedule them again.
+        assert!(queued.contains(&pair_13));
+        assert!(queued.contains(&pair_14));
+        assert!(queued.contains(&pair_25));
+    }
+
+    /// merge_entry_infos recomputes best_title from the canonical alias set, so
+    /// the result is independent of which entry was the winner — matching what
+    /// build_entry_infos produces after a DB reload. With both aliases on the
+    /// same source, the lexicographically smaller title name wins.
+    #[test]
+    fn test_merge_recomputes_best_title_canonically() {
+        let mut winner = titled_entry(100, "わためのうた vol.1", "musicbrainz", vec![]);
+        let loser = titled_entry(50, "わためのうた vol.2", "musicbrainz", vec![]);
+        merge_entry_infos(&mut winner, &loser);
+        assert_eq!(winner.best_title.as_deref(), Some("わためのうた vol.1"));
+
+        // Swapping winner/loser yields the identical title — no orientation bias.
+        let mut winner2 = titled_entry(50, "わためのうた vol.2", "musicbrainz", vec![]);
+        let loser2 = titled_entry(100, "わためのうた vol.1", "musicbrainz", vec![]);
+        merge_entry_infos(&mut winner2, &loser2);
+        assert_eq!(winner2.best_title.as_deref(), winner.best_title.as_deref());
+    }
+
+    /// A clean-source alias must win the title slot over a video-source alias,
+    /// regardless of merge orientation (canonical order puts clean sources first).
+    #[test]
+    fn test_merge_best_title_prefers_clean_source() {
+        let mut winner = titled_entry(1, "Noisy MV Title", "youtube", vec![]);
+        let loser = titled_entry(2, "Clean Title", "musicbrainz", vec![]);
+        merge_entry_infos(&mut winner, &loser);
+        assert_eq!(winner.best_title.as_deref(), Some("Clean Title"));
+    }
+
+    /// Durations are a sorted, deduplicated union — never collapsed to one value
+    /// and never order-dependent.
+    #[test]
+    fn test_merge_unions_durations() {
+        let mut winner = titled_entry(1, "T", "musicbrainz", vec![325000, 324000]);
+        let loser = titled_entry(2, "T", "spotify", vec![308573, 324000]);
+        merge_entry_infos(&mut winner, &loser);
+        assert_eq!(winner.durations, vec![308573, 324000, 325000]);
+
+        // Orientation-independent.
+        let mut winner2 = titled_entry(2, "T", "spotify", vec![308573, 324000]);
+        let loser2 = titled_entry(1, "T", "musicbrainz", vec![325000, 324000]);
+        merge_entry_infos(&mut winner2, &loser2);
+        assert_eq!(winner2.durations, winner.durations);
+    }
+
+    /// Fix 4: when a pair (A, loser) is popped but the loser was already merged
+    /// away, the reroute logic in score_candidates maps loser→winner. Verify the
+    /// normalisation arithmetic (min/max ordering, self-pair elimination).
+    #[test]
+    fn test_loser_reroute_normalisation() {
+        // Simulate the reroute step inline so the logic is testable without a DB.
+        let reroute = |id_a: i64, id_b: i64, loser: i64, winner: i64| -> Option<(i64, i64)> {
+            let a = if id_a == loser { winner } else { id_a };
+            let b = if id_b == loser { winner } else { id_b };
+            if a == b {
+                None // self-pair after reroute → skip
+            } else {
+                Some((a.min(b), a.max(b)))
+            }
+        };
+
+        // (1, 5): 5 is the loser, 10 is the winner → reroute to (1, 10)
+        assert_eq!(reroute(1, 5, 5, 10), Some((1, 10)));
+
+        // (5, 20): 5 is loser, 10 is winner → reroute to (10, 20)
+        assert_eq!(reroute(5, 20, 5, 10), Some((10, 20)));
+
+        // (5, 10): 5 is loser, 10 is winner → both map to same entry → skip
+        assert_eq!(reroute(5, 10, 5, 10), None);
+
+        // No reroute needed (neither is a loser)
+        assert_eq!(reroute(3, 7, 5, 10), Some((3, 7)));
+    }
 
     /// The shipped example script must compile under the real engine and run its
     /// dependency-free naive embedding (no `ffi` feature, no inference plugin).
