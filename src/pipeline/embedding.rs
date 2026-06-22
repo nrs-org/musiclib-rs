@@ -117,9 +117,9 @@ impl EmbeddingCache {
         let conn = self.conn.lock().unwrap();
         let mut stale = Vec::new();
         for e in entries {
-            if table_for_type(&e.entry_type).is_none() {
+            let Some(table) = table_for_type(&e.entry_type) else {
                 continue;
-            }
+            };
             let Some(title) = &e.best_title else {
                 continue;
             };
@@ -130,8 +130,19 @@ impl EmbeddingCache {
                     |r| r.get(0),
                 )
                 .ok();
+            // Title mismatch (or no meta row) → stale.
+            // Title matches but embedding is absent from the correct type table
+            // (e.g. entry_type changed between runs) → also stale.
+            let in_correct_table = || {
+                conn.query_row(
+                    &format!("SELECT 1 FROM {table} WHERE entry_id = ?"),
+                    params![e.entry_id],
+                    |_| Ok(()),
+                )
+                .is_ok()
+            };
             match cached {
-                Some(ct) if ct == *title => {}
+                Some(ct) if ct == *title && in_correct_table() => {}
                 _ => stale.push((e.entry_id, title.clone(), e.entry_type.clone())),
             }
         }

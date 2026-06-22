@@ -72,7 +72,11 @@ impl VideoResponse {
             sources,
             extra: self.extra,
             specific_data: EntrySpecificData::Track {
-                duration_ms: self.duration.map(|d| (d * 1000.0) as i64),
+                duration_ms: self
+                    .duration
+                    .map(|d| (d * 1000.0) as i64)
+                    .into_iter()
+                    .collect(),
                 positions: Default::default(),
             },
             children: vec![Arc::new(CachedChildSource::from_children(vec![artist_ref]))],
@@ -149,10 +153,7 @@ mod tests {
 
         assert!(matches!(
             video.specific_data,
-            EntrySpecificData::Track {
-                duration_ms: Some(_),
-                ..
-            }
+            EntrySpecificData::Track { ref duration_ms, .. } if !duration_ms.is_empty()
         ));
 
         assert_eq!(

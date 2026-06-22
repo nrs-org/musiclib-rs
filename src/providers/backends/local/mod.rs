@@ -135,7 +135,7 @@ fn entry_to_entity_result(entry: LocalEntry, base: &std::path::Path) -> EntityRe
 
     let specific_data = match entry.entry_type {
         crate::providers::types::EntryType::Track => EntrySpecificData::Track {
-            duration_ms: entry.duration_ms,
+            duration_ms: entry.duration_ms.into_iter().collect(),
             positions: Default::default(),
         },
         crate::providers::types::EntryType::Release => EntrySpecificData::Release {
@@ -272,9 +272,9 @@ mod tests {
         assert!(matches!(
             track.specific_data,
             EntrySpecificData::Track {
-                duration_ms: Some(240000),
+                ref duration_ms,
                 ..
-            }
+            } if duration_ms == &vec![240000_i64]
         ));
         assert_eq!(track.aliases[0].name, "My Song");
         assert!(track.aliases[0].primary);

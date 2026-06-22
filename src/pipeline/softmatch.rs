@@ -860,7 +860,12 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
 
         // Each per-source attribute is kept as a sorted set rather than collapsed
         // to one value, so the in-memory merge can reproduce it exactly.
-        let durations = dedup_sorted(sources.iter().filter_map(|s| s.duration_ms).collect());
+        let durations = dedup_sorted(
+            sources
+                .iter()
+                .flat_map(|s| s.duration_ms.iter().copied())
+                .collect(),
+        );
         let release_dates = dedup_sorted(
             sources
                 .iter()

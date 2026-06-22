@@ -51,6 +51,10 @@ mod entry_source {
         pub fetched_at: i64,
         // Track-specific
         pub duration_ms: Option<i64>,
+        /// JSON array of all known durations in milliseconds, sorted and deduped.
+        /// Supersedes `duration_ms` when present; `duration_ms` holds only the
+        /// first element for backward compatibility.
+        pub duration_ms_all: Option<String>,
         // Release-specific
         pub release_type: Option<String>,
         pub num_discs: Option<i32>,
@@ -497,17 +501,25 @@ impl MusicDb {
             .unwrap()
             .as_secs() as i64;
 
-        let (duration_ms, release_type, num_discs, num_tracks, primary_type) = match specific_data {
-            EntrySpecificData::Track { duration_ms, .. } => (*duration_ms, None, None, None, None),
+        let (durations, release_type, num_discs, num_tracks, primary_type) = match specific_data {
+            EntrySpecificData::Track { duration_ms, .. } => {
+                (duration_ms.as_slice(), None, None, None, None)
+            }
             EntrySpecificData::Release {
                 release_type,
                 num_discs,
                 num_tracks,
-            } => (None, release_type.clone(), *num_discs, *num_tracks, None),
+            } => (&[][..], release_type.clone(), *num_discs, *num_tracks, None),
             EntrySpecificData::ReleaseGroup { primary_type } => {
-                (None, None, None, None, primary_type.clone())
+                (&[][..], None, None, None, primary_type.clone())
             }
-            EntrySpecificData::Artist => (None, None, None, None, None),
+            EntrySpecificData::Artist => (&[][..], None, None, None, None),
+        };
+        let duration_ms = durations.first().copied();
+        let duration_ms_all = if durations.len() > 1 {
+            Some(serde_json::to_string(durations).unwrap_or_default())
+        } else {
+            None
         };
 
         entry_source::Entity::insert(entry_source::ActiveModel {
@@ -517,6 +529,7 @@ impl MusicDb {
             release_date: Set(release_date.map(|s| s.to_string())),
             fetched_at: Set(now),
             duration_ms: Set(duration_ms),
+            duration_ms_all: Set(duration_ms_all),
             release_type: Set(release_type),
             num_discs: Set(num_discs),
             num_tracks: Set(num_tracks),
@@ -532,6 +545,7 @@ impl MusicDb {
                 entry_source::Column::ReleaseDate,
                 entry_source::Column::FetchedAt,
                 entry_source::Column::DurationMs,
+                entry_source::Column::DurationMsAll,
                 entry_source::Column::ReleaseType,
                 entry_source::Column::NumDiscs,
                 entry_source::Column::NumTracks,
@@ -567,6 +581,7 @@ impl MusicDb {
                 release_date: Set(None),
                 fetched_at: Set(now),
                 duration_ms: Set(None),
+                duration_ms_all: Set(None),
                 release_type: Set(None),
                 num_discs: Set(None),
                 num_tracks: Set(None),
@@ -774,14 +789,21 @@ impl MusicDb {
             .all(&self.db)
             .await?
             .into_iter()
-            .map(|m| SourceRow {
-                source: m.source,
-                identifier: m.identifier,
-                entry_id: m.entry_id,
-                duration_ms: m.duration_ms,
-                release_type: m.release_type,
-                primary_type: m.primary_type,
-                release_date: m.release_date,
+            .map(|m| {
+                let duration_ms = if let Some(all) = &m.duration_ms_all {
+                    serde_json::from_str::<Vec<i64>>(all).unwrap_or_default()
+                } else {
+                    m.duration_ms.into_iter().collect()
+                };
+                SourceRow {
+                    source: m.source,
+                    identifier: m.identifier,
+                    entry_id: m.entry_id,
+                    duration_ms,
+                    release_type: m.release_type,
+                    primary_type: m.primary_type,
+                    release_date: m.release_date,
+                }
             })
             .collect())
     }
@@ -912,7 +934,8 @@ pub struct SourceRow {
     pub source: String,
     pub identifier: String,
     pub entry_id: i64,
-    pub duration_ms: Option<i64>,
+    /// All known durations for this source, sorted and deduped.
+    pub duration_ms: Vec<i64>,
     pub release_type: Option<String>,
     pub primary_type: Option<String>,
     pub release_date: Option<String>,

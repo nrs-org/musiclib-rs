@@ -378,7 +378,9 @@ async fn evaluate_entry_data(
         CompiledEntryDataMatcher::DurationRange { min, max } => {
             let entity = ctx.get_entity(provider).await?;
             let duration = match &entity.specific_data {
-                EntrySpecificData::Track { duration_ms, .. } => duration_ms.map(|d| d as u64),
+                EntrySpecificData::Track { duration_ms, .. } => {
+                    duration_ms.first().map(|d| *d as u64)
+                }
                 _ => None,
             };
             let Some(duration) = duration else {

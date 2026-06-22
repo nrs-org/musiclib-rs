@@ -117,6 +117,14 @@ pub struct MusicBrainzConfig {
     /// falls back to the public MetaBrainz server when unset.
     #[serde(default = "MusicBrainzConfig::default_dump_base_url")]
     pub dump_base_url: Option<Credential>,
+    /// When `true` (the default), recording fetches include `releases+media+recordings`
+    /// to collect all per-release track lengths. This makes duration comparison in
+    /// softmatch more robust when cross-matching MB recordings against Discogs or
+    /// other sources that report the track duration from a specific pressing.
+    /// Set to `false` to use only the recording-level aggregate `length` field
+    /// and avoid the larger API response.
+    #[serde(default = "MusicBrainzConfig::default_fetch_release_durations")]
+    pub fetch_release_durations: bool,
 }
 
 impl MusicBrainzConfig {
@@ -132,6 +140,9 @@ impl MusicBrainzConfig {
     fn default_dump_base_url() -> Option<Credential> {
         Some(Credential::from_env("MUSICBRAINZ_DUMP_BASE_URL"))
     }
+    fn default_fetch_release_durations() -> bool {
+        true
+    }
 }
 
 impl Default for MusicBrainzConfig {
@@ -141,6 +152,7 @@ impl Default for MusicBrainzConfig {
             base_url: Self::default_base_url(),
             mirror_db: Self::default_mirror_db(),
             dump_base_url: Self::default_dump_base_url(),
+            fetch_release_durations: Self::default_fetch_release_durations(),
         }
     }
 }
@@ -321,6 +333,7 @@ pub fn build_providers(
                 default_mirror_db.display()
             );
         }
+        provider = provider.with_fetch_release_durations(cfg.fetch_release_durations);
         providers.push(Arc::new(provider));
     }
 

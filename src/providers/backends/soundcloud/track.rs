@@ -68,7 +68,11 @@ impl TrackResponse {
             sources,
             extra: self.extra,
             specific_data: EntrySpecificData::Track {
-                duration_ms: self.duration.map(|d| (d * 1000.0) as i64),
+                duration_ms: self
+                    .duration
+                    .map(|d| (d * 1000.0) as i64)
+                    .into_iter()
+                    .collect(),
                 positions: Default::default(),
             },
             children: vec![Arc::new(CachedChildSource::from_children(vec![artist_ref]))],
@@ -149,9 +153,9 @@ mod tests {
         assert!(matches!(
             track.specific_data,
             EntrySpecificData::Track {
-                duration_ms: Some(254446),
+                ref duration_ms,
                 ..
-            }
+            } if duration_ms == &vec![254446_i64]
         ));
 
         assert_eq!(

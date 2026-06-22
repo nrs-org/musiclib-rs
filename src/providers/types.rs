@@ -63,7 +63,10 @@ pub struct TrackPosition {
 // specific data for different entry types
 pub enum EntrySpecificData {
     Track {
-        duration_ms: Option<i64>,
+        /// All known durations for this track in milliseconds, sorted and
+        /// deduped. Multiple values arise when different sources (e.g. MB
+        /// release tracks) report slightly different lengths.
+        duration_ms: Vec<i64>,
         positions: HashMap<String, TrackPosition>,
     },
     Release {

@@ -61,7 +61,7 @@ pub async fn get_track(client: &DiscogsClient, url: &str) -> Result<EntityResult
                         sources: [(SOURCE.into(), HashSet::from([canonical]))].into(),
                         extra: serde_json::Value::Null,
                         specific_data: EntrySpecificData::Track {
-                            duration_ms,
+                            duration_ms: duration_ms.into_iter().collect(),
                             positions: position
                                 .map(|p| [(SOURCE.into(), p)].into())
                                 .unwrap_or_default(),
@@ -148,9 +148,9 @@ mod tests {
         assert!(matches!(
             track.specific_data,
             EntrySpecificData::Track {
-                duration_ms: Some(229_000),
+                ref duration_ms,
                 ..
-            }
+            } if duration_ms == &vec![229_000_i64]
         ));
 
         // Position

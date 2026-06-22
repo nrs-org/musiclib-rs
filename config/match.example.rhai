@@ -389,6 +389,62 @@ fn parse_clean_title(title) {
     #{ main: main, markers: markers }
 }
 
+/// Tokenize a video title into all candidate segments by extracting both
+/// bracket-delimited content (【...】, (...), [...], （...）) and the
+/// separator-split parts of the remaining text. Both pools can contain
+/// valid song titles, so neither is discarded before classification.
+fn video_title_tokens(title) {
+    let tokens = [];
+
+    // Separator-split parts of the text outside brackets come first — the song
+    // name is most commonly in the main body, not inside brackets.
+    let stripped = re_replace_all("【[^】]*】|\\([^)]*\\)|\\[[^\\]]*\\]|（[^）]*）", " ", title);
+    stripped.trim();
+    let seps = [" - ", " – ", " / ", "／", " ｜ ", " | ", "〜", "～"];
+    let parts = [stripped];
+    for sep in seps {
+        let candidate = [];
+        for b in parts {
+            for p in b.split(sep) { let t = p; t.trim(); if t != "" { candidate.push(t); } }
+        }
+        if candidate.len() > parts.len() { parts = candidate; break; }
+    }
+    for p in parts { tokens.push(p); }
+
+    // Bracket content appended after — valid but lower priority than the main body.
+    for cap in re_captures_all("【([^】]*)】|\\(([^)]*)\\)|\\[([^\\]]*)\\]|（([^）]*)）", title) {
+        for i in 1..cap.len() {
+            if cap[i] != "" { let t = cap[i]; t.trim(); if t != "" { tokens.push(t); } break; }
+        }
+    }
+
+    tokens
+}
+
+/// Classify a single video title token into one of:
+///   "title"    — candidate song name
+///   "noise"    — upload metadata (MV, official, etc.)
+///   "modifier" — version descriptor (live, remix, …)
+///   "credit"   — artist-credit block ("Artist (Cover)", "feat. X", …)
+fn classify_video_token(tok) {
+    let tl = tok.to_lower(); tl.trim();
+    let noise = ["music video", "mv", "official", "official video", "official audio",
+        "official mv", "lyric video", "lyrics", "audio", "visualizer", "animation",
+        "short", "teaser", "trailer", "full ver", "full version", "pv", "cm",
+        "歌ってみた", "歌い手", "カバー", "cover",
+        "topic"];  // YouTube auto-generated artist channels append " - Topic"
+    if noise.contains(tl) { return "noise"; }
+    if re_is_match("(?i)^(live|remix|instrumental|acoustic|short ver\\.?|tv size|off vocal|karaoke)$", tl) {
+        return "modifier";
+    }
+    // "Artist (Cover)" / "Artist (feat. X)" / "Artist (歌ってみた)" — the block
+    // as a whole is an artist-credit, not a song name.
+    if re_is_match("(?i)\\(\\s*(cover|カバー|歌ってみた|feat\\.?.*)\\s*\\)\\s*$", tok) {
+        return "credit";
+    }
+    "title"
+}
+
 /// Parse a video platform title (YouTube, NicoVideo) into #{main, blocks}.
 fn parse_video_title(title) {
     // 1. 『song』 / 「song」 → unambiguous main title
@@ -399,42 +455,28 @@ fn parse_video_title(title) {
         return #{ main: main, blocks: [main] };
     }
 
-    // 2. Remove 【...】 blocks
-    let stripped = re_replace_all("【[^】]*】", " ", title);
-    stripped.trim();
+    // 2. Tokenize (bracket content + separator-split remainder), then classify.
+    //    Pick the first token classified as "title"; fall back to first non-noise
+    //    token so we always return something rather than an empty string.
+    let tokens = video_title_tokens(title);
+    let title_toks = tokens.filter(|t| classify_video_token(t) == "title");
+    let main = if title_toks.len() > 0 {
+        title_toks[0]
+    } else {
+        let non_noise = tokens.filter(|t| classify_video_token(t) != "noise");
+        if non_noise.len() > 0 { non_noise[0] } else { "" }
+    };
 
-    // 3. Split on the first separator that actually increases block count
-    let seps = [" - ", " – ", " / ", "／", " ｜ ", " | ", "〜", "～"];
-    let blocks = [stripped];
-    for sep in seps {
-        let candidate = [];
-        for b in blocks {
-            for part in b.split(sep) {
-                let t = part;
-                t.trim();
-                if t != "" { candidate.push(t); }
-            }
-        }
-        if candidate.len() > blocks.len() { blocks = candidate; break; }
-    }
-
-    // 4. Filter noise
-    let noise = ["music video", "mv", "official", "official video", "official audio",
-        "official mv", "lyric video", "lyrics", "audio", "visualizer", "animation",
-        "short", "teaser", "trailer", "full ver", "full version", "pv", "cm",
-        "歌ってみた", "歌い手", "カバー"];
-    let non_noise = blocks.filter(|b| !noise.contains(b.to_lower().trim()));
-
-    // 5. Longest surviving block = best guess at main title
-    let main = "";
-    for b in non_noise { if b.len() > main.len() { main = b; } }
-
-    #{ main: main, blocks: non_noise }
+    #{ main: main, blocks: title_toks }
 }
 
 /// Extract version/variant markers from a title as a space-separated string of
 /// canonical tokens. Empty string = no markers.
 fn version_tokens(title) {
+    // Strip "hololive" / "ホロライブ" before scanning so the embedded "ライブ"
+    // doesn't trip the live-version rule.
+    let title = re_replace_all("(?i)hololive|ホロライブ", "", title);
+
     let rules = [
         ["live", "live"], ["ライブ", "live"],
         ["remix", "remix"], ["リミックス", "remix"],
@@ -452,12 +494,36 @@ fn version_tokens(title) {
     ];
 
     let found = #{};
+
+    // Scan parenthesised/bracketed blocks first.
     let paren_caps = re_captures_all("(?i)\\(([^)]+)\\)|\\[([^\\]]+)\\]", title);
     for cap in paren_caps {
         let content = if cap[1] != "" { cap[1] } else { cap[2] };
         let cl = content.to_lower();
         for rule in rules { if cl.contains(rule[0]) { found[rule[1]] = true; } }
+        // Generic catch-all: any "word ver[.]" or "word version" inside brackets.
+        // Preserve the specific word so "Ouen ver." and "Kenko ver." don't collide.
+        let ver_caps = re_captures_all("(?i)(\\w+)\\s+ver\\.?$|(\\w+)\\s+version$", cl);
+        if ver_caps.len() > 0 {
+            let w = if ver_caps[0][1] != "" { ver_caps[0][1] } else { ver_caps[0][2] };
+            found["named:" + w] = true;
+        }
     }
+
+    // Scan hyphen-delimited blocks: -Foo ver.- / -Foo ver-
+    // These are common in Japanese music titles (e.g. "-Ouen ver.-").
+    let hyphen_caps = re_captures_all("(?i)-([^-]+ver\\.?)-", title);
+    for cap in hyphen_caps {
+        let cl = cap[1].to_lower();
+        for rule in rules { if cl.contains(rule[0]) { found[rule[1]] = true; } }
+        let ver_caps = re_captures_all("(?i)(\\w+)\\s+ver\\.?$", cl);
+        if ver_caps.len() > 0 {
+            found["named:" + ver_caps[0][1]] = true;
+        } else {
+            found["alt_version"] = true;
+        }
+    }
+
     let tl = title.to_lower();
     for rule in rules { if tl.contains(rule[0]) { found[rule[1]] = true; } }
 
@@ -601,6 +667,21 @@ fn same_release(a, b) {
     false
 }
 
+fn title_numbers(title) {
+    re_captures_all("\\d+(?:[.,]\\d+)?", title).map(|cap| cap[0])
+}
+
+// True when both entries have numbers in their main title and at least one
+// number on side A is absent from side B — numbered series (vol.N, Part N,
+// No.N, …) are distinct releases, not variants of each other.
+fn numbers_conflict(a, b) {
+    let na = title_numbers(pick_main_title(a));
+    let nb = title_numbers(pick_main_title(b));
+    if na.len() == 0 || nb.len() == 0 { return false; }
+    for n in na { if !nb.contains(n) { return true; } }
+    false
+}
+
 fn same_release_position(a, b) {
     for ap in a.track_positions {
         if ap.track_no == () { continue; }
@@ -688,6 +769,16 @@ fn decide_track(ctx, a, b) {
         return merge(t, "MV short/cut version, same song");
     }
 
+    // Exact title + authoritative cross-link → merge even when duration is
+    // missing or slightly over the ±2s gate.  Artist overlap alone is not
+    // enough (the same artist releases many distinct tracks with identical
+    // titles); we require a shared authoritative ID (ISRC, MB, Spotify) or
+    // the same position in the same release.
+    let has_auth_corroboration = shared_count_authoritative_ids(a, b) > 0 || same_release(a, b);
+    if title_exact(a, b) && !version_differs && t >= MERGE_MIN && has_auth_corroboration {
+        return merge(t, "exact title + authoritative corroboration, no reliable duration");
+    }
+
     if has_corroboration {
         let kind = classify_version(va, vb);
         let reason = if dur_known(a, b) {
@@ -720,26 +811,36 @@ fn classify_version(va, vb) {
 
 fn decide_artist(ctx, a, b) {
     let MERGE_MIN  = 0.90;
-    let RELATE_MIN = 0.80;
+    let RELATE_MIN = 0.87;
 
     let sim = max(alias_best(a, b), if title_exact(a, b) { 1.0 } else { jaccard(normalize(pick_main_title(a)), normalize(pick_main_title(b))) });
     if sim < RELATE_MIN { return distinct(); }
 
     let has_corroboration = artist_overlap(a, b) > 0.0 || shared_count_authoritative_ids(a, b) > 0;
-    if sim >= MERGE_MIN && has_corroboration {
-        return merge(sim, "alias match + shared_count credits or authoritative ID");
+    // title_exact without corroboration: same name on different platforms → merge.
+    if sim >= MERGE_MIN && (has_corroboration || title_exact(a, b)) {
+        return merge(sim, if has_corroboration {
+            "alias match + shared credits or authoritative ID"
+        } else {
+            "exact alias match across platforms"
+        });
     }
 
-    relate("same_artist", sim * 0.75, "alias match, no shared_count credits")
+    relate("same_artist", sim * 0.75, "alias match, no shared credits")
 }
 
 // ── Releases ──────────────────────────────────────────────────────────────────
 
 fn decide_release(ctx, a, b) {
+    let MERGE_MIN  = 0.90;
     let RELATE_MIN = 0.82;
 
+    if numbers_conflict(a, b) { return distinct(); }
     let t = main_title_sim(ctx, a, b);
     if t < RELATE_MIN { return distinct(); }
+    if title_exact(a, b) && shared_count_authoritative_ids(a, b) > 0 {
+        return merge(max(t, MERGE_MIN), "exact title + shared authoritative ID");
+    }
     relate("release_variant", t, "title match — likely release variant")
 }
 
@@ -748,6 +849,7 @@ fn decide_release(ctx, a, b) {
 fn decide_rg(ctx, a, b) {
     let MERGE_MIN = 0.85;
 
+    if numbers_conflict(a, b) { return distinct(); }
     let t = main_title_sim(ctx, a, b);
     if t < MERGE_MIN { return distinct(); }
     if artist_overlap(a, b) >= 0.5 || title_exact(a, b) {

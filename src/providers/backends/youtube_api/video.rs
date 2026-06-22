@@ -131,7 +131,7 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                 sources: [(SOURCE.into(), HashSet::from([url]))].into(),
                 extra: serde_json::to_value(&v).unwrap_or_default(),
                 specific_data: EntrySpecificData::Track {
-                    duration_ms,
+                    duration_ms: duration_ms.into_iter().collect(),
                     positions: Default::default(),
                 },
                 children: vec![Arc::new(CachedChildSource::from_children(vec![ChildRef {
@@ -222,9 +222,9 @@ mod tests {
         assert!(matches!(
             video.specific_data,
             EntrySpecificData::Track {
-                duration_ms: Some(132000),
+                ref duration_ms,
                 ..
-            },
+            } if duration_ms == &vec![132000_i64]
         ));
         let mut children_cursor = video.children[0].cursor();
         let (child, _) = child_next(&mut children_cursor)

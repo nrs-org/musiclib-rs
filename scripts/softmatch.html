@@ -39,6 +39,12 @@
   #approve-all-btn:hover { background: #166534; }
   #export-btn { background: #1d4ed8; border: none; color: white; border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 12px; font-family: inherit; font-weight: 700; }
   #export-btn:hover { background: #2563eb; }
+  #undo-btn { background: var(--surface); border: 1px solid var(--border); color: var(--muted); border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 12px; font-family: inherit; font-weight: 700; }
+  #undo-btn:hover { border-color: var(--accent); color: var(--accent); }
+  #clear-orphaned-btn { background: var(--surface); border: 1px solid var(--border); color: var(--muted); border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 12px; font-family: inherit; font-weight: 700; }
+  #clear-orphaned-btn:hover { border-color: var(--relate-border); color: var(--relate-text); }
+  #reset-btn { background: var(--barrier-bg); border: 1px solid var(--barrier-border); color: var(--barrier-text); border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 12px; font-family: inherit; font-weight: 700; }
+  #reset-btn:hover { background: #5b0f0f; }
 
   /* ── List ── */
   #list { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
@@ -132,6 +138,7 @@
   <div class="filter-group">
     <label>Verdict:</label>
     <button class="filter-btn active" data-filter="verdict" data-value="">All</button>
+    <button class="filter-btn" data-filter="verdict" data-value="POS">Positives</button>
     <button class="filter-btn" data-filter="verdict" data-value="MERGE">MERGE</button>
     <button class="filter-btn" data-filter="verdict" data-value="RELATE">RELATE</button>
     <button class="filter-btn" data-filter="verdict" data-value="DISTINCT">DISTINCT</button>
@@ -156,6 +163,9 @@
   <input id="search" type="text" placeholder="Search title / source…" autocomplete="off">
   <button id="approve-all-btn">Approve All Visible</button>
   <button id="export-btn">Export Labels JSON</button>
+  <button id="undo-btn">↶ Undo</button>
+  <button id="clear-orphaned-btn">Clear Orphaned</button>
+  <button id="reset-btn">Reset All</button>
 </div>
 </div>
 
@@ -168,7 +178,7 @@
 <div id="cursor-hint">
   <kbd>j</kbd>/<kbd>k</kbd> next/prev &nbsp; <kbd>]</kbd>/<kbd>[</kbd> next/prev unlabeled<br>
   <kbd>a</kbd> approve &nbsp; <kbd>m</kbd> MERGE &nbsp; <kbd>d</kbd> DISTINCT<br>
-  <kbd>r</kbd> RELATE (cycle kind with <kbd>R</kbd>) &nbsp; <kbd>x</kbd> clear<br>
+  <kbd>r</kbd> RELATE (cycle kind with <kbd>R</kbd>) &nbsp; <kbd>x</kbd> clear &nbsp; <kbd>u</kbd> undo<br>
   <kbd>g</kbd><kbd>g</kbd> top &nbsp; <kbd>G</kbd> bottom &nbsp; <kbd>/</kbd> search &nbsp; <kbd>Esc</kbd> blur
 </div>
 
@@ -229,6 +239,27 @@ function loadLabels() {
   try { labels = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch { labels = {}; }
 }
 function saveLabels() { localStorage.setItem(LS_KEY, JSON.stringify(labels)); }
+
+// ── Undo (snapshot stack) ─────────────────────────────────────────────────
+let undoStack = [];
+// Snapshot the whole labels map *before* a mutation. Cheap (a few hundred keys)
+// and correct for bulk ops too. Dedupes consecutive identical states so a
+// note's onchange+onblur pair doesn't eat two undo steps.
+function pushUndo() {
+  const snap = JSON.stringify(labels);
+  if (undoStack[undoStack.length - 1] === snap) return;
+  undoStack.push(snap);
+  if (undoStack.length > 100) undoStack.shift();
+}
+function undo() {
+  if (!undoStack.length) return;
+  labels = JSON.parse(undoStack.pop());
+  saveLabels();
+  updateStats();
+  currentFP = filteredPairs();
+  rebuildCumH();
+  paintWindow(wStart);   // refresh in place, keep scroll position
+}
 
 // ── Source formatting ─────────────────────────────────────────────────────
 function parseSources(raw) {
@@ -332,6 +363,7 @@ function renderCard(p, key, label) {
 
 // ── Actions ───────────────────────────────────────────────────────────────
 function doApprove(key, btn) {
+  pushUndo();
   const pIdx = currentFP.findIndex(p => pairKey(p) === key);
   if (pIdx >= 0) currentIdx = pIdx;
   const existing = labels[key] || {};
@@ -340,6 +372,7 @@ function doApprove(key, btn) {
   nextUnlabeled(+1);
 }
 function doSet(key, verdict, kind, btn) {
+  pushUndo();
   const pIdx = currentFP.findIndex(p => pairKey(p) === key);
   if (pIdx >= 0) currentIdx = pIdx;
   const existing = labels[key] || {};
@@ -348,6 +381,7 @@ function doSet(key, verdict, kind, btn) {
   if (verdict === 'MERGE' || verdict === 'DISTINCT') nextUnlabeled(+1);
 }
 function doRelate(key, btn) {
+  pushUndo();
   const existing = labels[key] || {};
   const sel = document.getElementById('kind-' + key);
   const kind = sel ? sel.value : 'alt_version';
@@ -355,6 +389,7 @@ function doRelate(key, btn) {
   saveLabels(); updateStats(); rerenderCard(key);
 }
 function doSetKind(key, sel) {
+  pushUndo();
   const existing = labels[key] || {};
   if (existing.verdict === 'RELATE') {
     labels[key] = { ...existing, kind: sel.value };
@@ -362,11 +397,13 @@ function doSetKind(key, sel) {
   }
 }
 function doNote(key, note) {
+  pushUndo();
   const existing = labels[key] || {};
   labels[key] = { ...existing, note };
   saveLabels();
 }
 function doClear(key, btn) {
+  pushUndo();
   delete labels[key];
   saveLabels(); updateStats(); rerenderCard(key);
 }
@@ -409,10 +446,11 @@ function rerenderCard(key) {
 
 // ── Stats & progress ──────────────────────────────────────────────────────
 function updateStats() {
-  const total = allPairs.length;
+  const scoped = scopedPairs();
+  const total = scoped.length;
   const activeKeys = new Set(allPairs.map(pairKey));
   let labeled = 0, approved = 0, overridden = 0, orphaned = 0;
-  allPairs.forEach(p => {
+  scoped.forEach(p => {
     const l = labels[pairKey(p)];
     if (!l) return;
     labeled++;
@@ -449,14 +487,20 @@ function matchesSearch(p) {
     || (p.reason||'').toLowerCase().includes(q);
 }
 
+function matchesVerdict(p) {
+  if (!filters.verdict) return true;
+  if (filters.verdict === 'POS') return p.verdict === 'MERGE' || p.verdict === 'RELATE';
+  return p.verdict === filters.verdict;
+}
+
+// Current universe ignoring the pending/approved status filter — the denominator
+// for progress, so labeling a scoped subset (e.g. Positives) reads as 100%.
+function scopedPairs() {
+  return allPairs.filter(p => matchesVerdict(p) && (!filters.type || p.type === filters.type) && matchesSearch(p));
+}
+
 function filteredPairs() {
-  return allPairs.filter(p => {
-    if (filters.verdict && p.verdict !== filters.verdict) return false;
-    if (filters.type && p.type !== filters.type) return false;
-    if (filters.status && getLabelStatus(p) !== filters.status) return false;
-    if (!matchesSearch(p)) return false;
-    return true;
-  });
+  return scopedPairs().filter(p => !filters.status || getLabelStatus(p) === filters.status);
 }
 
 // ── Virtual list ─────────────────────────────────────────────────────────
@@ -551,6 +595,7 @@ window.addEventListener('scroll', () => {
 
 function render() {
   currentIdx = -1;
+  updateStats();
   currentFP = filteredPairs();
   rebuildCumH();
   paintWindow(0);
@@ -563,6 +608,7 @@ document.getElementById('approve-all-btn').onclick = () => {
   const pending = visible.filter(p => getLabelStatus(p) === 'pending');
   if (pending.length === 0) return;
   if (!confirm(`Approve all ${pending.length} visible pending pair(s)?`)) return;
+  pushUndo();
   pending.forEach(p => {
     const key = pairKey(p);
     const existing = labels[key] || {};
@@ -598,6 +644,32 @@ document.getElementById('export-btn').onclick = () => {
   const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = 'softmatch_labels.json'; a.click();
+};
+
+// ── Undo / clear labels ────────────────────────────────────────────────────
+document.getElementById('undo-btn').onclick = () => {
+  if (!undoStack.length) { alert('Nothing to undo.'); return; }
+  undo();
+};
+
+document.getElementById('clear-orphaned-btn').onclick = () => {
+  const activeKeys = new Set(allPairs.map(pairKey));
+  const orphans = Object.keys(labels).filter(k => !activeKeys.has(k));
+  if (orphans.length === 0) { alert('No orphaned labels — every saved label matches a pair in this CSV.'); return; }
+  if (!confirm(`Delete ${orphans.length} orphaned label(s)? These belong to pairs no longer in this CSV (e.g. from a previous DB). Labels matching current pairs are kept.`)) return;
+  pushUndo();
+  orphans.forEach(k => delete labels[k]);
+  saveLabels(); updateStats(); render();
+};
+
+document.getElementById('reset-btn').onclick = () => {
+  const n = Object.keys(labels).length;
+  if (n === 0) { alert('No saved labels to reset.'); return; }
+  if (!confirm(`Reset ALL ${n} saved label(s)? Export first if unsure (you can still undo with u right after).`)) return;
+  pushUndo();
+  labels = {};
+  localStorage.removeItem(LS_KEY);
+  updateStats(); render();
 };
 
 // ── Cursor / keyboard nav ─────────────────────────────────────────────────
@@ -675,6 +747,7 @@ document.addEventListener('keydown', e => {
     case 'm': { const k = currentKey(); if (k) doSet(k, 'MERGE', ''); break; }
     case 'd': { const k = currentKey(); if (k) doSet(k, 'DISTINCT', ''); break; }
     case 'x': { const k = currentKey(); if (k) doClear(k); break; }
+    case 'u': undo(); break;
     case 'r': {
       const k = currentKey(); if (!k) break;
       const existing = labels[k];

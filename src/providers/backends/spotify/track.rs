@@ -144,7 +144,7 @@ pub async fn get_track(client: &SpotifyClient, url: &str) -> Result<EntityResult
             sources,
             extra: t.extra.clone(),
             specific_data: EntrySpecificData::Track {
-                duration_ms: Some(t.duration_ms),
+                duration_ms: vec![t.duration_ms],
                 positions: [(SOURCE.into(), position.clone().unwrap())].into(),
             },
             children: vec![
@@ -207,9 +207,9 @@ mod tests {
         assert!(matches!(
             track.specific_data,
             EntrySpecificData::Track {
-                duration_ms: Some(229233),
+                ref duration_ms,
                 ..
-            }
+            } if duration_ms == &vec![229233_i64]
         ));
 
         // Sources: canonical URL + ISRC

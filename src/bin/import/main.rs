@@ -56,6 +56,9 @@ struct Args {
     /// Skip the pre-import dedup pass.
     #[arg(long)]
     skip_dedup: bool,
+    /// Skip the post-import online soft-match pass.
+    #[arg(long)]
+    skip_softmatch: bool,
 }
 
 /// Load YAML config from an explicit path (errors if missing) or a default
@@ -200,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
     // Online soft-match: if match.rhai exists, compare newly-imported entries
     // against the rest of the library and apply decisions immediately.
     let script_path = config_dir.join("match.rhai");
-    if script_path.exists() {
+    if !args.skip_softmatch && script_path.exists() {
         let embed_db = app_dirs::data_dir().join("embeddings.db");
         let soft_cfg = SoftMatchConfig {
             script_path: script_path.display().to_string(),

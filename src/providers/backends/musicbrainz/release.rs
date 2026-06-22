@@ -373,16 +373,16 @@ mod tests {
             .and_then(|s| s.iter().next())
             .expect("expected recording source url")
             .clone();
-        let rec = get_recording(&client, &recording_url).await?;
+        let rec = get_recording(&client, &recording_url, false).await?;
 
         assert_eq!(rec.aliases.len(), 1);
         assert_eq!(rec.aliases[0].name, "Beautiful Circle");
         assert!(matches!(
             rec.specific_data,
             EntrySpecificData::Track {
-                duration_ms: Some(229000),
+                ref duration_ms,
                 ..
-            }
+            } if duration_ms == &vec![229000_i64]
         ));
         assert_eq!(
             rec.sources.get(SOURCE).unwrap(),

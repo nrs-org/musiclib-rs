@@ -40,6 +40,7 @@ pub const EXTERNAL_TYPE_RECORDING: &str = "musicbrainz:recording";
 pub struct Provider {
     client: MusicBrainzClient,
     mirror_db: Option<Arc<Mutex<rusqlite::Connection>>>,
+    pub fetch_release_durations: bool,
 }
 
 impl Provider {
@@ -47,6 +48,7 @@ impl Provider {
         Ok(Self {
             client: MusicBrainzClient::new(token)?,
             mirror_db: None,
+            fetch_release_durations: true,
         })
     }
 
@@ -57,6 +59,7 @@ impl Provider {
         Ok(Self {
             client: MusicBrainzClient::new_with_client(client, token)?,
             mirror_db: None,
+            fetch_release_durations: true,
         })
     }
 
@@ -68,6 +71,7 @@ impl Provider {
         Ok(Self {
             client: MusicBrainzClient::new_with_client_and_base_url(client, token, base_url)?,
             mirror_db: None,
+            fetch_release_durations: true,
         })
     }
 
@@ -75,6 +79,11 @@ impl Provider {
     /// API call for URLs that are not in the MB database.
     pub fn with_mirror_db(mut self, conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
         self.mirror_db = Some(conn);
+        self
+    }
+
+    pub fn with_fetch_release_durations(mut self, enabled: bool) -> Self {
+        self.fetch_release_durations = enabled;
         self
     }
 }
@@ -114,7 +123,7 @@ impl FetchProvider for Provider {
         .ok_or_else(|| Error::UnsupportedSourceKey(source_key.to_string()))?;
         let external_type: &str = &external_type;
         let result = if external_type == EXTERNAL_TYPE_RECORDING {
-            get_recording(&self.client, identifier).await?
+            get_recording(&self.client, identifier, self.fetch_release_durations).await?
         } else if external_type == EXTERNAL_TYPE_RELEASE {
             get_release(&self.client, identifier).await?
         } else if external_type == EXTERNAL_TYPE_RELEASE_GROUP {
