@@ -639,7 +639,7 @@ fn call_script(
             reason: rhai_str("reason").unwrap_or_default(),
         },
         Some("relate") => Verdict::Relate {
-            kind: rhai_str("kind").unwrap_or_else(|| "alt_version".to_string()),
+            kind: rhai_str("kind").unwrap_or_else(|| "variant".to_string()),
             confidence: rhai_f64("confidence"),
             reason: rhai_str("reason").unwrap_or_default(),
         },

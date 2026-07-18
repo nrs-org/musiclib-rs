@@ -279,7 +279,7 @@ function renderSources(raw) {
 }
 
 // ── Render ────────────────────────────────────────────────────────────────
-const RELATE_KINDS = ['alt_version','release_variant','live_version','instrumental','edit','remix','cover','compilation_version','other'];
+const RELATE_KINDS = ['variant'];
 
 function featBadge(label, value, opts = {}) {
   let cls = '';
@@ -384,7 +384,7 @@ function doRelate(key, btn) {
   pushUndo();
   const existing = labels[key] || {};
   const sel = document.getElementById('kind-' + key);
-  const kind = sel ? sel.value : 'alt_version';
+  const kind = sel ? sel.value : 'variant';
   labels[key] = { ...existing, approved: false, verdict: 'RELATE', kind };
   saveLabels(); updateStats(); rerenderCard(key);
 }

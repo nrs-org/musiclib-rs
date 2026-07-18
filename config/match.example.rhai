@@ -53,8 +53,7 @@
 //   distinct()                      → verdict
 //
 // Valid relate kinds:
-//   alt_version | live | remix | instrumental | cover | medley
-//   release_variant | in_release_group | same_artist
+//   variant  — same thing, different form (alt version, pressing, name alias, etc.)
 //
 // ── Semantic blocking (optional) ─────────────────────────────────────────────
 //
@@ -520,7 +519,7 @@ fn version_tokens(title) {
         if ver_caps.len() > 0 {
             found["named:" + ver_caps[0][1]] = true;
         } else {
-            found["alt_version"] = true;
+            found["variant"] = true;
         }
     }
 
@@ -718,7 +717,7 @@ fn decide_track(ctx, a, b) {
 
     if same_release_position(a, b) {
         if t >= 0.70 { return merge(max(t, 0.90), "same release position"); }
-        return relate("alt_version", 0.75, "same release position, titles differ");
+        return relate("variant", 0.75, "same release position, titles differ");
     }
 
     if t < RELATE_MIN { return distinct(); }
@@ -780,31 +779,19 @@ fn decide_track(ctx, a, b) {
     }
 
     if has_corroboration {
-        let kind = classify_version(va, vb);
         let reason = if dur_known(a, b) {
             "title match, duration differs or version marked"
         } else {
             "title match, no duration available"
         };
-        return relate(kind, t * 0.9, reason);
+        return relate("variant", t * 0.9, reason);
     }
 
     if !version_differs && t >= TITLE_ONLY_MIN {
-        return relate("alt_version", t * 0.75, "title match only, no corroboration");
+        return relate("variant", t * 0.75, "title match only, no corroboration");
     }
 
     distinct()
-}
-
-fn classify_version(va, vb) {
-    let all = va + " " + vb;
-    if all.contains("live")         { return "live"; }
-    if all.contains("remix")        { return "remix"; }
-    if all.contains("instrumental") { return "instrumental"; }
-    if all.contains("acoustic")     { return "acoustic"; }
-    if all.contains("cover")        { return "cover"; }
-    if all.contains("medley")       { return "medley"; }
-    "alt_version"
 }
 
 // ── Artists ───────────────────────────────────────────────────────────────────
@@ -826,7 +813,7 @@ fn decide_artist(ctx, a, b) {
         });
     }
 
-    relate("same_artist", sim * 0.75, "alias match, no shared credits")
+    relate("variant", sim * 0.75, "alias match, no shared credits")
 }
 
 // ── Releases ──────────────────────────────────────────────────────────────────
@@ -841,7 +828,7 @@ fn decide_release(ctx, a, b) {
     if title_exact(a, b) && shared_count_authoritative_ids(a, b) > 0 {
         return merge(max(t, MERGE_MIN), "exact title + shared authoritative ID");
     }
-    relate("release_variant", t, "title match — likely release variant")
+    relate("variant", t, "title match — likely release variant")
 }
 
 // ── Release groups ────────────────────────────────────────────────────────────
