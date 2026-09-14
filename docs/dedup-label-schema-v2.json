@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nrs-org.example/musiclib-rs/dedup-label-schema-v2.json",
+  "title": "musiclib-rs deduplication calibration ledger",
+  "oneOf": [
+    { "$ref": "#/$defs/task" },
+    { "$ref": "#/$defs/annotation" },
+    { "$ref": "#/$defs/adjudication" }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "entity_type": {
+      "enum": ["track", "release", "release_group", "artist"]
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_id", "field", "value"],
+      "properties": {
+        "evidence_id": { "type": "string", "minLength": 1 },
+        "field": {
+          "enum": [
+            "alias",
+            "duration_ms",
+            "release_date",
+            "artist_credit",
+            "release_type",
+            "source_classification",
+            "primary_type",
+            "track_position",
+            "parent_release",
+            "parent_release_group",
+            "parent_entity",
+            "credited_on",
+            "tracklist_item",
+            "external_link",
+            "catalog_number",
+            "barcode"
+          ]
+        },
+        "value": true
+      }
+    },
+    "source_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_id",
+        "source",
+        "identifier",
+        "evidence_sha256",
+        "facts"
+      ],
+      "properties": {
+        "record_id": { "type": "string", "minLength": 3 },
+        "source": { "type": "string", "minLength": 1 },
+        "identifier": { "type": "string", "minLength": 1 },
+        "external_type": { "type": ["string", "null"] },
+        "fetched_at": { "type": ["string", "null"], "format": "date-time" },
+        "evidence_sha256": { "$ref": "#/$defs/sha256" },
+        "facts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fact" }
+        }
+      }
+    },
+    "entity_view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "view_id",
+        "entry_type",
+        "display_title",
+        "records_total",
+        "records_omitted",
+        "records"
+      ],
+      "properties": {
+        "view_id": { "$ref": "#/$defs/sha256" },
+        "entry_type": { "$ref": "#/$defs/entity_type" },
+        "display_title": { "type": ["string", "null"] },
+        "records_total": { "type": "integer", "minimum": 1 },
+        "records_omitted": { "type": "integer", "minimum": 0 },
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/source_record" }
+        }
+      }
+    },
+    "proposer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "rank": { "type": ["integer", "null"], "minimum": 1 },
+        "score": { "type": ["number", "null"] },
+        "score_name": { "type": ["string", "null"] }
+      }
+    },
+    "masked_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "value_hash"],
+      "properties": {
+        "kind": {
+          "enum": ["musicbrainz_bridge", "shared_id", "current_cluster"]
+        },
+        "value_hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sampling_frame",
+        "stratum",
+        "eligible_count",
+        "selected_count",
+        "selection_method",
+        "proposers",
+        "masked_links",
+        "split_group_keys",
+        "partition"
+      ],
+      "properties": {
+        "sampling_frame": {
+          "enum": [
+            "production_candidate",
+            "masked_bridge",
+            "hard_confuser",
+            "independent_miss",
+            "active_learning",
+            "uniform"
+          ]
+        },
+        "stratum": { "type": "string", "minLength": 1 },
+        "eligible_count": { "type": "integer", "minimum": 1 },
+        "selected_count": { "type": "integer", "minimum": 1 },
+        "selection_method": { "type": "string", "minLength": 1 },
+        "inclusion_probability": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "production_candidate": { "type": ["boolean", "null"] },
+        "candidate_set_version": { "type": ["string", "null"] },
+        "proposers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/proposer" }
+        },
+        "masked_links": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/masked_link" }
+        },
+        "current_entry_ids": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "split_group_keys": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "partition": { "enum": ["calibration", "train", "dev", "test"] }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "schema_version",
+        "item_id",
+        "snapshot_id",
+        "ontology_version",
+        "policy_version",
+        "created_at",
+        "entry_type",
+        "left",
+        "right"
+      ],
+      "properties": {
+        "record_type": { "const": "task" },
+        "schema_version": { "const": "dedup-calibration/2" },
+        "item_id": { "$ref": "#/$defs/sha256" },
+        "snapshot_id": { "$ref": "#/$defs/sha256" },
+        "ontology_version": { "const": "identity-primitives-v2" },
+        "policy_version": { "const": "library-policy-v2" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "entry_type": { "$ref": "#/$defs/entity_type" },
+        "left": { "$ref": "#/$defs/entity_view" },
+        "right": { "$ref": "#/$defs/entity_view" },
+        "hidden": { "$ref": "#/$defs/selection" }
+      }
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "role"],
+      "properties": {
+        "ref": { "type": "string", "minLength": 1 },
+        "role": {
+          "enum": [
+            "supports_same_identity",
+            "supports_different_identity",
+            "supports_primitive_relation",
+            "context"
+          ]
+        }
+      }
+    },
+    "entity_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref_kind", "entity_type", "ref"],
+      "properties": {
+        "ref_kind": { "enum": ["view", "provider", "hypothesis"] },
+        "entity_type": {
+          "enum": [
+            "track",
+            "release",
+            "release_group",
+            "artist",
+            "work",
+            "recording_family",
+            "person",
+            "collaboration"
+          ]
+        },
+        "ref": { "type": "string", "minLength": 1 },
+        "label": { "type": ["string", "null"] }
+      }
+    },
+    "primitive_relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["predicate", "subjects", "object", "metadata", "evidence_refs"],
+      "properties": {
+        "predicate": {
+          "enum": ["member_of", "derived_from", "participates_in", "facet_of"]
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/entity_ref" },
+          "uniqueItems": true
+        },
+        "object": { "$ref": "#/$defs/entity_ref" },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "judgment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_integrity",
+        "factual",
+        "name_relation",
+        "policy",
+        "confidence",
+        "external_evidence",
+        "citations",
+        "rationale"
+      ],
+      "properties": {
+        "input_integrity": {
+          "enum": [
+            "ok",
+            "left_mixed",
+            "right_mixed",
+            "wrong_type",
+            "packet_insufficient"
+          ]
+        },
+        "factual": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["entity_relation", "relations"],
+          "properties": {
+            "entity_relation": {
+              "enum": [
+                "same_identity",
+                "different_identity",
+                "insufficient_evidence"
+              ]
+            },
+            "relations": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/primitive_relation" },
+              "uniqueItems": true
+            }
+          }
+        },
+        "name_relation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["primary", "secondary"],
+          "properties": {
+            "primary": {
+              "enum": [
+                "same_string",
+                "orthographic_variant",
+                "transliteration",
+                "translation",
+                "abbreviation",
+                "generic_collision",
+                "unrelated",
+                "mixed",
+                "unclear"
+              ]
+            },
+            "secondary": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            }
+          }
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "exception_reason"],
+          "properties": {
+            "action": { "enum": ["merge", "relate", "keep_separate", "defer"] },
+            "exception_reason": { "type": ["string", "null"] }
+          }
+        },
+        "confidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["label_probability", "evidence_quality"],
+          "properties": {
+            "label_probability": { "type": "number", "minimum": 0, "maximum": 1 },
+            "evidence_quality": { "enum": ["high", "medium", "low"] }
+          }
+        },
+        "external_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidence_id", "url", "accessed_at", "snapshot_sha256", "claim"],
+            "properties": {
+              "evidence_id": { "type": "string", "minLength": 1 },
+              "url": { "type": "string", "format": "uri" },
+              "accessed_at": { "type": "string", "format": "date-time" },
+              "snapshot_sha256": { "$ref": "#/$defs/sha256" },
+              "claim": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "citations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/citation" }
+        },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "annotator": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind", "annotator_id"],
+      "properties": {
+        "kind": { "enum": ["human", "model"] },
+        "annotator_id": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "model_version": { "type": "string" },
+        "prompt_version": { "type": "string" },
+        "run_id": { "type": "string" },
+        "temperature": { "type": "number" },
+        "guideline_version": { "type": "string" },
+        "interface_version": { "type": "string" }
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "schema_version",
+        "annotation_id",
+        "item_id",
+        "created_at",
+        "presented_order",
+        "blind_to_hidden",
+        "annotator",
+        "judgment"
+      ],
+      "properties": {
+        "record_type": { "const": "annotation" },
+        "schema_version": { "const": "dedup-calibration/2" },
+        "annotation_id": { "type": "string", "minLength": 1 },
+        "item_id": { "$ref": "#/$defs/sha256" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "presented_order": {
+          "type": "array",
+          "prefixItems": [{ "enum": ["left", "right"] }, { "enum": ["left", "right"] }],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "blind_to_hidden": { "const": true },
+        "annotator": { "$ref": "#/$defs/annotator" },
+        "judgment": { "$ref": "#/$defs/judgment" }
+      }
+    },
+    "adjudication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "schema_version",
+        "adjudication_id",
+        "item_id",
+        "created_at",
+        "input_annotation_ids",
+        "presented_order",
+        "status",
+        "adjudicator",
+        "disagreement_tags",
+        "judgment",
+        "resolution_reason",
+        "supersedes_adjudication_id"
+      ],
+      "properties": {
+        "record_type": { "const": "adjudication" },
+        "schema_version": { "const": "dedup-calibration/2" },
+        "adjudication_id": { "type": "string", "minLength": 1 },
+        "item_id": { "$ref": "#/$defs/sha256" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "input_annotation_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "presented_order": {
+          "type": "array",
+          "prefixItems": [{ "enum": ["left", "right"] }, { "enum": ["left", "right"] }],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "status": { "enum": ["resolved", "needs_more_evidence", "excluded"] },
+        "adjudicator": { "$ref": "#/$defs/annotator" },
+        "disagreement_tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "judgment": { "$ref": "#/$defs/judgment" },
+        "resolution_reason": { "type": "string", "minLength": 1 },
+        "supersedes_adjudication_id": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

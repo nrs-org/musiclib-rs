@@ -1,4 +1,5 @@
 /target
+/poc/labse-bench/target
 /data
 .direnv
 .envrc

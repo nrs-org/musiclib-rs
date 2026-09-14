@@ -1,0 +1,34 @@
+# Standalone benchmark crate for the dedup-poc "how do we speed up LaBSE"
+# question. Deliberately NOT a member of the root musiclib-rs workspace (its
+# own `[workspace]` below makes it a workspace root) so it doesn't touch the
+# tracked root Cargo.lock/Cargo.toml. Throwaway, same spirit as poc/dedup-poc.
+[workspace]
+
+[package]
+name = "labse-bench"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# CPU BLAS backend for candle's F32 GEMMs. See config/inference/Cargo.toml for
+# the identical hgemm_ stub rationale (intel-mkl-src 2020.1 lacks f16 hgemm;
+# all our tensors are F32 so it's unreachable).
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+
+[dependencies]
+anyhow = "1"
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Rust bindings to libtorch itself (not a reimplementation): reuses the exact
+# oneDNN-fused CPU kernels Python torch dispatches to, via LIBTORCH pointed at
+# the venv's already-downloaded torch install (no separate libtorch fetch).
+tch = "=0.19.0"
+
+[profile.release]
+opt-level = 3
