@@ -205,22 +205,32 @@ results. Dry-run by default.
 ```bash
 cargo run --features ffi --release --bin softmatch
 cargo run --features ffi --release --bin softmatch -- --apply   # write RELATE decisions to DB
+cargo run --features ffi --release --bin softmatch -- --apply --apply-merges # destructive
 cargo run --features ffi --release --bin softmatch -- --csv out.csv  # dump all pairs for review
+cargo run --features ffi --release --bin softmatch -- \
+  --model data/dedup-entry-combined-v4/poc-semantic/runtime-model.json \
+  --csv learned.csv
 ```
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--db` | `<data_dir>/musiclib.db` | SQLite music library |
 | `--script` | `<config_dir>/match.rhai` | Rhai match script |
+| `--model <path>` | `<config_dir>/dedup-model.json` if present | Versioned learned identity scorer; replaces only Rhai verdict scoring |
+| `--persist-suggestions` | false | Store learned MERGE/DEFER rows for the interactive review queue; conflicts with `--apply-merges` |
 | `--apply` | false | Persist RELATE decisions to `entry_relation` |
+| `--apply-merges` | false | Also apply destructive MERGE decisions; requires `--apply` |
 | `--csv <path>` | absent | Write all scored pairs (MERGE / RELATE / DISTINCT / BARRIER) to a CSV |
 | `--embed-db` | `<data_dir>/embeddings.db` | SQLite embedding cache (sqlite-vec) |
+| `--embedding-model-id` | absent | Identity of the local `embed()` model; must match a learned artifact |
 | `--no-embed` | false | Disable semantic blocking even if `embed_batch` is defined |
 | `--embed-dim` | `256` | Embedding dimension; must match the model (`384` for MiniLM) |
 | `--embed-k` | `20` | KNN neighbours per entry |
-| `--embed-threshold` | `0.5` | Min cosine similarity to surface a KNN pair as a candidate |
-| `--embed-max-pages` | `4` | Max KNN pages per entry type (each page widens the neighbour window) |
-| `--embed-page-merge-rate` | `0.5` | Per-type merge rate required to fetch the next page |
+| `--embed-threshold` | `0.45` | Min cosine similarity to surface a KNN pair as a candidate |
+| `--embed-max-pages` | `1` | Max KNN pages per entry type; larger values are recall experiments |
+| `--candidate-max-block` | `50` | Largest lexical/structural posting list expanded into pairs |
+| `--candidate-ngram-k` | `30` | Character-ngram neighbors retained per entry |
+| `--verbose-decisions` | false | Print every suggested merge/relation and full sources |
 | `--dedup-config` | auto from `<config_dir>/dedup_barriers/` | Barrier file(s); repeatable |
 | `--registry-config` | `<config_dir>/providers.yaml` | Provider credentials |
 | `--http-config` | `<config_dir>/http.yaml` | HTTP client config |
@@ -229,6 +239,12 @@ The `--features ffi` flag is optional but required to load the native inference
 cdylib (`config/inference/`). Without it the script falls back to the
 dependency-free naive token-hash embedder. See [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
 for the `match.rhai` format.
+
+Candidate retrieval is a union of bounded exact-name, token, character-ngram,
+duration/credit, release-tracklist, and optional semantic-ANN channels. Their
+provenance is written in the CSV's `candidate_channels` column. Import-time
+soft-match is suggestion-only: it may warm embeddings and score focused pairs,
+but does not write relationships or merge entries.
 
 ### `ytdlp_server` — local yt-dlp HTTP server
 
@@ -272,3 +288,154 @@ cargo test -- --nocapture         # show println! output
 
 When an upstream API changes and fixtures go stale, run `update_fixtures` to
 re-record them (needs live credentials), then re-run the test suite.
+
+## Deduplication calibration data
+
+The v2 deduplication design and labeling ontology live in
+[`dedup-v2.md`](dedup-v2.md). Generate the first blind calibration batch from a
+read-only music library snapshot with:
+
+```bash
+python3 scripts/export_dedup_calibration.py
+python3 scripts/validate_dedup_ledger.py
+python3 scripts/prepare_dedup_label_batches.py
+```
+
+The exporter writes ignored local artifacts under `data/`:
+
+- `dedup-calibration.private.jsonl` contains sampling-frame, current-cluster,
+  and proposer provenance for analysis;
+- `dedup-calibration.blind.jsonl` is the only file that should be presented to
+  annotators.
+
+The blind projection physically omits the current matcher verdict, existing
+human labels, source cluster IDs, sampling frame, and candidate-generator
+metadata. The validator checks that it is exactly the private task with
+`hidden` removed, verifies stable content hashes and unique evidence IDs, and
+uses [`dedup-label-schema-v2.json`](dedup-label-schema-v2.json) when the optional
+Python `jsonschema` package is installed.
+
+For an entry-dedup dataset, keep `--masked-bridge 0`: masked source fragments
+exercise source linking, not deduplication between library entries. The v3 pilot
+was generated from the isolated playlist-expanded corpus with:
+
+```bash
+python3 scripts/export_dedup_calibration.py \
+  --db data/dedup-corpus-v3.db \
+  --playlist-db data/dedup-playlist-seed-v3.db \
+  --private-out data/dedup-entry-pilot-v3.private.jsonl \
+  --blind-out data/dedup-entry-pilot-v3.blind.jsonl \
+  --manifest-out data/dedup-entry-pilot-v3.manifest.json \
+  --exclude-task-ledger data/dedup-calibration.private.jsonl \
+  --production 0 --masked-bridge 0 \
+  --hard-confuser 160 --independent-miss 200 --uniform 40
+```
+
+The exporter aborts if a selected task does not contain two distinct current
+entry IDs. Corpus origin is stratified as baseline, playlist anchor, or
+expansion so a prolific discography seed cannot dominate the batch. The
+resulting 400-item pilot is for candidate and annotation development, not a
+representative production performance estimate. Only later pre-registered,
+held-out evaluation exports should be used for headline metrics.
+
+The labeling instructions are
+[`dedup-label-prompt-v2.md`](dedup-label-prompt-v2.md). The batch preparer emits
+JSON bundles of up to five tasks under ignored
+`data/dedup-agent-batches/lane-a/`, with a deterministic randomized left/right
+presentation and a default 50,000-character context budget. Prepare a
+complementary second vote with the opposite presentation using:
+
+```bash
+python3 scripts/prepare_dedup_label_batches.py \
+  --lane b --invert-sides --shuffle \
+  --output-dir data/dedup-agent-batches/lane-b
+```
+
+Concatenate each annotator's JSONL responses and validate them before analysis:
+
+```bash
+python3 scripts/validate_dedup_annotations.py data/dedup-annotations.jsonl
+
+# Or validate a sharded full pass with exact task coverage:
+python3 scripts/validate_dedup_annotations.py --require-complete \
+  --batches data/dedup-agent-batches/lane-a \
+  data/dedup-agent-labels/luna-low-a
+```
+
+The accepted two-pass Luna calibration annotations are stored locally in
+`data/dedup-agent-labels/luna-low-a/` and `luna-low-b/`. Each directory contains
+exactly one schema-validated vote for all 200 tasks. Like the source task
+ledgers, these generated artifacts are ignored by Git.
+
+The 40 disagreements have a blind third vote and an append-only adjudication
+ledger. MusicBrainz and provider-page enrichment were followed by authoritative
+project-owner review. The effective result is 39 resolved items, no outstanding
+evidence requests, and one explicitly excluded contaminated comparison. The
+effective ledger is `data/dedup-adjudications.final.jsonl`; validate it with:
+
+```bash
+python3 scripts/validate_dedup_adjudications.py \
+  data/dedup-adjudications.final.jsonl \
+  --tasks data/dedup-calibration.blind.jsonl \
+  --annotations data/dedup-agent-labels/luna-low-a \
+    data/dedup-agent-labels/luna-low-b \
+    data/dedup-adjudication/third-pass-astra
+```
+
+Generate a self-contained, searchable review page. The renderer also supports
+unlabeled task ledgers, so the v3 pilot can be inspected before annotation:
+
+```bash
+python3 scripts/render_dedup_review.py
+xdg-open data/dedup-review.html
+
+python3 scripts/render_dedup_review.py \
+  --tasks data/dedup-entry-pilot-v3.private.jsonl \
+  --lane-a data/no-labels-v3-a --lane-b data/no-labels-v3-b \
+  --adjudications data/no-adjudications-v3.jsonl \
+  --output data/dedup-entry-pilot-v3.review.html
+```
+
+The read-only Python retrieval/scoring PoC lives in `poc/dedup-poc/`. It builds
+a bounded lexical, Hepburn, identifier, structural, and HNSW semantic candidate
+union over all 3,102 supported entries in the v3 corpus. It evaluates
+type-specific scorers using grouped out-of-fold predictions and writes an HTML
+report plus candidate CSV:
+
+```bash
+nix-shell -p uv --run \
+  'uv run --project poc/dedup-poc --extra semantic dedup-poc'
+xdg-open data/dedup-entry-pilot-v3-poc/report.html
+```
+
+Install the `semantic` extra to use the in-process LaBSE channel; model download
+is opt-in via `--allow-model-download`. The PoC never calls a metadata API and
+never writes to the music database.
+
+Generate the next positive-enriched active-learning batch from the semantic
+candidate report with:
+
+```bash
+python3 scripts/export_dedup_candidate_review.py
+python3 scripts/validate_dedup_ledger.py \
+  --private data/dedup-entry-active-v4.private.jsonl \
+  --blind data/dedup-entry-active-v4.blind.jsonl
+```
+
+This batch deliberately over-samples non-exact romanized, semantic, duration,
+tracklist, exact-confuser, and decision-boundary candidates. It is useful for
+training and failure discovery, but not for estimating corpus prevalence or
+headline precision/recall.
+
+Export and run the counterfactual positive-retrieval harness with:
+
+```bash
+python3 scripts/export_dedup_retrieval_probes.py
+nix-shell -p uv --run \
+  'uv run --project poc/dedup-poc --extra semantic \
+    dedup-retrieval-benchmark'
+```
+
+This replaces each probed current entry by two disjoint source partitions and
+keeps the remaining corpus as distractors. It evaluates candidate recall only;
+it does not train the scorer or estimate duplicate prevalence.

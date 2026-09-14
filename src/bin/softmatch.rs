@@ -40,9 +40,19 @@ struct Args {
     /// Rhai match script. Defaults to <config_dir>/match.rhai.
     #[arg(long)]
     script: Option<String>,
+    /// Versioned learned scorer JSON. When present, replaces Rhai verdict
+    /// scoring while retaining the script's local embedding hook.
+    #[arg(long)]
+    model: Option<String>,
+    /// Persist learned MERGE/DEFER candidates in the database for review.
+    #[arg(long, conflicts_with = "apply_merges")]
+    persist_suggestions: bool,
     /// Persist RELATE decisions to the entry_relation table.
     #[arg(long)]
     apply: bool,
+    /// Also apply destructive MERGE decisions. Requires --apply.
+    #[arg(long, requires = "apply")]
+    apply_merges: bool,
     /// Write all candidate pairs (including DISTINCT and BARRIER) to a CSV
     /// file for manual quality review.
     #[arg(long)]
@@ -51,6 +61,10 @@ struct Args {
     /// Requires the Rhai script to define embed(text) -> array.
     #[arg(long)]
     embed_db: Option<String>,
+    /// Stable identity of the model behind the local Rhai embed() hook. Must
+    /// match the learned scorer artifact's embedding contract.
+    #[arg(long)]
+    embedding_model_id: Option<String>,
     /// Disable semantic (embedding-based) blocking even if embed() is defined.
     #[arg(long)]
     no_embed: bool,
@@ -61,16 +75,21 @@ struct Args {
     /// Number of KNN neighbours per entry for semantic blocking. [default: 20]
     #[arg(long, default_value_t = 20)]
     embed_k: usize,
-    /// Minimum cosine similarity to treat a KNN pair as a blocking candidate. [default: 0.5]
-    #[arg(long, default_value_t = 0.5)]
+    /// Minimum cosine similarity to treat a KNN pair as a blocking candidate. [default: 0.45]
+    #[arg(long, default_value_t = 0.45)]
     embed_threshold: f64,
-    /// Max KNN pages to walk per entry type; each page widens the neighbour window
-    /// by one k step and is only fetched if the previous page merged enough. [default: 4]
-    #[arg(long, default_value_t = 4)]
+    /// Max KNN pages per type. Values above one are recall experiments. [default: 1]
+    #[arg(long, default_value_t = 1)]
     embed_max_pages: usize,
-    /// Per-type page merge rate (merges/scored) required to fetch the next page. [default: 0.5]
-    #[arg(long, default_value_t = 0.5)]
-    embed_page_merge_rate: f64,
+    /// Largest lexical/structural posting list expanded into pairs. [default: 50]
+    #[arg(long, default_value_t = 50)]
+    candidate_max_block: usize,
+    /// Character-trigram neighbors retained per entry. [default: 30]
+    #[arg(long, default_value_t = 30)]
+    candidate_ngram_k: usize,
+    /// Print every suggested merge/relation and its sources to stdout.
+    #[arg(long)]
+    verbose_decisions: bool,
 }
 
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
@@ -144,6 +163,10 @@ async fn main() -> anyhow::Result<()> {
             script_path.display()
         );
     }
+    let model_path = args.model.map(PathBuf::from).or_else(|| {
+        let default = config_dir.join("dedup-model.json");
+        default.exists().then_some(default)
+    });
 
     let mut http_config: HttpClientConfig =
         load_config(args.http_config.as_deref(), &config_dir.join("http.yaml")).await?;
@@ -174,14 +197,20 @@ async fn main() -> anyhow::Result<()> {
 
     let soft_cfg = SoftMatchConfig {
         script_path: script_path.display().to_string(),
+        model_path: model_path.map(|path| path.display().to_string()),
+        persist_suggestions: args.persist_suggestions,
         apply_relates: args.apply,
+        apply_merges: args.apply_merges,
         csv_path: args.csv,
         embed_db_path,
+        embed_model_id: args.embedding_model_id,
         embed_dim: args.embed_dim,
         embed_k: args.embed_k,
         embed_sim_threshold: args.embed_threshold,
         embed_max_pages: args.embed_max_pages,
-        embed_page_merge_rate: args.embed_page_merge_rate,
+        candidate_max_block: args.candidate_max_block,
+        candidate_ngram_k: args.candidate_ngram_k,
+        verbose_decisions: args.verbose_decisions,
     };
 
     match_db(&db, &merged_dedup, providers.as_slice(), &soft_cfg).await?;

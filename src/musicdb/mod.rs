@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, Database, DatabaseConnection, DbErr,
-    EntityTrait, QueryFilter, TransactionTrait, sea_query,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait, sea_query,
 };
 use tracing::warn;
 
@@ -12,6 +12,8 @@ use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType}
 pub enum Error {
     #[error("Database error: {0}")]
     Database(#[from] DbErr),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 // Pair-centric schema. Metadata lives on `entry_source` (keyed by the
@@ -156,6 +158,63 @@ mod entry_relation {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// Current model suggestion queue. Re-running the same model refreshes its
+/// evidence without resetting review state; a new model version gets its own
+/// row so comparisons and rollback remain possible.
+mod dedup_suggestion {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "dedup_suggestion")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_a: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_b: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub model_version: String,
+        pub probability: f64,
+        pub decision: String,
+        pub candidate_channels: String,
+        pub features: String,
+        pub evidence: String,
+        pub status: String,
+        pub created_at: i64,
+        pub updated_at: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Immutable human/model judgments used to reconstruct corrections and export
+/// training data. A correction appends a row pointing at `supersedes_id`.
+mod dedup_feedback {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "dedup_feedback")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub entry_a: i64,
+        pub entry_b: i64,
+        pub judgment: String,
+        pub origin: String,
+        pub model_version: Option<String>,
+        pub probability: Option<f64>,
+        pub candidate_channels: Option<String>,
+        pub features: Option<String>,
+        pub evidence: Option<String>,
+        pub note: Option<String>,
+        pub supersedes_id: Option<i64>,
+        pub created_at: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 // Dedup bookkeeping. `dedup_state` records the last-applied mtime of each barrier
 // config file (the cheap "did it change" gate). `entry_dedup` is a many-to-many
 // tag table recording which config files currently affect which entries, so when
@@ -195,6 +254,247 @@ mod entry_dedup {
 
 pub struct MusicDb {
     db: DatabaseConnection,
+}
+
+pub const SAME_IDENTITY: &str = "same_identity";
+pub const DIFFERENT_IDENTITY: &str = "different_identity";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityJudgment {
+    Same,
+    Different,
+    Unsure,
+}
+
+impl IdentityJudgment {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Same => SAME_IDENTITY,
+            Self::Different => DIFFERENT_IDENTITY,
+            Self::Unsure => "unsure",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewDedupFeedback {
+    pub entry_a: i64,
+    pub entry_b: i64,
+    pub judgment: IdentityJudgment,
+    pub origin: String,
+    pub model_version: Option<String>,
+    pub probability: Option<f64>,
+    pub candidate_channels: Option<String>,
+    pub features: Option<String>,
+    pub evidence: Option<String>,
+    pub note: Option<String>,
+    pub supersedes_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewDedupSuggestion {
+    pub entry_a: i64,
+    pub entry_b: i64,
+    pub model_version: String,
+    pub probability: f64,
+    pub decision: String,
+    pub candidate_channels: String,
+    pub features: String,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DedupSuggestionRow {
+    pub entry_a: i64,
+    pub entry_b: i64,
+    pub model_version: String,
+    pub probability: f64,
+    pub decision: String,
+    pub candidate_channels: String,
+    pub features: String,
+    pub evidence: String,
+    pub status: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DedupFeedbackRow {
+    pub id: i64,
+    pub entry_a: i64,
+    pub entry_b: i64,
+    pub judgment: String,
+    pub origin: String,
+    pub model_version: Option<String>,
+    pub probability: Option<f64>,
+    pub candidate_channels: Option<String>,
+    pub features: Option<String>,
+    pub evidence: Option<String>,
+    pub note: Option<String>,
+    pub supersedes_id: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoftIdentityConflict {
+    pub same_edge: (i64, i64),
+    pub different_edge: (i64, i64),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SoftIdentityProjection {
+    pub component_by_entry: HashMap<i64, i64>,
+    pub members_by_component: BTreeMap<i64, Vec<i64>>,
+    pub conflicts: Vec<SoftIdentityConflict>,
+    cannot_components: HashSet<(i64, i64)>,
+}
+
+impl SoftIdentityProjection {
+    pub fn component_of(&self, entry_id: i64) -> Option<i64> {
+        self.component_by_entry.get(&entry_id).copied()
+    }
+
+    pub fn are_same(&self, a: i64, b: i64) -> bool {
+        a == b
+            || matches!((self.component_of(a), self.component_of(b)), (Some(x), Some(y)) if x == y)
+    }
+
+    pub fn are_different(&self, a: i64, b: i64) -> bool {
+        let Some(a) = self.component_of(a) else {
+            return false;
+        };
+        let Some(b) = self.component_of(b) else {
+            return false;
+        };
+        self.cannot_components.contains(&ordered_pair(a, b))
+    }
+}
+
+fn ordered_pair(a: i64, b: i64) -> (i64, i64) {
+    (a.min(b), a.max(b))
+}
+
+struct IdentityDsu {
+    parent: HashMap<i64, i64>,
+}
+
+impl IdentityDsu {
+    fn new(entries: impl IntoIterator<Item = i64>) -> Self {
+        Self {
+            parent: entries.into_iter().map(|id| (id, id)).collect(),
+        }
+    }
+
+    fn find(&mut self, id: i64) -> i64 {
+        let parent = self.parent.get(&id).copied().unwrap_or(id);
+        if parent == id {
+            self.parent.entry(id).or_insert(id);
+            id
+        } else {
+            let root = self.find(parent);
+            self.parent.insert(id, root);
+            root
+        }
+    }
+
+    fn union(&mut self, a: i64, b: i64) {
+        let a = self.find(a);
+        let b = self.find(b);
+        if a != b {
+            let (root, child) = ordered_pair(a, b);
+            self.parent.insert(child, root);
+        }
+    }
+}
+
+fn origin_priority(origin: &str) -> u8 {
+    match origin {
+        "user" | "manual" => 0,
+        "imported" | "provider" => 1,
+        _ => 2,
+    }
+}
+
+fn build_soft_identity_projection(
+    entry_ids: impl IntoIterator<Item = i64>,
+    relations: impl IntoIterator<Item = RelationRow>,
+) -> SoftIdentityProjection {
+    let mut dsu = IdentityDsu::new(entry_ids);
+    let mut same = Vec::new();
+    let mut different = Vec::new();
+    for relation in relations.into_iter().filter(|relation| relation.enabled) {
+        match relation.kind.as_str() {
+            SAME_IDENTITY => same.push(relation),
+            DIFFERENT_IDENTITY => different.push(ordered_pair(relation.entry_a, relation.entry_b)),
+            _ => {}
+        }
+    }
+    different.sort_unstable();
+    different.dedup();
+    same.sort_by(|a, b| {
+        origin_priority(&a.origin)
+            .cmp(&origin_priority(&b.origin))
+            .then_with(|| b.confidence.total_cmp(&a.confidence))
+            .then_with(|| {
+                ordered_pair(a.entry_a, a.entry_b).cmp(&ordered_pair(b.entry_a, b.entry_b))
+            })
+    });
+
+    let mut conflicts = Vec::new();
+    for relation in same {
+        let edge = ordered_pair(relation.entry_a, relation.entry_b);
+        let left_root = dsu.find(edge.0);
+        let right_root = dsu.find(edge.1);
+        if left_root == right_root {
+            continue;
+        }
+        let blocker = different.iter().copied().find(|(a, b)| {
+            let a_root = dsu.find(*a);
+            let b_root = dsu.find(*b);
+            (a_root == left_root && b_root == right_root)
+                || (a_root == right_root && b_root == left_root)
+        });
+        if let Some(different_edge) = blocker {
+            conflicts.push(SoftIdentityConflict {
+                same_edge: edge,
+                different_edge,
+            });
+        } else {
+            dsu.union(edge.0, edge.1);
+        }
+    }
+
+    let ids: Vec<i64> = dsu.parent.keys().copied().collect();
+    let mut raw_components: HashMap<i64, Vec<i64>> = HashMap::new();
+    for id in ids {
+        let root = dsu.find(id);
+        raw_components.entry(root).or_default().push(id);
+    }
+    let mut component_by_entry = HashMap::new();
+    let mut members_by_component = BTreeMap::new();
+    for mut members in raw_components.into_values() {
+        members.sort_unstable();
+        let canonical = members[0];
+        for &member in &members {
+            component_by_entry.insert(member, canonical);
+        }
+        members_by_component.insert(canonical, members);
+    }
+    let cannot_components = different
+        .into_iter()
+        .filter_map(|(a, b)| {
+            let pair = ordered_pair(
+                component_by_entry.get(&a).copied()?,
+                component_by_entry.get(&b).copied()?,
+            );
+            (pair.0 != pair.1).then_some(pair)
+        })
+        .collect();
+    SoftIdentityProjection {
+        component_by_entry,
+        members_by_component,
+        conflicts,
+        cannot_components,
+    }
 }
 
 /// Combine the `extra` payloads of two relations being merged into one. Both are
@@ -347,6 +647,64 @@ async fn remap_relations<C: ConnectionTrait>(
     Ok(())
 }
 
+async fn upsert_relation_on<C: ConnectionTrait>(
+    db: &C,
+    entry_a: i64,
+    entry_b: i64,
+    kind: &str,
+    confidence: f64,
+    origin: &str,
+    extra: Option<&str>,
+) -> Result<(), Error> {
+    let (a, b) = ordered_pair(entry_a, entry_b);
+    entry_relation::Entity::insert(entry_relation::ActiveModel {
+        entry_a: Set(a),
+        entry_b: Set(b),
+        kind: Set(kind.to_string()),
+        confidence: Set(confidence),
+        origin: Set(origin.to_string()),
+        enabled: Set(true),
+        extra: Set(extra.map(str::to_owned)),
+    })
+    .on_conflict(
+        sea_query::OnConflict::columns([
+            entry_relation::Column::EntryA,
+            entry_relation::Column::EntryB,
+            entry_relation::Column::Kind,
+        ])
+        .update_columns([
+            entry_relation::Column::Confidence,
+            entry_relation::Column::Origin,
+            entry_relation::Column::Enabled,
+        ])
+        .to_owned(),
+    )
+    .exec(db)
+    .await?;
+    Ok(())
+}
+
+async fn set_relation_enabled_on<C: ConnectionTrait>(
+    db: &C,
+    entry_a: i64,
+    entry_b: i64,
+    kind: &str,
+    enabled: bool,
+) -> Result<bool, Error> {
+    let (a, b) = ordered_pair(entry_a, entry_b);
+    let result = entry_relation::Entity::update_many()
+        .col_expr(
+            entry_relation::Column::Enabled,
+            sea_query::Expr::value(enabled),
+        )
+        .filter(entry_relation::Column::EntryA.eq(a))
+        .filter(entry_relation::Column::EntryB.eq(b))
+        .filter(entry_relation::Column::Kind.eq(kind))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected > 0)
+}
+
 impl MusicDb {
     pub async fn new(db_url: &str) -> Result<Self, Error> {
         let db = Database::connect(db_url).await?;
@@ -441,6 +799,22 @@ impl MusicDb {
         // to be deleted, so re-point every relation that referenced it onto the
         // winner, drop the resulting self-relations, and collapse duplicates.
         remap_relations(&txn, loser, winner).await?;
+
+        // Suggestions are ephemeral review work, not historical evidence.
+        // Retire rows involving the disappearing endpoint; dedup_feedback keeps
+        // the immutable history with the original ids.
+        dedup_suggestion::Entity::update_many()
+            .col_expr(
+                dedup_suggestion::Column::Status,
+                sea_query::Expr::value("superseded_by_hard_merge"),
+            )
+            .filter(
+                Condition::any()
+                    .add(dedup_suggestion::Column::EntryA.eq(loser))
+                    .add(dedup_suggestion::Column::EntryB.eq(loser)),
+            )
+            .exec(&txn)
+            .await?;
 
         entry::Entity::delete_by_id(loser).exec(&txn).await?;
 
@@ -852,40 +1226,261 @@ impl MusicDb {
         origin: &str,
         extra: Option<&str>,
     ) -> Result<(), Error> {
-        let (a, b) = if entry_a < entry_b {
-            (entry_a, entry_b)
-        } else {
-            (entry_b, entry_a)
+        upsert_relation_on(&self.db, entry_a, entry_b, kind, confidence, origin, extra).await
+    }
+
+    /// Enable or tombstone one exact relation without deleting its provenance.
+    /// Returns false when the row did not exist.
+    pub async fn set_relation_enabled(
+        &self,
+        entry_a: i64,
+        entry_b: i64,
+        kind: &str,
+        enabled: bool,
+    ) -> Result<bool, Error> {
+        set_relation_enabled_on(&self.db, entry_a, entry_b, kind, enabled).await
+    }
+
+    /// Project enabled soft-identity assertions into deterministic virtual
+    /// components. Cannot-link assertions win; conflicting same-identity edges
+    /// are reported rather than silently joining the components.
+    pub async fn soft_identity_projection(&self) -> Result<SoftIdentityProjection, Error> {
+        let entries = entry::Entity::find().all(&self.db).await?;
+        let relations = entry_relation::Entity::find()
+            .filter(entry_relation::Column::Enabled.eq(true))
+            .filter(
+                Condition::any()
+                    .add(entry_relation::Column::Kind.eq(SAME_IDENTITY))
+                    .add(entry_relation::Column::Kind.eq(DIFFERENT_IDENTITY)),
+            )
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect::<Vec<_>>();
+        Ok(build_soft_identity_projection(
+            entries.into_iter().map(|entry| entry.id),
+            relations,
+        ))
+    }
+
+    /// Append a user/model judgment and atomically update the active soft
+    /// identity relation. `Unsure` acts as a retraction and disables both
+    /// identity assertions while retaining all feedback rows.
+    pub async fn record_identity_feedback(&self, feedback: NewDedupFeedback) -> Result<i64, Error> {
+        if feedback.entry_a == feedback.entry_b {
+            return Err(Error::InvalidInput(
+                "identity feedback endpoints must differ".into(),
+            ));
+        }
+        if feedback
+            .probability
+            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err(Error::InvalidInput(
+                "identity feedback probability must be in [0, 1]".into(),
+            ));
+        }
+        let (entry_a, entry_b) = ordered_pair(feedback.entry_a, feedback.entry_b);
+        let txn = self.db.begin().await?;
+        let left = entry::Entity::find_by_id(entry_a).one(&txn).await?;
+        let right = entry::Entity::find_by_id(entry_b).one(&txn).await?;
+        let (Some(left), Some(right)) = (left, right) else {
+            return Err(Error::InvalidInput(
+                "identity feedback references a missing entry".into(),
+            ));
         };
-        entry_relation::Entity::insert(entry_relation::ActiveModel {
-            entry_a: Set(a),
-            entry_b: Set(b),
-            kind: Set(kind.to_string()),
-            confidence: Set(confidence),
-            origin: Set(origin.to_string()),
-            enabled: Set(true),
-            extra: Set(extra.map(|s| s.to_string())),
+        if left.entry_type != right.entry_type {
+            return Err(Error::InvalidInput(format!(
+                "identity feedback types differ: {:?} and {:?}",
+                left.entry_type, right.entry_type
+            )));
+        }
+        if let Some(previous_id) = feedback.supersedes_id {
+            let previous = dedup_feedback::Entity::find_by_id(previous_id)
+                .one(&txn)
+                .await?
+                .ok_or_else(|| Error::InvalidInput("superseded feedback does not exist".into()))?;
+            if ordered_pair(previous.entry_a, previous.entry_b) != (entry_a, entry_b) {
+                return Err(Error::InvalidInput(
+                    "superseded feedback belongs to another pair".into(),
+                ));
+            }
+        }
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let relation_origin = feedback.origin.clone();
+        let inserted = dedup_feedback::Entity::insert(dedup_feedback::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            entry_a: Set(entry_a),
+            entry_b: Set(entry_b),
+            judgment: Set(feedback.judgment.as_str().to_owned()),
+            origin: Set(feedback.origin),
+            model_version: Set(feedback.model_version),
+            probability: Set(feedback.probability),
+            candidate_channels: Set(feedback.candidate_channels),
+            features: Set(feedback.features),
+            evidence: Set(feedback.evidence),
+            note: Set(feedback.note),
+            supersedes_id: Set(feedback.supersedes_id),
+            created_at: Set(now),
+        })
+        .exec(&txn)
+        .await?;
+        match feedback.judgment {
+            IdentityJudgment::Same => {
+                upsert_relation_on(
+                    &txn,
+                    entry_a,
+                    entry_b,
+                    SAME_IDENTITY,
+                    1.0,
+                    &relation_origin,
+                    None,
+                )
+                .await?;
+                set_relation_enabled_on(&txn, entry_a, entry_b, DIFFERENT_IDENTITY, false).await?;
+            }
+            IdentityJudgment::Different => {
+                upsert_relation_on(
+                    &txn,
+                    entry_a,
+                    entry_b,
+                    DIFFERENT_IDENTITY,
+                    1.0,
+                    &relation_origin,
+                    None,
+                )
+                .await?;
+                set_relation_enabled_on(&txn, entry_a, entry_b, SAME_IDENTITY, false).await?;
+            }
+            IdentityJudgment::Unsure => {
+                set_relation_enabled_on(&txn, entry_a, entry_b, SAME_IDENTITY, false).await?;
+                set_relation_enabled_on(&txn, entry_a, entry_b, DIFFERENT_IDENTITY, false).await?;
+            }
+        }
+        dedup_suggestion::Entity::update_many()
+            .col_expr(
+                dedup_suggestion::Column::Status,
+                sea_query::Expr::value("resolved"),
+            )
+            .col_expr(
+                dedup_suggestion::Column::UpdatedAt,
+                sea_query::Expr::value(now),
+            )
+            .filter(dedup_suggestion::Column::EntryA.eq(entry_a))
+            .filter(dedup_suggestion::Column::EntryB.eq(entry_b))
+            .exec(&txn)
+            .await?;
+        txn.commit().await?;
+        Ok(inserted.last_insert_id)
+    }
+
+    /// Complete append-only feedback ledger, in insertion order, for history
+    /// views and deterministic offline dataset export.
+    pub async fn all_dedup_feedback(&self) -> Result<Vec<DedupFeedbackRow>, Error> {
+        Ok(dedup_feedback::Entity::find()
+            .order_by_asc(dedup_feedback::Column::Id)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(DedupFeedbackRow::from)
+            .collect())
+    }
+
+    /// Insert or refresh a model suggestion without reopening an already
+    /// reviewed row for the same model version.
+    pub async fn upsert_dedup_suggestion(
+        &self,
+        suggestion: NewDedupSuggestion,
+    ) -> Result<(), Error> {
+        if suggestion.entry_a == suggestion.entry_b
+            || !suggestion.probability.is_finite()
+            || !(0.0..=1.0).contains(&suggestion.probability)
+        {
+            return Err(Error::InvalidInput("invalid dedup suggestion".into()));
+        }
+        let (entry_a, entry_b) = ordered_pair(suggestion.entry_a, suggestion.entry_b);
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        dedup_suggestion::Entity::insert(dedup_suggestion::ActiveModel {
+            entry_a: Set(entry_a),
+            entry_b: Set(entry_b),
+            model_version: Set(suggestion.model_version),
+            probability: Set(suggestion.probability),
+            decision: Set(suggestion.decision),
+            candidate_channels: Set(suggestion.candidate_channels),
+            features: Set(suggestion.features),
+            evidence: Set(suggestion.evidence),
+            status: Set("pending".into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         })
         .on_conflict(
             sea_query::OnConflict::columns([
-                entry_relation::Column::EntryA,
-                entry_relation::Column::EntryB,
-                entry_relation::Column::Kind,
+                dedup_suggestion::Column::EntryA,
+                dedup_suggestion::Column::EntryB,
+                dedup_suggestion::Column::ModelVersion,
             ])
-            // Note: `Extra` is intentionally NOT updated on conflict. It may hold
-            // a payload combined by `combine_relations` when entries merged; a
-            // later re-score refreshes confidence/origin/enabled but must not wipe
-            // that combined `extra`.
             .update_columns([
-                entry_relation::Column::Confidence,
-                entry_relation::Column::Origin,
-                entry_relation::Column::Enabled,
+                dedup_suggestion::Column::Probability,
+                dedup_suggestion::Column::Decision,
+                dedup_suggestion::Column::CandidateChannels,
+                dedup_suggestion::Column::Features,
+                dedup_suggestion::Column::Evidence,
+                dedup_suggestion::Column::UpdatedAt,
             ])
             .to_owned(),
         )
         .exec(&self.db)
         .await?;
         Ok(())
+    }
+
+    pub async fn pending_dedup_suggestions(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<DedupSuggestionRow>, Error> {
+        Ok(dedup_suggestion::Entity::find()
+            .filter(dedup_suggestion::Column::Status.eq("pending"))
+            .order_by_desc(dedup_suggestion::Column::Probability)
+            .order_by_asc(dedup_suggestion::Column::EntryA)
+            .order_by_asc(dedup_suggestion::Column::EntryB)
+            .limit(limit)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(DedupSuggestionRow::from)
+            .collect())
+    }
+
+    pub async fn set_dedup_suggestion_status(
+        &self,
+        entry_a: i64,
+        entry_b: i64,
+        model_version: &str,
+        status: &str,
+    ) -> Result<bool, Error> {
+        if !matches!(status, "pending" | "snoozed" | "resolved" | "dismissed") {
+            return Err(Error::InvalidInput(format!(
+                "unsupported dedup suggestion status {status:?}"
+            )));
+        }
+        let (entry_a, entry_b) = ordered_pair(entry_a, entry_b);
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let result = dedup_suggestion::Entity::update_many()
+            .col_expr(
+                dedup_suggestion::Column::Status,
+                sea_query::Expr::value(status),
+            )
+            .col_expr(
+                dedup_suggestion::Column::UpdatedAt,
+                sea_query::Expr::value(now),
+            )
+            .filter(dedup_suggestion::Column::EntryA.eq(entry_a))
+            .filter(dedup_suggestion::Column::EntryB.eq(entry_b))
+            .filter(dedup_suggestion::Column::ModelVersion.eq(model_version))
+            .exec(&self.db)
+            .await?;
+        Ok(result.rows_affected > 0)
     }
 
     /// Every entry_child row. Used by soft-match to compute release-position features.
@@ -972,6 +1567,56 @@ pub struct RelationRow {
     pub confidence: f64,
     pub origin: String,
     pub enabled: bool,
+}
+
+impl From<entry_relation::Model> for RelationRow {
+    fn from(value: entry_relation::Model) -> Self {
+        Self {
+            entry_a: value.entry_a,
+            entry_b: value.entry_b,
+            kind: value.kind,
+            confidence: value.confidence,
+            origin: value.origin,
+            enabled: value.enabled,
+        }
+    }
+}
+
+impl From<dedup_suggestion::Model> for DedupSuggestionRow {
+    fn from(value: dedup_suggestion::Model) -> Self {
+        Self {
+            entry_a: value.entry_a,
+            entry_b: value.entry_b,
+            model_version: value.model_version,
+            probability: value.probability,
+            decision: value.decision,
+            candidate_channels: value.candidate_channels,
+            features: value.features,
+            evidence: value.evidence,
+            status: value.status,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<dedup_feedback::Model> for DedupFeedbackRow {
+    fn from(value: dedup_feedback::Model) -> Self {
+        Self {
+            id: value.id,
+            entry_a: value.entry_a,
+            entry_b: value.entry_b,
+            judgment: value.judgment,
+            origin: value.origin,
+            model_version: value.model_version,
+            probability: value.probability,
+            candidate_channels: value.candidate_channels,
+            features: value.features,
+            evidence: value.evidence,
+            note: value.note,
+            supersedes_id: value.supersedes_id,
+            created_at: value.created_at,
+        }
+    }
 }
 
 fn entry_type_str(entry_type: Option<EntryType>) -> &'static str {
@@ -1141,5 +1786,158 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].entry_a, rows[0].entry_b), (10, 20));
         assert!(rows[0].entry_a < rows[0].entry_b, "endpoints normalized");
+    }
+
+    #[tokio::test]
+    async fn soft_identity_edges_are_reversible_and_cannot_link_wins() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2, 3] {
+            insert_entry(&mdb.db, id).await;
+        }
+        mdb.upsert_relation(1, 2, SAME_IDENTITY, 1.0, "user", None)
+            .await
+            .unwrap();
+        mdb.upsert_relation(2, 3, SAME_IDENTITY, 0.9, "model", None)
+            .await
+            .unwrap();
+        let projection = mdb.soft_identity_projection().await.unwrap();
+        assert!(projection.are_same(1, 3));
+
+        assert!(
+            mdb.set_relation_enabled(2, 3, SAME_IDENTITY, false)
+                .await
+                .unwrap()
+        );
+        let projection = mdb.soft_identity_projection().await.unwrap();
+        assert!(projection.are_same(1, 2));
+        assert!(!projection.are_same(1, 3));
+
+        mdb.upsert_relation(1, 3, DIFFERENT_IDENTITY, 1.0, "user", None)
+            .await
+            .unwrap();
+        mdb.upsert_relation(2, 3, SAME_IDENTITY, 0.9, "model", None)
+            .await
+            .unwrap();
+        let projection = mdb.soft_identity_projection().await.unwrap();
+        assert!(projection.are_same(1, 2));
+        assert!(projection.are_different(2, 3));
+        assert!(!projection.are_same(1, 3));
+        assert_eq!(projection.conflicts.len(), 1);
+        assert_eq!(projection.conflicts[0].same_edge, (2, 3));
+        assert_eq!(projection.conflicts[0].different_edge, (1, 3));
+    }
+
+    #[tokio::test]
+    async fn feedback_is_append_only_and_toggles_soft_identity() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2] {
+            insert_entry(&mdb.db, id).await;
+        }
+        mdb.upsert_dedup_suggestion(NewDedupSuggestion {
+            entry_a: 2,
+            entry_b: 1,
+            model_version: "model-1".into(),
+            probability: 0.9,
+            decision: "merge".into(),
+            candidate_channels: "exact_name".into(),
+            features: "{\"name_exact\":1.0}".into(),
+            evidence: "{\"left\":{},\"right\":{}}".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(mdb.pending_dedup_suggestions(10).await.unwrap().len(), 1);
+
+        let same_id = mdb
+            .record_identity_feedback(NewDedupFeedback {
+                entry_a: 2,
+                entry_b: 1,
+                judgment: IdentityJudgment::Same,
+                origin: "user".into(),
+                model_version: Some("model-1".into()),
+                probability: Some(0.9),
+                candidate_channels: Some("exact_name".into()),
+                features: Some("{\"name_exact\":1.0}".into()),
+                evidence: Some("{\"left\":{},\"right\":{}}".into()),
+                note: None,
+                supersedes_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(mdb.soft_identity_projection().await.unwrap().are_same(1, 2));
+        assert!(mdb.pending_dedup_suggestions(10).await.unwrap().is_empty());
+
+        let different_id = mdb
+            .record_identity_feedback(NewDedupFeedback {
+                entry_a: 1,
+                entry_b: 2,
+                judgment: IdentityJudgment::Different,
+                origin: "user".into(),
+                model_version: Some("model-1".into()),
+                probability: Some(0.9),
+                candidate_channels: None,
+                features: None,
+                evidence: None,
+                note: Some("wrong artist".into()),
+                supersedes_id: Some(same_id),
+            })
+            .await
+            .unwrap();
+        let projection = mdb.soft_identity_projection().await.unwrap();
+        assert!(!projection.are_same(1, 2));
+        assert!(projection.are_different(1, 2));
+
+        mdb.record_identity_feedback(NewDedupFeedback {
+            entry_a: 1,
+            entry_b: 2,
+            judgment: IdentityJudgment::Unsure,
+            origin: "user".into(),
+            model_version: None,
+            probability: None,
+            candidate_channels: None,
+            features: None,
+            evidence: None,
+            note: Some("retracted".into()),
+            supersedes_id: Some(different_id),
+        })
+        .await
+        .unwrap();
+        let projection = mdb.soft_identity_projection().await.unwrap();
+        assert!(!projection.are_same(1, 2));
+        assert!(!projection.are_different(1, 2));
+        let feedback = dedup_feedback::Entity::find().all(&mdb.db).await.unwrap();
+        assert_eq!(feedback.len(), 3, "corrections append instead of overwrite");
+    }
+
+    #[tokio::test]
+    async fn suggestion_refresh_preserves_review_status() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2] {
+            insert_entry(&mdb.db, id).await;
+        }
+        let suggestion = |probability| NewDedupSuggestion {
+            entry_a: 1,
+            entry_b: 2,
+            model_version: "model-1".into(),
+            probability,
+            decision: "defer".into(),
+            candidate_channels: "char_ngram".into(),
+            features: "{}".into(),
+            evidence: "{\"left\":{},\"right\":{}}".into(),
+        };
+        mdb.upsert_dedup_suggestion(suggestion(0.6)).await.unwrap();
+        assert!(
+            mdb.set_dedup_suggestion_status(2, 1, "model-1", "snoozed")
+                .await
+                .unwrap()
+        );
+        mdb.upsert_dedup_suggestion(suggestion(0.7)).await.unwrap();
+        assert!(mdb.pending_dedup_suggestions(10).await.unwrap().is_empty());
+        let row = dedup_suggestion::Entity::find()
+            .one(&mdb.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "snoozed");
+        assert_eq!(row.probability, 0.7);
     }
 }

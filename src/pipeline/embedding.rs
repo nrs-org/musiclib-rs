@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Once};
 
 use anyhow::Context as _;
+use hnsw::{Hnsw, Params as HnswParams};
+use rand_pcg::Pcg64;
 use rhai::{Dynamic, Engine, Map as RhaiMap};
 use rusqlite::{Connection, params};
-use tracing::warn;
+use space::{KnnPoints, Metric, Neighbor};
+use tracing::{info, warn};
 
 use crate::pipeline::softmatch::EntryInfo;
 
@@ -45,6 +49,113 @@ fn table_for_type(entry_type: &str) -> Option<&'static str> {
 pub struct EmbeddingCache {
     conn: Arc<Mutex<Connection>>,
     pub dim: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SquaredL2;
+
+impl Metric<Vec<f32>> for SquaredL2 {
+    type Unit = u32;
+
+    fn distance(&self, left: &Vec<f32>, right: &Vec<f32>) -> Self::Unit {
+        left.iter()
+            .zip(right)
+            .map(|(a, b)| {
+                let delta = a - b;
+                delta * delta
+            })
+            .sum::<f32>()
+            .to_bits()
+    }
+}
+
+type TypeHnsw = Hnsw<SquaredL2, Vec<f32>, Pcg64, 24, 48>;
+
+struct TypeAnn {
+    index: TypeHnsw,
+    entry_ids: Vec<i64>,
+    index_by_entry: HashMap<i64, usize>,
+}
+
+/// Run-local approximate-nearest-neighbour index built from the durable SQLite
+/// embedding cache. `vec0` remains the source of truth, while HNSW avoids an
+/// O(N²) full-library query pattern at 100k-entry scale.
+pub struct EmbeddingAnn {
+    by_type: HashMap<String, TypeAnn>,
+}
+
+impl EmbeddingAnn {
+    pub fn build(cache: &EmbeddingCache) -> anyhow::Result<Self> {
+        let mut by_type = HashMap::new();
+        for entry_type in KNOWN_TYPES {
+            let rows = cache.all_vectors(entry_type)?;
+            if rows.is_empty() {
+                continue;
+            }
+            let mut index = TypeHnsw::new_params(SquaredL2, HnswParams::new().ef_construction(160));
+            let mut entry_ids = Vec::with_capacity(rows.len());
+            let mut index_by_entry = HashMap::with_capacity(rows.len());
+            let mut searcher = hnsw::Searcher::default();
+            for (entry_id, vector) in rows {
+                let position = index.insert(vector, &mut searcher);
+                if position != entry_ids.len() {
+                    anyhow::bail!("HNSW returned a non-contiguous insertion index");
+                }
+                entry_ids.push(entry_id);
+                index_by_entry.insert(entry_id, position);
+            }
+            info!(
+                "Built {entry_type} HNSW index with {} vector(s)",
+                entry_ids.len()
+            );
+            by_type.insert(
+                (*entry_type).to_string(),
+                TypeAnn {
+                    index,
+                    entry_ids,
+                    index_by_entry,
+                },
+            );
+        }
+        Ok(Self { by_type })
+    }
+
+    /// Return approximate same-type neighbors as `(entry_id, L2 distance)`.
+    pub fn knn(&self, entry_id: i64, k: usize, entry_type: &str) -> Vec<(i64, f64)> {
+        let Some(type_index) = self.by_type.get(entry_type) else {
+            return vec![];
+        };
+        let Some(&query_index) = type_index.index_by_entry.get(&entry_id) else {
+            return vec![];
+        };
+        let query = type_index.index.get_point(query_index);
+        let wanted = (k + 1).min(type_index.entry_ids.len());
+        let mut neighbors = vec![
+            Neighbor {
+                index: usize::MAX,
+                distance: u32::MAX,
+            };
+            wanted
+        ];
+        let mut searcher = hnsw::Searcher::default();
+        let found = type_index.index.nearest(
+            query,
+            50.max(k.saturating_mul(3)),
+            &mut searcher,
+            &mut neighbors,
+        );
+        found
+            .iter()
+            .filter(|neighbor| neighbor.index != query_index)
+            .take(k)
+            .map(|neighbor| {
+                (
+                    type_index.entry_ids[neighbor.index],
+                    f32::from_bits(neighbor.distance).sqrt() as f64,
+                )
+            })
+            .collect()
+    }
 }
 
 impl EmbeddingCache {
@@ -180,6 +291,38 @@ impl EmbeddingCache {
             params![entry_id, json],
         )?;
         Ok(())
+    }
+
+    fn all_vectors(&self, entry_type: &str) -> anyhow::Result<Vec<(i64, Vec<f32>)>> {
+        let Some(table) = table_for_type(entry_type) else {
+            return Ok(vec![]);
+        };
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(&format!(
+            "SELECT entry_id, embedding FROM {table} ORDER BY entry_id"
+        ))?;
+        let rows = statement.query_map([], |row| {
+            let entry_id = row.get::<_, i64>(0)?;
+            let bytes = row.get::<_, Vec<u8>>(1)?;
+            Ok((entry_id, bytes))
+        })?;
+        let mut output = Vec::new();
+        for row in rows {
+            let (entry_id, bytes) = row?;
+            if bytes.len() != self.dim * std::mem::size_of::<f32>() {
+                anyhow::bail!(
+                    "embedding {entry_id} has {} bytes, expected {}",
+                    bytes.len(),
+                    self.dim * std::mem::size_of::<f32>()
+                );
+            }
+            let vector = bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+                .collect();
+            output.push((entry_id, vector));
+        }
+        Ok(output)
     }
 
     /// KNN search: up to `k` nearest neighbours of `entry_id` within the same
@@ -364,10 +507,64 @@ pub fn embed_stale_entries(
     );
     let has_batch = !matches!(&probe, Err(e) if is_fn_not_found(e));
 
-    if has_batch {
-        embed_via_batch(engine, ast, base_scope, user_ctx, cache, &stale)
+    // Track the densest vector produced this pass; a low maximum is the
+    // signature of the naive token-hash fallback (see `report_embed_health`).
+    let mut max_nonzero = 0usize;
+    let ok = if has_batch {
+        embed_via_batch(
+            engine,
+            ast,
+            base_scope,
+            user_ctx,
+            cache,
+            &stale,
+            &mut max_nonzero,
+        )
     } else {
-        embed_via_single(engine, ast, base_scope, user_ctx, cache, &stale)
+        embed_via_single(
+            engine,
+            ast,
+            base_scope,
+            user_ctx,
+            cache,
+            &stale,
+            &mut max_nonzero,
+        )
+    };
+    report_embed_health(cache.dim, max_nonzero);
+    ok
+}
+
+/// Number of vector components above a small magnitude epsilon.
+fn nonzero_dims(arr: &[f64]) -> usize {
+    arr.iter().filter(|x| x.abs() > 1e-6).count()
+}
+
+/// After an embedding pass, loudly flag the degenerate case where every vector
+/// is sparse and near-orthogonal — the fingerprint of the token-hash naive
+/// fallback (a handful of non-zero dims) rather than a real dense sentence
+/// embedder. The example script's fallback only `print`s to stdout, which never
+/// reaches `tracing`, so this is the signal operators actually see: it fires on
+/// exactly the runs that populate the embedding cache with junk.
+fn report_embed_health(dim: usize, max_nonzero: usize) {
+    if dim == 0 {
+        return;
+    }
+    // Real embedders (Model2Vec / MiniLM / LaBSE) are essentially fully dense;
+    // the naive histogram lights up only as many dims as a title has distinct
+    // token buckets. Anything under 25% density across the *whole* batch means
+    // no real model ran.
+    if max_nonzero * 4 < dim {
+        warn!(
+            "Embedding backend produced only sparse, near-orthogonal vectors \
+             (at most {max_nonzero}/{dim} non-zero dims) — this is the naive \
+             token-hash fallback, NOT a real model, so semantic blocking is \
+             effectively disabled. Build the inference cdylib and enable the \
+             `ffi` feature (and make libinference.so loadable) so a real \
+             embedder runs."
+        );
+    } else {
+        info!("Embedding backend healthy: dense {dim}-d vectors.");
     }
 }
 
@@ -378,6 +575,7 @@ fn embed_via_batch(
     user_ctx: &Dynamic,
     cache: &EmbeddingCache,
     stale: &[(i64, String, String)],
+    max_nonzero: &mut usize,
 ) -> bool {
     for chunk in stale.chunks(EMBED_BATCH_SIZE) {
         let texts: Vec<Dynamic> = chunk
@@ -414,6 +612,7 @@ fn embed_via_batch(
                         .iter()
                         .filter_map(|d| d.as_float().ok())
                         .collect();
+                    *max_nonzero = (*max_nonzero).max(nonzero_dims(&arr));
                     store_vec(cache, *entry_id, title, entry_type, &arr);
                 }
             }
@@ -429,6 +628,7 @@ fn embed_via_single(
     user_ctx: &Dynamic,
     cache: &EmbeddingCache,
     stale: &[(i64, String, String)],
+    max_nonzero: &mut usize,
 ) -> bool {
     for (entry_id, title, entry_type) in stale {
         let result: Result<Dynamic, _> = engine.call_fn_with_options(
@@ -451,6 +651,7 @@ fn embed_via_single(
                     .iter()
                     .filter_map(|d| d.as_float().ok())
                     .collect();
+                *max_nonzero = (*max_nonzero).max(nonzero_dims(&arr));
                 store_vec(cache, *entry_id, title, entry_type, &arr);
             }
         }
@@ -474,4 +675,25 @@ fn store_vec(cache: &EmbeddingCache, entry_id: i64, title: &str, entry_type: &st
 
 fn is_fn_not_found(e: &rhai::EvalAltResult) -> bool {
     matches!(e, rhai::EvalAltResult::ErrorFunctionNotFound(..))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hnsw_reads_cached_vectors_and_returns_nearest_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("embeddings.db");
+        let cache = EmbeddingCache::open(path.to_str().unwrap(), 2).unwrap();
+        cache.upsert(1, "one", "track", &[1.0, 0.0]).unwrap();
+        cache.upsert(2, "two", "track", &[0.99, 0.01]).unwrap();
+        cache.upsert(3, "three", "track", &[0.0, 1.0]).unwrap();
+
+        let index = EmbeddingAnn::build(&cache).unwrap();
+        let neighbors = index.knn(1, 1, "track");
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].0, 2);
+        assert!(neighbors[0].1 < 0.02);
+    }
 }

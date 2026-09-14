@@ -31,6 +31,7 @@
 //                       or credited-track entry IDs (for artists); opaque DB IDs
 //   track_positions     array of #{release_id, disc_no, track_no} — placement
 //                       in releases; disc_no/track_no are () when unknown
+//   child_ids           array of integers — child track entry IDs (for releases)
 //
 // Low-level string primitives (free functions):
 //   normalize(s)                   → String   lowercase, alphanumeric+CJK, collapsed

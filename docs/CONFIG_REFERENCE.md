@@ -476,6 +476,25 @@ The `softmatch` binary evaluates candidate entry pairs using a
 [Rhai](https://rhai.rs/) script. Copy `config/match.example.rhai` to
 `<config_dir>/match.rhai` and tune thresholds as needed.
 
+Passing `--model <runtime-model.json>` replaces `decide()` with the native,
+versioned logistic scorer. Candidate generation and the local `embed()` hook
+still come from the same pipeline; there are no scoring API calls. Scores in
+the learned defer band are emitted as `DEFER`, while low scores are `SEPARATE`.
+The richer research `model.json` is intentionally rejected because Rust cannot
+reproduce all of its enrichment features. If the runtime artifact names an
+embedding model, `--embedding-model-id` must name that exact local model.
+The batch and import paths also discover `<config_dir>/dedup-model.json`
+automatically. Import-time matching remains suggestion-only: merely installing
+the model cannot merge entries. Imports persist learned MERGE/DEFER candidates
+for review; batch runs opt into this with `--persist-suggestions`.
+
+Soft identity uses enabled `entry_relation` rows with kinds `same_identity` and
+`different_identity`. The former creates virtual connected components; the
+latter is a cannot-link barrier and wins over a conflicting same-identity path.
+Corrections tombstone relation state and append to `dedup_feedback`; model
+candidates live in `dedup_suggestion` with their model, feature, and evidence
+snapshots.
+
 ### Lifecycle
 
 The host calls three optional entry points in order:
@@ -508,6 +527,7 @@ to share state between calls.
 | `sourced_aliases` | array of `#{source, name}` | Authoritative sources first (non-video before video) |
 | `peer_ids` | array of int | For tracks: credited-artist entry IDs. For artists: credited-track entry IDs |
 | `track_positions` | array of `#{release_id, disc_no, track_no}` | Placement in releases; `disc_no`/`track_no` are `()` when unknown |
+| `child_ids` | array of int | For releases: child track entry IDs used by bounded tracklist retrieval |
 
 ### Host-provided functions
 
@@ -562,8 +582,9 @@ ffi_available()   // → bool: true when musiclib was built with --features ffi
 If the script defines `embed_batch(ctx, texts) -> array-of-arrays`, the host
 calls it in chunks of 64 at startup to embed every entry with a missing or stale
 vector. Falls back to `embed(ctx, text) -> array` if `embed_batch` is not defined.
-Vectors are stored in the embedding cache (`<data_dir>/embeddings.db`) and used
-with sqlite-vec KNN for candidate generation.
+Vectors are stored in the sqlite-vec embedding cache
+(`<data_dir>/embeddings.db`). A run-local HNSW index performs candidate KNN;
+SQLite remains the durable cache rather than becoming an O(N²) search loop.
 
 The embedding dimension must match the `--embed-dim` flag (default `256`).
 

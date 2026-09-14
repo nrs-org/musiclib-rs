@@ -200,21 +200,31 @@ async fn main() -> anyhow::Result<()> {
         reconcile_tags(providers.as_slice(), &db, &dedup_configs).await?;
     }
 
-    // Online soft-match: if match.rhai exists, compare newly-imported entries
-    // against the rest of the library and apply decisions immediately.
+    // Online soft-match is suggestion-only until its high-precision release
+    // gate is validated on a frozen, representative entry-level panel.
     let script_path = config_dir.join("match.rhai");
     if !args.skip_softmatch && script_path.exists() {
         let embed_db = app_dirs::data_dir().join("embeddings.db");
+        let model_path = config_dir.join("dedup-model.json");
+        let persist_suggestions = model_path.exists();
         let soft_cfg = SoftMatchConfig {
             script_path: script_path.display().to_string(),
-            apply_relates: true,
+            model_path: model_path
+                .exists()
+                .then(|| model_path.display().to_string()),
+            persist_suggestions,
+            apply_relates: false,
+            apply_merges: false,
             csv_path: None,
             embed_db_path: Some(embed_db.display().to_string()),
+            embed_model_id: None,
             embed_dim: 256,
             embed_k: 20,
-            embed_sim_threshold: 0.5,
-            embed_max_pages: 4,
-            embed_page_merge_rate: 0.5,
+            embed_sim_threshold: 0.45,
+            embed_max_pages: 1,
+            candidate_max_block: 50,
+            candidate_ngram_k: 30,
+            verbose_decisions: false,
         };
         match_new_entries(&db, &touched_ids, &merged, providers.as_slice(), &soft_cfg).await?;
     }

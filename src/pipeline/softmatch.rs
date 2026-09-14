@@ -1,23 +1,28 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use rhai::{AST, Dynamic, Engine, ImmutableString, Map as RhaiMap, Scope};
+use serde::Serialize;
 use std::time::Instant;
 use tracing::{info, warn};
+use unicode_normalization::UnicodeNormalization as _;
 
-use crate::pipeline::embedding::{EmbeddingCache, embed_stale_entries, register_http_fns};
+use crate::pipeline::embedding::{
+    EmbeddingAnn, EmbeddingCache, embed_stale_entries, register_http_fns,
+};
 
-use crate::musicdb::{AliasRow, ChildRow, ContribRow, MusicDb, SourceRow};
+use crate::musicdb::{AliasRow, ChildRow, ContribRow, MusicDb, NewDedupSuggestion, SourceRow};
 use crate::pipeline::dedup::DedupConfig;
+use crate::pipeline::dedup_model::{DedupModel, ModelDecision};
 use crate::providers::FetchProvider;
 
 type Pair = (String, String);
 
 /// All data needed about one entry for candidate scoring.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EntryInfo {
     pub entry_id: i64,
     pub entry_type: String,
@@ -43,6 +48,10 @@ pub struct EntryInfo {
     pub peer_entry_ids: Vec<i64>,
     /// For tracks: (release_entry_id, disc_no, track_no) from entry_child edges.
     pub track_positions: Vec<(i64, Option<i32>, Option<i32>)>,
+    /// For releases: entry IDs of tracks in the release. This is used only for
+    /// bounded structural candidate retrieval; order/edition policy stays in
+    /// the scorer.
+    pub child_entry_ids: Vec<i64>,
     /// (source, alias_name, is_primary) triples in canonical order: clean
     /// sources before video sources, then by `(source, name)`. `pick_main_title`
     /// and `pick_markers` prefer authoritative names by reading this in order.
@@ -61,38 +70,56 @@ pub enum Verdict {
         confidence: f64,
         reason: String,
     },
+    Defer {
+        confidence: f64,
+        reason: String,
+    },
+    Separate {
+        confidence: f64,
+        reason: String,
+    },
     Distinct,
 }
 
 pub struct SoftMatchConfig {
     pub script_path: String,
+    /// Optional versioned logistic model. When set, it replaces Rhai verdict
+    /// scoring; Rhai remains available for embedding and CSV diagnostics.
+    pub model_path: Option<String>,
+    /// Persist learned MERGE/DEFER candidates for an interactive review queue.
+    pub persist_suggestions: bool,
     /// Write RELATE decisions to the DB.
     pub apply_relates: bool,
+    /// Apply MERGE decisions destructively. Kept separate from relation writes
+    /// so a review/relation pass cannot silently collapse entries.
+    pub apply_merges: bool,
     /// If set, write a CSV row for every candidate pair (including DISTINCT)
     /// to this path for manual quality review.
     pub csv_path: Option<String>,
     /// Path to the SQLite file used as the embedding cache.
     /// `None` disables semantic blocking entirely.
     pub embed_db_path: Option<String>,
+    /// Stable identity of the model behind the local `embed()` hook. Learned
+    /// artifacts use this to reject a mismatched embedding vector space.
+    pub embed_model_id: Option<String>,
     /// Embedding vector dimension — must match the model used in the Rhai `embed()`
     /// function. Default script + default inference backend is 256 (Model2Vec);
     /// use 384 when the inference cdylib is built with `--features minilm`.
     pub embed_dim: usize,
-    /// Base number of semantic KNN neighbours per entry for blocking (applies to
-    /// tracks/releases; artists and release groups are capped lower via
-    /// `k_for_type`). Default: 20.
+    /// Number of semantic KNN neighbours per entry and type. Default: 20.
     pub embed_k: usize,
     /// Minimum cosine similarity to include a semantic pair as a blocking candidate.
-    /// Default: 0.5 (permissive — the Rhai script does the real filtering).
+    /// Default: 0.45, as calibrated by the entry-level retrieval PoC.
     pub embed_sim_threshold: f64,
-    /// Maximum number of KNN pages to walk per entry type. Each page widens the
-    /// neighbour window by one `k_for_type` step; paging stops early once a type's
-    /// per-page merge rate falls below `embed_page_merge_rate`. Default: 4.
+    /// Maximum number of KNN pages to walk per entry type. One page is the
+    /// calibrated k-neighbour channel; larger values are recall experiments.
     pub embed_max_pages: usize,
-    /// Per-type page merge rate (merges / scored) required to fetch the next page.
-    /// A high first-page merge rate suggests the `k` window is too small and more
-    /// neighbours are worth scoring. Default: 0.5.
-    pub embed_page_merge_rate: f64,
+    /// Largest posting list expanded by a lexical/structural channel.
+    pub candidate_max_block: usize,
+    /// Per-entry character-trigram neighbors retained before channel union.
+    pub candidate_ngram_k: usize,
+    /// Print every non-distinct decision and its full source list to stdout.
+    pub verbose_decisions: bool,
 }
 
 // ── Source classification ─────────────────────────────────────────────────────
@@ -168,14 +195,14 @@ fn pick_best_title(sourced: &[(String, String, bool)]) -> Option<String> {
 
 // ── Title normalization ───────────────────────────────────────────────────────
 
-/// Lowercase, keep only alphanumeric + CJK, collapse whitespace.
-/// Good enough for blocking and Jaccard without external unicode crates.
+/// Compatibility-normalize, lowercase, keep alphanumerics, collapse whitespace.
+/// This matches the normalization contract used to calibrate the Python PoC.
 fn normalize(s: &str) -> String {
-    s.chars()
+    s.nfkc()
+        .flat_map(char::to_lowercase)
         .map(|c| {
-            // Keep letters, digits, CJK/kana/hangul ranges, collapse the rest to spaces.
             if c.is_alphabetic() || c.is_numeric() {
-                c.to_lowercase().next().unwrap_or(c)
+                c
             } else {
                 ' '
             }
@@ -214,6 +241,359 @@ fn jaccard_i64(a: &[i64], b: &[i64]) -> f64 {
     } else {
         inter as f64 / union as f64
     }
+}
+
+const VERSION_MARKERS: &[&str] = &[
+    "acoustic",
+    "arrange",
+    "arranged",
+    "bootleg",
+    "cover",
+    "demo",
+    "edit",
+    "instrumental",
+    "karaoke",
+    "live",
+    "mix",
+    "remaster",
+    "remastered",
+    "remix",
+    "reprise",
+    "spedup",
+    "version",
+    "ver",
+    "radio",
+    "unplugged",
+    "アコースティック",
+    "アレンジ",
+    "インスト",
+    "カバー",
+    "ライブ",
+    "リミックス",
+];
+
+const RUNTIME_FEATURE_NAMES: &[&str] = &[
+    "name_exact",
+    "name_similarity",
+    "token_jaccard",
+    "ngram_jaccard",
+    "identifier_overlap",
+    "artist_jaccard",
+    "tracklist_jaccard",
+    "tracklist_length_similarity",
+    "date_exact",
+    "duration_similarity",
+    "version_conflict",
+    "base_title_exact",
+    "qualifier_jaccard",
+    "qualifier_conflict",
+    "primary_type_match",
+    "primary_type_conflict",
+    "track_position_match",
+    "internal_mixedness",
+    "empty_side",
+    "semantic_similarity",
+];
+
+fn set_jaccard<T: Eq + std::hash::Hash>(a: &HashSet<T>, b: &HashSet<T>) -> f64 {
+    let union = a.union(b).count();
+    if union == 0 {
+        0.0
+    } else {
+        a.intersection(b).count() as f64 / union as f64
+    }
+}
+
+fn title_tokens(names: &[String]) -> HashSet<String> {
+    names
+        .iter()
+        .flat_map(|name| {
+            normalize(name)
+                .split_whitespace()
+                .filter(|token| token.chars().count() > 1)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn title_grams(names: &[String]) -> HashSet<String> {
+    names.iter().flat_map(|name| char_trigrams(name)).collect()
+}
+
+// difflib.SequenceMatcher without junk handling. Title strings are far below
+// Python's 200-item autojunk cutoff, so this reproduces the PoC ratio.
+fn sequence_match_ratio(a: &str, b: &str) -> f64 {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    fn matching(a: &[char], b: &[char]) -> usize {
+        let mut best = (0, 0, 0);
+        let mut previous = vec![0usize; b.len() + 1];
+        for i in 0..a.len() {
+            let mut current = vec![0usize; b.len() + 1];
+            for j in 0..b.len() {
+                if a[i] == b[j] {
+                    let size = previous[j] + 1;
+                    current[j + 1] = size;
+                    let start = (i + 1 - size, j + 1 - size);
+                    if size > best.2 || (size == best.2 && (start.0, start.1) < (best.0, best.1)) {
+                        best = (start.0, start.1, size);
+                    }
+                }
+            }
+            previous = current;
+        }
+        if best.2 == 0 {
+            0
+        } else {
+            matching(&a[..best.0], &b[..best.1])
+                + best.2
+                + matching(&a[best.0 + best.2..], &b[best.1 + best.2..])
+        }
+    }
+    2.0 * matching(&a, &b) as f64 / (a.len() + b.len()) as f64
+}
+
+fn normalized_names(entry: &EntryInfo) -> Vec<String> {
+    entry
+        .aliases
+        .iter()
+        .map(|name| normalize(name))
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn best_name_similarity(a: &[String], b: &[String]) -> f64 {
+    a.iter()
+        .flat_map(|left| b.iter().map(move |right| sequence_match_ratio(left, right)))
+        .fold(0.0, f64::max)
+}
+
+fn base_title(value: &str) -> String {
+    let mut depth = 0usize;
+    let mut out = String::new();
+    for ch in value.chars() {
+        if matches!(ch, '(' | '[' | '【' | '（') {
+            depth += 1;
+            out.push(' ');
+        } else if matches!(ch, ')' | ']' | '】' | '）') && depth > 0 {
+            depth -= 1;
+            out.push(' ');
+        } else if depth == 0 {
+            out.push(ch);
+        }
+    }
+    normalize(&out)
+}
+
+fn qualifiers(value: &str) -> HashSet<String> {
+    let mut depth = 0usize;
+    let mut grouped = String::new();
+    for ch in value.chars() {
+        if matches!(ch, '(' | '[' | '【' | '（') {
+            depth += 1;
+        } else if matches!(ch, ')' | ']' | '】' | '）') {
+            depth = depth.saturating_sub(1);
+        } else if depth > 0 {
+            grouped.push(ch);
+        } else {
+            grouped.push(' ');
+        }
+    }
+    let markers: HashSet<&str> = VERSION_MARKERS.iter().copied().collect();
+    let mut result: HashSet<String> = normalize(&grouped)
+        .split_whitespace()
+        .filter(|token| token.chars().count() > 1)
+        .map(str::to_owned)
+        .collect();
+    result.extend(
+        normalize(value)
+            .split_whitespace()
+            .filter(|token| markers.contains(token))
+            .map(str::to_owned),
+    );
+    result.remove("ver");
+    result.remove("version");
+    result
+}
+
+fn is_external_identifier(source: &str, value: &str) -> bool {
+    let source = source.to_lowercase();
+    if matches!(source.as_str(), "barcode" | "upc" | "isrc") {
+        return true;
+    }
+    let chars: Vec<char> = value.chars().collect();
+    (chars.len() == 12
+        && chars[..2].iter().all(|c| c.is_ascii_alphabetic())
+        && chars[2..5].iter().all(|c| c.is_ascii_alphanumeric())
+        && chars[5..].iter().all(|c| c.is_ascii_digit()))
+        || ((12..=14).contains(&chars.len()) && chars.iter().all(|c| c.is_ascii_digit()))
+}
+
+fn learned_features(
+    a: &EntryInfo,
+    b: &EntryInfo,
+    embeddings: Option<&EmbeddingCache>,
+) -> HashMap<String, f64> {
+    let an = normalized_names(a);
+    let bn = normalized_names(b);
+    let ac: HashSet<String> = an.iter().map(|name| name.replace(' ', "")).collect();
+    let bc: HashSet<String> = bn.iter().map(|name| name.replace(' ', "")).collect();
+    let at = title_tokens(&a.aliases);
+    let bt = title_tokens(&b.aliases);
+    let ag = title_grams(&a.aliases);
+    let bg = title_grams(&b.aliases);
+    let ai: HashSet<String> = a
+        .pairs
+        .iter()
+        .filter(|(s, i)| is_external_identifier(s, i))
+        .map(|(_, i)| normalize(i))
+        .collect();
+    let bi: HashSet<String> = b
+        .pairs
+        .iter()
+        .filter(|(s, i)| is_external_identifier(s, i))
+        .map(|(_, i)| normalize(i))
+        .collect();
+    let abase: HashSet<String> = a
+        .aliases
+        .iter()
+        .map(|name| base_title(name))
+        .filter(|x| !x.is_empty())
+        .collect();
+    let bbase: HashSet<String> = b
+        .aliases
+        .iter()
+        .map(|name| base_title(name))
+        .filter(|x| !x.is_empty())
+        .collect();
+    let aq: HashSet<String> = a.aliases.iter().flat_map(|name| qualifiers(name)).collect();
+    let bq: HashSet<String> = b.aliases.iter().flat_map(|name| qualifiers(name)).collect();
+    let am: HashSet<String> = at
+        .iter()
+        .filter(|x| VERSION_MARKERS.contains(&x.as_str()))
+        .cloned()
+        .collect();
+    let bm: HashSet<String> = bt
+        .iter()
+        .filter(|x| VERSION_MARKERS.contains(&x.as_str()))
+        .cloned()
+        .collect();
+    let ap: HashSet<String> = a.primary_types.iter().map(|x| normalize(x)).collect();
+    let bp: HashSet<String> = b.primary_types.iter().map(|x| normalize(x)).collect();
+    let apos: HashSet<(Option<i32>, Option<i32>)> =
+        a.track_positions.iter().map(|(_, d, t)| (*d, *t)).collect();
+    let bpos: HashSet<(Option<i32>, Option<i32>)> =
+        b.track_positions.iter().map(|(_, d, t)| (*d, *t)).collect();
+    let duration_similarity = if a.durations.is_empty() || b.durations.is_empty() {
+        0.0
+    } else {
+        let delta = a
+            .durations
+            .iter()
+            .flat_map(|x| b.durations.iter().map(move |y| x.abs_diff(*y)))
+            .min()
+            .unwrap();
+        (1.0 - delta as f64 / 30_000.0).max(0.0)
+    };
+    let tracklist_length_similarity =
+        if a.child_entry_ids.is_empty() || b.child_entry_ids.is_empty() {
+            0.0
+        } else {
+            a.child_entry_ids.len().min(b.child_entry_ids.len()) as f64
+                / a.child_entry_ids.len().max(b.child_entry_ids.len()) as f64
+        };
+    let mixedness = |entry: &EntryInfo| {
+        let primary: Vec<String> = entry
+            .sourced_aliases
+            .iter()
+            .filter(|(_, _, p)| *p)
+            .map(|(_, name, _)| normalize(name))
+            .filter(|x| !x.is_empty())
+            .collect();
+        if primary.len() < 2 {
+            0.0
+        } else {
+            let minimum = primary
+                .iter()
+                .enumerate()
+                .flat_map(|(i, x)| {
+                    primary[i + 1..]
+                        .iter()
+                        .map(move |y| sequence_match_ratio(x, y))
+                })
+                .fold(1.0, f64::min);
+            1.0 - minimum
+        }
+    };
+    let base_exact = !abase.is_disjoint(&bbase);
+    HashMap::from([
+        ("name_exact".into(), (!ac.is_disjoint(&bc)) as u8 as f64),
+        ("name_similarity".into(), best_name_similarity(&an, &bn)),
+        ("token_jaccard".into(), set_jaccard(&at, &bt)),
+        ("ngram_jaccard".into(), set_jaccard(&ag, &bg)),
+        (
+            "identifier_overlap".into(),
+            (!ai.is_disjoint(&bi)) as u8 as f64,
+        ),
+        (
+            "artist_jaccard".into(),
+            jaccard_i64(&a.peer_entry_ids, &b.peer_entry_ids),
+        ),
+        (
+            "tracklist_jaccard".into(),
+            jaccard_i64(&a.child_entry_ids, &b.child_entry_ids),
+        ),
+        (
+            "tracklist_length_similarity".into(),
+            tracklist_length_similarity,
+        ),
+        (
+            "date_exact".into(),
+            a.release_dates.iter().any(|x| {
+                b.release_dates
+                    .iter()
+                    .any(|y| x.split_whitespace().next() == y.split_whitespace().next())
+            }) as u8 as f64,
+        ),
+        ("duration_similarity".into(), duration_similarity),
+        (
+            "version_conflict".into(),
+            (am != bm && (!am.is_empty() || !bm.is_empty())) as u8 as f64,
+        ),
+        ("base_title_exact".into(), base_exact as u8 as f64),
+        ("qualifier_jaccard".into(), set_jaccard(&aq, &bq)),
+        (
+            "qualifier_conflict".into(),
+            (base_exact && aq != bq && (!aq.is_empty() || !bq.is_empty())) as u8 as f64,
+        ),
+        (
+            "primary_type_match".into(),
+            (!ap.is_disjoint(&bp)) as u8 as f64,
+        ),
+        (
+            "primary_type_conflict".into(),
+            (!ap.is_empty() && !bp.is_empty() && ap.is_disjoint(&bp)) as u8 as f64,
+        ),
+        (
+            "track_position_match".into(),
+            (!apos.is_disjoint(&bpos)) as u8 as f64,
+        ),
+        ("internal_mixedness".into(), mixedness(a).max(mixedness(b))),
+        (
+            "empty_side".into(),
+            (an.is_empty() || bn.is_empty()) as u8 as f64,
+        ),
+        (
+            "semantic_similarity".into(),
+            embeddings
+                .and_then(|cache| cache.cosine_similarity(a.entry_id, b.entry_id))
+                .unwrap_or(0.0),
+        ),
+    ])
 }
 
 // ── Lazy features (internal — used only for CSV diagnostic output) ────────────
@@ -595,6 +975,13 @@ fn entry_to_rhai(e: &EntryInfo) -> RhaiMap {
         })
         .collect();
     m.insert("track_positions".into(), Dynamic::from(pos_dyn));
+    let child_ids: Vec<Dynamic> = e
+        .child_entry_ids
+        .iter()
+        .copied()
+        .map(Dynamic::from)
+        .collect();
+    m.insert("child_ids".into(), Dynamic::from(child_ids));
     m
 }
 
@@ -649,75 +1036,243 @@ fn call_script(
 
 // ── Candidate blocking ────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
-fn blocking_key(entry: &EntryInfo) -> Option<String> {
-    let title = entry.best_title.as_deref()?;
-    let norm = normalize(title);
-    let first = norm.split_whitespace().next()?;
-    if first.len() < 2 {
-        return None;
+#[derive(Clone, Copy, Debug, Default)]
+struct ChannelMask(u16);
+
+impl ChannelMask {
+    const CHANNELS: [(&'static str, u16); 7] = [
+        ("exact_name", 1 << 0),
+        ("token", 1 << 1),
+        ("char_ngram", 1 << 2),
+        ("duration_credit", 1 << 3),
+        ("tracklist", 1 << 4),
+        ("tracklist_overlap", 1 << 5),
+        ("semantic_ann", 1 << 6),
+    ];
+
+    fn insert(&mut self, channel: &'static str) {
+        let bit = Self::CHANNELS
+            .iter()
+            .find_map(|(name, bit)| (*name == channel).then_some(*bit))
+            .expect("registered candidate channel");
+        self.0 |= bit;
     }
-    Some(first.to_string())
+
+    #[cfg(test)]
+    fn contains(&self, channel: &str) -> bool {
+        Self::CHANNELS
+            .iter()
+            .any(|(name, bit)| *name == channel && self.0 & bit != 0)
+    }
+
+    fn csv(self) -> String {
+        Self::CHANNELS
+            .iter()
+            .filter_map(|(name, bit)| (self.0 & bit != 0).then_some(*name))
+            .collect::<Vec<_>>()
+            .join(";")
+    }
 }
 
-/// If `focus` is Some, only emit pairs where at least one entry_id is in the set.
-/// This lets callers do incremental comparisons (new entries vs. everything in
-/// their blocking bucket) without re-scanning already-compared pairs.
-#[allow(dead_code)]
-fn generate_candidates(entries: &[EntryInfo], focus: Option<&HashSet<i64>>) -> Vec<(i64, i64)> {
-    // Group by (entry_type, first_title_token). Only same-type pairs.
-    let mut blocks: HashMap<(String, String), Vec<i64>> = HashMap::new();
-    for e in entries {
-        if e.entry_type == "unknown" {
+type CandidateChannels = HashMap<(i64, i64), ChannelMask>;
+
+fn candidate_pair(a: i64, b: i64) -> (i64, i64) {
+    (a.min(b), a.max(b))
+}
+
+fn add_candidate(
+    output: &mut CandidateChannels,
+    a: i64,
+    b: i64,
+    channel: &'static str,
+    focus: Option<&HashSet<i64>>,
+) {
+    if a == b || focus.is_some_and(|ids| !ids.contains(&a) && !ids.contains(&b)) {
+        return;
+    }
+    output
+        .entry(candidate_pair(a, b))
+        .or_default()
+        .insert(channel);
+}
+
+fn compact_normalized(value: &str) -> String {
+    normalize(value).replace(' ', "")
+}
+
+fn char_trigrams(value: &str) -> BTreeSet<String> {
+    let chars: Vec<char> = compact_normalized(value).chars().collect();
+    if chars.is_empty() {
+        return BTreeSet::new();
+    }
+    if chars.len() <= 3 {
+        return [chars.into_iter().collect()].into_iter().collect();
+    }
+    (0..=chars.len() - 3)
+        .map(|index| chars[index..index + 3].iter().collect())
+        .collect()
+}
+
+fn emit_blocks<K: Eq + std::hash::Hash>(
+    postings: HashMap<K, Vec<i64>>,
+    channel: &'static str,
+    max_block: usize,
+    focus: Option<&HashSet<i64>>,
+    output: &mut CandidateChannels,
+) {
+    for members in postings.into_values() {
+        let members = dedup_sorted(members);
+        if !(2..=max_block).contains(&members.len()) {
             continue;
         }
-        if let Some(key) = blocking_key(e) {
-            blocks
-                .entry((e.entry_type.clone(), key))
-                .or_default()
-                .push(e.entry_id);
+        for (index, &left) in members.iter().enumerate() {
+            for &right in &members[index + 1..] {
+                add_candidate(output, left, right, channel, focus);
+            }
         }
     }
+}
 
-    let mut pairs: Vec<(i64, i64)> = Vec::new();
-    for ((et, _key), group) in &blocks {
-        if group.len() > 200 {
-            warn!(
-                "Skipping oversized block ({} entries, type={et}) — too large to compare O(n²)",
-                group.len()
-            );
+/// Bounded, entry-level lexical and structural retrieval. Every posting is
+/// capped before pair expansion, and fuzzy trigrams retain only `ngram_k`
+/// neighbors per entry. Channels are unioned instead of competing for one
+/// global top-k, preserving complementary recall without an all-pairs scan.
+fn generate_bounded_candidates(
+    entries: &HashMap<i64, EntryInfo>,
+    focus: Option<&HashSet<i64>>,
+    max_block: usize,
+    ngram_k: usize,
+) -> CandidateChannels {
+    let mut exact: HashMap<(String, String), Vec<i64>> = HashMap::new();
+    let mut tokens: HashMap<(String, String), Vec<i64>> = HashMap::new();
+    let mut grams: HashMap<(String, String), Vec<i64>> = HashMap::new();
+    let mut duration_credit: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
+    let mut tracklists: HashMap<Vec<i64>, Vec<i64>> = HashMap::new();
+    let mut tracks: HashMap<i64, Vec<i64>> = HashMap::new();
+
+    for entry in entries.values() {
+        if entry.entry_type == "unknown" {
             continue;
         }
-        for i in 0..group.len() {
-            for j in (i + 1)..group.len() {
-                if focus.is_some_and(|f| !f.contains(&group[i]) && !f.contains(&group[j])) {
-                    continue;
+        for alias in &entry.aliases {
+            let normalized = normalize(alias);
+            let compact = normalized.replace(' ', "");
+            if compact.chars().count() >= 2 {
+                exact
+                    .entry((entry.entry_type.clone(), compact))
+                    .or_default()
+                    .push(entry.entry_id);
+            }
+            for token in normalized
+                .split_whitespace()
+                .filter(|token| token.chars().count() > 1)
+            {
+                tokens
+                    .entry((entry.entry_type.clone(), token.to_string()))
+                    .or_default()
+                    .push(entry.entry_id);
+            }
+            for gram in char_trigrams(alias) {
+                grams
+                    .entry((entry.entry_type.clone(), gram))
+                    .or_default()
+                    .push(entry.entry_id);
+            }
+        }
+        if entry.entry_type == "track" {
+            for &peer in &entry.peer_entry_ids {
+                for &duration in &entry.durations {
+                    let bucket = duration / 5_000;
+                    for nearby in [bucket - 1, bucket, bucket + 1] {
+                        duration_credit
+                            .entry((peer, nearby))
+                            .or_default()
+                            .push(entry.entry_id);
+                    }
                 }
-                let a = group[i].min(group[j]);
-                let b = group[i].max(group[j]);
-                pairs.push((a, b));
+            }
+        }
+        if entry.entry_type == "release" && !entry.child_entry_ids.is_empty() {
+            let fingerprint = dedup_sorted(entry.child_entry_ids.clone());
+            tracklists
+                .entry(fingerprint.clone())
+                .or_default()
+                .push(entry.entry_id);
+            for child in fingerprint {
+                tracks.entry(child).or_default().push(entry.entry_id);
             }
         }
     }
 
-    pairs.sort_unstable();
-    pairs.dedup();
-    pairs
-}
+    let mut output = CandidateChannels::new();
+    emit_blocks(exact, "exact_name", max_block, focus, &mut output);
+    emit_blocks(tokens, "token", max_block, focus, &mut output);
+    emit_blocks(
+        duration_credit,
+        "duration_credit",
+        max_block,
+        focus,
+        &mut output,
+    );
+    emit_blocks(tracklists, "tracklist", max_block, focus, &mut output);
 
-/// Per-entry-type KNN fan-out for semantic blocking.
-///
-/// Higher-cardinality, more-distinctive types (tracks, releases) tolerate a large
-/// neighbour count, but coarse types (artists, release groups) have few true
-/// duplicates and a large `k` only floods the scorer with noise, so they are
-/// capped well below the base. `base_k` is the configured `embed_k` and applies
-/// to tracks/releases and any unrecognised type.
-fn k_for_type(entry_type: &str, base_k: usize) -> usize {
-    match entry_type {
-        "artist" => 3.min(base_k),
-        "release_group" => 5.min(base_k),
-        _ => base_k,
+    let mut gram_overlap: HashMap<i64, HashMap<i64, usize>> = HashMap::new();
+    for members in grams.into_values() {
+        let members = dedup_sorted(members);
+        if !(2..=max_block).contains(&members.len()) {
+            continue;
+        }
+        for (index, &left) in members.iter().enumerate() {
+            for &right in &members[index + 1..] {
+                *gram_overlap
+                    .entry(left)
+                    .or_default()
+                    .entry(right)
+                    .or_default() += 1;
+                *gram_overlap
+                    .entry(right)
+                    .or_default()
+                    .entry(left)
+                    .or_default() += 1;
+            }
+        }
     }
+    for (left, neighbors) in gram_overlap {
+        let mut ranked: Vec<(usize, i64)> = neighbors.into_iter().map(|(id, n)| (n, id)).collect();
+        ranked.sort_unstable_by(|a, b| b.cmp(a));
+        for (shared, right) in ranked.into_iter().take(ngram_k) {
+            if shared >= 2 {
+                add_candidate(&mut output, left, right, "char_ngram", focus);
+            }
+        }
+    }
+
+    let mut track_overlap: HashMap<(i64, i64), usize> = HashMap::new();
+    for members in tracks.into_values() {
+        let members = dedup_sorted(members);
+        if !(2..=max_block).contains(&members.len()) {
+            continue;
+        }
+        for (index, &left) in members.iter().enumerate() {
+            for &right in &members[index + 1..] {
+                *track_overlap
+                    .entry(candidate_pair(left, right))
+                    .or_default() += 1;
+            }
+        }
+    }
+    for ((left, right), shared) in track_overlap {
+        if shared < 2 {
+            continue;
+        }
+        let a: HashSet<i64> = entries[&left].child_entry_ids.iter().copied().collect();
+        let b: HashSet<i64> = entries[&right].child_entry_ids.iter().copied().collect();
+        let union = a.union(&b).count();
+        if union > 0 && shared as f64 / union as f64 >= 0.18 {
+            add_candidate(&mut output, left, right, "tracklist_overlap", focus);
+        }
+    }
+    output
 }
 
 /// Semantic blocking for a single entry: walk up to `max_pages` KNN pages and
@@ -725,29 +1280,61 @@ fn k_for_type(entry_type: &str, base_k: usize) -> usize {
 /// from `all_entries` (merge losers) are skipped. Because vec0 returns neighbours
 /// sorted by ascending L2 distance, the first neighbour that exceeds the
 /// threshold terminates the walk for all subsequent pages too.
+trait SemanticKnn {
+    fn semantic_knn(
+        &self,
+        entry_id: i64,
+        k: usize,
+        entry_type: &str,
+    ) -> anyhow::Result<Vec<(i64, f64)>>;
+}
+
+impl SemanticKnn for EmbeddingCache {
+    fn semantic_knn(
+        &self,
+        entry_id: i64,
+        k: usize,
+        entry_type: &str,
+    ) -> anyhow::Result<Vec<(i64, f64)>> {
+        self.knn(entry_id, k, entry_type)
+    }
+}
+
+impl SemanticKnn for EmbeddingAnn {
+    fn semantic_knn(
+        &self,
+        entry_id: i64,
+        k: usize,
+        entry_type: &str,
+    ) -> anyhow::Result<Vec<(i64, f64)>> {
+        Ok(self.knn(entry_id, k, entry_type))
+    }
+}
+
 fn generate_semantic_candidates_for_entry(
     entry: &EntryInfo,
     all_entries: &HashMap<i64, EntryInfo>,
-    cache: &EmbeddingCache,
+    search: &impl SemanticKnn,
     base_k: usize,
     sim_threshold: f64,
     max_pages: usize,
     already: &mut HashSet<(i64, i64)>,
+    channels: &mut CandidateChannels,
 ) -> Vec<(i64, i64)> {
     if entry.best_title.is_none() || entry.entry_type == "unknown" {
         return vec![];
     }
     // For unit vectors: L2² = 2(1 − cos_sim), so L2 = √(2(1 − cos_sim)).
     let l2_threshold = (2.0 * (1.0 - sim_threshold)).sqrt();
-    let page_k = k_for_type(&entry.entry_type, base_k);
+    let page_k = base_k;
     let mut pairs = Vec::new();
 
     for page in 0..max_pages.max(1) {
         let want = (page + 1) * page_k;
-        let neighbors = match cache.knn(entry.entry_id, want, &entry.entry_type) {
-            Ok(n) => n,
-            Err(err) => {
-                warn!("semantic KNN failed for entry {}: {err}", entry.entry_id);
+        let neighbors = match search.semantic_knn(entry.entry_id, want, &entry.entry_type) {
+            Ok(neighbors) => neighbors,
+            Err(error) => {
+                warn!("semantic KNN failed for entry {}: {error}", entry.entry_id);
                 break;
             }
         };
@@ -762,6 +1349,7 @@ fn generate_semantic_candidates_for_entry(
             }
             let a = entry.entry_id.min(neighbor_id);
             let b = entry.entry_id.max(neighbor_id);
+            channels.entry((a, b)).or_default().insert("semantic_ann");
             if already.insert((a, b)) {
                 pairs.push((a, b));
             }
@@ -818,6 +1406,7 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
     // track positions: child_entry_id → [(release_entry_id, disc_no, track_no)]
     #[allow(clippy::type_complexity)]
     let mut positions_by_track: HashMap<i64, Vec<(i64, Option<i32>, Option<i32>)>> = HashMap::new();
+    let mut children_by_release: HashMap<i64, Vec<i64>> = HashMap::new();
     for c in &child_rows {
         let parent_key = (c.parent_source.clone(), c.parent_identifier.clone());
         let child_key = (c.child_source.clone(), c.child_identifier.clone());
@@ -829,6 +1418,10 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
                 .entry(child_id)
                 .or_default()
                 .push((parent_id, c.disc_no, c.track_no));
+            children_by_release
+                .entry(parent_id)
+                .or_default()
+                .push(child_id);
         }
     }
 
@@ -914,6 +1507,8 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
         peer_entry_ids.sort_unstable();
 
         let track_positions = positions_by_track.get(&e.id).cloned().unwrap_or_default();
+        let child_entry_ids =
+            dedup_sorted(children_by_release.get(&e.id).cloned().unwrap_or_default());
 
         infos.push(EntryInfo {
             entry_id: e.id,
@@ -927,6 +1522,7 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
             primary_types,
             peer_entry_ids,
             track_positions,
+            child_entry_ids,
             sourced_aliases,
         });
     }
@@ -1000,6 +1596,14 @@ fn merge_entry_infos(winner: &mut EntryInfo, loser: &EntryInfo) {
             winner.track_positions.push(pos);
         }
     }
+    winner.child_entry_ids = dedup_sorted(
+        winner
+            .child_entry_ids
+            .iter()
+            .chain(&loser.child_entry_ids)
+            .copied()
+            .collect(),
+    );
 }
 
 // ── Post-merge in-memory consistency helpers ──────────────────────────────────
@@ -1139,7 +1743,7 @@ async fn load_script(
 ///
 /// `focus` restricts the initial seeding to a subset of entries (used by the
 /// incremental import path); merge cascades from those seeds are unrestricted.
-/// Returns `[merge, relate, distinct]` counts per entry type.
+/// Returns `[merge, relate, distinct, defer]` counts per entry type.
 async fn score_candidates(
     db: &MusicDb,
     mut entries: HashMap<i64, EntryInfo>,
@@ -1148,14 +1752,14 @@ async fn score_candidates(
     barrier: &HashMap<Pair, crate::pipeline::dedup::AnchorId>,
     config: &SoftMatchConfig,
     embed_cache: Option<&EmbeddingCache>,
-) -> anyhow::Result<HashMap<String, [usize; 3]>> {
+) -> anyhow::Result<HashMap<String, [usize; 4]>> {
     // Optional CSV output for manual quality review.
     let mut csv: Option<std::io::BufWriter<std::fs::File>> = if let Some(path) = &config.csv_path {
         let f = std::fs::File::create(path).with_context(|| format!("creating CSV file {path}"))?;
         let mut w = std::io::BufWriter::new(f);
         writeln!(
             w,
-            "verdict,kind,confidence,reason,type,\
+            "verdict,kind,confidence,reason,candidate_channels,type,\
              entry_a,title_a,sources_a,\
              entry_b,title_b,sources_b,\
              main_title_sim,markers_conflict,\
@@ -1167,12 +1771,48 @@ async fn score_candidates(
         None
     };
 
-    let mut stats: HashMap<String, [usize; 3]> = HashMap::new();
-
-    let Some(cache) = embed_cache else {
-        info!("Semantic blocking disabled (no embedding cache); no candidates to score.");
-        return Ok(stats);
-    };
+    let learned_model = config
+        .model_path
+        .as_deref()
+        .map(Path::new)
+        .map(DedupModel::load)
+        .transpose()?;
+    if let Some(model) = &learned_model {
+        let supported: HashSet<&str> = RUNTIME_FEATURE_NAMES.iter().copied().collect();
+        let unsupported: Vec<&str> = model
+            .feature_names()
+            .filter(|name| !supported.contains(name))
+            .collect();
+        if !unsupported.is_empty() {
+            anyhow::bail!(
+                "dedup model requires unsupported runtime features: {}",
+                unsupported.join(", ")
+            );
+        }
+        if let Some(required) = model.required_embedding_model() {
+            if embed_cache.is_none() {
+                anyhow::bail!(
+                    "dedup model requires local embeddings from {required:?}, but embeddings are disabled"
+                );
+            }
+            if config.embed_model_id.as_deref() != Some(required) {
+                anyhow::bail!(
+                    "dedup model requires embedding model {required:?}; pass --embedding-model-id {required:?} only when the configured local embed() hook uses it"
+                );
+            }
+        }
+    }
+    if let Some(path) = &config.model_path {
+        info!("Loaded learned dedup scorer from {path}");
+    }
+    let soft_identity = db.soft_identity_projection().await?;
+    if !soft_identity.conflicts.is_empty() {
+        warn!(
+            conflicts = soft_identity.conflicts.len(),
+            "soft identity graph contains conflicting assertions; cannot-link edges won"
+        );
+    }
+    let mut stats: HashMap<String, [usize; 4]> = HashMap::new();
 
     // `queued` tracks every pair ever added to `work_queue` or already decided,
     // preventing duplicates. `scored` is a subset of `queued` for pairs that
@@ -1180,29 +1820,47 @@ async fn score_candidates(
     // gains new data (duration, peer coverage) that could flip the verdict to MERGE.
     // `loser_to_winner` lets us reroute a stale pair (A, loser) to (A, winner)
     // when the loser has already been merged away before the pair is processed.
-    let mut queued: HashSet<(i64, i64)> = HashSet::new();
+    let mut candidate_channels = generate_bounded_candidates(
+        &entries,
+        focus,
+        config.candidate_max_block,
+        config.candidate_ngram_k,
+    );
+    let mut queued: HashSet<(i64, i64)> = candidate_channels.keys().copied().collect();
     let mut scored: HashSet<(i64, i64)> = HashSet::new();
     let mut loser_to_winner: HashMap<i64, i64> = HashMap::new();
-    let mut work_queue: VecDeque<(i64, i64)> = VecDeque::new();
+    let mut lexical_pairs: Vec<(i64, i64)> = queued.iter().copied().collect();
+    lexical_pairs.sort_unstable();
+    let mut work_queue: VecDeque<(i64, i64)> = lexical_pairs.into();
+    info!(
+        "Bounded lexical/structural retrieval: {} candidate pair(s)",
+        work_queue.len()
+    );
 
     // Seed the queue from the focused entries (or all entries for a full scan).
     let seed_ids: Vec<i64> = match focus {
         Some(f) => f.iter().copied().collect(),
         None => entries.keys().copied().collect(),
     };
-    for id in seed_ids {
-        if let Some(entry) = entries.get(&id) {
-            let pairs = generate_semantic_candidates_for_entry(
-                entry,
-                &entries,
-                cache,
-                config.embed_k,
-                config.embed_sim_threshold,
-                config.embed_max_pages,
-                &mut queued,
-            );
-            work_queue.extend(pairs);
+    let ann_index = embed_cache.map(EmbeddingAnn::build).transpose()?;
+    if let Some(ann) = &ann_index {
+        for id in seed_ids {
+            if let Some(entry) = entries.get(&id) {
+                let pairs = generate_semantic_candidates_for_entry(
+                    entry,
+                    &entries,
+                    ann,
+                    config.embed_k,
+                    config.embed_sim_threshold,
+                    config.embed_max_pages,
+                    &mut queued,
+                    &mut candidate_channels,
+                );
+                work_queue.extend(pairs);
+            }
         }
+    } else {
+        info!("Semantic blocking disabled; using lexical/structural candidates only.");
     }
     info!("Initial queue: {} candidate pair(s)", work_queue.len());
 
@@ -1231,24 +1889,59 @@ async fn score_candidates(
             _ => continue,
         };
 
+        if soft_identity.are_same(id_a, id_b) {
+            if let Some(w) = &mut csv {
+                let channels = candidate_channels.get(&(id_a, id_b));
+                write_csv_row(w, "SOFT_SAME", "", 1.0, "", channels, &ea, &eb, ctx)?;
+            }
+            continue;
+        }
+        if soft_identity.are_different(id_a, id_b) {
+            if let Some(w) = &mut csv {
+                let channels = candidate_channels.get(&(id_a, id_b));
+                write_csv_row(w, "SOFT_BARRIER", "", 0.0, "", channels, &ea, &eb, ctx)?;
+            }
+            continue;
+        }
+
         if barrier_blocks(&ea.pairs, &eb.pairs, barrier) {
             if let Some(w) = &mut csv {
-                write_csv_row(w, "BARRIER", "", 0.0, "", &ea, &eb, ctx)?;
+                let channels = candidate_channels.get(&(id_a, id_b));
+                write_csv_row(w, "BARRIER", "", 0.0, "", channels, &ea, &eb, ctx)?;
             }
             continue;
         }
 
         total_scored += 1;
-        let verdict = apply_candidate(db, &ea, &eb, ctx, config, &mut csv, &mut stats).await?;
+        let channels = candidate_channels.get(&(id_a, id_b));
+        let verdict = apply_candidate(
+            db,
+            &ea,
+            &eb,
+            channels,
+            ctx,
+            learned_model.as_ref(),
+            embed_cache,
+            config,
+            &mut csv,
+            &mut stats,
+        )
+        .await?;
 
         // Track DISTINCT and RELATE verdicts: either can flip to MERGE if the
         // entry gains new scoring-relevant data (duration, peer coverage) later.
-        if matches!(verdict, Verdict::Distinct | Verdict::Relate { .. }) {
+        if matches!(
+            verdict,
+            Verdict::Distinct
+                | Verdict::Separate { .. }
+                | Verdict::Defer { .. }
+                | Verdict::Relate { .. }
+        ) {
             scored.insert((id_a, id_b));
         }
 
         // On a real merge, update the winner in memory and cascade.
-        if matches!(verdict, Verdict::Merge { .. }) && config.apply_relates {
+        if matches!(verdict, Verdict::Merge { .. }) && config.apply_merges {
             // apply_candidate calls merge_entries(ea, eb) → ea is loser, eb is winner.
             let loser_id = ea.entry_id;
             let winner_id = eb.entry_id;
@@ -1267,16 +1960,18 @@ async fn score_candidates(
 
                     merge_entry_infos(winner, &loser);
                     // Re-embed if the winner's best_title changed (stale check is fast).
-                    tokio::task::block_in_place(|| {
-                        embed_stale_entries(
-                            std::slice::from_ref(winner),
-                            &ctx.engine,
-                            &ctx.ast,
-                            &ctx.base_scope,
-                            &ctx.user_ctx,
-                            cache,
-                        );
-                    });
+                    if let Some(cache) = embed_cache {
+                        tokio::task::block_in_place(|| {
+                            embed_stale_entries(
+                                std::slice::from_ref(winner),
+                                &ctx.engine,
+                                &ctx.ast,
+                                &ctx.base_scope,
+                                &ctx.user_ctx,
+                                cache,
+                            );
+                        });
+                    }
 
                     // Fix 1+3: if the winner gained duration or peer coverage, pairs
                     // that previously scored DISTINCT or RELATE against the winner may
@@ -1303,7 +1998,9 @@ async fn score_candidates(
                     // Peer overlap changed → previously-scored pairs may now MERGE.
                     drain_scored_for_entry(affected_id, &mut scored, &mut queued, &mut work_queue);
                     // Seed new KNN candidates: embedding unchanged but peer data is richer.
-                    if let Some(entry) = entries.get(&affected_id).cloned() {
+                    if let (Some(cache), Some(entry)) =
+                        (embed_cache, entries.get(&affected_id).cloned())
+                    {
                         let new_pairs = generate_semantic_candidates_for_entry(
                             &entry,
                             &entries,
@@ -1312,22 +2009,26 @@ async fn score_candidates(
                             config.embed_sim_threshold,
                             config.embed_max_pages,
                             &mut queued,
+                            &mut candidate_channels,
                         );
                         work_queue.extend(new_pairs);
                     }
                 }
 
                 // Seed new KNN candidates for the winner (its embedding may have changed).
-                let new_pairs = generate_semantic_candidates_for_entry(
-                    &winner_snapshot,
-                    &entries,
-                    cache,
-                    config.embed_k,
-                    config.embed_sim_threshold,
-                    config.embed_max_pages,
-                    &mut queued,
-                );
-                work_queue.extend(new_pairs);
+                if let Some(cache) = embed_cache {
+                    let new_pairs = generate_semantic_candidates_for_entry(
+                        &winner_snapshot,
+                        &entries,
+                        cache,
+                        config.embed_k,
+                        config.embed_sim_threshold,
+                        config.embed_max_pages,
+                        &mut queued,
+                        &mut candidate_channels,
+                    );
+                    work_queue.extend(new_pairs);
+                }
             }
         }
     }
@@ -1343,19 +2044,72 @@ async fn apply_candidate(
     db: &MusicDb,
     ea: &EntryInfo,
     eb: &EntryInfo,
+    channels: Option<&ChannelMask>,
     ctx: &ScriptCtx<'_>,
+    learned_model: Option<&DedupModel>,
+    embed_cache: Option<&EmbeddingCache>,
     config: &SoftMatchConfig,
     csv: &mut Option<std::io::BufWriter<std::fs::File>>,
-    stats: &mut HashMap<String, [usize; 3]>,
+    stats: &mut HashMap<String, [usize; 4]>,
 ) -> anyhow::Result<Verdict> {
-    let verdict = call_script(
-        &ctx.engine,
-        &ctx.ast,
-        &ctx.base_scope,
-        &ctx.user_ctx,
-        ea,
-        eb,
-    )?;
+    let verdict = if let Some(model) = learned_model {
+        let features = learned_features(ea, eb, embed_cache);
+        let probability = model.probability(&ea.entry_type, &features)?;
+        let decision = model.decide(probability);
+        if config.persist_suggestions
+            && decision != ModelDecision::Separate
+            && !(decision == ModelDecision::Merge && config.apply_merges)
+        {
+            let sorted_features: BTreeMap<&str, f64> = features
+                .iter()
+                .map(|(name, value)| (name.as_str(), *value))
+                .collect();
+            db.upsert_dedup_suggestion(NewDedupSuggestion {
+                entry_a: ea.entry_id,
+                entry_b: eb.entry_id,
+                model_version: model.version().to_owned(),
+                probability,
+                decision: match decision {
+                    ModelDecision::Merge => "merge",
+                    ModelDecision::Defer => "defer",
+                    ModelDecision::Separate => unreachable!(),
+                }
+                .to_owned(),
+                candidate_channels: channels.copied().map(ChannelMask::csv).unwrap_or_default(),
+                features: serde_json::to_string(&sorted_features)?,
+                evidence: serde_json::to_string(&serde_json::json!({
+                    "left": ea,
+                    "right": eb,
+                }))?,
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("persisting dedup suggestion: {error}"))?;
+        }
+        let reason = "learned musiclib-entry-info/1 scorer".to_owned();
+        match decision {
+            ModelDecision::Merge => Verdict::Merge {
+                confidence: probability,
+                reason,
+            },
+            ModelDecision::Separate => Verdict::Separate {
+                confidence: probability,
+                reason,
+            },
+            ModelDecision::Defer => Verdict::Defer {
+                confidence: probability,
+                reason,
+            },
+        }
+    } else {
+        call_script(
+            &ctx.engine,
+            &ctx.ast,
+            &ctx.base_scope,
+            &ctx.user_ctx,
+            ea,
+            eb,
+        )?
+    };
 
     if let Some(w) = csv {
         let (vname, kind, conf, reason) = match &verdict {
@@ -1365,35 +2119,44 @@ async fn apply_candidate(
                 confidence,
                 reason,
             } => ("RELATE", kind.as_str(), *confidence, reason.as_str()),
+            Verdict::Defer { confidence, reason } => ("DEFER", "", *confidence, reason.as_str()),
+            Verdict::Separate { confidence, reason } => {
+                ("SEPARATE", "", *confidence, reason.as_str())
+            }
             Verdict::Distinct => ("DISTINCT", "", 0.0, ""),
         };
-        write_csv_row(w, vname, kind, conf, reason, ea, eb, ctx)?;
+        write_csv_row(w, vname, kind, conf, reason, channels, ea, eb, ctx)?;
     }
 
-    let counters = stats.entry(ea.entry_type.clone()).or_insert([0; 3]);
+    let counters = stats.entry(ea.entry_type.clone()).or_insert([0; 4]);
 
     match &verdict {
-        Verdict::Distinct => {
+        Verdict::Distinct | Verdict::Separate { .. } => {
             counters[2] += 1;
+        }
+        Verdict::Defer { .. } => {
+            counters[3] += 1;
         }
         Verdict::Merge { confidence, reason } => {
             counters[0] += 1;
-            println!("[MERGE] conf={:.2}  type={}", confidence, ea.entry_type);
-            println!(
-                "  A: {:?} (entry {})\n     {}",
-                ea.best_title.as_deref().unwrap_or("?"),
-                ea.entry_id,
-                fmt_pairs(&ea.pairs)
-            );
-            println!(
-                "  B: {:?} (entry {})\n     {}",
-                eb.best_title.as_deref().unwrap_or("?"),
-                eb.entry_id,
-                fmt_pairs(&eb.pairs)
-            );
-            println!("  reason: {reason}\n");
+            if config.verbose_decisions {
+                println!("[MERGE] conf={:.2}  type={}", confidence, ea.entry_type);
+                println!(
+                    "  A: {:?} (entry {})\n     {}",
+                    ea.best_title.as_deref().unwrap_or("?"),
+                    ea.entry_id,
+                    fmt_pairs(&ea.pairs)
+                );
+                println!(
+                    "  B: {:?} (entry {})\n     {}",
+                    eb.best_title.as_deref().unwrap_or("?"),
+                    eb.entry_id,
+                    fmt_pairs(&eb.pairs)
+                );
+                println!("  reason: {reason}\n");
+            }
 
-            if config.apply_relates {
+            if config.apply_merges {
                 db.merge_entries(ea.entry_id, eb.entry_id)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1406,23 +2169,25 @@ async fn apply_candidate(
             reason,
         } => {
             counters[1] += 1;
-            println!(
-                "[RELATE {}] conf={:.2}  type={}",
-                kind, confidence, ea.entry_type
-            );
-            println!(
-                "  A: {:?} (entry {})\n     {}",
-                ea.best_title.as_deref().unwrap_or("?"),
-                ea.entry_id,
-                fmt_pairs(&ea.pairs)
-            );
-            println!(
-                "  B: {:?} (entry {})\n     {}",
-                eb.best_title.as_deref().unwrap_or("?"),
-                eb.entry_id,
-                fmt_pairs(&eb.pairs)
-            );
-            println!("  reason: {reason}\n");
+            if config.verbose_decisions {
+                println!(
+                    "[RELATE {}] conf={:.2}  type={}",
+                    kind, confidence, ea.entry_type
+                );
+                println!(
+                    "  A: {:?} (entry {})\n     {}",
+                    ea.best_title.as_deref().unwrap_or("?"),
+                    ea.entry_id,
+                    fmt_pairs(&ea.pairs)
+                );
+                println!(
+                    "  B: {:?} (entry {})\n     {}",
+                    eb.best_title.as_deref().unwrap_or("?"),
+                    eb.entry_id,
+                    fmt_pairs(&eb.pairs)
+                );
+                println!("  reason: {reason}\n");
+            }
 
             if config.apply_relates {
                 db.upsert_relation(
@@ -1449,6 +2214,7 @@ fn write_csv_row(
     kind: &str,
     confidence: f64,
     reason: &str,
+    channels: Option<&ChannelMask>,
     ea: &EntryInfo,
     eb: &EntryInfo,
     ctx: &ScriptCtx,
@@ -1485,11 +2251,12 @@ fn write_csv_row(
 
     writeln!(
         w,
-        "{},{},{:.4},{},{},{},{},{},{},{},{},{:.4},{},{},{},{},{},{:.4}",
+        "{},{},{:.4},{},{},{},{},{},{},{},{},{},{:.4},{},{},{},{},{},{:.4}",
         verdict,
         kind,
         confidence,
         csv_field(reason),
+        csv_field(&channels.copied().map(ChannelMask::csv).unwrap_or_default(),),
         ea.entry_type,
         ea.entry_id,
         csv_field(ea.best_title.as_deref().unwrap_or("")),
@@ -1566,11 +2333,16 @@ pub async fn match_db(
     println!("=== Summary ===");
     for t in ["track", "release", "release_group", "artist"] {
         if let Some(c) = stats.get(t) {
-            println!("  {t:14}  merge={} relate={} distinct={}", c[0], c[1], c[2]);
+            println!(
+                "  {t:14}  merge={} relate={} distinct={} defer={}",
+                c[0], c[1], c[2], c[3]
+            );
         }
     }
-    if config.apply_relates {
-        info!("Decisions written to DB.");
+    if config.apply_merges {
+        info!("MERGE and RELATE decisions written to DB.");
+    } else if config.apply_relates {
+        info!("RELATE decisions written to DB; MERGE decisions remained suggestions.");
     } else {
         info!("Dry-run complete. Pass --apply to write decisions to the DB.");
     }
@@ -1697,6 +2469,7 @@ mod tests {
             primary_types: vec![],
             peer_entry_ids: peers,
             track_positions: vec![],
+            child_entry_ids: vec![],
             sourced_aliases: vec![],
         }
     }
@@ -1717,8 +2490,115 @@ mod tests {
             primary_types: vec![],
             peer_entry_ids: vec![],
             track_positions: vec![],
+            child_entry_ids: vec![],
             sourced_aliases,
         }
+    }
+
+    #[test]
+    fn bounded_candidates_union_exact_and_fuzzy_channels() {
+        let mut a = titled_entry(1, "Shared Name", "musicbrainz", vec![]);
+        let mut b = titled_entry(2, "shared-name", "discogs", vec![]);
+        a.entry_type = "artist".into();
+        b.entry_type = "artist".into();
+        let entries = [(1, a), (2, b)].into_iter().collect();
+        let candidates = generate_bounded_candidates(&entries, None, 50, 30);
+        let channels = &candidates[&(1, 2)];
+        assert!(channels.contains("exact_name"));
+        assert!(channels.contains("char_ngram"));
+        assert!(channels.contains("token"));
+    }
+
+    #[test]
+    fn normalization_uses_nfkc_for_calibration_parity() {
+        assert_eq!(normalize("ＡＢＣ—Live!"), "abc live");
+    }
+
+    #[test]
+    fn learned_features_cover_runtime_model_contract() {
+        let mut a = titled_entry(1, "Song (Live)", "isrc", vec![180_000]);
+        let mut b = titled_entry(2, "Song [Live]", "spotify", vec![181_000]);
+        a.entry_type = "track".into();
+        b.entry_type = "track".into();
+        a.pairs = vec![("isrc".into(), "JPABC1234567".into())];
+        b.pairs = vec![("spotify".into(), "JPABC1234567".into())];
+        a.peer_entry_ids = vec![7];
+        b.peer_entry_ids = vec![7];
+        let row = learned_features(&a, &b, None);
+        let expected: HashSet<&str> = [
+            "name_exact",
+            "name_similarity",
+            "token_jaccard",
+            "ngram_jaccard",
+            "identifier_overlap",
+            "artist_jaccard",
+            "tracklist_jaccard",
+            "tracklist_length_similarity",
+            "date_exact",
+            "duration_similarity",
+            "version_conflict",
+            "base_title_exact",
+            "qualifier_jaccard",
+            "qualifier_conflict",
+            "primary_type_match",
+            "primary_type_conflict",
+            "track_position_match",
+            "internal_mixedness",
+            "empty_side",
+            "semantic_similarity",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            row.keys().map(String::as_str).collect::<HashSet<_>>(),
+            expected
+        );
+        assert_eq!(row["identifier_overlap"], 1.0);
+        assert_eq!(row["artist_jaccard"], 1.0);
+        assert_eq!(row["base_title_exact"], 1.0);
+        assert_eq!(row["qualifier_jaccard"], 1.0);
+        assert!((row["duration_similarity"] - (29.0 / 30.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn bounded_candidates_use_track_duration_and_credit() {
+        let mut a = titled_entry(1, "異なる題", "musicbrainz", vec![180_000]);
+        let mut b = titled_entry(2, "Different title", "spotify", vec![183_000]);
+        a.entry_type = "track".into();
+        b.entry_type = "track".into();
+        a.peer_entry_ids = vec![99];
+        b.peer_entry_ids = vec![99];
+        let entries = [(1, a), (2, b)].into_iter().collect();
+        let candidates = generate_bounded_candidates(&entries, None, 50, 30);
+        assert!(candidates[&(1, 2)].contains("duration_credit"));
+    }
+
+    #[test]
+    fn bounded_candidates_use_partial_release_tracklists() {
+        let mut a = titled_entry(1, "Edition A", "musicbrainz", vec![]);
+        let mut b = titled_entry(2, "Edition B", "discogs", vec![]);
+        a.entry_type = "release".into();
+        b.entry_type = "release".into();
+        a.child_entry_ids = vec![10, 11, 12];
+        b.child_entry_ids = vec![10, 11, 13];
+        let entries = [(1, a), (2, b)].into_iter().collect();
+        let candidates = generate_bounded_candidates(&entries, None, 50, 30);
+        assert!(candidates[&(1, 2)].contains("tracklist_overlap"));
+    }
+
+    #[test]
+    fn bounded_candidates_honor_incremental_focus() {
+        let mut a = titled_entry(1, "Shared", "musicbrainz", vec![]);
+        let mut b = titled_entry(2, "Shared", "discogs", vec![]);
+        a.entry_type = "artist".into();
+        b.entry_type = "artist".into();
+        let entries = [(1, a), (2, b)].into_iter().collect();
+        let absent = HashSet::from([3]);
+        assert!(generate_bounded_candidates(&entries, Some(&absent), 50, 30).is_empty());
+        let focused = HashSet::from([1]);
+        assert!(
+            generate_bounded_candidates(&entries, Some(&focused), 50, 30).contains_key(&(1, 2))
+        );
     }
 
     /// Fix 2: when a merge removes the loser, every other entry that listed it
