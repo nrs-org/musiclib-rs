@@ -397,6 +397,11 @@ fn ordered_pair(a: i64, b: i64) -> (i64, i64) {
     (a.min(b), a.max(b))
 }
 
+/// Max pairs per `pair_condition` query. Each pair becomes one OR branch;
+/// SQLite caps expression tree depth at 1000, so callers with more pairs than
+/// this (e.g. a large backfill batch) must chunk — see `pair_rows_chunked`.
+const PAIR_QUERY_CHUNK: usize = 400;
+
 /// `WHERE (source_col, id_col) IN (pairs)`, expressed as an OR-of-ANDs since
 /// sea-orm's query builder has no composite-tuple `IN`. Cheap for the small,
 /// bounded pair sets the focused/online dedup path deals with; each branch
@@ -415,6 +420,26 @@ fn pair_condition<C: ColumnTrait>(
         );
     }
     cond
+}
+
+/// Runs `query` once per `PAIR_QUERY_CHUNK`-sized slice of `pairs`, concatenating
+/// results. `pair_condition` builds one OR branch per pair, so any caller whose
+/// pair count isn't already bounded small (i.e. anything besides the focused
+/// online-dedup path — batched backfills in particular) must go through this
+/// instead of calling `pair_condition` directly.
+async fn chunked_pair_query<T, F, Fut>(
+    pairs: &[(String, String)],
+    query: F,
+) -> Result<Vec<T>, Error>
+where
+    F: Fn(&[(String, String)]) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<T>, DbErr>>,
+{
+    let mut out = Vec::new();
+    for chunk in pairs.chunks(PAIR_QUERY_CHUNK) {
+        out.extend(query(chunk).await?);
+    }
+    Ok(out)
 }
 
 fn source_row_from_model(m: entry_source::Model) -> SourceRow {
@@ -1617,17 +1642,19 @@ impl MusicDb {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(entry_source::Entity::find()
-            .filter(pair_condition(
-                pairs,
-                entry_source::Column::Source,
-                entry_source::Column::Identifier,
-            ))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(source_row_from_model)
-            .collect())
+        Ok(chunked_pair_query(pairs, |chunk| {
+            entry_source::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    entry_source::Column::Source,
+                    entry_source::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(source_row_from_model)
+        .collect())
     }
 
     /// entry_alias rows for exactly `pairs` (indexed on (source, identifier)).
@@ -1638,23 +1665,25 @@ impl MusicDb {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(entry_alias::Entity::find()
-            .filter(pair_condition(
-                pairs,
-                entry_alias::Column::Source,
-                entry_alias::Column::Identifier,
-            ))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(|m| AliasRow {
-                source: m.source,
-                identifier: m.identifier,
-                name: m.name,
-                locale: m.locale,
-                primary_alias: m.primary,
-            })
-            .collect())
+        Ok(chunked_pair_query(pairs, |chunk| {
+            entry_alias::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    entry_alias::Column::Source,
+                    entry_alias::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(|m| AliasRow {
+            source: m.source,
+            identifier: m.identifier,
+            name: m.name,
+            locale: m.locale,
+            primary_alias: m.primary,
+        })
+        .collect())
     }
 
     /// contribution rows whose *track* pair is one of `pairs` (indexed).
@@ -1665,17 +1694,19 @@ impl MusicDb {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(contribution::Entity::find()
-            .filter(pair_condition(
-                pairs,
-                contribution::Column::Source,
-                contribution::Column::Identifier,
-            ))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(contrib_row_from_model)
-            .collect())
+        Ok(chunked_pair_query(pairs, |chunk| {
+            contribution::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    contribution::Column::Source,
+                    contribution::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(contrib_row_from_model)
+        .collect())
     }
 
     /// contribution rows whose *artist* pair is one of `pairs` (indexed).
@@ -1686,17 +1717,19 @@ impl MusicDb {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(contribution::Entity::find()
-            .filter(pair_condition(
-                pairs,
-                contribution::Column::ArtistSource,
-                contribution::Column::ArtistIdentifier,
-            ))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(contrib_row_from_model)
-            .collect())
+        Ok(chunked_pair_query(pairs, |chunk| {
+            contribution::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    contribution::Column::ArtistSource,
+                    contribution::Column::ArtistIdentifier,
+                ))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(contrib_row_from_model)
+        .collect())
     }
 
     /// entry_child rows whose *parent* pair is one of `pairs` (indexed).
@@ -1707,17 +1740,19 @@ impl MusicDb {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(entry_child::Entity::find()
-            .filter(pair_condition(
-                pairs,
-                entry_child::Column::ParentSource,
-                entry_child::Column::ParentIdentifier,
-            ))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(child_row_from_model)
-            .collect())
+        Ok(chunked_pair_query(pairs, |chunk| {
+            entry_child::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    entry_child::Column::ParentSource,
+                    entry_child::Column::ParentIdentifier,
+                ))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(child_row_from_model)
+        .collect())
     }
 
     /// entry_child rows whose *child* pair is one of `pairs` (indexed).
@@ -1728,17 +1763,19 @@ impl MusicDb {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(entry_child::Entity::find()
-            .filter(pair_condition(
-                pairs,
-                entry_child::Column::ChildSource,
-                entry_child::Column::ChildIdentifier,
-            ))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(child_row_from_model)
-            .collect())
+        Ok(chunked_pair_query(pairs, |chunk| {
+            entry_child::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    entry_child::Column::ChildSource,
+                    entry_child::Column::ChildIdentifier,
+                ))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(child_row_from_model)
+        .collect())
     }
 
     // ── dedup_block_key: persisted candidate-retrieval index ──────────────────
