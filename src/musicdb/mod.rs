@@ -131,6 +131,30 @@ mod contribution {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+// Persisted candidate-retrieval blocking index. One row per (entry, block key)
+// the entry participates in — `block_key` already encodes the channel and
+// entry-type discriminant (e.g. "exact|track|foo", "dur|482|96"), so a single
+// indexed column lookup answers "who else shares this key" without scanning
+// the rest of the library. Maintained incrementally: `reindex_block_keys`
+// deletes and re-inserts the rows for a given entry_id set, so it stays
+// correct as aliases/credits/tracklists change. See `block_keys_for_entry` in
+// `pipeline::softmatch` for key derivation.
+mod dedup_block_key {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "dedup_block_key")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        #[sea_orm(primary_key, auto_increment = false, indexed)]
+        pub block_key: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 // Soft-dedup relation edges. Each row is a heuristic (or manual) assertion
 // that two entries are related in some way. `entry_a < entry_b` is enforced
 // at insertion time so there is at most one row per (entry_a, entry_b, kind)
@@ -371,6 +395,63 @@ impl SoftIdentityProjection {
 
 fn ordered_pair(a: i64, b: i64) -> (i64, i64) {
     (a.min(b), a.max(b))
+}
+
+/// `WHERE (source_col, id_col) IN (pairs)`, expressed as an OR-of-ANDs since
+/// sea-orm's query builder has no composite-tuple `IN`. Cheap for the small,
+/// bounded pair sets the focused/online dedup path deals with; each branch
+/// hits the composite index created on these column pairs in `MusicDb::new`.
+fn pair_condition<C: ColumnTrait>(
+    pairs: &[(String, String)],
+    source_col: C,
+    id_col: C,
+) -> Condition {
+    let mut cond = Condition::any();
+    for (source, identifier) in pairs {
+        cond = cond.add(
+            Condition::all()
+                .add(source_col.eq(source.clone()))
+                .add(id_col.eq(identifier.clone())),
+        );
+    }
+    cond
+}
+
+fn source_row_from_model(m: entry_source::Model) -> SourceRow {
+    let duration_ms = if let Some(all) = &m.duration_ms_all {
+        serde_json::from_str::<Vec<i64>>(all).unwrap_or_default()
+    } else {
+        m.duration_ms.into_iter().collect()
+    };
+    SourceRow {
+        source: m.source,
+        identifier: m.identifier,
+        entry_id: m.entry_id,
+        duration_ms,
+        release_type: m.release_type,
+        primary_type: m.primary_type,
+        release_date: m.release_date,
+    }
+}
+
+fn contrib_row_from_model(m: contribution::Model) -> ContribRow {
+    ContribRow {
+        source: m.source,
+        identifier: m.identifier,
+        artist_source: m.artist_source,
+        artist_identifier: m.artist_identifier,
+    }
+}
+
+fn child_row_from_model(m: entry_child::Model) -> ChildRow {
+    ChildRow {
+        parent_source: m.parent_source,
+        parent_identifier: m.parent_identifier,
+        child_source: m.child_source,
+        child_identifier: m.child_identifier,
+        disc_no: m.disc_no,
+        track_no: m.track_no,
+    }
 }
 
 struct IdentityDsu {
@@ -716,6 +797,22 @@ impl MusicDb {
         db.get_schema_registry("musiclib_rs::musicdb::*")
             .sync(&db)
             .await?;
+        // Pair-keyed tables (entry_alias/contribution/entry_child) have no natural
+        // single-column index the entity-model attribute macro can express for a
+        // composite lookup, and entry_source.entry_id is looked up far more often
+        // than it's written. These indexes let the focused/online dedup path (see
+        // pipeline::softmatch::entry_infos_by_ids) fetch exactly the rows it needs
+        // instead of scanning full tables into memory.
+        sea_orm::ConnectionTrait::execute_unprepared(
+            &db,
+            "CREATE INDEX IF NOT EXISTS idx_entry_source_entry_id ON entry_source(entry_id);
+             CREATE INDEX IF NOT EXISTS idx_entry_alias_pair ON entry_alias(source, identifier);
+             CREATE INDEX IF NOT EXISTS idx_contribution_track_pair ON contribution(source, identifier);
+             CREATE INDEX IF NOT EXISTS idx_contribution_artist_pair ON contribution(artist_source, artist_identifier);
+             CREATE INDEX IF NOT EXISTS idx_entry_child_parent_pair ON entry_child(parent_source, parent_identifier);
+             CREATE INDEX IF NOT EXISTS idx_entry_child_child_pair ON entry_child(child_source, child_identifier);",
+        )
+        .await?;
         Ok(Self { db })
     }
 
@@ -1163,22 +1260,7 @@ impl MusicDb {
             .all(&self.db)
             .await?
             .into_iter()
-            .map(|m| {
-                let duration_ms = if let Some(all) = &m.duration_ms_all {
-                    serde_json::from_str::<Vec<i64>>(all).unwrap_or_default()
-                } else {
-                    m.duration_ms.into_iter().collect()
-                };
-                SourceRow {
-                    source: m.source,
-                    identifier: m.identifier,
-                    entry_id: m.entry_id,
-                    duration_ms,
-                    release_type: m.release_type,
-                    primary_type: m.primary_type,
-                    release_date: m.release_date,
-                }
-            })
+            .map(source_row_from_model)
             .collect())
     }
 
@@ -1204,12 +1286,7 @@ impl MusicDb {
             .all(&self.db)
             .await?
             .into_iter()
-            .map(|m| ContribRow {
-                source: m.source,
-                identifier: m.identifier,
-                artist_source: m.artist_source,
-                artist_identifier: m.artist_identifier,
-            })
+            .map(contrib_row_from_model)
             .collect())
     }
 
@@ -1489,14 +1566,242 @@ impl MusicDb {
             .all(&self.db)
             .await?
             .into_iter()
-            .map(|m| ChildRow {
-                parent_source: m.parent_source,
-                parent_identifier: m.parent_identifier,
-                child_source: m.child_source,
-                child_identifier: m.child_identifier,
-                disc_no: m.disc_no,
-                track_no: m.track_no,
+            .map(child_row_from_model)
+            .collect())
+    }
+
+    // ── Scoped bulk-fetch helpers (focused/online soft-match path) ────────────
+    //
+    // Counterparts to the `all_*_rows` full-table helpers above, filtered to a
+    // caller-supplied id/pair set instead of loading the whole library. Used by
+    // `pipeline::softmatch::entry_infos_by_ids` to assemble `EntryInfo` for
+    // just the entries a candidate search actually touches.
+
+    /// Entry rows for exactly `ids`. Missing ids are silently omitted (e.g. a
+    /// stale embedding-cache row pointing at an entry merged away since).
+    pub async fn entry_rows_by_ids(&self, ids: &[i64]) -> Result<Vec<EntryRow>, Error> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(entry::Entity::find()
+            .filter(entry::Column::Id.is_in(ids.iter().copied()))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| EntryRow {
+                id: m.id,
+                entry_type: m.entry_type,
             })
+            .collect())
+    }
+
+    /// entry_source rows for exactly `ids` (indexed on entry_id).
+    pub async fn source_rows_by_entry_ids(&self, ids: &[i64]) -> Result<Vec<SourceRow>, Error> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(entry_source::Entity::find()
+            .filter(entry_source::Column::EntryId.is_in(ids.iter().copied()))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(source_row_from_model)
+            .collect())
+    }
+
+    /// entry_source rows for exactly `pairs` (primary-key lookup).
+    pub async fn source_rows_for_pairs(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<SourceRow>, Error> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(entry_source::Entity::find()
+            .filter(pair_condition(
+                pairs,
+                entry_source::Column::Source,
+                entry_source::Column::Identifier,
+            ))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(source_row_from_model)
+            .collect())
+    }
+
+    /// entry_alias rows for exactly `pairs` (indexed on (source, identifier)).
+    pub async fn alias_rows_for_pairs(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<AliasRow>, Error> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(entry_alias::Entity::find()
+            .filter(pair_condition(
+                pairs,
+                entry_alias::Column::Source,
+                entry_alias::Column::Identifier,
+            ))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| AliasRow {
+                source: m.source,
+                identifier: m.identifier,
+                name: m.name,
+                locale: m.locale,
+                primary_alias: m.primary,
+            })
+            .collect())
+    }
+
+    /// contribution rows whose *track* pair is one of `pairs` (indexed).
+    pub async fn contrib_rows_for_track_pairs(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<ContribRow>, Error> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(contribution::Entity::find()
+            .filter(pair_condition(
+                pairs,
+                contribution::Column::Source,
+                contribution::Column::Identifier,
+            ))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(contrib_row_from_model)
+            .collect())
+    }
+
+    /// contribution rows whose *artist* pair is one of `pairs` (indexed).
+    pub async fn contrib_rows_for_artist_pairs(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<ContribRow>, Error> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(contribution::Entity::find()
+            .filter(pair_condition(
+                pairs,
+                contribution::Column::ArtistSource,
+                contribution::Column::ArtistIdentifier,
+            ))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(contrib_row_from_model)
+            .collect())
+    }
+
+    /// entry_child rows whose *parent* pair is one of `pairs` (indexed).
+    pub async fn child_rows_for_parent_pairs(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<ChildRow>, Error> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(entry_child::Entity::find()
+            .filter(pair_condition(
+                pairs,
+                entry_child::Column::ParentSource,
+                entry_child::Column::ParentIdentifier,
+            ))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(child_row_from_model)
+            .collect())
+    }
+
+    /// entry_child rows whose *child* pair is one of `pairs` (indexed).
+    pub async fn child_rows_for_child_pairs(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<ChildRow>, Error> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(entry_child::Entity::find()
+            .filter(pair_condition(
+                pairs,
+                entry_child::Column::ChildSource,
+                entry_child::Column::ChildIdentifier,
+            ))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(child_row_from_model)
+            .collect())
+    }
+
+    // ── dedup_block_key: persisted candidate-retrieval index ──────────────────
+
+    /// Replace every block-key row for `entry_id` with `keys`. Idempotent and
+    /// safe to call again after an entry's aliases/credits/tracklist change —
+    /// re-derive the keys and call this again to keep the index current.
+    pub async fn replace_block_keys(&self, entry_id: i64, keys: &[String]) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        dedup_block_key::Entity::delete_many()
+            .filter(dedup_block_key::Column::EntryId.eq(entry_id))
+            .exec(&txn)
+            .await?;
+        let mut keys = keys.to_vec();
+        keys.sort_unstable();
+        keys.dedup();
+        if !keys.is_empty() {
+            dedup_block_key::Entity::insert_many(keys.into_iter().map(|key| {
+                dedup_block_key::ActiveModel {
+                    entry_id: Set(entry_id),
+                    block_key: Set(key),
+                }
+            }))
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Entry ids sharing `key`, capped at `limit + 1` rows. The extra row over
+    /// `limit` is a signal, not data: the caller (mirroring the in-memory
+    /// blocker's `max_block` hub cutoff) treats a block this large as too
+    /// generic to be useful and skips it entirely rather than truncating it.
+    pub async fn block_key_members(&self, key: &str, limit: usize) -> Result<Vec<i64>, Error> {
+        Ok(dedup_block_key::Entity::find()
+            .filter(dedup_block_key::Column::BlockKey.eq(key))
+            .limit(limit as u64 + 1)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| m.entry_id)
+            .collect())
+    }
+
+    /// Up to `limit` entry ids with no `dedup_block_key` row at all — entries
+    /// the focused/online dedup path has never indexed (new library, or one
+    /// upgraded from before this index existed). Used by the `dedup` binary's
+    /// backfill step to catch the index up in bounded batches; the steady-state
+    /// online path never calls this, since it reindexes exactly what it touches.
+    pub async fn unindexed_entry_ids(&self, limit: usize) -> Result<Vec<i64>, Error> {
+        let indexed = sea_query::Query::select()
+            .distinct()
+            .column(dedup_block_key::Column::EntryId)
+            .from(dedup_block_key::Entity)
+            .to_owned();
+        Ok(entry::Entity::find()
+            .filter(entry::Column::Id.not_in_subquery(indexed))
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| m.id)
             .collect())
     }
 

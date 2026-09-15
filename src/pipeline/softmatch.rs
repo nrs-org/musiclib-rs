@@ -1530,6 +1530,581 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
     Ok(infos.into_iter().map(|e| (e.entry_id, e)).collect())
 }
 
+/// Scoped counterpart to `build_entry_infos`: assemble `EntryInfo` for exactly
+/// `ids`, touching only those entries' own pairs and their immediate graph
+/// neighbors (credited artists/tracks, parent/child releases) — never a full
+/// table scan. Ids that no longer exist (e.g. a stale embedding-cache row
+/// pointing at a merged-away entry) are silently omitted from the result.
+async fn entry_infos_by_ids(db: &MusicDb, ids: &[i64]) -> anyhow::Result<HashMap<i64, EntryInfo>> {
+    let ids = dedup_sorted(ids.to_vec());
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let entry_rows = db.entry_rows_by_ids(&ids).await?;
+    let source_rows = db.source_rows_by_entry_ids(&ids).await?;
+
+    let own_pairs: Vec<Pair> = dedup_sorted(
+        source_rows
+            .iter()
+            .map(|s| (s.source.clone(), s.identifier.clone()))
+            .collect(),
+    );
+
+    let alias_rows = db.alias_rows_for_pairs(&own_pairs).await?;
+    let contrib_as_track = db.contrib_rows_for_track_pairs(&own_pairs).await?;
+    let contrib_as_artist = db.contrib_rows_for_artist_pairs(&own_pairs).await?;
+    let child_as_parent = db.child_rows_for_parent_pairs(&own_pairs).await?;
+    let child_as_child = db.child_rows_for_child_pairs(&own_pairs).await?;
+
+    // Resolve every pair these rows reference but that isn't already one of
+    // our own pairs (the "other side" of a credit or a child edge) to its
+    // entry id, so peer/child ids can be filled in without needing the whole
+    // library's entry_source table in memory.
+    let own_pair_set: HashSet<&Pair> = own_pairs.iter().collect();
+    let mut referenced_pairs: Vec<Pair> = Vec::new();
+    for c in &contrib_as_track {
+        referenced_pairs.push((c.artist_source.clone(), c.artist_identifier.clone()));
+    }
+    for c in &contrib_as_artist {
+        referenced_pairs.push((c.source.clone(), c.identifier.clone()));
+    }
+    for c in &child_as_parent {
+        referenced_pairs.push((c.child_source.clone(), c.child_identifier.clone()));
+    }
+    for c in &child_as_child {
+        referenced_pairs.push((c.parent_source.clone(), c.parent_identifier.clone()));
+    }
+    let extra_pairs: Vec<Pair> = dedup_sorted(referenced_pairs)
+        .into_iter()
+        .filter(|p| !own_pair_set.contains(p))
+        .collect();
+    let extra_sources = db.source_rows_for_pairs(&extra_pairs).await?;
+
+    let mut pair_to_entry: HashMap<Pair, i64> = source_rows
+        .iter()
+        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
+        .collect();
+    for s in &extra_sources {
+        pair_to_entry.insert((s.source.clone(), s.identifier.clone()), s.entry_id);
+    }
+
+    let mut sources_by_entry: HashMap<i64, Vec<&SourceRow>> = HashMap::new();
+    for s in &source_rows {
+        sources_by_entry.entry(s.entry_id).or_default().push(s);
+    }
+    let mut aliases_by_pair: HashMap<Pair, Vec<&AliasRow>> = HashMap::new();
+    for a in &alias_rows {
+        aliases_by_pair
+            .entry((a.source.clone(), a.identifier.clone()))
+            .or_default()
+            .push(a);
+    }
+
+    // A release and one of its tracks can both be in `ids`, in which case the
+    // same underlying child_entry row comes back from both the parent-side and
+    // child-side queries — dedupe before folding into the position/children maps.
+    let mut seen_child_rows: HashSet<(String, String, String, String)> = HashSet::new();
+    #[allow(clippy::type_complexity)]
+    let mut positions_by_track: HashMap<i64, Vec<(i64, Option<i32>, Option<i32>)>> = HashMap::new();
+    let mut children_by_release: HashMap<i64, Vec<i64>> = HashMap::new();
+    for c in child_as_parent.iter().chain(child_as_child.iter()) {
+        let key = (
+            c.parent_source.clone(),
+            c.parent_identifier.clone(),
+            c.child_source.clone(),
+            c.child_identifier.clone(),
+        );
+        if !seen_child_rows.insert(key) {
+            continue;
+        }
+        let parent_key = (c.parent_source.clone(), c.parent_identifier.clone());
+        let child_key = (c.child_source.clone(), c.child_identifier.clone());
+        if let (Some(&parent_id), Some(&child_id)) = (
+            pair_to_entry.get(&parent_key),
+            pair_to_entry.get(&child_key),
+        ) {
+            positions_by_track
+                .entry(child_id)
+                .or_default()
+                .push((parent_id, c.disc_no, c.track_no));
+            children_by_release
+                .entry(parent_id)
+                .or_default()
+                .push(child_id);
+        }
+    }
+
+    // Same duplication risk for a track/artist pair both being in `ids`.
+    let mut seen_contrib_rows: HashSet<(String, String, String, String)> = HashSet::new();
+    let mut track_to_artists: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut artist_to_tracks: HashMap<i64, HashSet<i64>> = HashMap::new();
+    for c in contrib_as_track.iter().chain(contrib_as_artist.iter()) {
+        let key = (
+            c.source.clone(),
+            c.identifier.clone(),
+            c.artist_source.clone(),
+            c.artist_identifier.clone(),
+        );
+        if !seen_contrib_rows.insert(key) {
+            continue;
+        }
+        let track_key = (c.source.clone(), c.identifier.clone());
+        let artist_key = (c.artist_source.clone(), c.artist_identifier.clone());
+        if let (Some(&te), Some(&ae)) = (
+            pair_to_entry.get(&track_key),
+            pair_to_entry.get(&artist_key),
+        ) {
+            track_to_artists.entry(te).or_default().insert(ae);
+            artist_to_tracks.entry(ae).or_default().insert(te);
+        }
+    }
+
+    let mut infos = HashMap::with_capacity(entry_rows.len());
+    for e in &entry_rows {
+        let sources = sources_by_entry
+            .get(&e.id)
+            .map_or(&[][..], |v| v.as_slice());
+        let mut pairs: Vec<Pair> = sources
+            .iter()
+            .map(|s| (s.source.clone(), s.identifier.clone()))
+            .collect();
+        pairs.sort();
+
+        let durations = dedup_sorted(
+            sources
+                .iter()
+                .flat_map(|s| s.duration_ms.iter().copied())
+                .collect(),
+        );
+        let release_dates = dedup_sorted(
+            sources
+                .iter()
+                .filter_map(|s| s.release_date.clone())
+                .collect(),
+        );
+        let release_types = dedup_sorted(
+            sources
+                .iter()
+                .filter_map(|s| s.release_type.clone())
+                .collect(),
+        );
+        let primary_types = dedup_sorted(
+            sources
+                .iter()
+                .filter_map(|s| s.primary_type.clone())
+                .collect(),
+        );
+
+        let mut sourced_aliases: Vec<(String, String, bool)> = Vec::new();
+        for (src, id) in &pairs {
+            if let Some(pair_aliases) = aliases_by_pair.get(&(src.clone(), id.clone())) {
+                for a in pair_aliases {
+                    sourced_aliases.push((src.clone(), a.name.clone(), a.primary_alias));
+                }
+            }
+        }
+        let sourced_aliases = canon_sourced_aliases(sourced_aliases);
+        let aliases = derive_aliases(&sourced_aliases);
+        let best_title = pick_best_title(&sourced_aliases);
+
+        let mut peer_entry_ids: Vec<i64> = if e.entry_type == "artist" {
+            artist_to_tracks
+                .get(&e.id)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default()
+        } else {
+            track_to_artists
+                .get(&e.id)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default()
+        };
+        peer_entry_ids.sort_unstable();
+
+        let track_positions = positions_by_track.get(&e.id).cloned().unwrap_or_default();
+        let child_entry_ids =
+            dedup_sorted(children_by_release.get(&e.id).cloned().unwrap_or_default());
+
+        infos.insert(
+            e.id,
+            EntryInfo {
+                entry_id: e.id,
+                entry_type: e.entry_type.clone(),
+                pairs,
+                aliases,
+                best_title,
+                durations,
+                release_dates,
+                release_types,
+                primary_types,
+                peer_entry_ids,
+                track_positions,
+                child_entry_ids,
+                sourced_aliases,
+            },
+        );
+    }
+
+    Ok(infos)
+}
+
+/// Persisted-index equivalent of the per-entry postings `generate_bounded_candidates`
+/// builds in memory: every key this entry would insert itself under, across all
+/// channels. Symmetric with lookup — an entry is discoverable by anything that
+/// shares at least one of these keys via `dedup_block_key`.
+fn block_keys_for_entry(entry: &EntryInfo) -> Vec<String> {
+    let mut keys = Vec::new();
+    if entry.entry_type == "unknown" {
+        return keys;
+    }
+    for alias in &entry.aliases {
+        let compact = compact_normalized(alias);
+        if compact.chars().count() >= 2 {
+            keys.push(format!("exact|{}|{}", entry.entry_type, compact));
+        }
+        let normalized = normalize(alias);
+        for token in normalized
+            .split_whitespace()
+            .filter(|token| token.chars().count() > 1)
+        {
+            keys.push(format!("token|{}|{}", entry.entry_type, token));
+        }
+        for gram in char_trigrams(alias) {
+            keys.push(format!("gram|{}|{}", entry.entry_type, gram));
+        }
+    }
+    if entry.entry_type == "track" {
+        for &peer in &entry.peer_entry_ids {
+            for &duration in &entry.durations {
+                let bucket = duration / 5_000;
+                for nearby in [bucket - 1, bucket, bucket + 1] {
+                    keys.push(format!("dur|{peer}|{nearby}"));
+                }
+            }
+        }
+    }
+    if entry.entry_type == "release" && !entry.child_entry_ids.is_empty() {
+        let fingerprint = dedup_sorted(entry.child_entry_ids.clone());
+        let fp_key = fingerprint
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        keys.push(format!("tracklistfp|{fp_key}"));
+        for &child in &fingerprint {
+            keys.push(format!("trackchild|{child}"));
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+/// Recompute and persist block keys for `entries`. Call before querying the
+/// index against these entries so newly-created or newly-enriched entries are
+/// immediately discoverable, and so an existing entry's stale keys (from an
+/// alias/credit/tracklist change) don't linger.
+async fn reindex_block_keys(db: &MusicDb, entries: &HashMap<i64, EntryInfo>) -> anyhow::Result<()> {
+    for entry in entries.values() {
+        let keys = block_keys_for_entry(entry);
+        db.replace_block_keys(entry.entry_id, &keys).await?;
+    }
+    Ok(())
+}
+
+/// Catch the persisted block-key index up with entries it has never seen — a
+/// library that predates this index, or one upgraded from before it existed.
+/// Pages through unindexed entries in bounded batches so peak memory stays
+/// flat regardless of library size. Safe to call repeatedly: it's a cheap
+/// no-op once caught up, since `match_new_entries` and the full-scan path
+/// keep every entry they touch reindexed on their own from then on. Intended
+/// to be run once (e.g. from the `dedup` maintenance binary) after adopting
+/// the focused/online dedup path against an existing library.
+pub async fn backfill_block_key_index(db: &MusicDb) -> anyhow::Result<usize> {
+    const BATCH: usize = 500;
+    let mut total = 0usize;
+    loop {
+        let ids = db.unindexed_entry_ids(BATCH).await?;
+        if ids.is_empty() {
+            break;
+        }
+        let batch_len = ids.len();
+        let batch_entries = entry_infos_by_ids(db, &ids).await?;
+        reindex_block_keys(db, &batch_entries).await?;
+        total += batch_entries.len();
+        info!("Block-key index backfill: {total} entr(y/ies) indexed so far");
+        if batch_len < BATCH {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Entry ids sharing `key` with the caller, or empty if the block is larger
+/// than `max_block` (a hub — too generic to be useful, matching the in-memory
+/// blocker's cutoff in `emit_blocks`).
+async fn capped_block_members(
+    db: &MusicDb,
+    key: &str,
+    max_block: usize,
+) -> anyhow::Result<Vec<i64>> {
+    let members = db.block_key_members(key, max_block).await?;
+    if members.len() > max_block {
+        Ok(Vec::new())
+    } else {
+        Ok(members)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn add_block_candidates(
+    db: &MusicDb,
+    key: &str,
+    max_block: usize,
+    from_id: i64,
+    channel: &'static str,
+    focus_set: &HashSet<i64>,
+    output: &mut CandidateChannels,
+    candidate_ids: &mut HashSet<i64>,
+) -> anyhow::Result<()> {
+    for member in capped_block_members(db, key, max_block).await? {
+        if member == from_id {
+            continue;
+        }
+        add_candidate(output, from_id, member, channel, Some(focus_set));
+        candidate_ids.insert(member);
+    }
+    Ok(())
+}
+
+/// DB-driven candidate retrieval for the online/focused soft-match pass: looks
+/// up each focus entry's own block keys against the persisted `dedup_block_key`
+/// index (reindexing the focus entries first so their keys are current), plus
+/// one semantic KNN query per focus entry when embeddings are configured.
+/// Never loads the full library into memory or builds the in-RAM HNSW index —
+/// cost is O(focus entries × candidates found), not O(library).
+#[allow(clippy::too_many_arguments)]
+async fn generate_focused_candidates(
+    db: &MusicDb,
+    focus_entries: &HashMap<i64, EntryInfo>,
+    max_block: usize,
+    ngram_k: usize,
+    embed_cache: Option<&EmbeddingCache>,
+    embed_k: usize,
+    embed_sim_threshold: f64,
+    embed_max_pages: usize,
+) -> anyhow::Result<(CandidateChannels, HashMap<i64, EntryInfo>)> {
+    if focus_entries.is_empty() {
+        return Ok((CandidateChannels::new(), HashMap::new()));
+    }
+    let focus_set: HashSet<i64> = focus_entries.keys().copied().collect();
+    reindex_block_keys(db, focus_entries).await?;
+
+    let mut output = CandidateChannels::new();
+    let mut candidate_ids: HashSet<i64> = focus_set.clone();
+
+    // exact_name / token / duration_credit / tracklist(fingerprint): plain
+    // membership lookups, capped the same way `emit_blocks` caps in-memory blocks.
+    for entry in focus_entries.values() {
+        if entry.entry_type == "unknown" {
+            continue;
+        }
+        for alias in &entry.aliases {
+            let compact = compact_normalized(alias);
+            if compact.chars().count() >= 2 {
+                let key = format!("exact|{}|{}", entry.entry_type, compact);
+                add_block_candidates(
+                    db,
+                    &key,
+                    max_block,
+                    entry.entry_id,
+                    "exact_name",
+                    &focus_set,
+                    &mut output,
+                    &mut candidate_ids,
+                )
+                .await?;
+            }
+            let normalized = normalize(alias);
+            for token in normalized
+                .split_whitespace()
+                .filter(|token| token.chars().count() > 1)
+            {
+                let key = format!("token|{}|{}", entry.entry_type, token);
+                add_block_candidates(
+                    db,
+                    &key,
+                    max_block,
+                    entry.entry_id,
+                    "token",
+                    &focus_set,
+                    &mut output,
+                    &mut candidate_ids,
+                )
+                .await?;
+            }
+        }
+        if entry.entry_type == "track" {
+            for &peer in &entry.peer_entry_ids {
+                for &duration in &entry.durations {
+                    let bucket = duration / 5_000;
+                    for nearby in [bucket - 1, bucket, bucket + 1] {
+                        let key = format!("dur|{peer}|{nearby}");
+                        add_block_candidates(
+                            db,
+                            &key,
+                            max_block,
+                            entry.entry_id,
+                            "duration_credit",
+                            &focus_set,
+                            &mut output,
+                            &mut candidate_ids,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        if entry.entry_type == "release" && !entry.child_entry_ids.is_empty() {
+            let fingerprint = dedup_sorted(entry.child_entry_ids.clone());
+            let fp_key = fingerprint
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let key = format!("tracklistfp|{fp_key}");
+            add_block_candidates(
+                db,
+                &key,
+                max_block,
+                entry.entry_id,
+                "tracklist",
+                &focus_set,
+                &mut output,
+                &mut candidate_ids,
+            )
+            .await?;
+        }
+    }
+
+    // char_ngram: rank by shared-trigram count, same as the in-memory blocker,
+    // but only among entries that actually share a trigram with this one.
+    for entry in focus_entries.values() {
+        if entry.entry_type == "unknown" {
+            continue;
+        }
+        let mut grams: HashSet<String> = HashSet::new();
+        for alias in &entry.aliases {
+            grams.extend(char_trigrams(alias));
+        }
+        let mut shared: HashMap<i64, usize> = HashMap::new();
+        for gram in &grams {
+            let key = format!("gram|{}|{}", entry.entry_type, gram);
+            for member in capped_block_members(db, &key, max_block).await? {
+                if member == entry.entry_id {
+                    continue;
+                }
+                *shared.entry(member).or_default() += 1;
+            }
+        }
+        let mut ranked: Vec<(usize, i64)> = shared.into_iter().map(|(id, n)| (n, id)).collect();
+        ranked.sort_unstable_by(|a, b| b.cmp(a));
+        for (count, member) in ranked.into_iter().take(ngram_k) {
+            if count >= 2 {
+                add_candidate(
+                    &mut output,
+                    entry.entry_id,
+                    member,
+                    "char_ngram",
+                    Some(&focus_set),
+                );
+                candidate_ids.insert(member);
+            }
+        }
+    }
+
+    // tracklist_overlap: candidates found via shared child tracks, confirmed by
+    // Jaccard ratio once full child lists are available (after the batched fetch below).
+    let mut overlap_pending: Vec<(i64, i64, usize)> = Vec::new();
+    for entry in focus_entries.values() {
+        if entry.entry_type != "release" || entry.child_entry_ids.is_empty() {
+            continue;
+        }
+        let mut shared: HashMap<i64, usize> = HashMap::new();
+        for &child in &entry.child_entry_ids {
+            let key = format!("trackchild|{child}");
+            for member in capped_block_members(db, &key, max_block).await? {
+                if member == entry.entry_id {
+                    continue;
+                }
+                *shared.entry(member).or_default() += 1;
+            }
+        }
+        for (member, count) in shared {
+            if count >= 2 {
+                candidate_ids.insert(member);
+                overlap_pending.push((entry.entry_id, member, count));
+            }
+        }
+    }
+
+    // semantic_ann: direct indexed KNN per focus entry — no in-RAM HNSW build.
+    let mut semantic_pending: Vec<(i64, i64)> = Vec::new();
+    if let Some(cache) = embed_cache {
+        let l2_threshold = (2.0 * (1.0 - embed_sim_threshold)).sqrt();
+        for entry in focus_entries.values() {
+            if entry.best_title.is_none() || entry.entry_type == "unknown" {
+                continue;
+            }
+            let mut exhausted = false;
+            for page in 0..embed_max_pages.max(1) {
+                if exhausted {
+                    break;
+                }
+                let want = (page + 1) * embed_k;
+                let neighbors = match cache.knn(entry.entry_id, want, &entry.entry_type) {
+                    Ok(n) => n,
+                    Err(error) => {
+                        warn!("semantic KNN failed for entry {}: {error}", entry.entry_id);
+                        break;
+                    }
+                };
+                for (neighbor_id, dist) in neighbors.into_iter().skip(page * embed_k) {
+                    if dist > l2_threshold {
+                        exhausted = true;
+                        break;
+                    }
+                    candidate_ids.insert(neighbor_id);
+                    semantic_pending.push((entry.entry_id, neighbor_id));
+                }
+            }
+        }
+    }
+
+    let all_ids: Vec<i64> = candidate_ids.into_iter().collect();
+    let entries = entry_infos_by_ids(db, &all_ids).await?;
+
+    for (a, b, shared) in overlap_pending {
+        let (Some(ea), Some(eb)) = (entries.get(&a), entries.get(&b)) else {
+            continue;
+        };
+        let a_children: HashSet<i64> = ea.child_entry_ids.iter().copied().collect();
+        let b_children: HashSet<i64> = eb.child_entry_ids.iter().copied().collect();
+        let union = a_children.union(&b_children).count();
+        if union > 0 && shared as f64 / union as f64 >= 0.18 {
+            add_candidate(&mut output, a, b, "tracklist_overlap", Some(&focus_set));
+        }
+    }
+
+    for (a, b) in semantic_pending {
+        if entries.contains_key(&a) && entries.contains_key(&b) {
+            add_candidate(&mut output, a, b, "semantic_ann", Some(&focus_set));
+        }
+    }
+
+    Ok((output, entries))
+}
+
 // ── In-memory entry merge ─────────────────────────────────────────────────────
 
 /// Merge the loser's data into the winner in memory, mirroring what
@@ -1743,7 +2318,14 @@ async fn load_script(
 ///
 /// `focus` restricts the initial seeding to a subset of entries (used by the
 /// incremental import path); merge cascades from those seeds are unrestricted.
+///
+/// `precomputed`, when set, is the candidate/channel map the caller already
+/// retrieved from the DB (see `generate_focused_candidates`) — skips the
+/// in-memory `generate_bounded_candidates` scan and `EmbeddingAnn` build
+/// entirely, since both would otherwise materialize the full library that
+/// `entries` (deliberately just focus ∪ candidates for this path) doesn't have.
 /// Returns `[merge, relate, distinct, defer]` counts per entry type.
+#[allow(clippy::too_many_arguments)]
 async fn score_candidates(
     db: &MusicDb,
     mut entries: HashMap<i64, EntryInfo>,
@@ -1752,6 +2334,7 @@ async fn score_candidates(
     barrier: &HashMap<Pair, crate::pipeline::dedup::AnchorId>,
     config: &SoftMatchConfig,
     embed_cache: Option<&EmbeddingCache>,
+    precomputed: Option<CandidateChannels>,
 ) -> anyhow::Result<HashMap<String, [usize; 4]>> {
     // Optional CSV output for manual quality review.
     let mut csv: Option<std::io::BufWriter<std::fs::File>> = if let Some(path) = &config.csv_path {
@@ -1820,12 +2403,21 @@ async fn score_candidates(
     // gains new data (duration, peer coverage) that could flip the verdict to MERGE.
     // `loser_to_winner` lets us reroute a stale pair (A, loser) to (A, winner)
     // when the loser has already been merged away before the pair is processed.
-    let mut candidate_channels = generate_bounded_candidates(
-        &entries,
-        focus,
-        config.candidate_max_block,
-        config.candidate_ngram_k,
-    );
+    // The focused/online path already did retrieval against the DB (see
+    // `generate_focused_candidates`) and hands us the finished channel map —
+    // recomputing it here in memory would silently fall back to seeing only
+    // `entries` (focus ∪ discovered candidates) instead of the full library,
+    // which would look like it worked while actually missing most matches.
+    let used_precomputed = precomputed.is_some();
+    let mut candidate_channels = match precomputed {
+        Some(channels) => channels,
+        None => generate_bounded_candidates(
+            &entries,
+            focus,
+            config.candidate_max_block,
+            config.candidate_ngram_k,
+        ),
+    };
     let mut queued: HashSet<(i64, i64)> = candidate_channels.keys().copied().collect();
     let mut scored: HashSet<(i64, i64)> = HashSet::new();
     let mut loser_to_winner: HashMap<i64, i64> = HashMap::new();
@@ -1838,29 +2430,36 @@ async fn score_candidates(
     );
 
     // Seed the queue from the focused entries (or all entries for a full scan).
+    // The precomputed path already ran semantic retrieval per focus entry via
+    // direct indexed KNN queries (see `generate_focused_candidates`), so an
+    // in-RAM `EmbeddingAnn` — which rebuilds all four type-local HNSW graphs
+    // from every vector in the library — is only worth its build cost for a
+    // full scan that's going to touch most of the library anyway.
     let seed_ids: Vec<i64> = match focus {
         Some(f) => f.iter().copied().collect(),
         None => entries.keys().copied().collect(),
     };
-    let ann_index = embed_cache.map(EmbeddingAnn::build).transpose()?;
-    if let Some(ann) = &ann_index {
-        for id in seed_ids {
-            if let Some(entry) = entries.get(&id) {
-                let pairs = generate_semantic_candidates_for_entry(
-                    entry,
-                    &entries,
-                    ann,
-                    config.embed_k,
-                    config.embed_sim_threshold,
-                    config.embed_max_pages,
-                    &mut queued,
-                    &mut candidate_channels,
-                );
-                work_queue.extend(pairs);
+    if !used_precomputed {
+        let ann_index = embed_cache.map(EmbeddingAnn::build).transpose()?;
+        if let Some(ann) = &ann_index {
+            for id in seed_ids {
+                if let Some(entry) = entries.get(&id) {
+                    let pairs = generate_semantic_candidates_for_entry(
+                        entry,
+                        &entries,
+                        ann,
+                        config.embed_k,
+                        config.embed_sim_threshold,
+                        config.embed_max_pages,
+                        &mut queued,
+                        &mut candidate_channels,
+                    );
+                    work_queue.extend(pairs);
+                }
             }
+        } else {
+            info!("Semantic blocking disabled; using lexical/structural candidates only.");
         }
-    } else {
-        info!("Semantic blocking disabled; using lexical/structural candidates only.");
     }
     info!("Initial queue: {} candidate pair(s)", work_queue.len());
 
@@ -2317,6 +2916,7 @@ pub async fn match_db(
         &barrier,
         config,
         embed_cache.as_deref(),
+        None,
     )
     .await?;
     let t_score = t4.elapsed();
@@ -2353,6 +2953,12 @@ pub async fn match_db(
 /// Incremental scan: only compare pairs involving one of `new_entry_ids`.
 /// Called automatically by the `import` binary after each flush so new entries
 /// are soft-matched against the existing library online.
+///
+/// Unlike the full-scan path, this never materializes the library: it loads
+/// `EntryInfo` for exactly `new_entry_ids` and whatever candidates the
+/// persisted block-key index / embedding KNN turn up for them (see
+/// `generate_focused_candidates`), so cost scales with candidates found, not
+/// library size.
 pub async fn match_new_entries(
     db: &MusicDb,
     new_entry_ids: &HashSet<i64>,
@@ -2363,11 +2969,23 @@ pub async fn match_new_entries(
     if new_entry_ids.is_empty() {
         return Ok(());
     }
-    let entries = build_entry_infos(db).await?;
+    let focus_ids: Vec<i64> = new_entry_ids.iter().copied().collect();
+    let focus_entries = entry_infos_by_ids(db, &focus_ids).await?;
     let (barrier, _) = dedup.compile(providers).await;
-    let entries_slice: Vec<EntryInfo> = entries.values().cloned().collect();
+    let entries_slice: Vec<EntryInfo> = focus_entries.values().cloned().collect();
     let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries_slice).await;
     let ctx = load_script(&config.script_path, embed_cache.clone()).await?;
+    let (candidate_channels, entries) = generate_focused_candidates(
+        db,
+        &focus_entries,
+        config.candidate_max_block,
+        config.candidate_ngram_k,
+        embed_cache.as_deref(),
+        config.embed_k,
+        config.embed_sim_threshold,
+        config.embed_max_pages,
+    )
+    .await?;
     score_candidates(
         db,
         entries,
@@ -2376,6 +2994,7 @@ pub async fn match_new_entries(
         &barrier,
         config,
         embed_cache.as_deref(),
+        Some(candidate_channels),
     )
     .await?;
     Ok(())
@@ -2512,6 +3131,116 @@ mod tests {
     #[test]
     fn normalization_uses_nfkc_for_calibration_parity() {
         assert_eq!(normalize("ＡＢＣ—Live!"), "abc live");
+    }
+
+    async fn insert_track(
+        db: &MusicDb,
+        source: &str,
+        identifier: &str,
+        title: &str,
+        duration_ms: i64,
+    ) -> i64 {
+        use crate::providers::types::{Alias, EntrySpecificData, EntryType};
+
+        let entry_id = db.insert_entry(Some(EntryType::Track)).await.unwrap();
+        db.upsert_pair(
+            source,
+            identifier,
+            entry_id,
+            None,
+            &EntrySpecificData::Track {
+                duration_ms: vec![duration_ms],
+                positions: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        db.insert_aliases_for_pair(
+            source,
+            identifier,
+            &[Alias {
+                name: title.to_string(),
+                source: source.to_string(),
+                locale: None,
+                extra: serde_json::Value::Null,
+                primary: true,
+            }],
+        )
+        .await
+        .unwrap();
+        entry_id
+    }
+
+    /// The focused/online path must find a pre-existing library entry as a
+    /// candidate for a newly-imported one purely through the persisted
+    /// `dedup_block_key` index — no full-library scan involved — and
+    /// `entry_infos_by_ids` must assemble the same `EntryInfo` a full
+    /// `build_entry_infos` load would have produced for the touched entries.
+    #[tokio::test]
+    async fn focused_candidates_find_exact_name_match_via_db_index() {
+        let db = MusicDb::new("sqlite::memory:").await.unwrap();
+
+        let existing_id = insert_track(&db, "youtube", "vid1", "Shiny Song", 180_000).await;
+        // An unrelated entry must never surface as a candidate.
+        let unrelated_id = insert_track(&db, "youtube", "vid2", "Totally Different", 42_000).await;
+        // Simulate both having gone through a prior online pass, which is what
+        // actually indexes an entry (the focused path only reindexes what it
+        // touches — see `backfill_block_key_index` for the pre-existing-library
+        // migration case this test intentionally isn't exercising).
+        let prior = entry_infos_by_ids(&db, &[existing_id, unrelated_id])
+            .await
+            .unwrap();
+        reindex_block_keys(&db, &prior).await.unwrap();
+
+        let new_id = insert_track(&db, "spotify", "trk1", "Shiny Song", 180_500).await;
+        let focus_entries = entry_infos_by_ids(&db, &[new_id]).await.unwrap();
+        assert_eq!(focus_entries.len(), 1);
+        assert_eq!(
+            focus_entries[&new_id].aliases,
+            vec!["Shiny Song".to_string()]
+        );
+        assert_eq!(focus_entries[&new_id].durations, vec![180_500]);
+
+        let (channels, entries) =
+            generate_focused_candidates(&db, &focus_entries, 50, 30, None, 20, 0.45, 1)
+                .await
+                .unwrap();
+
+        assert!(entries.contains_key(&existing_id));
+        let pair = (new_id.min(existing_id), new_id.max(existing_id));
+        let mask = channels
+            .get(&pair)
+            .expect("pre-existing entry found as a candidate via the block-key index");
+        assert!(mask.contains("exact_name"));
+        assert!(!channels.contains_key(&(unrelated_id.min(new_id), unrelated_id.max(new_id))));
+    }
+
+    /// A library that predates the block-key index (or one where the index
+    /// somehow drifted) must be recoverable by `backfill_block_key_index`
+    /// without the caller doing anything else.
+    #[tokio::test]
+    async fn backfill_indexes_every_entry_exactly_once() {
+        let db = MusicDb::new("sqlite::memory:").await.unwrap();
+        let mut ids = Vec::new();
+        for i in 0..1203 {
+            ids.push(
+                insert_track(
+                    &db,
+                    "youtube",
+                    &format!("v{i}"),
+                    &format!("Song {i}"),
+                    1_000,
+                )
+                .await,
+            );
+        }
+
+        let indexed = backfill_block_key_index(&db).await.unwrap();
+        assert_eq!(indexed, ids.len());
+        assert!(db.unindexed_entry_ids(10).await.unwrap().is_empty());
+
+        // Idempotent: nothing left to do on a second run.
+        assert_eq!(backfill_block_key_index(&db).await.unwrap(), 0);
     }
 
     #[test]

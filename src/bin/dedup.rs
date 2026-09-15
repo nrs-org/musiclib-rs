@@ -16,6 +16,7 @@ use musiclib_rs::{
     pipeline::{
         dedup::{DedupConfig, dedup_db},
         progress,
+        softmatch::backfill_block_key_index,
     },
     providers::registry::{RegistryConfig, build_providers},
 };
@@ -129,6 +130,11 @@ async fn main() -> anyhow::Result<()> {
     let db = MusicDb::new(&format!("sqlite://{}?mode=rwc", db_path.display())).await?;
 
     dedup_db(providers, &db, &dedup_configs).await?;
+
+    let backfilled = backfill_block_key_index(&db).await?;
+    if backfilled > 0 {
+        info!("Block-key index backfill indexed {backfilled} entr(y/ies)");
+    }
 
     info!(
         "YouTube Data API quota used: {} unit(s)",
