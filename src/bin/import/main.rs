@@ -200,8 +200,10 @@ async fn main() -> anyhow::Result<()> {
         reconcile_tags(providers.as_slice(), &db, &dedup_configs).await?;
     }
 
-    // Online soft-match is suggestion-only until its high-precision release
-    // gate is validated on a frozen, representative entry-level panel.
+    // RELATE writes to `entry_relation` (reversible: tombstoned via `enabled`,
+    // never repoints `entry_source`). MERGE stays suggestion-only via
+    // `apply_merges: false` — `merge_entries` has no undo path, and its
+    // high-precision release gate isn't validated yet (docs/dedup-v2.md).
     let script_path = config_dir.join("match.rhai");
     if !args.skip_softmatch && script_path.exists() {
         let embed_db = app_dirs::data_dir().join("embeddings.db");
@@ -213,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
                 .exists()
                 .then(|| model_path.display().to_string()),
             persist_suggestions,
-            apply_relates: false,
+            apply_relates: true,
             apply_merges: false,
             csv_path: None,
             embed_db_path: Some(embed_db.display().to_string()),
