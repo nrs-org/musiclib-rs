@@ -44,11 +44,21 @@ path = "src/bin/ytdlp_server.rs"
 name = "softmatch"
 path = "src/bin/softmatch.rs"
 
+[[bin]]
+name = "server"
+path = "src/bin/server/main.rs"
+
 [features]
+default = ["store_protocol", "player"]
 # Generic C-ABI FFI rhai module (`pipeline::ffi`): bind/call any cdylib from a
 # match script. Off by default — enabling it pulls libffi (built from source via
 # autotools). See config/match.example.rhai for the inference-cdylib binding.
 ffi = ["dep:libffi", "dep:libc"]
+# `server` binary route groups (see src/bin/server/). No extra dependencies —
+# both are gated purely to let a deployment build one without the other, e.g.
+# `cargo build --bin server --no-default-features --features store_protocol`.
+store_protocol = []
+player = []
 
 [dependencies]
 libloading = "0.9"
