@@ -614,11 +614,67 @@ fn title_exact(a, b) {
     false
 }
 
+// Per-token best-alignment similarity for multi-word (Western-order) names.
+// Whole-string Jaro-Winkler is fooled when two different people share a
+// common Japanese given name once transliterated: "Takayuki Yoshimura" vs
+// "Takayuki Ishikura" scores 0.93 on whole-string JW despite being different
+// people (JW's prefix bonus rewards the shared "Takayuki" run). Requiring
+// EVERY token to find its own best match on the other side, then taking the
+// worst of those per-token matches, distinguishes "every word corroborates"
+// from "only the given name happens to match". Returns () when either name
+// isn't multi-word, so the caller can fall back to whole-string JW.
+fn token_min_sim(x, y) {
+    // Channel-boilerplate words that ride along on artist aliases scraped
+    // from platform display names (YouTube auto-appends "- Topic" to its
+    // generated artist channels; "Ch." commonly prefixes a VTuber's
+    // native-name alias). Drop them before token alignment: two DIFFERENT
+    // artists' "Topic" channel aliases trivially agree with each other on
+    // that one word, which can mask a real per-token mismatch elsewhere.
+    let stopwords = ["topic", "ch"];
+
+    let xt = [];
+    for t in x.split(" ") { if t != "" && !stopwords.contains(t) { xt.push(t); } }
+    let yt = [];
+    for t in y.split(" ") { if t != "" && !stopwords.contains(t) { yt.push(t); } }
+    if xt.len() < 2 || yt.len() < 2 { return (); }
+
+    // A large token-count gap usually means one side is a decorative/credit
+    // blob (a "various artists" alias listing several unrelated people, or a
+    // group name embedded inside one member's channel title) rather than the
+    // same name plus a harmless extra word (YouTube's auto-appended
+    // "- Topic" suffix on auto-generated channels). Only trust per-token
+    // alignment when the two sides are close in length; otherwise fall back
+    // to whole-string comparison, which correctly scores a short name against
+    // an unrelated long blob as low.
+    let diff = xt.len() - yt.len();
+    if diff < 0 { diff = -diff; }
+    if diff > 1 { return (); }
+
+    // Iterate over the shorter side only, so one harmless extra token on the
+    // longer side (like "Topic") never itself has to find a match.
+    let short = if xt.len() <= yt.len() { xt } else { yt };
+    let long  = if xt.len() <= yt.len() { yt } else { xt };
+
+    let worst = 1.0;
+    for ts in short {
+        let best = 0.0;
+        for tl in long {
+            let s = jaro_winkler(ts, tl);
+            if s > best { best = s; }
+        }
+        if best < worst { worst = best; }
+    }
+    worst
+}
+
 fn alias_best(a, b) {
     let best = 0.0;
     for x in a.aliases {
+        let nx = normalize(x);
         for y in b.aliases {
-            let s = jaro_winkler(normalize(x), normalize(y));
+            let ny = normalize(y);
+            let tm = token_min_sim(nx, ny);
+            let s = if tm == () { jaro_winkler(nx, ny) } else { tm };
             if s > best { best = s; }
         }
     }
