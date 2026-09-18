@@ -27,6 +27,7 @@ use musiclib_rs::providers::registry::{self, RegistryConfig};
 use rusqlite::{Connection, params};
 use tar::Archive;
 use tracing::info;
+use uuid::Uuid;
 
 const URL_TABLE_PATH: &str = "mbdump/url";
 const DUMP_BASE_URL: &str = "https://data.metabrainz.org/pub/musicbrainz/data/fullexport";
@@ -269,6 +270,13 @@ fn read_seq<R: Read>(reader: &mut R) -> Result<i64> {
 ///
 /// `mb_state` is a single-row table (enforced by `CHECK (id = 1)`) holding the
 /// two sequence ints that drive the replication consumer.
+///
+/// `gid` (the MBID of the `url` entity) is stored as a 16-byte BLOB rather
+/// than its 36-char hyphenated text form — at ~20M rows that's the
+/// difference between a ~2.3GB and a ~2.7GB database. It's migrated in as
+/// nullable for databases created before it was tracked; old rows read back
+/// `NULL` until the next full re-extract or backfill, since the UUID can't
+/// be recovered from `url_norm` alone.
 fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -277,6 +285,7 @@ fn init_db(conn: &Connection) -> Result<()> {
          PRAGMA cache_size   = -262144;
          CREATE TABLE IF NOT EXISTS mb_url (
              id       INTEGER PRIMARY KEY,
+             gid      BLOB,
              url_norm TEXT NOT NULL
          );
          CREATE TABLE IF NOT EXISTS mb_state (
@@ -286,6 +295,21 @@ fn init_db(conn: &Connection) -> Result<()> {
          );",
     )
     .context("initializing sqlite")?;
+    migrate_gid_column(conn)?;
+    Ok(())
+}
+
+/// Add the `gid` column to a `mb_url` table created before this field was
+/// tracked. No-op if it's already present.
+fn migrate_gid_column(conn: &Connection) -> Result<()> {
+    let has_gid: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('mb_url') WHERE name = 'gid'")?
+        .exists([])?;
+    if !has_gid {
+        info!("migrating mb_url: adding gid column");
+        conn.execute_batch("ALTER TABLE mb_url ADD COLUMN gid BLOB;")
+            .context("adding gid column to mb_url")?;
+    }
     Ok(())
 }
 
@@ -308,7 +332,7 @@ fn set_state(conn: &Connection, replication_sequence: i64, schema_sequence: i64)
     Ok(())
 }
 
-/// Stream `mbdump/url` row-by-row and INSERT each `(id, url_norm)` into
+/// Stream `mbdump/url` row-by-row and INSERT each `(id, gid, url_norm)` into
 /// `mb_url`. URLs are normalized inline via [`registry::normalize`] so both
 /// the bootstrap and lookup paths agree on the canonical form. One enclosing
 /// transaction so commit cost amortizes over the full load.
@@ -328,9 +352,9 @@ fn load_urls<R: Read>(reader: R, conn: &mut Connection) -> Result<u64> {
         .map(|n| n.get().saturating_sub(2).max(1))
         .unwrap_or(2);
 
-    let (raw_tx, raw_rx) = sync_channel::<Vec<(i64, String)>>(CHANNEL_CAP);
+    let (raw_tx, raw_rx) = sync_channel::<Vec<(i64, Uuid, String)>>(CHANNEL_CAP);
     let raw_rx = Arc::new(Mutex::new(raw_rx));
-    let (norm_tx, norm_rx) = sync_channel::<Vec<(i64, String)>>(CHANNEL_CAP);
+    let (norm_tx, norm_rx) = sync_channel::<Vec<(i64, Uuid, String)>>(CHANNEL_CAP);
 
     std::thread::scope(|s| -> Result<u64> {
         for _ in 0..n_workers {
@@ -345,9 +369,9 @@ fn load_urls<R: Read>(reader: R, conn: &mut Connection) -> Result<u64> {
                             Err(_) => break,
                         }
                     };
-                    let normalized: Vec<(i64, String)> = batch
+                    let normalized: Vec<(i64, Uuid, String)> = batch
                         .into_iter()
-                        .map(|(id, raw)| (id, registry::normalize(&raw)))
+                        .map(|(id, gid, raw)| (id, gid, registry::normalize(&raw)))
                         .collect();
                     if tx.send(normalized).is_err() {
                         break;
@@ -364,11 +388,12 @@ fn load_urls<R: Read>(reader: R, conn: &mut Connection) -> Result<u64> {
             let mut count = 0u64;
             let mut last_log = Instant::now();
             {
-                let mut stmt =
-                    dbtx.prepare("INSERT OR REPLACE INTO mb_url(id, url_norm) VALUES (?1, ?2)")?;
+                let mut stmt = dbtx.prepare(
+                    "INSERT OR REPLACE INTO mb_url(id, gid, url_norm) VALUES (?1, ?2, ?3)",
+                )?;
                 while let Ok(batch) = norm_rx.recv() {
-                    for (id, norm) in batch {
-                        stmt.execute(params![id, norm])?;
+                    for (id, gid, norm) in batch {
+                        stmt.execute(params![id, gid, norm])?;
                         count += 1;
                         if count.is_multiple_of(100_000) && last_log.elapsed().as_secs() >= 2 {
                             info!("  {count} urls inserted...");
@@ -381,10 +406,10 @@ fn load_urls<R: Read>(reader: R, conn: &mut Connection) -> Result<u64> {
             Ok(count)
         });
 
-        let mut batch: Vec<(i64, String)> = Vec::with_capacity(BATCH_SIZE);
+        let mut batch: Vec<(i64, Uuid, String)> = Vec::with_capacity(BATCH_SIZE);
         let read_res: Result<()> = (|| {
-            for_each_url(reader, |id, url| {
-                batch.push((id, url));
+            for_each_url(reader, |id, gid, url| {
+                batch.push((id, gid, url));
                 if batch.len() >= BATCH_SIZE {
                     let full = std::mem::replace(&mut batch, Vec::with_capacity(BATCH_SIZE));
                     if raw_tx.send(full).is_err() {
@@ -409,13 +434,17 @@ fn load_urls<R: Read>(reader: R, conn: &mut Connection) -> Result<u64> {
     })
 }
 
-/// Parse the `url` table TSV and yield `(id, raw_url)` for each row. The
+/// Parse the `url` table TSV and yield `(id, gid, raw_url)` for each row. The
 /// `String` is passed owned so callers can move it across a thread boundary
 /// without an extra clone.
 ///
 /// Schema: `id, gid, url, edits_pending, last_updated` in Postgres COPY TEXT
-/// format (tab-separated, `\N` NULL, backslash escapes).
-fn for_each_url<R: Read>(reader: R, mut f: impl FnMut(i64, String) -> Result<()>) -> Result<u64> {
+/// format (tab-separated, `\N` NULL, backslash escapes). `gid` is a
+/// Postgres UUID column so it's never escaped and always well-formed.
+fn for_each_url<R: Read>(
+    reader: R,
+    mut f: impl FnMut(i64, Uuid, String) -> Result<()>,
+) -> Result<u64> {
     let buf = BufReader::with_capacity(1 << 20, reader);
     let mut count: u64 = 0;
 
@@ -423,7 +452,7 @@ fn for_each_url<R: Read>(reader: R, mut f: impl FnMut(i64, String) -> Result<()>
         let line = line.context("reading url table line")?;
         let mut fields = line.split('\t');
         let id_raw = fields.next().context("missing id column")?;
-        let _gid = fields.next().context("missing gid column")?;
+        let gid_raw = fields.next().context("missing gid column")?;
         let url_raw = fields.next().context("missing url column")?;
 
         if url_raw == r"\N" {
@@ -433,8 +462,10 @@ fn for_each_url<R: Read>(reader: R, mut f: impl FnMut(i64, String) -> Result<()>
         let id: i64 = id_raw
             .parse()
             .with_context(|| format!("parsing id {id_raw:?}"))?;
+        let gid = Uuid::parse_str(gid_raw)
+            .with_context(|| format!("parsing gid {gid_raw:?} for id={id}"))?;
         let url = unescape_copy(url_raw);
-        f(id, url)?;
+        f(id, gid, url)?;
         count += 1;
     }
     Ok(count)
@@ -512,15 +543,29 @@ mod tests {
     fn for_each_url_basic() {
         let tsv = "1\t00000000-0000-0000-0000-000000000001\thttps://a.example\t0\t2024-01-01\n\
                    2\t00000000-0000-0000-0000-000000000002\thttps://b.example/x\t0\t2024-01-02\n";
-        let mut got: Vec<(i64, String)> = Vec::new();
-        let count = for_each_url(Cursor::new(tsv), |id, url| {
-            got.push((id, url));
+        let mut got: Vec<(i64, Uuid, String)> = Vec::new();
+        let count = for_each_url(Cursor::new(tsv), |id, gid, url| {
+            got.push((id, gid, url));
             Ok(())
         })
         .unwrap();
         assert_eq!(count, 2);
-        assert_eq!(got[0], (1, "https://a.example".to_owned()));
-        assert_eq!(got[1], (2, "https://b.example/x".to_owned()));
+        assert_eq!(
+            got[0],
+            (
+                1,
+                Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                "https://a.example".to_owned()
+            )
+        );
+        assert_eq!(
+            got[1],
+            (
+                2,
+                Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+                "https://b.example/x".to_owned()
+            )
+        );
     }
 
     #[test]
@@ -541,12 +586,16 @@ mod tests {
             .unwrap();
         assert_eq!((r, s), (123456, 27));
 
-        let url: String = conn
-            .query_row("SELECT url_norm FROM mb_url WHERE id = 7", [], |row| {
-                row.get(0)
+        let (url, gid): (String, Uuid) = conn
+            .query_row("SELECT url_norm, gid FROM mb_url WHERE id = 7", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
             })
             .unwrap();
         assert_eq!(url, "https://youtu.be/dQw4w9WgXcQ");
+        assert_eq!(
+            gid,
+            Uuid::parse_str("00000000-0000-0000-0000-000000000007").unwrap()
+        );
     }
 
     #[test]
@@ -605,12 +654,16 @@ mod tests {
             .unwrap();
         assert_eq!((r, s), (999, 27));
 
-        let url: String = conn
-            .query_row("SELECT url_norm FROM mb_url WHERE id = 5", [], |row| {
-                row.get(0)
+        let (url, gid): (String, Uuid) = conn
+            .query_row("SELECT url_norm, gid FROM mb_url WHERE id = 5", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
             })
             .unwrap();
         assert_eq!(url, "https://youtu.be/dQw4w9WgXcQ");
+        assert_eq!(
+            gid,
+            Uuid::parse_str("00000000-0000-0000-0000-000000000005").unwrap()
+        );
     }
 
     #[test]
@@ -650,6 +703,27 @@ mod tests {
     }
 
     #[test]
+    fn init_db_migrates_pre_gid_schema() {
+        // Simulate a database created before `gid` was tracked.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mb_url (id INTEGER PRIMARY KEY, url_norm TEXT NOT NULL);
+             INSERT INTO mb_url(id, url_norm) VALUES (1, 'https://example.com');",
+        )
+        .unwrap();
+
+        init_db(&conn).unwrap();
+
+        let gid: Option<Uuid> = conn
+            .query_row("SELECT gid FROM mb_url WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gid, None);
+
+        // Re-running init_db on an already-migrated table is a no-op, not an error.
+        init_db(&conn).unwrap();
+    }
+
+    #[test]
     fn load_urls_normalizes_and_writes_to_sqlite() {
         // Row 11's URL is a youtube.com/watch form with junk tail params; the
         // YT canonicalize provider collapses it to https://youtu.be/<id>.
@@ -660,12 +734,16 @@ mod tests {
         let n = load_urls(Cursor::new(tsv), &mut conn).unwrap();
         assert_eq!(n, 2);
 
-        let norm: String = conn
-            .query_row("SELECT url_norm FROM mb_url WHERE id = 11", [], |r| {
-                r.get(0)
+        let (norm, gid): (String, Uuid) = conn
+            .query_row("SELECT url_norm, gid FROM mb_url WHERE id = 11", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
         assert_eq!(norm, "https://youtu.be/dQw4w9WgXcQ");
+        assert_eq!(
+            gid,
+            Uuid::parse_str("00000000-0000-0000-0000-00000000000b").unwrap()
+        );
 
         build_index(&conn).unwrap();
         let found: i64 = conn

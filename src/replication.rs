@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, params};
 use serde::Deserialize;
 use tar::Archive;
+use uuid::Uuid;
 
 use crate::providers::registry;
 
@@ -20,15 +21,18 @@ pub const URL_TABLE: &str = "musicbrainz.url";
 pub enum UrlOp {
     Insert {
         id: i64,
+        gid: Uuid,
         new_url: String,
     },
     Update {
         id: i64,
+        gid: Uuid,
         old_url: String,
         new_url: String,
     },
     Delete {
         id: i64,
+        gid: Uuid,
         old_url: String,
     },
 }
@@ -45,6 +49,7 @@ pub struct PacketInfo {
 #[derive(Deserialize)]
 struct UrlRow {
     id: i64,
+    gid: Option<String>,
     url: Option<String>,
 }
 
@@ -137,17 +142,21 @@ pub fn parse_url_ops<R: Read>(reader: R) -> Result<Vec<UrlOp>> {
         let op = match op {
             "i" => {
                 let row: UrlRow = parse_json_col(new_json, line_no, "new_json")?;
+                let gid = parse_gid(row.gid, line_no, row.id)?;
                 let new_url = row.url.with_context(|| {
                     format!("line {line_no}: insert has null url for id={}", row.id)
                 })?;
                 UrlOp::Insert {
                     id: row.id,
+                    gid,
                     new_url,
                 }
             }
             "u" => {
                 let old: UrlRow = parse_json_col(old_json, line_no, "old_json")?;
                 let new: UrlRow = parse_json_col(new_json, line_no, "new_json")?;
+                // gid is immutable once assigned; either row carries the same value.
+                let gid = parse_gid(new.gid.or(old.gid), line_no, new.id)?;
                 let old_url = old.url.with_context(|| {
                     format!(
                         "line {line_no}: update old_json has null url for id={}",
@@ -162,17 +171,20 @@ pub fn parse_url_ops<R: Read>(reader: R) -> Result<Vec<UrlOp>> {
                 })?;
                 UrlOp::Update {
                     id: new.id,
+                    gid,
                     old_url,
                     new_url,
                 }
             }
             "d" => {
                 let row: UrlRow = parse_json_col(old_json, line_no, "old_json")?;
+                let gid = parse_gid(row.gid, line_no, row.id)?;
                 let old_url = row.url.with_context(|| {
                     format!("line {line_no}: delete has null url for id={}", row.id)
                 })?;
                 UrlOp::Delete {
                     id: row.id,
+                    gid,
                     old_url,
                 }
             }
@@ -198,28 +210,38 @@ pub fn exec_ops(
 
     {
         let mut upsert =
-            tx.prepare("INSERT OR REPLACE INTO mb_url(id, url_norm) VALUES (?1, ?2)")?;
+            tx.prepare("INSERT OR REPLACE INTO mb_url(id, gid, url_norm) VALUES (?1, ?2, ?3)")?;
         let mut delete = tx.prepare("DELETE FROM mb_url WHERE id = ?1")?;
 
         for op in ops {
             match (op, reverse) {
-                (UrlOp::Insert { id, new_url }, false) => {
-                    upsert.execute(params![id, registry::normalize(new_url)])?;
+                (UrlOp::Insert { id, gid, new_url }, false) => {
+                    upsert.execute(params![id, gid, registry::normalize(new_url)])?;
                 }
                 (UrlOp::Insert { id, .. }, true) => {
                     delete.execute(params![id])?;
                 }
-                (UrlOp::Update { id, new_url, .. }, false) => {
-                    upsert.execute(params![id, registry::normalize(new_url)])?;
+                (
+                    UrlOp::Update {
+                        id, gid, new_url, ..
+                    },
+                    false,
+                ) => {
+                    upsert.execute(params![id, gid, registry::normalize(new_url)])?;
                 }
-                (UrlOp::Update { id, old_url, .. }, true) => {
-                    upsert.execute(params![id, registry::normalize(old_url)])?;
+                (
+                    UrlOp::Update {
+                        id, gid, old_url, ..
+                    },
+                    true,
+                ) => {
+                    upsert.execute(params![id, gid, registry::normalize(old_url)])?;
                 }
                 (UrlOp::Delete { id, .. }, false) => {
                     delete.execute(params![id])?;
                 }
-                (UrlOp::Delete { id, old_url }, true) => {
-                    upsert.execute(params![id, registry::normalize(old_url)])?;
+                (UrlOp::Delete { id, gid, old_url }, true) => {
+                    upsert.execute(params![id, gid, registry::normalize(old_url)])?;
                 }
             }
         }
@@ -264,4 +286,10 @@ fn parse_json_col<T: serde::de::DeserializeOwned>(
         bail!("line {line_no}: expected JSON in {col_name} but got \\N");
     }
     serde_json::from_str(col).with_context(|| format!("line {line_no}: parsing {col_name} JSON"))
+}
+
+fn parse_gid(gid: Option<String>, line_no: usize, id: i64) -> Result<Uuid> {
+    let gid = gid.with_context(|| format!("line {line_no}: null gid for id={id}"))?;
+    Uuid::parse_str(&gid)
+        .with_context(|| format!("line {line_no}: parsing gid {gid:?} for id={id}"))
 }

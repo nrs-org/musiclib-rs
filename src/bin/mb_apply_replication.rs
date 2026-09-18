@@ -173,6 +173,7 @@ mod tests {
             "PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS mb_url (
                  id       INTEGER PRIMARY KEY,
+                 gid      BLOB,
                  url_norm TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS mb_state (
@@ -276,7 +277,7 @@ mod tests {
             URL_TABLE,
             "i",
             r"\N",
-            r#"{"id":42,"gid":"aaa","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","edits_pending":0,"last_updated":""}"#,
+            r#"{"id":42,"gid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","edits_pending":0,"last_updated":""}"#,
         );
         let tar = build_packet(b"101\n", b"31\n", pending.as_bytes());
         let mut conn = Connection::open_in_memory().unwrap();
@@ -295,8 +296,8 @@ mod tests {
             1,
             URL_TABLE,
             "u",
-            r#"{"id":7,"gid":"bbb","url":"http://youtu.be/abc","edits_pending":0,"last_updated":""}"#,
-            r#"{"id":7,"gid":"bbb","url":"https://youtu.be/abc","edits_pending":0,"last_updated":""}"#,
+            r#"{"id":7,"gid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","url":"http://youtu.be/abc","edits_pending":0,"last_updated":""}"#,
+            r#"{"id":7,"gid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","url":"https://youtu.be/abc","edits_pending":0,"last_updated":""}"#,
         );
         let tar = build_packet(b"101\n", b"31\n", pending.as_bytes());
         let mut conn = Connection::open_in_memory().unwrap();
@@ -315,7 +316,7 @@ mod tests {
             1,
             URL_TABLE,
             "d",
-            r#"{"id":99,"gid":"ccc","url":"https://example.com","edits_pending":0,"last_updated":""}"#,
+            r#"{"id":99,"gid":"cccccccc-cccc-cccc-cccc-cccccccccccc","url":"https://example.com","edits_pending":0,"last_updated":""}"#,
             r"\N",
         );
         let tar = build_packet(b"101\n", b"31\n", pending.as_bytes());
@@ -358,7 +359,7 @@ mod tests {
             URL_TABLE,
             "i",
             r"\N",
-            r#"{"id":42,"gid":"aaa","url":"https://example.com","edits_pending":0,"last_updated":""}"#,
+            r#"{"id":42,"gid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","url":"https://example.com","edits_pending":0,"last_updated":""}"#,
         );
         let tar = build_packet(b"101\n", b"31\n", pending.as_bytes());
         let mut conn = Connection::open_in_memory().unwrap();
@@ -378,7 +379,7 @@ mod tests {
             1,
             URL_TABLE,
             "d",
-            r#"{"id":99,"gid":"ccc","url":"https://example.com","edits_pending":0,"last_updated":""}"#,
+            r#"{"id":99,"gid":"cccccccc-cccc-cccc-cccc-cccccccccccc","url":"https://example.com","edits_pending":0,"last_updated":""}"#,
             r"\N",
         );
         let tar = build_packet(b"101\n", b"31\n", pending.as_bytes());
@@ -398,8 +399,8 @@ mod tests {
             1,
             URL_TABLE,
             "u",
-            r#"{"id":7,"gid":"bbb","url":"https://example.com/old","edits_pending":0,"last_updated":""}"#,
-            r#"{"id":7,"gid":"bbb","url":"https://example.com/new","edits_pending":0,"last_updated":""}"#,
+            r#"{"id":7,"gid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","url":"https://example.com/old","edits_pending":0,"last_updated":""}"#,
+            r#"{"id":7,"gid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","url":"https://example.com/new","edits_pending":0,"last_updated":""}"#,
         );
         let tar = build_packet(b"101\n", b"31\n", pending.as_bytes());
         let mut conn = Connection::open_in_memory().unwrap();
@@ -426,8 +427,8 @@ mod tests {
 
     #[test]
     fn apply_then_undo_roundtrip() {
-        let old_json = r#"{"id":7,"gid":"bbb","url":"https://example.com/old","edits_pending":0,"last_updated":""}"#;
-        let new_json = r#"{"id":7,"gid":"bbb","url":"https://example.com/new","edits_pending":0,"last_updated":""}"#;
+        let old_json = r#"{"id":7,"gid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","url":"https://example.com/old","edits_pending":0,"last_updated":""}"#;
+        let new_json = r#"{"id":7,"gid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","url":"https://example.com/new","edits_pending":0,"last_updated":""}"#;
         let pending = pending_row(1, URL_TABLE, "u", old_json, new_json);
         let tar_bytes = build_packet(b"101\n", b"31\n", pending.as_bytes());
 
