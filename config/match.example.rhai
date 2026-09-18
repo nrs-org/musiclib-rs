@@ -716,16 +716,21 @@ fn decide_track(ctx, a, b) {
 
     let t = main_title_sim(ctx, a, b);
 
+    // Hoisted above the same_release_position gate below: a vocal/instrumental
+    // (or other mix-variant, e.g. off-vocal/karaoke/remix) pair can end up
+    // sharing a disc/track slot when two sources catalogue the same release
+    // differently, and position agreement alone must not paper over a real
+    // content difference between the two recordings.
+    let va = entry_version_tokens(a);
+    let vb = entry_version_tokens(b);
+    let version_differs = va != vb;
+
     if same_release_position(a, b) {
-        if t >= 0.70 { return merge(max(t, 0.90), "same release position"); }
+        if t >= 0.70 && !version_differs { return merge(max(t, 0.90), "same release position"); }
         return relate("variant", 0.75, "same release position, titles differ");
     }
 
     if t < RELATE_MIN { return distinct(); }
-
-    let va = entry_version_tokens(a);
-    let vb = entry_version_tokens(b);
-    let version_differs = va != vb;
 
     // Detect MV pair: exactly one side is an MV entry.
     let a_video = is_mv_entry(a);
