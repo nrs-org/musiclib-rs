@@ -69,6 +69,11 @@ pub enum Verdict {
         kind: String,
         confidence: f64,
         reason: String,
+        /// Dedup-v2 primitive-relation metadata (docs/dedup-v2.md), when the
+        /// script called the 4-arg `relate(kind, conf, reason, metadata)`
+        /// overload. `None` for every legacy `relate(kind, conf, reason)`
+        /// call site that hasn't been migrated onto the new ontology.
+        metadata: Option<serde_json::Value>,
     },
     Defer {
         confidence: f64,
@@ -742,6 +747,24 @@ fn build_rhai_engine(
             m
         },
     );
+    // Overload carrying dedup-v2 primitive-relation metadata (e.g.
+    // `#{"transformation": "instrumental"}`) alongside the legacy
+    // kind/confidence/reason shape, dispatched by arity. Kept as an add-on
+    // rather than replacing the 3-arg form so every existing `relate(...)`
+    // call site that hasn't been deliberately validated against the new
+    // ontology keeps behaving exactly as before.
+    engine.register_fn(
+        "relate",
+        |kind: String, conf: f64, reason: String, metadata: RhaiMap| -> RhaiMap {
+            let mut m = RhaiMap::new();
+            m.insert("verdict".into(), Dynamic::from("relate".to_string()));
+            m.insert("kind".into(), Dynamic::from(kind));
+            m.insert("confidence".into(), Dynamic::from(conf));
+            m.insert("reason".into(), Dynamic::from(reason));
+            m.insert("metadata".into(), Dynamic::from_map(metadata));
+            m
+        },
+    );
     engine.register_fn("distinct", || -> RhaiMap {
         let mut m = RhaiMap::new();
         m.insert("verdict".into(), Dynamic::from("distinct".to_string()));
@@ -985,6 +1008,42 @@ fn entry_to_rhai(e: &EntryInfo) -> RhaiMap {
     m
 }
 
+/// Convert a Rhai `Dynamic` to a `serde_json::Value`, for turning a script's
+/// dedup-v2 relation metadata map (flat string/number/bool fields, plus
+/// nested arrays/maps if a script ever needs them) into JSON for the
+/// `entry_relation.extra` column. Not exhaustive — falls back to `Null` for
+/// types metadata maps aren't expected to carry (closures, blobs, etc.).
+fn rhai_dynamic_to_json(d: &Dynamic) -> serde_json::Value {
+    if d.is_unit() {
+        return serde_json::Value::Null;
+    }
+    if let Some(b) = d.clone().try_cast::<bool>() {
+        return serde_json::Value::Bool(b);
+    }
+    if let Some(i) = d.clone().try_cast::<i64>() {
+        return serde_json::Value::Number(i.into());
+    }
+    if let Some(f) = d.clone().try_cast::<f64>() {
+        return serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(s) = d.clone().try_cast::<ImmutableString>() {
+        return serde_json::Value::String(s.to_string());
+    }
+    if let Some(arr) = d.clone().try_cast::<rhai::Array>() {
+        return serde_json::Value::Array(arr.iter().map(rhai_dynamic_to_json).collect());
+    }
+    if let Some(map) = d.clone().try_cast::<RhaiMap>() {
+        return serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.to_string(), rhai_dynamic_to_json(v)))
+                .collect(),
+        );
+    }
+    serde_json::Value::Null
+}
+
 fn call_script(
     engine: &Engine,
     ast: &AST,
@@ -1029,6 +1088,7 @@ fn call_script(
             kind: rhai_str("kind").unwrap_or_else(|| "variant".to_string()),
             confidence: rhai_f64("confidence"),
             reason: rhai_str("reason").unwrap_or_default(),
+            metadata: map.get("metadata").map(rhai_dynamic_to_json),
         },
         _ => Verdict::Distinct,
     })
@@ -1535,7 +1595,10 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
 /// neighbors (credited artists/tracks, parent/child releases) — never a full
 /// table scan. Ids that no longer exist (e.g. a stale embedding-cache row
 /// pointing at a merged-away entry) are silently omitted from the result.
-async fn entry_infos_by_ids(db: &MusicDb, ids: &[i64]) -> anyhow::Result<HashMap<i64, EntryInfo>> {
+pub async fn entry_infos_by_ids(
+    db: &MusicDb,
+    ids: &[i64],
+) -> anyhow::Result<HashMap<i64, EntryInfo>> {
     let ids = dedup_sorted(ids.to_vec());
     if ids.is_empty() {
         return Ok(HashMap::new());
@@ -2717,6 +2780,7 @@ async fn apply_candidate(
                 kind,
                 confidence,
                 reason,
+                ..
             } => ("RELATE", kind.as_str(), *confidence, reason.as_str()),
             Verdict::Defer { confidence, reason } => ("DEFER", "", *confidence, reason.as_str()),
             Verdict::Separate { confidence, reason } => {
@@ -2766,6 +2830,7 @@ async fn apply_candidate(
             kind,
             confidence,
             reason,
+            metadata,
         } => {
             counters[1] += 1;
             if config.verbose_decisions {
@@ -2789,13 +2854,25 @@ async fn apply_candidate(
             }
 
             if config.apply_relates {
+                // `reason` is always present; dedup-v2 metadata (if the script
+                // used the 4-arg `relate(...)` overload) is folded in under
+                // its own fields so `extra` stays a flat, queryable object
+                // rather than nesting a `metadata` object one level deep.
+                let mut extra = serde_json::json!({ "reason": reason });
+                if let (Some(obj), Some(serde_json::Value::Object(meta))) =
+                    (extra.as_object_mut(), metadata)
+                {
+                    obj.extend(meta.clone());
+                }
+                let extra_json = serde_json::to_string(&extra)?;
+
                 db.upsert_relation(
                     ea.entry_id,
                     eb.entry_id,
                     kind,
                     *confidence,
                     "heuristic",
-                    None,
+                    Some(&extra_json),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;

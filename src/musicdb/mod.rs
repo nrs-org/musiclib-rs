@@ -283,6 +283,17 @@ pub struct MusicDb {
 pub const SAME_IDENTITY: &str = "same_identity";
 pub const DIFFERENT_IDENTITY: &str = "different_identity";
 
+// Primitive relation predicates from the dedup-v2 ontology (see
+// docs/dedup-v2.md, docs/dedup-label-schema-v2.json). These are additive:
+// existing `variant`-kind rows are legacy provenance-bearing review
+// candidates and must not be blindly migrated onto these predicates — only
+// new writes that have been deliberately validated (e.g. the instrumental
+// `derived_from` case in `decide_track`) should use them.
+pub const MEMBER_OF: &str = "member_of";
+pub const DERIVED_FROM: &str = "derived_from";
+pub const PARTICIPATES_IN: &str = "participates_in";
+pub const FACET_OF: &str = "facet_of";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityJudgment {
     Same,

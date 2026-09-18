@@ -541,6 +541,22 @@ fn entry_version_tokens(entry) {
     version_tokens(combined)
 }
 
+// Symmetric difference between two `entry_version_tokens()` results (each a
+// space-joined sorted token string), as a token array. Lets a caller that
+// already knows `va != vb` find out *which* marker(s) actually differ — e.g.
+// distinguishing "one side is specifically instrumental" from "the markers
+// differ in some other way" — without re-deriving the whole comparison.
+fn version_token_symdiff(va, vb) {
+    let at = [];
+    for t in va.split(" ") { if t != "" { at.push(t); } }
+    let bt = [];
+    for t in vb.split(" ") { if t != "" { bt.push(t); } }
+    let diff = [];
+    for t in at { if !bt.contains(t) { diff.push(t); } }
+    for t in bt { if !at.contains(t) { diff.push(t); } }
+    diff
+}
+
 // ── Per-entry helpers ─────────────────────────────────────────────────────────
 
 fn pick_main_title(entry) {
@@ -772,16 +788,29 @@ fn decide_track(ctx, a, b) {
 
     let t = main_title_sim(ctx, a, b);
 
+    // Hoisted above the same_release_position gate below: a vocal/instrumental
+    // (or other mix-variant, e.g. off-vocal/karaoke/remix) pair can end up
+    // sharing a disc/track slot when two sources catalogue the same release
+    // differently, and position agreement alone must not paper over a real
+    // content difference between the two recordings.
+    let va = entry_version_tokens(a);
+    let vb = entry_version_tokens(b);
+    let version_differs = va != vb;
+
     if same_release_position(a, b) {
-        if t >= 0.70 { return merge(max(t, 0.90), "same release position"); }
+        if t >= 0.70 && !version_differs { return merge(max(t, 0.90), "same release position"); }
+        // Validated dedup-v2 case: two sources catalogue the same disc/track
+        // slot but one side is specifically an instrumental/off-vocal/karaoke
+        // cut. That's a `derived_from` transformation of the vocal recording,
+        // not an undifferentiated "variant" — see docs/dedup-v2.md.
+        if version_differs && version_token_symdiff(va, vb).contains("instrumental") {
+            return relate("derived_from", 0.75, "same release position, instrumental vs vocal",
+                #{"transformation": "instrumental"});
+        }
         return relate("variant", 0.75, "same release position, titles differ");
     }
 
     if t < RELATE_MIN { return distinct(); }
-
-    let va = entry_version_tokens(a);
-    let vb = entry_version_tokens(b);
-    let version_differs = va != vb;
 
     // Detect MV pair: exactly one side is an MV entry.
     let a_video = is_mv_entry(a);
@@ -841,6 +870,11 @@ fn decide_track(ctx, a, b) {
         } else {
             "title match, no duration available"
         };
+        // Same dedup-v2 instrumental case as above, reached via the
+        // corroborated-title path instead of a shared release position.
+        if version_differs && version_token_symdiff(va, vb).contains("instrumental") {
+            return relate("derived_from", t * 0.9, reason, #{"transformation": "instrumental"});
+        }
         return relate("variant", t * 0.9, reason);
     }
 
