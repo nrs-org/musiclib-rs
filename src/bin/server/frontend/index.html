@@ -349,6 +349,151 @@
     font-size: 12px;
   }
 
+  /* ---------- ingest: "add a song" panel + its job list ---------- */
+
+  .ingest-jobs {
+    list-style: none;
+    margin: 10px 0 0;
+    padding: 0;
+  }
+
+  .ingest-job {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 0;
+    border-top: 1px solid var(--rail);
+  }
+
+  .ingest-job-status {
+    flex: none;
+    width: 14px;
+    height: 14px;
+    margin-top: 1px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .ingest-job-spinner {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--rail);
+    border-top-color: var(--brass);
+    animation: ingest-spin 800ms linear infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ingest-job-spinner { animation: none; }
+  }
+
+  @keyframes ingest-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .ingest-job-status.done { color: var(--verdigris); }
+  .ingest-job-status.error { color: var(--danger); }
+
+  .ingest-job-body {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .ingest-job-query {
+    overflow-wrap: anywhere;
+    color: var(--ink-soft);
+    font-size: 12px;
+  }
+
+  .ingest-job-detail {
+    margin: 2px 0 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+
+  .ingest-job-detail.error { color: var(--danger); }
+
+  .ingest-job-link {
+    display: inline-block;
+    margin-top: 2px;
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    font-size: 12px;
+    color: var(--verdigris);
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .ingest-job-link:hover { text-decoration: underline; }
+
+  .ingest-job-dismiss {
+    flex: none;
+    border: none;
+    background: none;
+    color: var(--ink-faint);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0 2px;
+    line-height: 1;
+  }
+
+  .ingest-job-dismiss:hover { color: var(--ink); }
+
+  /* ---------- import mode: dedicated full-page "add a song" screen,
+     replacing the old rail-foot mini box — same job-row markup/CSS above,
+     just given room to breathe ---------- */
+
+  .import-view {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 44px 28px 40px;
+  }
+
+  .import-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 4px 0 6px;
+  }
+
+  .import-url-input {
+    flex: 1 1 280px;
+    min-width: 0;
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+    padding: 10px 12px;
+    font-size: 14px;
+  }
+
+  .import-url-input:focus { outline: none; border-color: var(--brass); }
+
+  .import-select {
+    flex: none;
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+    color: var(--ink);
+    padding: 0 8px;
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+
+  .import-jobs .ingest-job {
+    padding: 10px 0;
+  }
+
+  .import-jobs .ingest-job-query {
+    font-size: 13px;
+  }
+
+  .import-jobs .ingest-job-detail,
+  .import-jobs .ingest-job-link {
+    font-size: 12px;
+  }
+
   /* ---------- main: browsing / entry detail ---------- */
 
   main {
@@ -1463,6 +1608,7 @@
           <button type="button" data-mode="library" aria-pressed="true">Library</button>
           <button type="button" data-mode="graph" aria-pressed="false">Graph</button>
           <button type="button" data-mode="player" aria-pressed="false">Player</button>
+          <button type="button" data-mode="import" aria-pressed="false">Import</button>
         </nav>
         <div class="search-slot">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -1493,6 +1639,7 @@
           <p class="sub">Search your library or hit <strong>Shuffle all</strong> to start a queue.</p>
         </div>
       </div>
+      <div id="view-import" hidden></div>
     </main>
   </div>
 
@@ -1563,6 +1710,7 @@
   const viewLibraryEl = mainEl;
   const viewGraphEl = document.getElementById("view-graph");
   const viewPlayerEl = document.getElementById("view-player");
+  const viewImportEl = document.getElementById("view-import");
   const playerStageWrapEl = document.getElementById("player-stage-wrap");
   const playerStageMountEl = document.getElementById("player-stage-mount");
   const playerStageEmptyEl = document.getElementById("player-stage-empty");
@@ -1597,13 +1745,15 @@
   // remembered separately so switching modes doesn't clobber the other.
   let graphActiveId = null;
 
-  // ---------- modes: Library / Graph / Player ----------
+  // ---------- modes: Library / Graph / Player / Import ----------
   //
-  // One `main` element, three permanent view containers (see the body HTML)
+  // One `main` element, four permanent view containers (see the body HTML)
   // instead of one that gets wholesale-replaced per screen. Switching modes
-  // never touches the other two views' DOM, which is what lets Graph mode's
+  // never touches the other views' DOM, which is what lets Graph mode's
   // d3 simulation and Player mode's reparented dock (see `Player.setStageMode`
-  // below) survive a mode switch instead of being torn down and rebuilt.
+  // below) survive a mode switch instead of being torn down and rebuilt —
+  // and, for Import mode, means in-flight job polling keeps running
+  // undisturbed while you look elsewhere (see the `Ingest` module).
   let currentMode = "library";
 
   function setMode(mode) {
@@ -1611,6 +1761,7 @@
     viewLibraryEl.hidden = mode !== "library";
     viewGraphEl.hidden = mode !== "graph";
     viewPlayerEl.hidden = mode !== "player";
+    viewImportEl.hidden = mode !== "import";
     for (const btn of modeSwitcherEl.querySelectorAll("button[data-mode]")) {
       btn.setAttribute("aria-pressed", String(btn.dataset.mode === mode));
     }
@@ -1640,6 +1791,9 @@
     } else if (mode === "player") {
       history.pushState({}, "", "/player");
       setMode("player");
+    } else if (mode === "import") {
+      history.pushState({}, "", "/import");
+      setMode("import");
     }
   }
 
@@ -1711,6 +1865,285 @@
       `stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name]}</svg>`
     );
   }
+
+  // ---------- import mode: dedicated "add a song" screen — POST
+  // /api/ingest, then poll GET /api/jobs/:id ----------
+  //
+  // The webapp's own import affordance, an alternative to the `import` CLI:
+  // submits a URL (plus a fetch-options depth preset, from GET
+  // /api/fetch-options) to the server, which runs it through the exact same
+  // fetch/flush/dedup pipeline as a background job (see player.rs `ingest`).
+  // Jobs are tracked client-side only (`jobs`, newest first) — a page reload
+  // loses the list, same as every other bit of client-side-only UI state in
+  // this app — and each job polls its own status independently, so queuing
+  // several imports back-to-back shows all of their progress at once rather
+  // than serializing them in the UI (the server itself still processes one
+  // connection at a time — see main.rs's single-threaded `LocalSet` — so
+  // "independent" here is about polling, not actual concurrency). Lives in
+  // its own permanent `#view-import` container (see the mode-switching
+  // section above) precisely so that polling keeps running while you're
+  // looking at Library/Graph/Player instead — mirrors how Player's dock
+  // survives a mode switch.
+  const Ingest = (() => {
+    const viewEl = document.getElementById("view-import");
+    const POLL_MS = 1000;
+    const MAX_SHOWN = 30;
+
+    // Built-in fallback so the form works even before (or if)
+    // GET /api/fetch-options/files responds — matches the server's own
+    // always-present `__shallow__` choice (see fetch_options.rs `shallow`).
+    // `<config_dir>/fetch_options/` is otherwise entirely user-managed: no
+    // file here is bundled or assumed, the list is whatever `files` gets
+    // replaced with once the request above resolves.
+    let files = [{ id: "__shallow__", label: "Quick (1 level deep, no config file)" }];
+    let selectedFile = "__shallow__";
+    // Entry-point names the currently selected file offers (its YAML
+    // document's own top-level keys — see fetch_options.rs's module doc on
+    // why one file can define more than one). Empty for `__shallow__` (not
+    // a real file) and for any file that only defines `main` — the picker
+    // below only renders when this has more than one name.
+    let entryPoints = [];
+    let selectedEntryPoint = "main";
+
+    // { id, query, status, stage, message, entryId, errorMessage }
+    let jobs = [];
+    let inputValue = "";
+    let submitError = null;
+
+    function findJob(id) {
+      return jobs.find((j) => j.id === id);
+    }
+
+    function renderJob(job) {
+      let statusEl;
+      if (job.status === "succeeded") {
+        statusEl = el("span", { className: "ingest-job-status done", text: "✓" });
+      } else if (job.status === "failed" || job.status === "canceled") {
+        statusEl = el("span", { className: "ingest-job-status error", text: "✕" });
+      } else {
+        statusEl = el("span", { className: "ingest-job-status" }, [
+          el("span", { className: "ingest-job-spinner" }),
+        ]);
+      }
+
+      const body = el("div", { className: "ingest-job-body" }, [
+        el("p", { className: "ingest-job-query", text: job.query }),
+      ]);
+
+      if (job.status === "succeeded") {
+        body.appendChild(
+          el("button", {
+            className: "ingest-job-link",
+            type: "button",
+            text: "Open →",
+            onclick: () => viewEntry(job.entryId),
+          })
+        );
+      } else if (job.status === "failed" || job.status === "canceled") {
+        body.appendChild(
+          el("p", {
+            className: "ingest-job-detail error",
+            text: job.errorMessage || (job.status === "canceled" ? "canceled" : "import failed"),
+          })
+        );
+      } else {
+        body.appendChild(
+          el("p", { className: "ingest-job-detail", text: job.message || job.stage || "queued…" })
+        );
+      }
+
+      const dismissBtn = el("button", {
+        className: "ingest-job-dismiss",
+        type: "button",
+        "aria-label": "Dismiss",
+        text: "×",
+        onclick: () => {
+          jobs = jobs.filter((j) => j.id !== job.id);
+          render();
+        },
+      });
+
+      return el("li", { className: "ingest-job" }, [statusEl, body, dismissBtn]);
+    }
+
+    function render() {
+      viewEl.innerHTML = "";
+
+      const urlInput = el("input", {
+        className: "import-url-input",
+        type: "text",
+        placeholder: "Paste a URL (YouTube, Spotify, MusicBrainz, Discogs, SoundCloud, NicoNico…)",
+        value: inputValue,
+        oninput: (e) => {
+          inputValue = e.target.value;
+        },
+        onkeydown: (e) => {
+          if (e.key === "Enter") submit();
+        },
+      });
+      const fileSelect = el("select", {
+        className: "import-select",
+        title: "Which fetch-options file to use",
+        onchange: (e) => {
+          selectedFile = e.target.value;
+          loadEntryPoints(selectedFile);
+        },
+      });
+      for (const f of files) {
+        fileSelect.appendChild(el("option", { value: f.id, text: f.label || `${f.id}.yaml` }));
+      }
+      fileSelect.value = selectedFile;
+
+      // Only shown once a file is picked that actually defines more than
+      // one entry point — most files just have `main`, and forcing a choice
+      // of one option every time would be pure friction.
+      let entryPointSelect = null;
+      if (entryPoints.length > 1) {
+        entryPointSelect = el(
+          "select",
+          {
+            className: "import-select",
+            title: "Which entry point in the file to start from",
+            onchange: (e) => {
+              selectedEntryPoint = e.target.value;
+            },
+          },
+          entryPoints.map((name) => el("option", { value: name, text: name }))
+        );
+        entryPointSelect.value = selectedEntryPoint;
+      }
+
+      const submitBtn = el("button", {
+        className: "play-cta",
+        type: "button",
+        text: "Start import",
+        onclick: submit,
+      });
+
+      const jobsList = jobs.length
+        ? el(
+            "ul",
+            { className: "ingest-jobs import-jobs" },
+            jobs.slice(0, MAX_SHOWN).map(renderJob)
+          )
+        : null;
+
+      viewEl.appendChild(
+        el("div", { className: "import-view" }, [
+          el("p", { className: "card-kicker", text: "Import" }),
+          el("h1", { className: "card-title", text: "Add to your library" }),
+          el("p", {
+            className: "card-meta",
+            text: "Paste a URL from any source musiclib-rs understands, pick a fetch-options file from your config directory (and which entry point in it to start from, if it defines more than one), and it runs through the same pipeline as the import CLI.",
+          }),
+          el("div", { className: "import-form" }, [urlInput, fileSelect, entryPointSelect, submitBtn]),
+          submitError ? el("p", { className: "rail-foot-error", text: submitError }) : null,
+          el("p", { className: "manifest-label", text: jobs.length ? "Recent imports" : "No imports yet" }),
+          jobsList,
+        ])
+      );
+    }
+
+    // Polls one job until it reaches a terminal status. Stops silently if the
+    // job was dismissed from `jobs` while in flight — nothing left to update.
+    async function poll(id) {
+      let view;
+      try {
+        view = await api(`/api/jobs/${id}`);
+      } catch (e) {
+        const job = findJob(id);
+        if (job) {
+          job.status = "failed";
+          job.errorMessage = e.message;
+          render();
+        }
+        return;
+      }
+      const job = findJob(id);
+      if (!job) return;
+      job.status = view.status;
+      job.stage = view.progress?.stage || null;
+      job.message = view.progress?.message || null;
+      if (view.status === "succeeded") {
+        job.entryId = view.result?.entry_id ?? null;
+      } else if (view.status === "failed" || view.status === "canceled") {
+        job.errorMessage = view.error?.message || null;
+      }
+      render();
+      if (view.status === "pending" || view.status === "running") {
+        setTimeout(() => poll(id), POLL_MS);
+      }
+    }
+
+    async function submit() {
+      const query = inputValue.trim();
+      if (!query) return;
+      inputValue = "";
+      submitError = null;
+      let res;
+      try {
+        res = await postJson("/api/ingest", {
+          query,
+          fetch_options: { file: selectedFile, entry_point: selectedEntryPoint || "main" },
+        });
+      } catch (e) {
+        submitError = e.message;
+        render();
+        return;
+      }
+      jobs = [
+        { id: res.job_id, query, status: "pending", stage: null, message: null },
+        ...jobs,
+      ];
+      render();
+      poll(res.job_id);
+    }
+
+    // Fetched once at startup; `render()` above already works off the
+    // built-in `__shallow__` fallback in the meantime, so a slow or failed
+    // request just means the file picker stays down to that one option.
+    async function loadFiles() {
+      try {
+        const data = await api("/api/fetch-options/files");
+        if (Array.isArray(data.files) && data.files.length) {
+          files = data.files;
+          if (!files.some((f) => f.id === selectedFile)) {
+            selectedFile = files[0].id;
+          }
+        }
+      } catch {
+        // keep the built-in fallback — the form still works.
+      }
+      await loadEntryPoints(selectedFile);
+    }
+
+    // `__shallow__` isn't a real file, so it never has more than the one
+    // implicit entry point — skip the network round trip and just clear the
+    // picker. `render()` at the end covers both branches.
+    async function loadEntryPoints(fileId) {
+      if (fileId === "__shallow__") {
+        entryPoints = [];
+        selectedEntryPoint = "main";
+        render();
+        return;
+      }
+      try {
+        const data = await api(`/api/fetch-options/entry-points?file=${encodeURIComponent(fileId)}`);
+        entryPoints = Array.isArray(data.entry_points) ? data.entry_points : [];
+      } catch {
+        entryPoints = [];
+      }
+      selectedEntryPoint = entryPoints.includes("main") ? "main" : entryPoints[0] || "main";
+      render();
+    }
+
+    function init() {
+      render();
+      loadFiles();
+    }
+
+    return { render: init };
+  })();
 
   // ---------- spotify: connect + playback, entirely client-side ----------
   //
@@ -3215,7 +3648,14 @@
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "/" && document.activeElement !== searchEl) {
+    // Only steal "/" as the jump-to-search shortcut when focus isn't already
+    // in some other text field — originally just excluded `searchEl` itself,
+    // which meant typing a literal "/" (as in a pasted-by-hand URL) into any
+    // other input, e.g. the ingest panel's URL field or the Spotify Client ID
+    // field, got hijacked mid-keystroke.
+    const active = document.activeElement;
+    const inTextField = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
+    if (e.key === "/" && active !== searchEl && !inTextField) {
       e.preventDefault();
       searchEl.focus();
       searchEl.select();
@@ -5124,6 +5564,8 @@
       setMode("graph");
     } else if (path === "/player") {
       setMode("player");
+    } else if (path === "/import") {
+      setMode("import");
     } else {
       showInvite();
     }
@@ -5132,6 +5574,7 @@
   window.addEventListener("popstate", () => routeFromUrl(false));
   routeFromUrl(false);
 
+  Ingest.render();
   Spotify.render();
   Spotify.handleRedirect();
 })();

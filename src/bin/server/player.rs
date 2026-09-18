@@ -1,25 +1,43 @@
-//! Store-specific player API: search, entry details, playable sources, and
-//! release tracklists, plus a minimal static frontend. This is deliberately
-//! *not* part of the NRS Store Protocol (`store_protocol.rs`) — it's
-//! musiclib-rs's own UI-facing surface, per docs/plan-video-player.md Phase 1.
-//! Scope matches that plan's MVP boundary: read-only browsing, YouTube and
-//! Spotify embeds, no persistence/dedup sidebar yet. The frontend owns queue
-//! state entirely client-side; this module just tells it which tracks are
-//! playable at all (the `playable` flag on `/releases/:id/tracks`).
+//! Store-specific player API: search, entry details, playable sources,
+//! release tracklists, and library ingest, plus a minimal static frontend.
+//! This is deliberately *not* part of the NRS Store Protocol
+//! (`store_protocol.rs`) — it's musiclib-rs's own UI-facing surface, per
+//! docs/plan-video-player.md Phase 1. Browsing/playback stays read-only
+//! (YouTube and Spotify embeds, no persistence/dedup sidebar) except for the
+//! `ingest` job below, which the frontend uses as its "add a song" affordance
+//! instead of the `import` CLI. It reuses the exact same
+//! `pipeline::ingest::ingest_entry` call and `JobManager` machinery as
+//! `store_protocol::ingest` — just under `/api` with a response shape that
+//! matches this module's other endpoints (numeric `entry_id`, not NRS's
+//! string `store_id`) rather than the store-protocol wire format. The
+//! frontend owns queue state entirely client-side; this module just tells it
+//! which tracks are playable at all (the `playable` flag on
+//! `/releases/:id/tracks`).
 
 use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use hyper::{Method, StatusCode};
-use musiclib_rs::musicdb::{Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback};
+use musiclib_rs::{
+    app_dirs,
+    musicdb::{Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback},
+    pipeline::ingest::ingest_entry,
+};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
     entries::{component_members, dedupe_by_soft_identity, entry_summaries},
+    fetch_options,
     respond::{self, HyperResponse},
     state::AppState,
 };
+
+/// `<config_dir>/fetch_options/` — where the import form's depth presets are
+/// read from, fresh on every request (see `fetch_options`'s module doc).
+fn fetch_options_dir() -> std::path::PathBuf {
+    app_dirs::config_dir().join("fetch_options")
+}
 
 const FRONTEND_INDEX: &str = include_str!("frontend/index.html");
 
@@ -27,6 +45,7 @@ pub fn handles(path: &str) -> bool {
     path == "/"
         || path == "/graph"
         || path == "/player"
+        || path == "/import"
         || path.starts_with("/api/")
         || path.starts_with("/entry/")
         || path.starts_with("/graph/")
@@ -41,15 +60,16 @@ pub async fn route(
 ) -> HyperResponse {
     match path {
         "/" if *method == Method::GET => frontend(),
-        // SPA deep links: `/entry/{id}`, `/graph`, `/graph/{id}`, and
-        // `/player` all serve the exact same shell as `/` — the frontend
+        // SPA deep links: `/entry/{id}`, `/graph`, `/graph/{id}`, `/player`,
+        // and `/import` all serve the exact same shell as `/` — the frontend
         // reads `location.pathname` on load and restores the mode/view
         // client-side. This is the only reason the id isn't validated here;
         // the API calls the page then makes do that.
         p if p.starts_with("/entry/")
             || p == "/graph"
             || p.starts_with("/graph/")
-            || p == "/player" =>
+            || p == "/player"
+            || p == "/import" =>
         {
             if *method != Method::GET {
                 return respond::method_not_allowed();
@@ -59,6 +79,19 @@ pub async fn route(
         "/api/library/search" if *method == Method::GET => search(state, &parse_query(query)).await,
         "/api/library/shuffle" if *method == Method::GET => {
             shuffle_library(state, &parse_query(query)).await
+        }
+        "/api/fetch-options/files" if *method == Method::GET => fetch_options_files(),
+        "/api/fetch-options/entry-points" if *method == Method::GET => {
+            fetch_options_entry_points(&parse_query(query)).await
+        }
+        "/api/ingest" if *method == Method::POST => ingest(state, &body).await,
+        p if p.starts_with("/api/jobs/") => {
+            let id = &p["/api/jobs/".len()..];
+            match *method {
+                Method::GET => job_status(state, id),
+                Method::DELETE => job_cancel(state, id),
+                _ => respond::method_not_allowed(),
+            }
         }
         "/api/relations/link" if *method == Method::POST => link_relation(state, &body).await,
         "/api/relations/unlink" if *method == Method::POST => unlink_relation(state, &body).await,
@@ -96,6 +129,9 @@ pub async fn route(
         "/"
         | "/api/library/search"
         | "/api/library/shuffle"
+        | "/api/fetch-options/files"
+        | "/api/fetch-options/entry-points"
+        | "/api/ingest"
         | "/api/relations/link"
         | "/api/relations/unlink"
         | "/api/relations/relate"
@@ -264,6 +300,151 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
         .take(limit)
         .collect();
     respond::json(StatusCode::OK, json!({ "tracks": tracks }))
+}
+
+/// `GET /api/fetch-options/files` — the import form's file picker: every
+/// `.yaml` file the user has dropped into `<config_dir>/fetch_options/`,
+/// read fresh from disk on every call (see `fetch_options`'s module doc) —
+/// no bundled/hardcoded list, that directory is entirely user-managed.
+/// Always includes the built-in `__shallow__` choice first (not a file — see
+/// `fetch_options::shallow`) so the form still works before the user has set
+/// up any config at all.
+fn fetch_options_files() -> HyperResponse {
+    let mut files = vec![
+        json!({ "id": fetch_options::SHALLOW_ID, "label": "Quick (1 level deep, no config file)" }),
+    ];
+    files.extend(
+        fetch_options::list_files(&fetch_options_dir())
+            .into_iter()
+            .map(|f| json!({ "id": f.id })),
+    );
+    respond::json(StatusCode::OK, json!({ "files": files }))
+}
+
+/// `GET /api/fetch-options/entry-points?file=<id>` — the entry points one
+/// picked file offers, i.e. its YAML document's top-level keys (`main` and
+/// whatever other named sets it defines — see `fetch_options`'s module doc
+/// on why a file can offer more than one). The frontend only shows its own
+/// entry-point picker when this comes back with more than one name.
+async fn fetch_options_entry_points(query: &HashMap<String, String>) -> HyperResponse {
+    let Some(file_id) = query.get("file") else {
+        return respond::error(StatusCode::BAD_REQUEST, "invalid_input", "file is required");
+    };
+    if file_id == fetch_options::SHALLOW_ID {
+        return respond::json(StatusCode::OK, json!({ "entry_points": [] }));
+    }
+    match fetch_options::entry_points(&fetch_options_dir(), file_id).await {
+        Ok(names) => respond::json(StatusCode::OK, json!({ "entry_points": names })),
+        Err(message) => respond::error(StatusCode::BAD_REQUEST, "invalid_input", &message),
+    }
+}
+
+#[derive(Deserialize)]
+struct IngestFetchOptions {
+    /// A file id from `GET /api/fetch-options/files`.
+    file: String,
+    /// An entry-point name from `GET /api/fetch-options/entry-points`.
+    /// Defaults to `"main"` — see `fetch_options::DEFAULT_ENTRY_POINT`.
+    #[serde(default = "default_entry_point")]
+    entry_point: String,
+}
+
+fn default_entry_point() -> String {
+    fetch_options::DEFAULT_ENTRY_POINT.to_string()
+}
+
+#[derive(Deserialize)]
+struct IngestRequest {
+    query: String,
+    /// Omitted falls back to the server's process-wide default
+    /// (`--fetch-options`, or the built-in 1-level-deep fallback) — same as
+    /// before this field existed.
+    #[serde(default)]
+    fetch_options: Option<IngestFetchOptions>,
+}
+
+/// `POST /api/ingest` — the webapp's "add a song" affordance: runs
+/// `pipeline::ingest::ingest_entry` (the same fetch/flush/dedup sequence the
+/// `import` CLI and `store_protocol::ingest` use) as a background job against
+/// the shared `AppState`, so it competes for the same `MusicDb` connection
+/// and provider HTTP budget as everything else this process is doing — see
+/// `job_status` for the write-during-read question this raises for concurrent
+/// browsing. Returns `202` with a `job_id`; poll `GET /api/jobs/:id` for
+/// progress and the eventual `entry_id`.
+async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let req: IngestRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    let query = req.query.trim().to_string();
+    if query.is_empty() {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "query must not be empty",
+        );
+    }
+    let (pool, options_id) = match &req.fetch_options {
+        Some(fo) => {
+            match fetch_options::resolve(&fetch_options_dir(), &fo.file, &fo.entry_point).await {
+                Some(resolved) => resolved,
+                None => {
+                    return respond::error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_input",
+                        &format!(
+                            "unknown fetch_options file/entry_point {:?}/{:?}",
+                            fo.file, fo.entry_point
+                        ),
+                    );
+                }
+            }
+        }
+        None => (Arc::clone(&state.pool), state.root_id),
+    };
+
+    let job_state = Arc::clone(state);
+    let job_id = state.jobs.spawn("ingest", move |handle| async move {
+        handle.progress("fetching", "running import pipeline");
+        let result = ingest_entry(
+            &job_state.db,
+            &job_state.providers,
+            &pool,
+            options_id,
+            &job_state.dedup_configs,
+            &job_state.merged_dedup,
+            job_state.soft_cfg.as_ref(),
+            query,
+        )
+        .await;
+        match result {
+            Ok(outcome) => match outcome.entry_id {
+                Some(id) => handle.succeed(json!({ "entry_id": id })),
+                None => handle.fail("not_found", "no provider recognised the query"),
+            },
+            Err(e) => handle.fail("provider_error", e.to_string()),
+        }
+    });
+
+    respond::json(
+        StatusCode::ACCEPTED,
+        json!({ "job_id": job_id, "op": "ingest", "status": "pending" }),
+    )
+}
+
+fn job_status(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    match state.jobs.view(id) {
+        Some(view) => respond::json_typed(StatusCode::OK, &view),
+        None => respond::not_found(),
+    }
+}
+
+fn job_cancel(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    if state.jobs.cancel(id) {
+        job_status(state, id)
+    } else {
+        respond::not_found()
+    }
 }
 
 async fn entry_details(state: &Arc<AppState>, id: &str) -> HyperResponse {

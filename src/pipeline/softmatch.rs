@@ -161,6 +161,29 @@ pub fn default_soft_match_config() -> Option<SoftMatchConfig> {
     })
 }
 
+// ── Blocking helper ────────────────────────────────────────────────────────────
+
+/// Runs `f` (synchronous, CPU/FFI-bound work — Rhai script execution, an
+/// embedding model) off the async task without stalling the runtime, on
+/// runtimes that support it. `tokio::task::block_in_place` requires a
+/// multi-threaded runtime (it hands this task's worker thread to another
+/// waiting task while `f` runs) and panics on a current-thread one — which
+/// the `server` binary uses deliberately, since its dedup scoring pipeline
+/// holds a `rhai::Engine` (not `Send`) across `.await` points and needs
+/// `spawn_local` (see `src/bin/server/jobs.rs`). On a current-thread runtime
+/// there's no worker pool to hand off to anyway, so `f` just runs in place —
+/// blocking the one thread, same as every other request handler already does
+/// while `db`/HTTP calls are in flight there.
+fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
+    if tokio::runtime::Handle::current().runtime_flavor()
+        == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 // ── Source classification ─────────────────────────────────────────────────────
 
 /// Sources whose titles are noisy (artist prefix, "Music Video" suffix, etc.).
@@ -2602,7 +2625,7 @@ async fn score_candidates(
                     merge_entry_infos(winner, &loser);
                     // Re-embed if the winner's best_title changed (stale check is fast).
                     if let Some(cache) = embed_cache {
-                        tokio::task::block_in_place(|| {
+                        run_blocking(|| {
                             embed_stale_entries(
                                 std::slice::from_ref(winner),
                                 &ctx.engine,
@@ -3099,7 +3122,7 @@ async fn open_embed_cache(
 
     let cache_clone = cache.clone();
     let entries_ref = entries;
-    tokio::task::block_in_place(|| {
+    run_blocking(|| {
         embed_stale_entries(
             entries_ref,
             &tmp_engine,

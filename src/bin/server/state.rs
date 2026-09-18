@@ -18,7 +18,12 @@ use crate::jobs::JobManager;
 pub struct AppState {
     pub db: MusicDb,
     pub providers: Arc<Vec<Arc<dyn FetchProvider>>>,
-    /// Fetch options used by the store-protocol `ingest` job.
+    /// Fetch options used by the store-protocol `ingest` job, and by the
+    /// player UI's `/api/ingest` when the request doesn't name a preset.
+    /// Named presets the import form can choose *instead* are resolved
+    /// fresh per request by `fetch_options::list`/`resolve` — not stored
+    /// here — so new preset files show up without a server restart; see
+    /// that module's doc comment.
     pub pool: Arc<EntryFetchOptionsPool>,
     pub root_id: OptionsId,
     pub dedup_configs: Vec<(String, DedupConfig)>,

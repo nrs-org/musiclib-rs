@@ -909,15 +909,32 @@ fn emit_matcher_expr(expr: &ChildMatcherExpr) -> YamlMatcherExpr {
 // ---------------------------------------------------------------------------
 
 /// Load a [`YamlFetchDocument`] from a file on disk, resolving all cross-file
-/// `./path/to/file.yaml::entry_name` references. Cross-file cycles are supported.
-///
-/// The `"main"` entry of the entry file becomes the root.
+/// `./path/to/file.yaml::entry_name` references. Cross-file cycles are
+/// supported. The `"main"` entry of the entry file becomes the root — see
+/// [`load_from_file_with_root`] for callers that need a different entry
+/// point.
 ///
 /// Returns the pool, root id, and a content hash of all loaded files combined.
 /// The hash is stable regardless of file discovery order and can be used as a
 /// cache key: if the hash matches a previously cached result, re-fetching is unnecessary.
 pub async fn load_from_file(
     path: &Path,
+) -> Result<(Arc<EntryFetchOptionsPool>, OptionsId, [u8; 32]), YamlConversionError> {
+    load_from_file_with_root(path, "main").await
+}
+
+/// Like [`load_from_file`], but starts from `root_name` — any top-level key
+/// defined in the entry file, not just the conventional `"main"` — instead
+/// of a fixed root. `"main"` itself is still resolved normally when passed
+/// explicitly, so `load_from_file` is exactly `load_from_file_with_root(path, "main")`.
+///
+/// Exists for callers that let a user pick which named entry point in a file
+/// to start from (e.g. `server`'s import UI, where one `.yaml` file can
+/// define several usable starting points alongside `main`) rather than
+/// always taking the file's conventional root.
+pub async fn load_from_file_with_root(
+    path: &Path,
+    root_name: &str,
 ) -> Result<(Arc<EntryFetchOptionsPool>, OptionsId, [u8; 32]), YamlConversionError> {
     let canonical = std::fs::canonicalize(path).map_err(|e| YamlConversionError::Io {
         path: path.to_owned(),
@@ -953,7 +970,7 @@ pub async fn load_from_file(
     }
 
     let root_id = file_name_to_id[&canonical]
-        .get("main")
+        .get(root_name)
         .copied()
         .unwrap_or(EntryFetchOptionsPool::DEFAULT_ID);
 

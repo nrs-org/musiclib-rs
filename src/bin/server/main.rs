@@ -12,6 +12,7 @@
 //! `src/bin/ytdlp_server.rs`.
 
 mod entries;
+mod fetch_options;
 mod jobs;
 #[cfg(feature = "player")]
 mod player;
@@ -43,9 +44,6 @@ use musiclib_rs::{
     providers::{
         fetch_options_yaml::load_from_file,
         registry::{RegistryConfig, build_providers},
-        types::{
-            ChildMatcher, ChildMatcherExpr, ChildRule, EntryFetchOptions, EntryFetchOptionsPool,
-        },
     },
 };
 use tracing::info;
@@ -97,7 +95,7 @@ async fn load_config<T: Default + serde::de::DeserializeOwned>(
     Ok(serde_yaml_ng::from_str(&text)?)
 }
 
-fn dedup_paths_from_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+fn yaml_paths_in_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     if !dir.exists() {
         return Ok(vec![]);
     }
@@ -160,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let dedup_paths: Vec<PathBuf> = if args.dedup_config.is_empty() {
-        dedup_paths_from_dir(&config_dir.join("dedup_barriers"))?
+        yaml_paths_in_dir(&config_dir.join("dedup_barriers"))?
     } else {
         args.dedup_config.iter().map(PathBuf::from).collect()
     };
@@ -201,17 +199,14 @@ async fn main() -> anyhow::Result<()> {
             (pool, root_id)
         }
         None => {
-            let mut pool = EntryFetchOptionsPool::default();
-            let root_id = pool.insert(EntryFetchOptions {
-                child_rules: vec![ChildRule {
-                    matcher: ChildMatcherExpr::Matcher(ChildMatcher::Always),
-                    options_id: Some(EntryFetchOptionsPool::DEFAULT_ID),
-                }],
-            });
             info!("Ingest fetch options: default (1 level deep)");
-            (Arc::new(pool), root_id)
+            fetch_options::shallow()
         }
     };
+    info!(
+        "Import UI fetch-options presets: read fresh from {} on every request",
+        config_dir.join("fetch_options").display()
+    );
 
     let soft_cfg = default_soft_match_config();
     if soft_cfg.is_none() {
