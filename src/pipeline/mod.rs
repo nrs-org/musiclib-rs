@@ -9,6 +9,7 @@ pub mod embedding;
 pub(crate) mod ffi;
 pub mod flush;
 pub mod importer;
+pub mod ingest;
 pub mod progress;
 pub mod softmatch;
 pub mod state;

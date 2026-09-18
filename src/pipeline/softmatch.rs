@@ -122,6 +122,45 @@ pub struct SoftMatchConfig {
     pub verbose_decisions: bool,
 }
 
+/// The `SoftMatchConfig` shared by every caller that runs online soft-dedup
+/// after an ingest (the `import` CLI, the `server` binary's ingest job):
+/// RELATE decisions are written (reversible — tombstoned via `enabled` on
+/// `entry_relation`, never repoints `entry_source`); MERGE stays
+/// suggestion-only since `merge_entries` has no undo path and its
+/// high-precision release gate isn't validated yet (docs/dedup-v2.md).
+///
+/// Returns `None` if `<config_dir>/match.rhai` doesn't exist, meaning
+/// soft-dedup isn't configured and should be skipped entirely.
+pub fn default_soft_match_config() -> Option<SoftMatchConfig> {
+    let config_dir = crate::app_dirs::config_dir();
+    let script_path = config_dir.join("match.rhai");
+    if !script_path.exists() {
+        return None;
+    }
+    let embed_db = crate::app_dirs::data_dir().join("embeddings.db");
+    let model_path = config_dir.join("dedup-model.json");
+    let persist_suggestions = model_path.exists();
+    Some(SoftMatchConfig {
+        script_path: script_path.display().to_string(),
+        model_path: model_path
+            .exists()
+            .then(|| model_path.display().to_string()),
+        persist_suggestions,
+        apply_relates: true,
+        apply_merges: false,
+        csv_path: None,
+        embed_db_path: Some(embed_db.display().to_string()),
+        embed_model_id: None,
+        embed_dim: 256,
+        embed_k: 20,
+        embed_sim_threshold: 0.45,
+        embed_max_pages: 1,
+        candidate_max_block: 50,
+        candidate_ngram_k: 30,
+        verbose_decisions: false,
+    })
+}
+
 // ── Source classification ─────────────────────────────────────────────────────
 
 /// Sources whose titles are noisy (artist prefix, "Music Video" suffix, etc.).
@@ -1535,7 +1574,10 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
 /// neighbors (credited artists/tracks, parent/child releases) — never a full
 /// table scan. Ids that no longer exist (e.g. a stale embedding-cache row
 /// pointing at a merged-away entry) are silently omitted from the result.
-async fn entry_infos_by_ids(db: &MusicDb, ids: &[i64]) -> anyhow::Result<HashMap<i64, EntryInfo>> {
+pub async fn entry_infos_by_ids(
+    db: &MusicDb,
+    ids: &[i64],
+) -> anyhow::Result<HashMap<i64, EntryInfo>> {
     let ids = dedup_sorted(ids.to_vec());
     if ids.is_empty() {
         return Ok(HashMap::new());
