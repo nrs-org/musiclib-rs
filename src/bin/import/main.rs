@@ -136,6 +136,10 @@ async fn main() -> anyhow::Result<()> {
     http_config.youtube_quota_counter = Some(Arc::clone(&youtube_quota));
 
     let http = http_config.build().await?;
+    // Cloned before `http` is wrapped/consumed below — see softmatch.rs's
+    // analogous clone for why the script-facing `http_call(...)` primitive
+    // gets the raw (non-progress-wrapped) client.
+    let http_for_script = Arc::clone(&http);
     let http = progress::ProgressHttpClient::new(http);
 
     tracing_subscriber::fmt()
@@ -227,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
             candidate_max_block: 50,
             candidate_ngram_k: 30,
             verbose_decisions: false,
+            http_client: Some(http_for_script),
         };
         match_new_entries(&db, &touched_ids, &merged, providers.as_slice(), &soft_cfg).await?;
     }

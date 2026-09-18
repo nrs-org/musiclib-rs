@@ -11,9 +11,11 @@ use tracing::{info, warn};
 use unicode_normalization::UnicodeNormalization as _;
 
 use crate::pipeline::embedding::{
-    EmbeddingAnn, EmbeddingCache, embed_stale_entries, register_http_fns,
+    EmbeddingAnn, EmbeddingCache, dynamic_to_serde, embed_stale_entries, register_http_fns,
+    serde_to_dynamic,
 };
 
+use crate::http::{HeaderName, HeaderValue, HttpClient, Method, Request as HttpRequest};
 use crate::musicdb::{AliasRow, ChildRow, ContribRow, MusicDb, NewDedupSuggestion, SourceRow};
 use crate::pipeline::dedup::DedupConfig;
 use crate::pipeline::dedup_model::{DedupModel, ModelDecision};
@@ -125,6 +127,12 @@ pub struct SoftMatchConfig {
     pub candidate_ngram_k: usize,
     /// Print every non-distinct decision and its full source list to stdout.
     pub verbose_decisions: bool,
+    /// Backing client for the script-facing `http_call(...)` primitive.
+    /// `None` disables it (`http_call` returns `#{"error": ...}` rather than
+    /// panicking) — e.g. no `http.yaml` configured. Uses the same
+    /// `DomainScheduler`/`HttpCache` stack as every other backend; the script
+    /// alone decides what, if anything, to call with it.
+    pub http_client: Option<Arc<dyn HttpClient>>,
 }
 
 // ── Source classification ─────────────────────────────────────────────────────
@@ -699,6 +707,7 @@ fn build_rhai_engine(
     script_dir: &Path,
     regex_cache: RegexCache,
     embed_cache: Option<Arc<EmbeddingCache>>,
+    http_client: Option<Arc<dyn HttpClient>>,
 ) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(0, 0); // no limit on expression or function-body nesting depth
@@ -926,7 +935,161 @@ fn build_rhai_engine(
         );
     }
 
+    // ── Generic HTTP + JSON primitives ────────────────────────────────────────
+    // Deliberately opinion-free: Rust knows how to make an HTTP request and
+    // convert JSON, nothing more. What gets called, why, with what evidence,
+    // and how the answer changes a verdict is entirely script logic (e.g. a
+    // script wiring up an external identity-review model) — see the
+    // conversation this was designed in for why that split matters: policy
+    // that "different people may disagree about" belongs in the editable
+    // `.rhai` file, not compiled into this binary.
+    {
+        let client = http_client.clone();
+        engine.register_fn("http_call", move |request: RhaiMap| -> RhaiMap {
+            http_call_impl(client.as_ref(), request)
+        });
+    }
+    engine.register_fn("env_var", |name: String| -> String {
+        std::env::var(&name).unwrap_or_default()
+    });
+    engine.register_fn("to_json", |value: Dynamic| -> String {
+        serde_json::to_string(&dynamic_to_serde(&value)).unwrap_or_default()
+    });
+    engine.register_fn("parse_json", |text: String| -> Dynamic {
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => serde_to_dynamic(&v),
+            Err(e) => {
+                warn!("parse_json: invalid JSON ({e}); returning unit");
+                Dynamic::UNIT
+            }
+        }
+    });
+
     engine
+}
+
+/// `http_call(request: Map) -> Map` implementation. `request` is
+/// `#{method, url, headers?, body?, cache_key?}` (all strings; `headers` is a
+/// string→string map); returns `#{status, body}` on completion or
+/// `#{error: "..."}` (optionally alongside a `status` if one was received) on
+/// failure — never panics or throws into the script, so a script can always
+/// check `result.status`/`result` before deciding what to do.
+///
+/// Goes through the same `HttpClient` stack (`DomainScheduler` concurrency,
+/// `HttpCache`) every other backend in this codebase uses; `cache_key`, if
+/// given, is passed straight through to that cache layer, opaque to Rust —
+/// the script decides what makes two calls "the same" (e.g. hashing whatever
+/// evidence it put in the body).
+///
+/// `register_fn` closures are synchronous; this bridges into the async
+/// `HttpClient` the same way `softmatch.rs`'s merge-cascade re-embed step
+/// already does (`tokio::task::block_in_place` + `Handle::current().block_on`).
+fn http_call_impl(client: Option<&Arc<dyn HttpClient>>, request: RhaiMap) -> RhaiMap {
+    let mut out = RhaiMap::new();
+    let err = |out: &mut RhaiMap, msg: String| {
+        out.insert("error".into(), Dynamic::from(msg));
+    };
+
+    let Some(client) = client else {
+        err(
+            &mut out,
+            "http_call: no HTTP client configured for this run".to_string(),
+        );
+        return out;
+    };
+
+    let get_str = |key: &str| -> Option<String> {
+        request
+            .get(key)
+            .and_then(|v| v.clone().try_cast::<ImmutableString>())
+            .map(|s| s.to_string())
+    };
+
+    let Some(method_str) = get_str("method") else {
+        err(&mut out, "http_call: missing 'method'".to_string());
+        return out;
+    };
+    let Some(url) = get_str("url") else {
+        err(&mut out, "http_call: missing 'url'".to_string());
+        return out;
+    };
+    let method = match method_str.parse::<Method>() {
+        Ok(m) => m,
+        Err(e) => {
+            err(
+                &mut out,
+                format!("http_call: bad method {method_str:?}: {e}"),
+            );
+            return out;
+        }
+    };
+
+    let mut headers = Vec::new();
+    if let Some(h) = request
+        .get("headers")
+        .and_then(|v| v.clone().try_cast::<RhaiMap>())
+    {
+        for (k, v) in h.iter() {
+            let name = match HeaderName::from_bytes(k.as_bytes()) {
+                Ok(n) => n,
+                Err(e) => {
+                    err(&mut out, format!("http_call: bad header name {k:?}: {e}"));
+                    return out;
+                }
+            };
+            let val_str = v
+                .clone()
+                .try_cast::<ImmutableString>()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let value = match HeaderValue::from_str(&val_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    err(
+                        &mut out,
+                        format!("http_call: bad header value for {k:?}: {e}"),
+                    );
+                    return out;
+                }
+            };
+            headers.push((name, value));
+        }
+    }
+
+    let body = get_str("body").map(bytes::Bytes::from);
+    let cache_key = get_str("cache_key");
+
+    let req = HttpRequest {
+        method,
+        url,
+        headers,
+        body,
+        cache_key,
+        ..Default::default()
+    };
+
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            let resp = client
+                .make_request(req, crate::http::text_body_extractor().into())
+                .await?;
+            let status = resp.status.as_u16();
+            let body = resp.text().await?.to_string();
+            Ok::<_, crate::http::Error>((status, body))
+        })
+    });
+
+    match result {
+        Ok((status, body)) => {
+            out.insert("status".into(), Dynamic::from(status as i64));
+            out.insert("body".into(), Dynamic::from(body));
+        }
+        Err(e) => {
+            err(&mut out, format!("http_call: {e}"));
+        }
+    }
+
+    out
 }
 
 fn entry_to_rhai(e: &EntryInfo) -> RhaiMap {
@@ -2344,6 +2507,7 @@ impl Drop for ScriptCtx<'_> {
 async fn load_script(
     path: &str,
     embed_cache: Option<Arc<EmbeddingCache>>,
+    http_client: Option<Arc<dyn HttpClient>>,
 ) -> anyhow::Result<ScriptCtx<'static>> {
     let script = tokio::fs::read_to_string(path)
         .await
@@ -2353,7 +2517,7 @@ async fn load_script(
         .unwrap_or_else(|| Path::new("."))
         .to_owned();
     let regex_cache: RegexCache = Arc::new(Mutex::new(HashMap::new()));
-    let engine = build_rhai_engine(&script_dir, regex_cache, embed_cache);
+    let engine = build_rhai_engine(&script_dir, regex_cache, embed_cache, http_client);
     let ast = engine
         .compile(&script)
         .map_err(|e| anyhow::anyhow!("Rhai compile error in {path}: {e}"))?;
@@ -2980,7 +3144,12 @@ pub async fn match_db(
     info!("Embedding phase in {t_embed:.2?}");
 
     let t3 = Instant::now();
-    let ctx = load_script(&config.script_path, embed_cache.clone()).await?;
+    let ctx = load_script(
+        &config.script_path,
+        embed_cache.clone(),
+        config.http_client.clone(),
+    )
+    .await?;
     let t_script = t3.elapsed();
     info!("Script loaded in {t_script:.2?}");
 
@@ -3051,7 +3220,12 @@ pub async fn match_new_entries(
     let (barrier, _) = dedup.compile(providers).await;
     let entries_slice: Vec<EntryInfo> = focus_entries.values().cloned().collect();
     let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries_slice).await;
-    let ctx = load_script(&config.script_path, embed_cache.clone()).await?;
+    let ctx = load_script(
+        &config.script_path,
+        embed_cache.clone(),
+        config.http_client.clone(),
+    )
+    .await?;
     let (candidate_channels, entries) = generate_focused_candidates(
         db,
         &focus_entries,
@@ -3112,6 +3286,7 @@ async fn open_embed_cache(
     let tmp_engine = build_rhai_engine(
         &embed_script_dir,
         Arc::new(Mutex::new(HashMap::new())),
+        None,
         None,
     );
     let tmp_ast = match tmp_engine.compile(&embed_script) {
@@ -3575,7 +3750,7 @@ mod tests {
         let script = std::fs::read_to_string(path).expect("read example script");
         let dir = Path::new(path).parent().unwrap();
 
-        let engine = build_rhai_engine(dir, Arc::new(Mutex::new(HashMap::new())), None);
+        let engine = build_rhai_engine(dir, Arc::new(Mutex::new(HashMap::new())), None, None);
         let ast = engine.compile(&script).expect("example script compiles");
 
         let mut scope = Scope::new();
@@ -3602,5 +3777,83 @@ mod tests {
             (ss - 1.0).abs() < 1e-6,
             "embedding should be L2-normalized, ss={ss}"
         );
+    }
+
+    /// `to_json`/`parse_json` must round-trip an arbitrary Rhai value through a
+    /// JSON string and back, since a script builds its own request bodies and
+    /// parses its own responses with these (Rust never sees the shape).
+    #[test]
+    fn to_json_and_parse_json_round_trip() {
+        let engine = build_rhai_engine(
+            Path::new("."),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            None,
+        );
+        let script = r#"
+            let original = #{
+                "str": "hello",
+                "int": 42,
+                "float": 1.5,
+                "bool": true,
+                "null": (),
+                "arr": [1, "two", 3.0],
+                "nested": #{"inner": "value"},
+            };
+            let json = to_json(original);
+            let parsed = parse_json(json);
+            parsed
+        "#;
+        let ast = engine.compile(script).expect("round-trip script compiles");
+        let mut scope = Scope::new();
+        let result: RhaiMap = engine
+            .eval_ast_with_scope(&mut scope, &ast)
+            .expect("round-trip script runs");
+
+        assert_eq!(result["str"].clone().cast::<String>(), "hello");
+        assert_eq!(result["int"].clone().as_int().unwrap(), 42);
+        assert!((result["float"].clone().as_float().unwrap() - 1.5).abs() < 1e-9);
+        assert!(result["bool"].clone().as_bool().unwrap());
+        assert!(result["null"].is_unit());
+        let arr = result["arr"].clone().cast::<rhai::Array>();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[1].clone().cast::<String>(), "two");
+        let nested = result["nested"].clone().cast::<RhaiMap>();
+        assert_eq!(nested["inner"].clone().cast::<String>(), "value");
+    }
+
+    /// `http_call` must never panic the script engine, even when nothing is
+    /// wired up to actually make the request — it should hand back an `error`
+    /// field the script can branch on. A live-network exercise of the real
+    /// `HttpClient` path isn't done here (no tokio runtime in a plain `#[test]`
+    /// for `block_in_place` to hand off to, and no live dependency in CI); the
+    /// `None`-client short circuit is what every caller gets when no
+    /// `http.yaml`/`--http-config` is configured, so it's the one guaranteed to
+    /// run in practice.
+    #[test]
+    fn http_call_without_a_client_reports_an_error_not_a_panic() {
+        let engine = build_rhai_engine(
+            Path::new("."),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            None, // no HttpClient configured
+        );
+        let script = r#"
+            http_call(#{
+                "method": "GET",
+                "url": "https://example.invalid/",
+            })
+        "#;
+        let ast = engine.compile(script).expect("http_call script compiles");
+        let mut scope = Scope::new();
+        let result: RhaiMap = engine
+            .eval_ast_with_scope(&mut scope, &ast)
+            .expect("http_call does not throw");
+
+        assert!(
+            result.contains_key("error"),
+            "expected an error field, got {result:?}"
+        );
+        assert!(!result.contains_key("status"));
     }
 }

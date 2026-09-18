@@ -173,6 +173,11 @@ async fn main() -> anyhow::Result<()> {
     http_config.coalescer_rules = musiclib_rs::providers::registry::coalesce_rules();
 
     let http = http_config.build().await?;
+    // Cloned before `http` is wrapped/consumed below — this raw client (no
+    // progress-bar wrapping) is what the script-facing `http_call(...)`
+    // primitive uses, so its console output isn't misattributed as a
+    // provider fetch.
+    let http_for_script = Arc::clone(&http);
     let http = progress::ProgressHttpClient::new(http);
 
     let providers = build_providers(&registry_config, http)?;
@@ -211,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
         candidate_max_block: args.candidate_max_block,
         candidate_ngram_k: args.candidate_ngram_k,
         verbose_decisions: args.verbose_decisions,
+        http_client: Some(http_for_script),
     };
 
     match_db(&db, &merged_dedup, providers.as_slice(), &soft_cfg).await?;
