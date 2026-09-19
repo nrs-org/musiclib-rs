@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
+use futures::stream::{self, StreamExt as _};
 use rhai::{AST, Dynamic, Engine, ImmutableString, Map as RhaiMap, Scope};
 use serde::Serialize;
 use std::time::Instant;
@@ -111,6 +112,13 @@ pub struct SoftMatchConfig {
     /// global, to allow a hybrid rollout (e.g. `{"track"}` while `release`
     /// stays on the existing heuristic).
     pub jev_entry_types: HashSet<String>,
+    /// Max in-flight Jev calls (`pipeline::jev::score_pair`) at once. Rhai/
+    /// learned-model scoring is cheap, in-process, and stays sequential
+    /// regardless of this value -- it only bounds concurrency for the
+    /// network-bound Jev refine step, which is where real wall-clock time
+    /// goes (measured: ~87% of a scored pair's latency is the TypeSafe
+    /// round-trip). Matches `typesafe_poc.rs`'s validated default of 12.
+    pub jev_concurrency: usize,
     /// If set, write a CSV row for every candidate pair (including DISTINCT)
     /// to this path for manual quality review.
     pub csv_path: Option<String>,
@@ -174,6 +182,7 @@ pub fn default_soft_match_config() -> Option<SoftMatchConfig> {
         persist_suggestions,
         apply_relates: true,
         jev_entry_types: Default::default(),
+        jev_concurrency: 12,
         csv_path: None,
         embed_db_path: Some(embed_db.display().to_string()),
         embed_model_id: None,
@@ -2637,8 +2646,10 @@ async fn score_candidates(
     }
     info!("Initial queue: {} candidate pair(s)", work_queue.len());
 
-    let mut total_scored = 0usize;
-
+    // Sequential pre-filter: soft-identity/barrier skips are cheap and local
+    // (no network/DB round trip), and write their own CSV row immediately.
+    // Only pairs that need real scoring proceed to the concurrent phase below.
+    let mut to_score: Vec<(EntryInfo, EntryInfo, Option<ChannelMask>)> = Vec::new();
     while let Some((id_a, id_b)) = work_queue.pop_front() {
         let (ea, eb) = match (entries.get(&id_a), entries.get(&id_b)) {
             (Some(a), Some(b)) => (a.clone(), b.clone()),
@@ -2668,21 +2679,74 @@ async fn score_candidates(
             continue;
         }
 
-        total_scored += 1;
-        let channels = candidate_channels.get(&(id_a, id_b));
-        apply_candidate(
-            db,
-            &ea,
-            &eb,
-            channels,
-            ctx,
-            learned_model.as_ref(),
-            embed_cache,
-            config,
-            &mut csv,
-            &mut stats,
-        )
-        .await?;
+        let channels = candidate_channels.get(&(id_a, id_b)).copied();
+        to_score.push((ea, eb, channels));
+    }
+
+    let total_scored = to_score.len();
+
+    // Concurrent phase. Rhai/learned-model scoring is cheap, in-process, and
+    // effectively free either way; the Jev refine call is the one that's
+    // ~87% network/inference wait (measured), so it's what concurrency here
+    // actually buys. `buffer_unordered` interleaves these on the single task
+    // driving this function rather than spreading them across OS threads, so
+    // it needs no `Send` bound -- the non-`Sync` Rhai engine behind `ctx` can
+    // still be shared by shared reference across every in-flight pair.
+    // `csv`/`stats` are caller-owned `&mut` state that can't be captured by
+    // several simultaneously-live futures, so `apply_candidate` no longer
+    // touches them; this loop applies both, one completed result at a time,
+    // as `buffer_unordered` yields them (order doesn't matter for either).
+    let concurrency = config.jev_concurrency.max(1);
+    let learned_model_ref = learned_model.as_ref();
+    let mut results = stream::iter(to_score.iter())
+        .map(|(ea, eb, channels)| async move {
+            let result = apply_candidate(
+                db,
+                ea,
+                eb,
+                channels.as_ref(),
+                ctx,
+                learned_model_ref,
+                embed_cache,
+                config,
+            )
+            .await;
+            (result, ea, eb, channels)
+        })
+        .buffer_unordered(concurrency);
+
+    while let Some((result, ea, eb, channels)) = results.next().await {
+        let verdict = result?;
+
+        if let Some(w) = &mut csv {
+            let (vname, kind, conf, reason) = match &verdict {
+                Verdict::Merge { confidence, reason } => {
+                    ("MERGE", "", *confidence, reason.as_str())
+                }
+                Verdict::Relate {
+                    kind,
+                    confidence,
+                    reason,
+                    ..
+                } => ("RELATE", kind.as_str(), *confidence, reason.as_str()),
+                Verdict::Defer { confidence, reason } => {
+                    ("DEFER", "", *confidence, reason.as_str())
+                }
+                Verdict::Separate { confidence, reason } => {
+                    ("SEPARATE", "", *confidence, reason.as_str())
+                }
+                Verdict::Distinct => ("DISTINCT", "", 0.0, ""),
+            };
+            write_csv_row(w, vname, kind, conf, reason, channels.as_ref(), ea, eb, ctx)?;
+        }
+
+        let counters = stats.entry(ea.entry_type.clone()).or_insert([0; 4]);
+        match &verdict {
+            Verdict::Distinct | Verdict::Separate { .. } => counters[2] += 1,
+            Verdict::Defer { .. } => counters[3] += 1,
+            Verdict::Merge { .. } => counters[0] += 1,
+            Verdict::Relate { .. } => counters[1] += 1,
+        }
     }
 
     info!("Scored {total_scored} candidate pair(s)");
@@ -2711,9 +2775,13 @@ fn resolve_derived_side(extra: &mut serde_json::Value, ea_id: i64, eb_id: i64) {
     obj.insert("source_entry".to_string(), serde_json::json!(source));
 }
 
-/// Score one candidate pair with the Rhai script, emit its CSV row and console
-/// log, apply the DB write when `apply_relates` is set, and bump `stats`. Returns
-/// the verdict so the caller can measure per-page merge rate for adaptive paging.
+/// Score one candidate pair with the Rhai script, emit its console log, and
+/// apply the DB write when `apply_relates` is set. Returns the verdict so the
+/// caller can write its CSV row and bump per-type stats -- those touch
+/// caller-owned `&mut` state that can't be captured by multiple in-flight
+/// futures at once (see the `buffer_unordered` scoring loop in
+/// `score_candidates`), so they're deliberately not this function's job.
+#[allow(clippy::too_many_arguments)]
 async fn apply_candidate(
     db: &MusicDb,
     ea: &EntryInfo,
@@ -2723,17 +2791,36 @@ async fn apply_candidate(
     learned_model: Option<&DedupModel>,
     embed_cache: Option<&EmbeddingCache>,
     config: &SoftMatchConfig,
-    csv: &mut Option<std::io::BufWriter<std::fs::File>>,
-    stats: &mut HashMap<String, [usize; 4]>,
 ) -> anyhow::Result<Verdict> {
     let (verdict, origin, model_version): (Verdict, &'static str, Option<String>) =
         if config.jev_entry_types.contains(&ea.entry_type) {
-            let verdict = crate::pipeline::jev::score_pair(db, ea, eb, config).await?;
-            (
-                verdict,
-                "jev",
-                Some(crate::pipeline::jev::MODEL_VERSION.to_string()),
-            )
+            // Rhai filters first (free, instant); only the non-DISTINCT
+            // subset (its own MERGE/RELATE candidates) gets refined by Jev.
+            // Matches the validated PoC pattern ("Full-DB auto-relation
+            // combine" in project memory) of pointing Jev at the heuristic's
+            // own positive output to corroborate or correct it, rather than
+            // re-deciding the entire (mostly blocking-noise) candidate pool
+            // -- both cheaper and the integration mode that's actually been
+            // shown to catch real heuristic errors (e.g. member-vs-group
+            // merges) without the ~25x cost/latency of scoring every pair.
+            let base_verdict = call_script(
+                &ctx.engine,
+                &ctx.ast,
+                &ctx.base_scope,
+                &ctx.user_ctx,
+                ea,
+                eb,
+            )?;
+            if matches!(base_verdict, Verdict::Distinct) {
+                (base_verdict, "heuristic", None)
+            } else {
+                let verdict = crate::pipeline::jev::score_pair(db, ea, eb, config).await?;
+                (
+                    verdict,
+                    "jev",
+                    Some(crate::pipeline::jev::MODEL_VERSION.to_string()),
+                )
+            }
         } else if let Some(model) = learned_model {
             let features = learned_features(ea, eb, embed_cache);
             let probability = model.probability(&ea.entry_type, &features)?;
@@ -2792,35 +2879,10 @@ async fn apply_candidate(
             (verdict, "heuristic", None)
         };
 
-    if let Some(w) = csv {
-        let (vname, kind, conf, reason) = match &verdict {
-            Verdict::Merge { confidence, reason } => ("MERGE", "", *confidence, reason.as_str()),
-            Verdict::Relate {
-                kind,
-                confidence,
-                reason,
-                ..
-            } => ("RELATE", kind.as_str(), *confidence, reason.as_str()),
-            Verdict::Defer { confidence, reason } => ("DEFER", "", *confidence, reason.as_str()),
-            Verdict::Separate { confidence, reason } => {
-                ("SEPARATE", "", *confidence, reason.as_str())
-            }
-            Verdict::Distinct => ("DISTINCT", "", 0.0, ""),
-        };
-        write_csv_row(w, vname, kind, conf, reason, channels, ea, eb, ctx)?;
-    }
-
-    let counters = stats.entry(ea.entry_type.clone()).or_insert([0; 4]);
-
     match &verdict {
-        Verdict::Distinct | Verdict::Separate { .. } => {
-            counters[2] += 1;
-        }
-        Verdict::Defer { .. } => {
-            counters[3] += 1;
-        }
+        Verdict::Distinct | Verdict::Separate { .. } => {}
+        Verdict::Defer { .. } => {}
         Verdict::Merge { confidence, reason } => {
-            counters[0] += 1;
             if config.verbose_decisions {
                 println!("[MERGE] conf={:.2}  type={}", confidence, ea.entry_type);
                 println!(
@@ -2872,7 +2934,6 @@ async fn apply_candidate(
             reason,
             metadata,
         } => {
-            counters[1] += 1;
             if config.verbose_decisions {
                 println!(
                     "[RELATE {}] conf={:.2}  type={}",

@@ -59,6 +59,11 @@ struct Args {
     /// heuristic).
     #[arg(long, value_delimiter = ',')]
     jev_types: Vec<String>,
+    /// Max concurrent Jev API calls. Rhai/learned-model scoring stays
+    /// sequential (cheap, in-process); this only bounds the network-bound
+    /// Jev refine step.
+    #[arg(long, default_value_t = 12)]
+    jev_concurrency: usize,
     /// Write all candidate pairs (including DISTINCT and BARRIER) to a CSV
     /// file for manual quality review.
     #[arg(long)]
@@ -220,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         persist_suggestions: args.persist_suggestions,
         apply_relates: args.apply,
         jev_entry_types,
+        jev_concurrency: args.jev_concurrency,
         csv_path: args.csv,
         embed_db_path,
         embed_model_id: args.embedding_model_id,
