@@ -82,7 +82,7 @@ impl YoutubeClient {
 
         match response.status.as_u16() {
             200..=299 => {
-                let result = response.json::<T>().await.expect("should be T");
+                let result = response.json::<T>().await.map_err(Error::from)?;
                 callback(&result).await
             }
             404 => Err(Error::NotFound("YouTube video/playlist/channel not found".into()).into()),
