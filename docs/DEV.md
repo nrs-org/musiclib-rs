@@ -199,17 +199,21 @@ tests start failing on deserialization.
 
 ### `softmatch` — heuristic soft-dedup
 
-Score candidate entry pairs with a Rhai script and optionally persist the
-results. Dry-run by default.
+Score candidate entry pairs with a Rhai script (or, per `--jev-types`,
+TypeSafe's Jev model) and optionally persist the results. Dry-run by
+default. Every verdict, from any backend, is soft/reversible — MERGE writes
+a `same_identity` assertion via the same path the player's manual "link"
+button uses, never a destructive `merge_entries`; that stays exclusively an
+import-time/dedup-barrier operation.
 
 ```bash
 cargo run --features ffi --release --bin softmatch
-cargo run --features ffi --release --bin softmatch -- --apply   # write RELATE decisions to DB
-cargo run --features ffi --release --bin softmatch -- --apply --apply-merges # destructive
+cargo run --features ffi --release --bin softmatch -- --apply   # write RELATE + soft MERGE decisions to DB
 cargo run --features ffi --release --bin softmatch -- --csv out.csv  # dump all pairs for review
 cargo run --features ffi --release --bin softmatch -- \
   --model data/dedup-entry-combined-v4/poc-semantic/runtime-model.json \
   --csv learned.csv
+cargo run --features ffi --release --bin softmatch -- --jev-types track --apply  # track uses Jev, everything else the Rhai script
 ```
 
 | Flag | Default | Notes |
@@ -217,9 +221,9 @@ cargo run --features ffi --release --bin softmatch -- \
 | `--db` | `<data_dir>/musiclib.db` | SQLite music library |
 | `--script` | `<config_dir>/match.rhai` | Rhai match script |
 | `--model <path>` | `<config_dir>/dedup-model.json` if present | Versioned learned identity scorer; replaces only Rhai verdict scoring |
-| `--persist-suggestions` | false | Store learned MERGE/DEFER rows for the interactive review queue; conflicts with `--apply-merges` |
-| `--apply` | false | Persist RELATE decisions to `entry_relation` |
-| `--apply-merges` | false | Also apply destructive MERGE decisions; requires `--apply` |
+| `--jev-types <list>` | empty | Comma-separated entry types scored by TypeSafe's Jev model instead (`pipeline::jev`); requires `TYPESAFE_API_KEY` |
+| `--persist-suggestions` | false | Store learned DEFER rows for the interactive review queue |
+| `--apply` | false | Persist RELATE and soft MERGE (`same_identity`) decisions to the DB |
 | `--csv <path>` | absent | Write all scored pairs (MERGE / RELATE / DISTINCT / BARRIER) to a CSV |
 | `--embed-db` | `<data_dir>/embeddings.db` | SQLite embedding cache (sqlite-vec) |
 | `--embedding-model-id` | absent | Identity of the local `embed()` model; must match a learned artifact |

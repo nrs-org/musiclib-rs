@@ -44,10 +44,6 @@ path = "src/bin/ytdlp_server.rs"
 name = "softmatch"
 path = "src/bin/softmatch.rs"
 
-[[bin]]
-name = "typesafe_poc"
-path = "src/bin/typesafe_poc.rs"
-
 [features]
 # Generic C-ABI FFI rhai module (`pipeline::ffi`): bind/call any cdylib from a
 # match script. Off by default — enabling it pulls libffi (built from source via

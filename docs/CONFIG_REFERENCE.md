@@ -484,9 +484,10 @@ The richer research `model.json` is intentionally rejected because Rust cannot
 reproduce all of its enrichment features. If the runtime artifact names an
 embedding model, `--embedding-model-id` must name that exact local model.
 The batch and import paths also discover `<config_dir>/dedup-model.json`
-automatically. Import-time matching remains suggestion-only: merely installing
-the model cannot merge entries. Imports persist learned MERGE/DEFER candidates
-for review; batch runs opt into this with `--persist-suggestions`.
+automatically. A learned MERGE decision is always soft (a `same_identity`
+assertion, not a destructive merge — see below); installing the model does
+not change that. Imports persist learned DEFER candidates for review; batch
+runs opt into this with `--persist-suggestions`.
 
 Soft identity uses enabled `entry_relation` rows with kinds `same_identity` and
 `different_identity`. The former creates virtual connected components; the
@@ -555,7 +556,7 @@ Both `re_*` functions accept either a pre-compiled `Regex` or a pattern `String`
 #### Verdict constructors
 
 ```rhai
-merge(conf, reason)             // conf: f64 confidence in [0,1]
+merge(conf, reason)             // conf: f64 confidence in [0,1] -- soft: asserts same_identity, never destructively merges
 relate(kind, conf, reason)      // kind: see below
 distinct()
 ```

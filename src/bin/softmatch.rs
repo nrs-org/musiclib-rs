@@ -18,9 +18,12 @@ use musiclib_rs::{
     providers::registry::{RegistryConfig, build_providers},
 };
 
-/// Heuristic soft-dedup: score candidate entry pairs with a Rhai script and
-/// report or apply the results. Dry-run by default; pass --apply to persist
-/// RELATE decisions to the entry_relation table.
+/// Heuristic soft-dedup: score candidate entry pairs with a Rhai script (or,
+/// per --jev-types, TypeSafe's Jev model) and report or apply the results.
+/// Dry-run by default; pass --apply to persist RELATE and soft MERGE
+/// (same_identity) decisions to the database. No verdict from any backend
+/// ever destructively collapses two entries — that stays an import-time
+/// operation.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
@@ -44,15 +47,18 @@ struct Args {
     /// scoring while retaining the script's local embedding hook.
     #[arg(long)]
     model: Option<String>,
-    /// Persist learned MERGE/DEFER candidates in the database for review.
-    #[arg(long, conflicts_with = "apply_merges")]
+    /// Persist learned DEFER candidates in the database for review.
+    #[arg(long)]
     persist_suggestions: bool,
-    /// Persist RELATE decisions to the entry_relation table.
+    /// Persist RELATE and soft MERGE (same_identity) decisions to the database.
     #[arg(long)]
     apply: bool,
-    /// Also apply destructive MERGE decisions. Requires --apply.
-    #[arg(long, requires = "apply")]
-    apply_merges: bool,
+    /// Entry types scored with TypeSafe's Jev model instead of the Rhai
+    /// script/learned model, e.g. "track" or "track,release". Requires
+    /// TYPESAFE_API_KEY. Empty by default (every type uses the existing
+    /// heuristic).
+    #[arg(long, value_delimiter = ',')]
+    jev_types: Vec<String>,
     /// Write all candidate pairs (including DISTINCT and BARRIER) to a CSV
     /// file for manual quality review.
     #[arg(long)]
@@ -200,12 +206,20 @@ async fn main() -> anyhow::Result<()> {
         }))
     };
 
+    let jev_entry_types: std::collections::HashSet<String> = args.jev_types.into_iter().collect();
+    if !jev_entry_types.is_empty() && std::env::var("TYPESAFE_API_KEY").is_err() {
+        anyhow::bail!(
+            "--jev-types {:?} was passed but TYPESAFE_API_KEY is not set",
+            jev_entry_types
+        );
+    }
+
     let soft_cfg = SoftMatchConfig {
         script_path: script_path.display().to_string(),
         model_path: model_path.map(|path| path.display().to_string()),
         persist_suggestions: args.persist_suggestions,
         apply_relates: args.apply,
-        apply_merges: args.apply_merges,
+        jev_entry_types,
         csv_path: args.csv,
         embed_db_path,
         embed_model_id: args.embedding_model_id,

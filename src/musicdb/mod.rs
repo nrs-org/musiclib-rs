@@ -211,6 +211,36 @@ mod dedup_suggestion {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// Cached verdict for a pair scored by `pipeline::jev`, keyed by an
+/// evidence-content hash (prompt version + entry_type + both sides' resolved
+/// evidence view). A hash match means the same question would get asked
+/// again for unchanged evidence — reuse the stored answer instead of paying
+/// for another TypeSafe API call. One row per pair (not per model version
+/// like `dedup_suggestion`): a hash change always means "the previous verdict
+/// no longer applies", so there is nothing to keep multiple rows around for.
+mod jev_verdict_cache {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "jev_verdict_cache")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_a: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_b: i64,
+        pub evidence_hash: String,
+        /// Raw `identity` answer from the model, e.g. `same_identity`,
+        /// `related_variant`, `unrelated`, `unsure`.
+        pub choice: String,
+        pub confidence: f64,
+        pub reason: String,
+        pub updated_at: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// Immutable human/model judgments used to reconstruct corrections and export
 /// training data. A correction appends a row pointing at `supersedes_id`.
 mod dedup_feedback {
@@ -349,6 +379,27 @@ pub struct DedupSuggestionRow {
     pub features: String,
     pub evidence: String,
     pub status: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewJevVerdictCache {
+    pub entry_a: i64,
+    pub entry_b: i64,
+    pub evidence_hash: String,
+    pub choice: String,
+    pub confidence: f64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JevVerdictCacheRow {
+    pub entry_a: i64,
+    pub entry_b: i64,
+    pub evidence_hash: String,
+    pub choice: String,
+    pub confidence: f64,
+    pub reason: String,
     pub updated_at: i64,
 }
 
@@ -1596,6 +1647,55 @@ impl MusicDb {
         Ok(result.rows_affected > 0)
     }
 
+    /// Look up `pipeline::jev`'s cached verdict for a pair, regardless of
+    /// whether its `evidence_hash` still matches the caller's current
+    /// evidence — the caller decides whether to trust it.
+    pub async fn get_jev_verdict_cache(
+        &self,
+        entry_a: i64,
+        entry_b: i64,
+    ) -> Result<Option<JevVerdictCacheRow>, Error> {
+        let (entry_a, entry_b) = ordered_pair(entry_a, entry_b);
+        Ok(jev_verdict_cache::Entity::find_by_id((entry_a, entry_b))
+            .one(&self.db)
+            .await?
+            .map(JevVerdictCacheRow::from))
+    }
+
+    pub async fn upsert_jev_verdict_cache(&self, cache: NewJevVerdictCache) -> Result<(), Error> {
+        if cache.entry_a == cache.entry_b {
+            return Err(Error::InvalidInput("invalid jev verdict cache pair".into()));
+        }
+        let (entry_a, entry_b) = ordered_pair(cache.entry_a, cache.entry_b);
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        jev_verdict_cache::Entity::insert(jev_verdict_cache::ActiveModel {
+            entry_a: Set(entry_a),
+            entry_b: Set(entry_b),
+            evidence_hash: Set(cache.evidence_hash),
+            choice: Set(cache.choice),
+            confidence: Set(cache.confidence),
+            reason: Set(cache.reason),
+            updated_at: Set(now),
+        })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                jev_verdict_cache::Column::EntryA,
+                jev_verdict_cache::Column::EntryB,
+            ])
+            .update_columns([
+                jev_verdict_cache::Column::EvidenceHash,
+                jev_verdict_cache::Column::Choice,
+                jev_verdict_cache::Column::Confidence,
+                jev_verdict_cache::Column::Reason,
+                jev_verdict_cache::Column::UpdatedAt,
+            ])
+            .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
     /// Every entry_child row. Used by soft-match to compute release-position features.
     pub async fn all_child_rows(&self) -> Result<Vec<ChildRow>, Error> {
         Ok(entry_child::Entity::find()
@@ -1931,6 +2031,20 @@ impl From<entry_relation::Model> for RelationRow {
             confidence: value.confidence,
             origin: value.origin,
             enabled: value.enabled,
+        }
+    }
+}
+
+impl From<jev_verdict_cache::Model> for JevVerdictCacheRow {
+    fn from(value: jev_verdict_cache::Model) -> Self {
+        Self {
+            entry_a: value.entry_a,
+            entry_b: value.entry_b,
+            evidence_hash: value.evidence_hash,
+            choice: value.choice,
+            confidence: value.confidence,
+            reason: value.reason,
+            updated_at: value.updated_at,
         }
     }
 }
@@ -2292,5 +2406,46 @@ mod tests {
             .unwrap();
         assert_eq!(row.status, "snoozed");
         assert_eq!(row.probability, 0.7);
+    }
+
+    #[tokio::test]
+    async fn jev_verdict_cache_roundtrips_and_overwrites_on_new_hash() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2] {
+            insert_entry(&mdb.db, id).await;
+        }
+        assert!(mdb.get_jev_verdict_cache(1, 2).await.unwrap().is_none());
+
+        mdb.upsert_jev_verdict_cache(NewJevVerdictCache {
+            entry_a: 2,
+            entry_b: 1, // unordered on purpose — must normalize like every other pair write
+            evidence_hash: "hash-1".into(),
+            choice: "same_identity".into(),
+            confidence: 0.9,
+            reason: "first pass".into(),
+        })
+        .await
+        .unwrap();
+        let row = mdb.get_jev_verdict_cache(1, 2).await.unwrap().unwrap();
+        assert_eq!((row.entry_a, row.entry_b), (1, 2));
+        assert_eq!(row.evidence_hash, "hash-1");
+        assert_eq!(row.choice, "same_identity");
+
+        // A later call with a changed evidence hash overwrites the row in place
+        // (one row per pair, not one per hash) rather than accumulating.
+        mdb.upsert_jev_verdict_cache(NewJevVerdictCache {
+            entry_a: 1,
+            entry_b: 2,
+            evidence_hash: "hash-2".into(),
+            choice: "related_variant".into(),
+            confidence: 0.6,
+            reason: "second pass".into(),
+        })
+        .await
+        .unwrap();
+        let row = mdb.get_jev_verdict_cache(1, 2).await.unwrap().unwrap();
+        assert_eq!(row.evidence_hash, "hash-2");
+        assert_eq!(row.choice, "related_variant");
+        assert_eq!(row.confidence, 0.6);
     }
 }

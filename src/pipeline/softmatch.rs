@@ -16,7 +16,10 @@ use crate::pipeline::embedding::{
 };
 
 use crate::http::{HeaderName, HeaderValue, HttpClient, Method, Request as HttpRequest};
-use crate::musicdb::{AliasRow, ChildRow, ContribRow, MusicDb, NewDedupSuggestion, SourceRow};
+use crate::musicdb::{
+    AliasRow, ChildRow, ContribRow, IdentityJudgment, MusicDb, NewDedupFeedback,
+    NewDedupSuggestion, SourceRow,
+};
 use crate::pipeline::dedup::DedupConfig;
 use crate::pipeline::dedup_model::{DedupModel, ModelDecision};
 use crate::providers::FetchProvider;
@@ -95,11 +98,19 @@ pub struct SoftMatchConfig {
     pub model_path: Option<String>,
     /// Persist learned MERGE/DEFER candidates for an interactive review queue.
     pub persist_suggestions: bool,
-    /// Write RELATE decisions to the DB.
+    /// Write RELATE and MERGE decisions to the DB. Both are soft/reversible:
+    /// RELATE writes an `entry_relation` row, MERGE writes a `same_identity`
+    /// soft-identity assertion via `MusicDb::record_identity_feedback` — the
+    /// same reversible path the player's manual "link" button uses. No
+    /// softmatch verdict, from any backend (Rhai, learned model, or Jev),
+    /// ever calls `MusicDb::merge_entries` (destructive, no undo path); that
+    /// stays exclusively an import-time/dedup-barrier operation.
     pub apply_relates: bool,
-    /// Apply MERGE decisions destructively. Kept separate from relation writes
-    /// so a review/relation pass cannot silently collapse entries.
-    pub apply_merges: bool,
+    /// Entry types scored by TypeSafe's Jev model instead of the Rhai script
+    /// or learned model (`pipeline::jev`). Empty by default. Per-type, not
+    /// global, to allow a hybrid rollout (e.g. `{"track"}` while `release`
+    /// stays on the existing heuristic).
+    pub jev_entry_types: HashSet<String>,
     /// If set, write a CSV row for every candidate pair (including DISTINCT)
     /// to this path for manual quality review.
     pub csv_path: Option<String>,
@@ -148,11 +159,12 @@ fn is_video_source(src: &str) -> bool {
 
 // ── Canonical derivation helpers ───────────────────────────────────────────────
 //
-// An entry's derived collections are produced by these helpers, applied
-// identically by `build_entry_infos` (DB-reload path) and `merge_entry_infos`
-// (in-memory path). Because both paths emit the same canonical order, no merge
-// verdict can depend on SQLite row order, which is what made soft-dedup
-// non-idempotent before.
+// An entry's derived collections are produced by these helpers, applied by
+// `build_entry_infos`/`entry_infos_by_ids` — the only path that constructs an
+// `EntryInfo` (no softmatch verdict merges entries in memory any more; MERGE
+// is soft — see `SoftMatchConfig::apply_relates`). Canonical, sorted-set order
+// means no verdict can depend on SQLite row order, which is what made
+// soft-dedup non-idempotent before.
 
 /// Sort and deduplicate a set-valued attribute (durations, release dates, …).
 fn dedup_sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> {
@@ -2331,132 +2343,6 @@ async fn generate_focused_candidates(
     Ok((output, entries))
 }
 
-// ── In-memory entry merge ─────────────────────────────────────────────────────
-
-/// Merge the loser's data into the winner in memory, mirroring what
-/// `MusicDb::merge_entries` does at the DB level (re-pointing all loser pairs
-/// to the winner). Called after the DB write so the winner's `EntryInfo` stays
-/// in sync with the DB for the remainder of the scoring pass.
-fn merge_entry_infos(winner: &mut EntryInfo, loser: &EntryInfo) {
-    // Union every collection and re-canonicalize with the same helpers
-    // build_entry_infos uses, so the merged winner is bit-identical to what a
-    // fresh DB reload would produce for the combined entry.
-    winner.pairs.extend(loser.pairs.iter().cloned());
-    winner.pairs.sort();
-    winner.pairs.dedup();
-
-    let mut sourced = std::mem::take(&mut winner.sourced_aliases);
-    sourced.extend(loser.sourced_aliases.iter().cloned());
-    winner.sourced_aliases = canon_sourced_aliases(sourced);
-    winner.aliases = derive_aliases(&winner.sourced_aliases);
-    winner.best_title = pick_best_title(&winner.sourced_aliases);
-
-    winner.durations = dedup_sorted(
-        winner
-            .durations
-            .iter()
-            .chain(&loser.durations)
-            .copied()
-            .collect(),
-    );
-    winner.release_dates = dedup_sorted(
-        winner
-            .release_dates
-            .iter()
-            .chain(&loser.release_dates)
-            .cloned()
-            .collect(),
-    );
-    winner.release_types = dedup_sorted(
-        winner
-            .release_types
-            .iter()
-            .chain(&loser.release_types)
-            .cloned()
-            .collect(),
-    );
-    winner.primary_types = dedup_sorted(
-        winner
-            .primary_types
-            .iter()
-            .chain(&loser.primary_types)
-            .cloned()
-            .collect(),
-    );
-
-    winner.peer_entry_ids = dedup_sorted(
-        winner
-            .peer_entry_ids
-            .iter()
-            .chain(&loser.peer_entry_ids)
-            .copied()
-            .collect(),
-    );
-    for &pos in &loser.track_positions {
-        if !winner.track_positions.contains(&pos) {
-            winner.track_positions.push(pos);
-        }
-    }
-    winner.child_entry_ids = dedup_sorted(
-        winner
-            .child_entry_ids
-            .iter()
-            .chain(&loser.child_entry_ids)
-            .copied()
-            .collect(),
-    );
-}
-
-// ── Post-merge in-memory consistency helpers ──────────────────────────────────
-
-/// After merging `loser_id` into `winner_id` at the DB level, update every
-/// other entry's `peer_entry_ids` to replace `loser_id` with `winner_id`,
-/// mirroring what a DB reload would produce. Returns the IDs of every entry
-/// whose peer list was modified.
-fn propagate_peer_remap(
-    entries: &mut HashMap<i64, EntryInfo>,
-    loser_id: i64,
-    winner_id: i64,
-) -> Vec<i64> {
-    let affected: Vec<i64> = entries
-        .values()
-        .filter(|e| e.peer_entry_ids.contains(&loser_id))
-        .map(|e| e.entry_id)
-        .collect();
-    for &id in &affected {
-        if let Some(e) = entries.get_mut(&id) {
-            e.peer_entry_ids.retain(|&p| p != loser_id);
-            if !e.peer_entry_ids.contains(&winner_id) {
-                e.peer_entry_ids.push(winner_id);
-            }
-        }
-    }
-    affected
-}
-
-/// Move every pair in `scored` that involves `entry_id` back onto `work_queue`
-/// so it is re-scored after that entry was enriched with new data (duration,
-/// peer coverage) that may flip a previous DISTINCT or RELATE verdict to MERGE.
-fn drain_scored_for_entry(
-    entry_id: i64,
-    scored: &mut HashSet<(i64, i64)>,
-    queued: &mut HashSet<(i64, i64)>,
-    work_queue: &mut VecDeque<(i64, i64)>,
-) {
-    let to_revisit: Vec<(i64, i64)> = scored
-        .iter()
-        .copied()
-        .filter(|(a, b)| *a == entry_id || *b == entry_id)
-        .collect();
-    for pair in to_revisit {
-        scored.remove(&pair);
-        queued.remove(&pair);
-        work_queue.push_back(pair);
-        // Re-insert into queued so generate_semantic won't schedule it a second time.
-        queued.insert(pair);
-    }
-}
-
 // ── Report helpers ────────────────────────────────────────────────────────────
 
 fn fmt_pairs(pairs: &[Pair]) -> String {
@@ -2555,7 +2441,7 @@ async fn load_script(
 #[allow(clippy::too_many_arguments)]
 async fn score_candidates(
     db: &MusicDb,
-    mut entries: HashMap<i64, EntryInfo>,
+    entries: HashMap<i64, EntryInfo>,
     focus: Option<&HashSet<i64>>,
     ctx: &ScriptCtx<'_>,
     barrier: &HashMap<Pair, crate::pipeline::dedup::AnchorId>,
@@ -2625,11 +2511,9 @@ async fn score_candidates(
     let mut stats: HashMap<String, [usize; 4]> = HashMap::new();
 
     // `queued` tracks every pair ever added to `work_queue` or already decided,
-    // preventing duplicates. `scored` is a subset of `queued` for pairs that
-    // received a DISTINCT or RELATE verdict — they may be re-queued if one entry
-    // gains new data (duration, peer coverage) that could flip the verdict to MERGE.
-    // `loser_to_winner` lets us reroute a stale pair (A, loser) to (A, winner)
-    // when the loser has already been merged away before the pair is processed.
+    // preventing duplicates. No softmatch verdict physically removes an entry
+    // from `entries` any more (MERGE is soft — see `SoftMatchConfig::apply_relates`),
+    // so unlike the entry-merging era there is no rerouting/re-queueing to do here.
     // The focused/online path already did retrieval against the DB (see
     // `generate_focused_candidates`) and hands us the finished channel map —
     // recomputing it here in memory would silently fall back to seeing only
@@ -2646,8 +2530,6 @@ async fn score_candidates(
         ),
     };
     let mut queued: HashSet<(i64, i64)> = candidate_channels.keys().copied().collect();
-    let mut scored: HashSet<(i64, i64)> = HashSet::new();
-    let mut loser_to_winner: HashMap<i64, i64> = HashMap::new();
     let mut lexical_pairs: Vec<(i64, i64)> = queued.iter().copied().collect();
     lexical_pairs.sort_unstable();
     let mut work_queue: VecDeque<(i64, i64)> = lexical_pairs.into();
@@ -2692,24 +2574,7 @@ async fn score_candidates(
 
     let mut total_scored = 0usize;
 
-    while let Some((orig_a, orig_b)) = work_queue.pop_front() {
-        // Fix 4: when one of the original pair members was merged away, reroute
-        // to its winner so the surviving partner is still compared against the
-        // absorbing entry.
-        let a = loser_to_winner.get(&orig_a).copied().unwrap_or(orig_a);
-        let b = loser_to_winner.get(&orig_b).copied().unwrap_or(orig_b);
-        if a == b {
-            continue; // both ended up as the same entry after rerouting
-        }
-        let (id_a, id_b) = (a.min(b), a.max(b));
-        // If rerouting changed either endpoint, the resulting pair is new and may
-        // already be scheduled/decided — skip it if so. Original pairs (no rerouting)
-        // are already in `queued` from seeding and must not be re-checked here, or
-        // all of them would be skipped on the first `insert` returning false.
-        if (id_a, id_b) != (orig_a, orig_b) && !queued.insert((id_a, id_b)) {
-            continue;
-        }
-
+    while let Some((id_a, id_b)) = work_queue.pop_front() {
         let (ea, eb) = match (entries.get(&id_a), entries.get(&id_b)) {
             (Some(a), Some(b)) => (a.clone(), b.clone()),
             _ => continue,
@@ -2740,7 +2605,7 @@ async fn score_candidates(
 
         total_scored += 1;
         let channels = candidate_channels.get(&(id_a, id_b));
-        let verdict = apply_candidate(
+        apply_candidate(
             db,
             &ea,
             &eb,
@@ -2753,110 +2618,6 @@ async fn score_candidates(
             &mut stats,
         )
         .await?;
-
-        // Track DISTINCT and RELATE verdicts: either can flip to MERGE if the
-        // entry gains new scoring-relevant data (duration, peer coverage) later.
-        if matches!(
-            verdict,
-            Verdict::Distinct
-                | Verdict::Separate { .. }
-                | Verdict::Defer { .. }
-                | Verdict::Relate { .. }
-        ) {
-            scored.insert((id_a, id_b));
-        }
-
-        // On a real merge, update the winner in memory and cascade.
-        if matches!(verdict, Verdict::Merge { .. }) && config.apply_merges {
-            // apply_candidate calls merge_entries(ea, eb) → ea is loser, eb is winner.
-            let loser_id = ea.entry_id;
-            let winner_id = eb.entry_id;
-
-            loser_to_winner.insert(loser_id, winner_id);
-
-            if let Some(loser) = entries.remove(&loser_id) {
-                let winner_snapshot = {
-                    let winner = entries
-                        .get_mut(&winner_id)
-                        .expect("merge winner still in map");
-
-                    // Capture pre-merge state for enrichment detection (Fix 1).
-                    let old_duration_count = winner.durations.len();
-                    let old_peer_count = winner.peer_entry_ids.len();
-
-                    merge_entry_infos(winner, &loser);
-                    // Re-embed if the winner's best_title changed (stale check is fast).
-                    if let Some(cache) = embed_cache {
-                        tokio::task::block_in_place(|| {
-                            embed_stale_entries(
-                                std::slice::from_ref(winner),
-                                &ctx.engine,
-                                &ctx.ast,
-                                &ctx.base_scope,
-                                &ctx.user_ctx,
-                                cache,
-                            );
-                        });
-                    }
-
-                    // Fix 1+3: if the winner gained duration or peer coverage, pairs
-                    // that previously scored DISTINCT or RELATE against the winner may
-                    // now score MERGE — re-queue them for a fresh evaluation.
-                    let gained_duration = winner.durations.len() > old_duration_count;
-                    let gained_peers = winner.peer_entry_ids.len() > old_peer_count;
-                    if gained_duration || gained_peers {
-                        drain_scored_for_entry(
-                            winner_id,
-                            &mut scored,
-                            &mut queued,
-                            &mut work_queue,
-                        );
-                    }
-
-                    winner.clone()
-                };
-
-                // Fix 2: the loser's entry_id is gone from the DB, but other entries
-                // that listed it as a peer still hold the stale id. Remap them now
-                // so the in-memory view matches what a fresh DB reload would produce.
-                let affected = propagate_peer_remap(&mut entries, loser_id, winner_id);
-                for &affected_id in &affected {
-                    // Peer overlap changed → previously-scored pairs may now MERGE.
-                    drain_scored_for_entry(affected_id, &mut scored, &mut queued, &mut work_queue);
-                    // Seed new KNN candidates: embedding unchanged but peer data is richer.
-                    if let (Some(cache), Some(entry)) =
-                        (embed_cache, entries.get(&affected_id).cloned())
-                    {
-                        let new_pairs = generate_semantic_candidates_for_entry(
-                            &entry,
-                            &entries,
-                            cache,
-                            config.embed_k,
-                            config.embed_sim_threshold,
-                            config.embed_max_pages,
-                            &mut queued,
-                            &mut candidate_channels,
-                        );
-                        work_queue.extend(new_pairs);
-                    }
-                }
-
-                // Seed new KNN candidates for the winner (its embedding may have changed).
-                if let Some(cache) = embed_cache {
-                    let new_pairs = generate_semantic_candidates_for_entry(
-                        &winner_snapshot,
-                        &entries,
-                        cache,
-                        config.embed_k,
-                        config.embed_sim_threshold,
-                        config.embed_max_pages,
-                        &mut queued,
-                        &mut candidate_channels,
-                    );
-                    work_queue.extend(new_pairs);
-                }
-            }
-        }
     }
 
     info!("Scored {total_scored} candidate pair(s)");
@@ -2900,64 +2661,71 @@ async fn apply_candidate(
     csv: &mut Option<std::io::BufWriter<std::fs::File>>,
     stats: &mut HashMap<String, [usize; 4]>,
 ) -> anyhow::Result<Verdict> {
-    let verdict = if let Some(model) = learned_model {
-        let features = learned_features(ea, eb, embed_cache);
-        let probability = model.probability(&ea.entry_type, &features)?;
-        let decision = model.decide(probability);
-        if config.persist_suggestions
-            && decision != ModelDecision::Separate
-            && !(decision == ModelDecision::Merge && config.apply_merges)
-        {
-            let sorted_features: BTreeMap<&str, f64> = features
-                .iter()
-                .map(|(name, value)| (name.as_str(), *value))
-                .collect();
-            db.upsert_dedup_suggestion(NewDedupSuggestion {
-                entry_a: ea.entry_id,
-                entry_b: eb.entry_id,
-                model_version: model.version().to_owned(),
-                probability,
-                decision: match decision {
-                    ModelDecision::Merge => "merge",
-                    ModelDecision::Defer => "defer",
-                    ModelDecision::Separate => unreachable!(),
-                }
-                .to_owned(),
-                candidate_channels: channels.copied().map(ChannelMask::csv).unwrap_or_default(),
-                features: serde_json::to_string(&sorted_features)?,
-                evidence: serde_json::to_string(&serde_json::json!({
-                    "left": ea,
-                    "right": eb,
-                }))?,
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("persisting dedup suggestion: {error}"))?;
-        }
-        let reason = "learned musiclib-entry-info/1 scorer".to_owned();
-        match decision {
-            ModelDecision::Merge => Verdict::Merge {
-                confidence: probability,
-                reason,
-            },
-            ModelDecision::Separate => Verdict::Separate {
-                confidence: probability,
-                reason,
-            },
-            ModelDecision::Defer => Verdict::Defer {
-                confidence: probability,
-                reason,
-            },
-        }
-    } else {
-        call_script(
-            &ctx.engine,
-            &ctx.ast,
-            &ctx.base_scope,
-            &ctx.user_ctx,
-            ea,
-            eb,
-        )?
-    };
+    let (verdict, origin, model_version): (Verdict, &'static str, Option<String>) =
+        if config.jev_entry_types.contains(&ea.entry_type) {
+            let verdict = crate::pipeline::jev::score_pair(db, ea, eb, config).await?;
+            (
+                verdict,
+                "jev",
+                Some(crate::pipeline::jev::MODEL_VERSION.to_string()),
+            )
+        } else if let Some(model) = learned_model {
+            let features = learned_features(ea, eb, embed_cache);
+            let probability = model.probability(&ea.entry_type, &features)?;
+            let decision = model.decide(probability);
+            if config.persist_suggestions && decision != ModelDecision::Separate {
+                let sorted_features: BTreeMap<&str, f64> = features
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), *value))
+                    .collect();
+                db.upsert_dedup_suggestion(NewDedupSuggestion {
+                    entry_a: ea.entry_id,
+                    entry_b: eb.entry_id,
+                    model_version: model.version().to_owned(),
+                    probability,
+                    decision: match decision {
+                        ModelDecision::Merge => "merge",
+                        ModelDecision::Defer => "defer",
+                        ModelDecision::Separate => unreachable!(),
+                    }
+                    .to_owned(),
+                    candidate_channels: channels.copied().map(ChannelMask::csv).unwrap_or_default(),
+                    features: serde_json::to_string(&sorted_features)?,
+                    evidence: serde_json::to_string(&serde_json::json!({
+                        "left": ea,
+                        "right": eb,
+                    }))?,
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("persisting dedup suggestion: {error}"))?;
+            }
+            let reason = "learned musiclib-entry-info/1 scorer".to_owned();
+            let verdict = match decision {
+                ModelDecision::Merge => Verdict::Merge {
+                    confidence: probability,
+                    reason,
+                },
+                ModelDecision::Separate => Verdict::Separate {
+                    confidence: probability,
+                    reason,
+                },
+                ModelDecision::Defer => Verdict::Defer {
+                    confidence: probability,
+                    reason,
+                },
+            };
+            (verdict, "heuristic", Some(model.version().to_owned()))
+        } else {
+            let verdict = call_script(
+                &ctx.engine,
+                &ctx.ast,
+                &ctx.base_scope,
+                &ctx.user_ctx,
+                ea,
+                eb,
+            )?;
+            (verdict, "heuristic", None)
+        };
 
     if let Some(w) = csv {
         let (vname, kind, conf, reason) = match &verdict {
@@ -3005,11 +2773,32 @@ async fn apply_candidate(
                 println!("  reason: {reason}\n");
             }
 
-            if config.apply_merges {
-                db.merge_entries(ea.entry_id, eb.entry_id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                info!("Merged entry {} into {}", ea.entry_id, eb.entry_id);
+            // MERGE is soft: it asserts `same_identity` via the same reversible
+            // path the player's manual "link" button uses
+            // (`MusicDb::record_identity_feedback`), never `merge_entries`
+            // (destructive, no undo path). Hard merge stays exclusively an
+            // import-time/dedup-barrier operation — no softmatch verdict, from
+            // any backend, triggers it.
+            if config.apply_relates {
+                db.record_identity_feedback(NewDedupFeedback {
+                    entry_a: ea.entry_id,
+                    entry_b: eb.entry_id,
+                    judgment: IdentityJudgment::Same,
+                    origin: origin.to_string(),
+                    model_version: model_version.clone(),
+                    probability: Some(*confidence),
+                    candidate_channels: channels.copied().map(ChannelMask::csv),
+                    features: None,
+                    evidence: Some(reason.clone()),
+                    note: None,
+                    supersedes_id: None,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                info!(
+                    "Soft-merged (same_identity) entry {} and {} [{origin}]",
+                    ea.entry_id, eb.entry_id
+                );
             }
         }
         Verdict::Relate {
@@ -3063,7 +2852,7 @@ async fn apply_candidate(
                     eb.entry_id,
                     kind,
                     *confidence,
-                    "heuristic",
+                    origin,
                     Some(&extra_json),
                 )
                 .await
@@ -3213,10 +3002,8 @@ pub async fn match_db(
             );
         }
     }
-    if config.apply_merges {
-        info!("MERGE and RELATE decisions written to DB.");
-    } else if config.apply_relates {
-        info!("RELATE decisions written to DB; MERGE decisions remained suggestions.");
+    if config.apply_relates {
+        info!("RELATE and soft MERGE (same_identity) decisions written to DB.");
     } else {
         info!("Dry-run complete. Pass --apply to write decisions to the DB.");
     }
@@ -3354,24 +3141,6 @@ async fn open_embed_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn blank_entry(id: i64, peers: Vec<i64>) -> EntryInfo {
-        EntryInfo {
-            entry_id: id,
-            entry_type: "artist".to_string(),
-            pairs: vec![("test".to_string(), id.to_string())],
-            aliases: vec![],
-            best_title: None,
-            durations: vec![],
-            release_dates: vec![],
-            release_types: vec![],
-            primary_types: vec![],
-            peer_entry_ids: peers,
-            track_positions: vec![],
-            child_entry_ids: vec![],
-            sourced_aliases: vec![],
-        }
-    }
 
     /// Build a release-group entry carrying a single primary alias `title` on
     /// source `src`, with the given durations.
@@ -3608,166 +3377,6 @@ mod tests {
         assert!(
             generate_bounded_candidates(&entries, Some(&focused), 50, 30).contains_key(&(1, 2))
         );
-    }
-
-    /// Fix 2: when a merge removes the loser, every other entry that listed it
-    /// as a peer should have the loser replaced by the winner.
-    #[test]
-    fn test_propagate_peer_remap_basic() {
-        let mut entries: HashMap<i64, EntryInfo> = HashMap::new();
-        // Artists A=1 and B=2 both credit track T10 (loser). C=3 does not.
-        entries.insert(1, blank_entry(1, vec![10, 30]));
-        entries.insert(2, blank_entry(2, vec![10, 40]));
-        entries.insert(3, blank_entry(3, vec![20, 30]));
-
-        let affected = propagate_peer_remap(&mut entries, 10, 20);
-
-        assert_eq!(affected.len(), 2);
-        assert!(affected.contains(&1));
-        assert!(affected.contains(&2));
-        assert!(!affected.contains(&3));
-
-        // A: T10 → T20; T20 was not previously listed → added.
-        let a = &entries[&1].peer_entry_ids;
-        assert!(!a.contains(&10));
-        assert!(a.contains(&20));
-        assert!(a.contains(&30));
-
-        // B: T10 → T20; T40 untouched.
-        let b = &entries[&2].peer_entry_ids;
-        assert!(!b.contains(&10));
-        assert!(b.contains(&20));
-        assert!(b.contains(&40));
-
-        // C: unchanged.
-        assert_eq!(entries[&3].peer_entry_ids, vec![20, 30]);
-    }
-
-    /// Fix 2: when the winner is already in an entry's peer list, the loser
-    /// must be removed without duplicating the winner.
-    #[test]
-    fn test_propagate_peer_remap_no_duplicate_winner() {
-        let mut entries: HashMap<i64, EntryInfo> = HashMap::new();
-        // Entry 1 already credits both loser (10) and winner (20).
-        entries.insert(1, blank_entry(1, vec![10, 20]));
-
-        propagate_peer_remap(&mut entries, 10, 20);
-
-        let peers = &entries[&1].peer_entry_ids;
-        assert!(!peers.contains(&10), "loser removed");
-        assert_eq!(
-            peers.iter().filter(|&&p| p == 20).count(),
-            1,
-            "winner not duplicated"
-        );
-    }
-
-    /// Fixes 1+3: DISTINCT- and RELATE-scored pairs involving the enriched entry
-    /// must be moved back onto the work queue for re-evaluation with the new data.
-    #[test]
-    fn test_drain_scored_for_entry_selective() {
-        let mut queued: HashSet<(i64, i64)> = HashSet::new();
-        let mut scored: HashSet<(i64, i64)> = HashSet::new();
-        let mut work_queue: VecDeque<(i64, i64)> = VecDeque::new();
-
-        let pair_13 = (1i64, 3i64);
-        let pair_14 = (1i64, 4i64);
-        let pair_25 = (2i64, 5i64); // unrelated — must not be touched
-        for &p in &[pair_13, pair_14, pair_25] {
-            queued.insert(p);
-            scored.insert(p);
-        }
-
-        drain_scored_for_entry(1, &mut scored, &mut queued, &mut work_queue);
-
-        // Only entry-1 pairs leave `scored`.
-        assert!(!scored.contains(&pair_13));
-        assert!(!scored.contains(&pair_14));
-        assert!(scored.contains(&pair_25));
-
-        // Those same pairs land in the work queue.
-        let in_queue: Vec<_> = work_queue.iter().copied().collect();
-        assert!(in_queue.contains(&pair_13));
-        assert!(in_queue.contains(&pair_14));
-        assert!(!in_queue.contains(&pair_25));
-
-        // Pairs remain in `queued` so generate_semantic won't schedule them again.
-        assert!(queued.contains(&pair_13));
-        assert!(queued.contains(&pair_14));
-        assert!(queued.contains(&pair_25));
-    }
-
-    /// merge_entry_infos recomputes best_title from the canonical alias set, so
-    /// the result is independent of which entry was the winner — matching what
-    /// build_entry_infos produces after a DB reload. With both aliases on the
-    /// same source, the lexicographically smaller title name wins.
-    #[test]
-    fn test_merge_recomputes_best_title_canonically() {
-        let mut winner = titled_entry(100, "わためのうた vol.1", "musicbrainz", vec![]);
-        let loser = titled_entry(50, "わためのうた vol.2", "musicbrainz", vec![]);
-        merge_entry_infos(&mut winner, &loser);
-        assert_eq!(winner.best_title.as_deref(), Some("わためのうた vol.1"));
-
-        // Swapping winner/loser yields the identical title — no orientation bias.
-        let mut winner2 = titled_entry(50, "わためのうた vol.2", "musicbrainz", vec![]);
-        let loser2 = titled_entry(100, "わためのうた vol.1", "musicbrainz", vec![]);
-        merge_entry_infos(&mut winner2, &loser2);
-        assert_eq!(winner2.best_title.as_deref(), winner.best_title.as_deref());
-    }
-
-    /// A clean-source alias must win the title slot over a video-source alias,
-    /// regardless of merge orientation (canonical order puts clean sources first).
-    #[test]
-    fn test_merge_best_title_prefers_clean_source() {
-        let mut winner = titled_entry(1, "Noisy MV Title", "youtube", vec![]);
-        let loser = titled_entry(2, "Clean Title", "musicbrainz", vec![]);
-        merge_entry_infos(&mut winner, &loser);
-        assert_eq!(winner.best_title.as_deref(), Some("Clean Title"));
-    }
-
-    /// Durations are a sorted, deduplicated union — never collapsed to one value
-    /// and never order-dependent.
-    #[test]
-    fn test_merge_unions_durations() {
-        let mut winner = titled_entry(1, "T", "musicbrainz", vec![325000, 324000]);
-        let loser = titled_entry(2, "T", "spotify", vec![308573, 324000]);
-        merge_entry_infos(&mut winner, &loser);
-        assert_eq!(winner.durations, vec![308573, 324000, 325000]);
-
-        // Orientation-independent.
-        let mut winner2 = titled_entry(2, "T", "spotify", vec![308573, 324000]);
-        let loser2 = titled_entry(1, "T", "musicbrainz", vec![325000, 324000]);
-        merge_entry_infos(&mut winner2, &loser2);
-        assert_eq!(winner2.durations, winner.durations);
-    }
-
-    /// Fix 4: when a pair (A, loser) is popped but the loser was already merged
-    /// away, the reroute logic in score_candidates maps loser→winner. Verify the
-    /// normalisation arithmetic (min/max ordering, self-pair elimination).
-    #[test]
-    fn test_loser_reroute_normalisation() {
-        // Simulate the reroute step inline so the logic is testable without a DB.
-        let reroute = |id_a: i64, id_b: i64, loser: i64, winner: i64| -> Option<(i64, i64)> {
-            let a = if id_a == loser { winner } else { id_a };
-            let b = if id_b == loser { winner } else { id_b };
-            if a == b {
-                None // self-pair after reroute → skip
-            } else {
-                Some((a.min(b), a.max(b)))
-            }
-        };
-
-        // (1, 5): 5 is the loser, 10 is the winner → reroute to (1, 10)
-        assert_eq!(reroute(1, 5, 5, 10), Some((1, 10)));
-
-        // (5, 20): 5 is loser, 10 is winner → reroute to (10, 20)
-        assert_eq!(reroute(5, 20, 5, 10), Some((10, 20)));
-
-        // (5, 10): 5 is loser, 10 is winner → both map to same entry → skip
-        assert_eq!(reroute(5, 10, 5, 10), None);
-
-        // No reroute needed (neither is a loser)
-        assert_eq!(reroute(3, 7, 5, 10), Some((3, 7)));
     }
 
     /// The shipped example script must compile under the real engine and run its

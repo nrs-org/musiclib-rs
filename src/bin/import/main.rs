@@ -204,10 +204,10 @@ async fn main() -> anyhow::Result<()> {
         reconcile_tags(providers.as_slice(), &db, &dedup_configs).await?;
     }
 
-    // RELATE writes to `entry_relation` (reversible: tombstoned via `enabled`,
-    // never repoints `entry_source`). MERGE stays suggestion-only via
-    // `apply_merges: false` — `merge_entries` has no undo path, and its
-    // high-precision release gate isn't validated yet (docs/dedup-v2.md).
+    // RELATE and soft MERGE (same_identity) both write reversibly
+    // (tombstoned via `enabled`, never repoints `entry_source`) — no
+    // softmatch verdict destructively merges entries; that stays an
+    // import-time/dedup-barrier operation (docs/dedup-v2.md).
     let script_path = config_dir.join("match.rhai");
     if !args.skip_softmatch && script_path.exists() {
         let embed_db = app_dirs::data_dir().join("embeddings.db");
@@ -220,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
                 .then(|| model_path.display().to_string()),
             persist_suggestions,
             apply_relates: true,
-            apply_merges: false,
+            jev_entry_types: Default::default(),
             csv_path: None,
             embed_db_path: Some(embed_db.display().to_string()),
             embed_model_id: None,
