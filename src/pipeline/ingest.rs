@@ -19,7 +19,7 @@ use super::{
     flush::flush,
     importer::import,
     softmatch::{SoftMatchConfig, match_new_entries},
-    state::State,
+    state::{ImportProgress, State},
 };
 
 /// Result of ingesting one URL.
@@ -42,6 +42,10 @@ pub struct IngestOutcome {
 /// reconciliation); `merged_dedup` is `dedup::merge_configs(dedup_configs)`,
 /// passed separately since callers that already have it (the CLI binaries do,
 /// to avoid recompiling the barrier on every call) shouldn't have to redo it.
+///
+/// `progress`, if given, is wired straight into the `State` driving this
+/// run's `import()` traversal — see `state::ImportProgress`. The CLI passes
+/// `None`; the `server` binary uses it to feed its job progress display.
 #[allow(clippy::too_many_arguments)]
 pub async fn ingest_entry(
     db: &MusicDb,
@@ -52,6 +56,7 @@ pub async fn ingest_entry(
     merged_dedup: &DedupConfig,
     soft_cfg: Option<&SoftMatchConfig>,
     url: String,
+    progress: Option<Arc<dyn ImportProgress>>,
 ) -> anyhow::Result<IngestOutcome> {
     // Resolve the canonical (source, identifier) pair for `url` up front so we
     // can look up its entry_id after flush, regardless of whether flush wrote
@@ -62,7 +67,7 @@ pub async fn ingest_entry(
         .clone()
         .unwrap_or_else(|| (StandardProviderKeys::UNKNOWN_URL.to_string(), url.clone()));
 
-    let state = Arc::new(State::new());
+    let state = Arc::new(State::with_progress(progress));
     import(
         Arc::clone(&state),
         Arc::clone(providers),

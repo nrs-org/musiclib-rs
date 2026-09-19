@@ -13,6 +13,7 @@
 
 mod entries;
 mod fetch_options;
+mod ingest_progress;
 mod jobs;
 #[cfg(feature = "player")]
 mod player;
@@ -25,7 +26,7 @@ use std::{
     ffi::OsStr,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU64},
 };
 
 use anyhow::Context as _;
@@ -39,6 +40,7 @@ use musiclib_rs::{
     musicdb::MusicDb,
     pipeline::{
         dedup::{DedupConfig, merge_configs},
+        progress::HttpActivityClient,
         softmatch::default_soft_match_config,
     },
     providers::{
@@ -144,8 +146,20 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
+    // `EnvFilter::from_default_env()` shows nothing at all when `RUST_LOG`
+    // isn't set — fine for the `import`/`dedup` CLIs, whose scripts always
+    // set it explicitly, but this is a long-running background process
+    // nobody launches with a `RUST_LOG=` prefix every time. Without a
+    // fallback, import failures (`warn!` in `pipeline::importer`) and even
+    // the startup/listening lines below were silently going nowhere — the
+    // only reason the `@ShirakamiFubuki` panic surfaced at all was that a
+    // Rust panic bypasses `tracing` and prints unconditionally. `RUST_LOG`
+    // still overrides this when set.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,server=info")),
+        )
         .init();
 
     let args = Args::parse();
@@ -175,9 +189,12 @@ async fn main() -> anyhow::Result<()> {
     let mut http_config: HttpClientConfig =
         load_config(args.http_config.as_deref(), &config_dir.join("http.yaml")).await?;
     http_config.coalescer_rules = musiclib_rs::providers::registry::coalesce_rules();
+    let youtube_quota = Arc::new(AtomicU64::new(0));
+    http_config.youtube_quota_counter = Some(Arc::clone(&youtube_quota));
     let http = http_config.build().await?;
+    let activity = HttpActivityClient::new(http);
 
-    let providers = build_providers(&registry_config, http)?;
+    let providers = build_providers(&registry_config, activity.clone())?;
     if providers.is_empty() {
         anyhow::bail!("No providers available -- check your credential env vars");
     }
@@ -222,6 +239,8 @@ async fn main() -> anyhow::Result<()> {
         merged_dedup,
         soft_cfg,
         jobs: JobManager::new(),
+        activity,
+        youtube_quota,
     });
 
     let addr: SocketAddr = args.listen.parse()?;

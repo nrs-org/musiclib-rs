@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 
 use musiclib_rs::{
     musicdb::MusicDb,
-    pipeline::{dedup::DedupConfig, softmatch::SoftMatchConfig},
+    pipeline::{dedup::DedupConfig, progress::HttpActivityClient, softmatch::SoftMatchConfig},
     providers::{
         FetchProvider,
         types::{EntryFetchOptionsPool, OptionsId},
@@ -32,4 +32,14 @@ pub struct AppState {
     /// `<config_dir>/match.rhai`), matching the `import` CLI's behavior.
     pub soft_cfg: Option<SoftMatchConfig>,
     pub jobs: Arc<JobManager>,
+    /// Process-wide HTTP request counts per domain, wrapped around the
+    /// shared client every provider was built with — see
+    /// `ingest_progress::JobProgressSink`, which embeds a snapshot of this
+    /// in each running `ingest` job's progress payload.
+    pub activity: Arc<HttpActivityClient>,
+    /// Cumulative YouTube Data API quota units spent since the process
+    /// started (every provider shares one counter, same as `activity`) —
+    /// mirrors the `import` CLI's end-of-run "quota used" line, but kept
+    /// running and surfaced live through `ingest_progress::JobProgressSink`.
+    pub youtube_quota: Arc<AtomicU64>,
 }

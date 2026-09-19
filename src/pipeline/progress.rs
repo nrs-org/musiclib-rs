@@ -9,6 +9,7 @@ use crate::http::{BodyExtractorCow, Error, HttpClient, Request, Response};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use serde::Serialize;
 
 struct DomainStats {
     bar: ProgressBar,
@@ -90,6 +91,93 @@ impl HttpClient for ProgressHttpClient {
             stats.done.fetch_add(1, Ordering::Relaxed);
             stats.update();
         }
+
+        result
+    }
+}
+
+// ── headless activity tracking (server binary's job progress) ──────────────
+
+/// One domain's live request counts, as returned by `HttpActivityClient::snapshot`.
+#[derive(Clone, Serialize)]
+pub struct DomainActivity {
+    pub host: String,
+    pub in_flight: usize,
+    pub done: usize,
+}
+
+struct DomainCounts {
+    in_flight: AtomicUsize,
+    done: AtomicUsize,
+}
+
+/// Same per-domain in-flight/done counting as `ProgressHttpClient`, without
+/// the `indicatif` terminal bars — for a process with no terminal to draw
+/// them on (the `server` binary), which instead exposes `snapshot()` to embed
+/// in a polled job's progress payload. One instance wraps the whole process's
+/// shared `HttpClient`, so a snapshot reflects every request in flight across
+/// every concurrently-running job, not just the one polling it — acceptable
+/// for what's documented elsewhere as a local, single-user server.
+pub struct HttpActivityClient {
+    inner: Arc<dyn HttpClient>,
+    domains: DashMap<String, DomainCounts>,
+}
+
+impl HttpActivityClient {
+    pub fn new(inner: Arc<dyn HttpClient>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            domains: DashMap::new(),
+        })
+    }
+
+    /// Domains with an in-flight request first, then by host name, so a
+    /// truncated display shows what's actually happening right now.
+    pub fn snapshot(&self) -> Vec<DomainActivity> {
+        let mut out: Vec<DomainActivity> = self
+            .domains
+            .iter()
+            .map(|e| DomainActivity {
+                host: e.key().clone(),
+                in_flight: e.in_flight.load(Ordering::Relaxed),
+                done: e.done.load(Ordering::Relaxed),
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.in_flight
+                .cmp(&a.in_flight)
+                .then_with(|| a.host.cmp(&b.host))
+        });
+        out
+    }
+}
+
+#[async_trait]
+impl HttpClient for HttpActivityClient {
+    async fn make_request(
+        &self,
+        req: Request,
+        body_extractor: BodyExtractorCow<'static>,
+    ) -> Result<Arc<Response>, Error> {
+        let host = extract_host(&req.url).to_string();
+
+        self.domains
+            .entry(host.clone())
+            .or_insert_with(|| DomainCounts {
+                in_flight: AtomicUsize::new(0),
+                done: AtomicUsize::new(0),
+            });
+        self.domains
+            .get(&host)
+            .unwrap()
+            .in_flight
+            .fetch_add(1, Ordering::Relaxed);
+
+        let result = self.inner.make_request(req, body_extractor).await;
+
+        let counts = self.domains.get(&host).unwrap();
+        counts.in_flight.fetch_sub(1, Ordering::Relaxed);
+        counts.done.fetch_add(1, Ordering::Relaxed);
 
         result
     }

@@ -436,6 +436,11 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     let job_state = Arc::clone(state);
     let job_id = state.jobs.spawn("ingest", move |handle| async move {
         handle.progress("fetching", "running import pipeline");
+        let sink = crate::ingest_progress::JobProgressSink::new(
+            handle.clone(),
+            Arc::clone(&job_state.activity),
+            Arc::clone(&job_state.youtube_quota),
+        );
         let result = ingest_entry(
             &job_state.db,
             &job_state.providers,
@@ -445,6 +450,7 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
             &job_state.merged_dedup,
             job_state.soft_cfg.as_ref(),
             query,
+            Some(sink),
         )
         .await;
         match result {

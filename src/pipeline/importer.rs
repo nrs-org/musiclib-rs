@@ -73,18 +73,20 @@ pub fn import(
 
         // 4. Fetch. On failure we log and bail.
         debug!("fetching {}:{}", canonical.0, canonical.1);
+        if let Some(p) = state.progress() {
+            p.fetching(&canonical);
+        }
         let result = match provider
             .fetch_entry(&canonical.0, &canonical.1, pool.clone(), options_id)
             .await
         {
             Ok(r) => r,
             Err(e) => {
-                warn!(
-                    "fetch failed for {}:{}: {}",
-                    canonical.0,
-                    canonical.1,
-                    error_chain(&e)
-                );
+                let msg = error_chain(&e);
+                warn!("fetch failed for {}:{}: {}", canonical.0, canonical.1, msg);
+                if let Some(p) = state.progress() {
+                    p.fetch_failed(&canonical, &msg);
+                }
                 return;
             }
         };
@@ -110,6 +112,9 @@ pub fn import(
                 aliases,
             },
         );
+        if let Some(p) = state.progress() {
+            p.fetched(&canonical);
+        }
 
         // 5b. Cross-link: ask every other provider to enrich `sources` with
         //     IDs in its own namespace. Fixed-point: each pass calls every

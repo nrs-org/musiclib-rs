@@ -16,7 +16,24 @@ use dashmap::DashMap;
 use serde::Serialize;
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinError};
+
+/// A `JoinError` is always either "cancelled" or "panicked" — never both, and
+/// nothing else. `into_panic()` panics if called on the former, hence the
+/// `is_cancelled` guard.
+fn join_error_message(e: JoinError) -> String {
+    if e.is_cancelled() {
+        return "canceled".to_string();
+    }
+    let payload = e.into_panic();
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "job task panicked".to_string()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +55,13 @@ pub enum JobStatus {
 pub struct JobProgress {
     pub stage: String,
     pub message: String,
+    /// Op-specific structured payload, opaque to `JobManager` itself — e.g.
+    /// the `ingest` job attaches a live fetch feed and per-domain HTTP
+    /// activity here (see `server`'s `ingest_progress` module) so the
+    /// frontend can render something closer to the `import` CLI's display
+    /// than `stage`/`message` alone allow. `None` for jobs that don't use it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Value>,
 }
 
 #[derive(Clone, Serialize)]
@@ -54,7 +78,7 @@ struct JobEntry {
     progress: Option<JobProgress>,
     result: Option<Value>,
     error: Option<JobError>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<AbortHandle>,
 }
 
 #[derive(Serialize)]
@@ -97,6 +121,12 @@ impl JobManager {
     /// `make_task` is handed a [`JobHandle`] to report progress and the
     /// terminal outcome through; the job manager marks it `running` right
     /// before the task starts.
+    ///
+    /// If `make_task`'s future panics (a provider backend bug, say) without
+    /// ever reaching `succeed`/`fail`, a second watcher task (below) notices
+    /// the underlying `JoinHandle` came back `Err` and fails the job itself
+    /// — otherwise it would sit at its last reported progress forever, which
+    /// looks indistinguishable from a slow job that's still working.
     pub fn spawn<F, Fut>(self: &Arc<Self>, op: &str, make_task: F) -> String
     where
         F: FnOnce(JobHandle) -> Fut + 'static,
@@ -129,9 +159,39 @@ impl JobManager {
             .await;
         });
         if let Some(mut entry) = self.jobs.get_mut(&id) {
-            entry.handle = Some(join_handle);
+            entry.handle = Some(join_handle.abort_handle());
         }
+
+        let watch_this = Arc::clone(self);
+        let watch_id = id.clone();
+        tokio::task::spawn_local(async move {
+            if let Err(join_err) = join_handle.await {
+                watch_this.fail_if_unfinished(&watch_id, &join_error_message(join_err));
+            }
+        });
         id
+    }
+
+    /// Marks `id` `failed` with `message` unless it already reached a
+    /// terminal status — used by the panic watcher above, and harmless
+    /// no-op for the ordinary case where `cancel()` already set `Canceled`
+    /// (a cancelled task's `JoinHandle` also resolves `Err`, just for
+    /// "cancelled" rather than "panicked").
+    fn fail_if_unfinished(&self, id: &str, message: &str) {
+        if let Some(mut entry) = self.jobs.get_mut(id) {
+            if matches!(
+                entry.status,
+                JobStatus::Succeeded | JobStatus::Failed | JobStatus::Canceled
+            ) {
+                return;
+            }
+            entry.status = JobStatus::Failed;
+            entry.error = Some(JobError {
+                code: "panicked".to_string(),
+                message: message.to_string(),
+            });
+            entry.updated_at = Self::now();
+        }
     }
 
     fn set_status(&self, id: &str, status: JobStatus) {
@@ -182,7 +242,11 @@ impl JobManager {
 /// Handed to a job's task so it can report progress and its terminal
 /// outcome. Dropping it without calling `succeed`/`fail` leaves the job
 /// stuck at its last reported status — every job implementation must call
-/// exactly one of them.
+/// exactly one of them. `Clone` is cheap (an `Arc` and a `String`) and lets a
+/// job hand a copy to a progress observer (e.g. `ImportProgress`) that only
+/// ever calls `progress`/`progress_detail`, while keeping the original to
+/// call `succeed`/`fail` itself.
+#[derive(Clone)]
 pub struct JobHandle {
     manager: Arc<JobManager>,
     id: String,
@@ -190,10 +254,17 @@ pub struct JobHandle {
 
 impl JobHandle {
     pub fn progress(&self, stage: &str, message: impl Into<String>) {
+        self.progress_detail(stage, message, None);
+    }
+
+    /// Same as `progress`, plus an op-specific `detail` payload — see
+    /// `JobProgress::detail`.
+    pub fn progress_detail(&self, stage: &str, message: impl Into<String>, detail: Option<Value>) {
         if let Some(mut entry) = self.manager.jobs.get_mut(&self.id) {
             entry.progress = Some(JobProgress {
                 stage: stage.to_string(),
                 message: message.into(),
+                detail,
             });
             entry.updated_at = JobManager::now();
         }

@@ -200,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
         &merged,
         soft_cfg.as_ref(),
         args.url,
+        None,
     )
     .await?;
     match outcome.entry_id {
