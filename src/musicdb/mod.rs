@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, Database, DatabaseConnection, DbErr,
-    EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait, sea_query,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait, sea_query,
 };
 use tracing::warn;
 
@@ -585,15 +585,16 @@ fn origin_priority(origin: &str) -> u8 {
 fn build_soft_identity_projection(
     entry_ids: impl IntoIterator<Item = i64>,
     relations: impl IntoIterator<Item = RelationRow>,
+    same_kinds: &[&str],
 ) -> SoftIdentityProjection {
     let mut dsu = IdentityDsu::new(entry_ids);
     let mut same = Vec::new();
     let mut different = Vec::new();
     for relation in relations.into_iter().filter(|relation| relation.enabled) {
-        match relation.kind.as_str() {
-            SAME_IDENTITY => same.push(relation),
-            DIFFERENT_IDENTITY => different.push(ordered_pair(relation.entry_a, relation.entry_b)),
-            _ => {}
+        if same_kinds.contains(&relation.kind.as_str()) {
+            same.push(relation);
+        } else if relation.kind == DIFFERENT_IDENTITY {
+            different.push(ordered_pair(relation.entry_a, relation.entry_b));
         }
     }
     different.sort_unstable();
@@ -934,6 +935,61 @@ impl MusicDb {
             .into_iter()
             .map(|m| (m.source, m.identifier))
             .collect())
+    }
+
+    /// Entry ids with at least one alias containing `query` (case-insensitive
+    /// substring match), most recently... actually unordered beyond SQLite's
+    /// natural row order — good enough for a bounded typeahead, not a ranked
+    /// search. Used by the player's library search endpoint.
+    pub async fn search_entry_ids_by_alias(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<i64>, Error> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "SELECT DISTINCT es.entry_id AS entry_id \
+             FROM entry_alias ea \
+             JOIN entry_source es ON es.source = ea.source AND es.identifier = ea.identifier \
+             WHERE ea.name LIKE ? ESCAPE '\\' \
+             LIMIT ?",
+            [pattern.into(), (limit as i64).into()],
+        );
+        self.db
+            .query_all_raw(stmt)
+            .await?
+            .iter()
+            .map(|row| row.try_get::<i64>("", "entry_id").map_err(Error::from))
+            .collect()
+    }
+
+    /// Up to `limit` track entry ids chosen uniformly at random — the
+    /// backing query for the player's "shuffle the whole library" entry
+    /// point. No playability filter here: that needs each entry's (and its
+    /// soft-linked siblings') sources, a separate batched lookup the caller
+    /// already does via `entry_summaries` — over-fetch and filter there.
+    pub async fn random_track_entry_ids(&self, limit: usize) -> Result<Vec<i64>, Error> {
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "SELECT id FROM entry WHERE entry_type = 'track' ORDER BY RANDOM() LIMIT ?",
+            [(limit as i64).into()],
+        );
+        self.db
+            .query_all_raw(stmt)
+            .await?
+            .iter()
+            .map(|row| row.try_get::<i64>("", "id").map_err(Error::from))
+            .collect()
     }
 
     /// Allocate a fresh `entry` row and return its auto-assigned id.
@@ -1409,14 +1465,43 @@ impl MusicDb {
     /// components. Cannot-link assertions win; conflicting same-identity edges
     /// are reported rather than silently joining the components.
     pub async fn soft_identity_projection(&self) -> Result<SoftIdentityProjection, Error> {
+        self.soft_identity_projection_with_kinds(&[SAME_IDENTITY])
+            .await
+    }
+
+    /// Like `soft_identity_projection`, but also treats softmatch's own
+    /// RELATE output (`entry_relation` rows with kind `"variant"`, written
+    /// by `pipeline::softmatch` — see `default_soft_match_config`) as a
+    /// same-identity signal, not just a human-confirmed `same_identity` row.
+    ///
+    /// Deliberately a separate method rather than widening
+    /// `soft_identity_projection` itself: that one is also read inside the
+    /// scoring pipeline to skip re-scoring pairs it already considers
+    /// settled (`are_same` in `score_candidates`), where treating every
+    /// heuristic RELATE as permanently confirmed would be the wrong
+    /// default. This method is for presentation only — the player unifying
+    /// browsing/playback across entries softmatch has already flagged as
+    /// likely the same recording, RELATE-tier confidence and all.
+    pub async fn soft_identity_projection_for_display(
+        &self,
+    ) -> Result<SoftIdentityProjection, Error> {
+        self.soft_identity_projection_with_kinds(&[SAME_IDENTITY, "variant"])
+            .await
+    }
+
+    async fn soft_identity_projection_with_kinds(
+        &self,
+        same_kinds: &[&str],
+    ) -> Result<SoftIdentityProjection, Error> {
         let entries = entry::Entity::find().all(&self.db).await?;
+        let mut kind_filter =
+            Condition::any().add(entry_relation::Column::Kind.eq(DIFFERENT_IDENTITY));
+        for kind in same_kinds {
+            kind_filter = kind_filter.add(entry_relation::Column::Kind.eq(*kind));
+        }
         let relations = entry_relation::Entity::find()
             .filter(entry_relation::Column::Enabled.eq(true))
-            .filter(
-                Condition::any()
-                    .add(entry_relation::Column::Kind.eq(SAME_IDENTITY))
-                    .add(entry_relation::Column::Kind.eq(DIFFERENT_IDENTITY)),
-            )
+            .filter(kind_filter)
             .all(&self.db)
             .await?
             .into_iter()
@@ -1425,6 +1510,7 @@ impl MusicDb {
         Ok(build_soft_identity_projection(
             entries.into_iter().map(|entry| entry.id),
             relations,
+            same_kinds,
         ))
     }
 
@@ -1518,8 +1604,18 @@ impl MusicDb {
                 set_relation_enabled_on(&txn, entry_a, entry_b, SAME_IDENTITY, false).await?;
             }
             IdentityJudgment::Unsure => {
+                // A full retraction: clear every kind of active confirmation
+                // between this pair, not just `same_identity`/
+                // `different_identity`. Without also clearing `"variant"`
+                // (the automatic dedup pipeline's own RELATE output —
+                // see `soft_identity_projection_for_display`), a pair linked
+                // that way would come back enabled the moment this
+                // transaction commits: `Unsure` would have touched two rows
+                // that were never enabled to begin with and left the one
+                // actually holding the pair together untouched.
                 set_relation_enabled_on(&txn, entry_a, entry_b, SAME_IDENTITY, false).await?;
                 set_relation_enabled_on(&txn, entry_a, entry_b, DIFFERENT_IDENTITY, false).await?;
+                set_relation_enabled_on(&txn, entry_a, entry_b, "variant", false).await?;
             }
         }
         dedup_suggestion::Entity::update_many()
@@ -1950,6 +2046,46 @@ impl MusicDb {
             .await?
             .into_iter()
             .map(|m| m.id)
+            .collect())
+    }
+
+    /// Every relation row — enabled *or not* — touching `entry_id` or any
+    /// live member of its soft-identity component: the graph view the
+    /// player renders and lets a human edit directly, including a link a
+    /// plain "Unlink" just downgraded to disabled (still shown, dashed, one
+    /// click from being restored) and a `different_identity` hard block
+    /// (still shown, distinctly, one click from being softened back). Using
+    /// only *enabled* edges among *live* members — the obvious-looking
+    /// query — would make a downgraded link disappear outright the moment
+    /// it's disabled, since disabling it is exactly what drops the far
+    /// endpoint out of the live component in the first place; anchoring on
+    /// `entry_id` and querying "touches a live member" rather than "both
+    /// endpoints are live members" keeps that endpoint's edge (and the node
+    /// itself) visible so it stays undoable.
+    pub async fn relations_around(&self, entry_id: i64) -> Result<Vec<RelationRow>, Error> {
+        let projection = self.soft_identity_projection_for_display().await?;
+        let mut anchors: HashSet<i64> = match projection.component_of(entry_id) {
+            Some(component) => projection
+                .members_by_component
+                .get(&component)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            None => HashSet::new(),
+        };
+        anchors.insert(entry_id);
+
+        Ok(entry_relation::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(entry_relation::Column::EntryA.is_in(anchors.iter().copied()))
+                    .add(entry_relation::Column::EntryB.is_in(anchors.iter().copied())),
+            )
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
             .collect())
     }
 
@@ -2447,5 +2583,72 @@ mod tests {
         assert_eq!(row.evidence_hash, "hash-2");
         assert_eq!(row.choice, "related_variant");
         assert_eq!(row.confidence, 0.6);
+    }
+
+    fn alias(name: &str) -> crate::providers::types::Alias {
+        crate::providers::types::Alias {
+            name: name.to_string(),
+            source: "youtube".to_string(),
+            locale: None,
+            extra: serde_json::Value::Null,
+            primary: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn search_entry_ids_by_alias_matches_substring_case_insensitively() {
+        let mdb = mem_db().await;
+        let matching = mdb.insert_entry(None).await.unwrap();
+        mdb.upsert_pair(
+            "youtube",
+            "v1",
+            matching,
+            None,
+            &EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Ridiculous Fervor")])
+            .await
+            .unwrap();
+
+        let other = mdb.insert_entry(None).await.unwrap();
+        mdb.upsert_pair(
+            "youtube",
+            "v2",
+            other,
+            None,
+            &EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        mdb.insert_aliases_for_pair("youtube", "v2", &[alias("Totally Different")])
+            .await
+            .unwrap();
+
+        let ids = mdb
+            .search_entry_ids_by_alias("ridiculous", 10)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec![matching]);
+
+        assert!(
+            mdb.search_entry_ids_by_alias("", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            mdb.search_entry_ids_by_alias("no such song", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -146,6 +146,71 @@ pub struct SoftMatchConfig {
     pub http_client: Option<Arc<dyn HttpClient>>,
 }
 
+/// The `SoftMatchConfig` shared by every caller that runs online soft-dedup
+/// after an ingest (the `import` CLI, the `server` binary's ingest job):
+/// RELATE and soft MERGE (`same_identity`) decisions are both written
+/// reversibly (tombstoned via `enabled`, never repoints `entry_source`) —
+/// no softmatch verdict destructively merges entries; that stays an
+/// import-time/dedup-barrier operation (docs/dedup-v2.md). No entry types
+/// are routed to Jev by default; `http_client` is unset, so `http_call` is
+/// disabled until a caller wires one in.
+///
+/// Returns `None` if `<config_dir>/match.rhai` doesn't exist, meaning
+/// soft-dedup isn't configured and should be skipped entirely.
+pub fn default_soft_match_config() -> Option<SoftMatchConfig> {
+    let config_dir = crate::app_dirs::config_dir();
+    let script_path = config_dir.join("match.rhai");
+    if !script_path.exists() {
+        return None;
+    }
+    let embed_db = crate::app_dirs::data_dir().join("embeddings.db");
+    let model_path = config_dir.join("dedup-model.json");
+    let persist_suggestions = model_path.exists();
+    Some(SoftMatchConfig {
+        script_path: script_path.display().to_string(),
+        model_path: model_path
+            .exists()
+            .then(|| model_path.display().to_string()),
+        persist_suggestions,
+        apply_relates: true,
+        jev_entry_types: Default::default(),
+        csv_path: None,
+        embed_db_path: Some(embed_db.display().to_string()),
+        embed_model_id: None,
+        embed_dim: 256,
+        embed_k: 20,
+        embed_sim_threshold: 0.45,
+        embed_max_pages: 1,
+        candidate_max_block: 50,
+        candidate_ngram_k: 30,
+        verbose_decisions: false,
+        http_client: None,
+    })
+}
+
+// ── Blocking helper ────────────────────────────────────────────────────────────
+
+/// Runs `f` (synchronous, CPU/FFI-bound work — Rhai script execution, an
+/// embedding model) off the async task without stalling the runtime, on
+/// runtimes that support it. `tokio::task::block_in_place` requires a
+/// multi-threaded runtime (it hands this task's worker thread to another
+/// waiting task while `f` runs) and panics on a current-thread one — which
+/// the `server` binary uses deliberately, since its dedup scoring pipeline
+/// holds a `rhai::Engine` (not `Send`) across `.await` points and needs
+/// `spawn_local` (see `src/bin/server/jobs.rs`). On a current-thread runtime
+/// there's no worker pool to hand off to anyway, so `f` just runs in place —
+/// blocking the one thread, same as every other request handler already does
+/// while `db`/HTTP calls are in flight there.
+fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
+    if tokio::runtime::Handle::current().runtime_flavor()
+        == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 // ── Source classification ─────────────────────────────────────────────────────
 
 /// Sources whose titles are noisy (artist prefix, "Music Video" suffix, etc.).
@@ -3124,7 +3189,7 @@ async fn open_embed_cache(
 
     let cache_clone = cache.clone();
     let entries_ref = entries;
-    tokio::task::block_in_place(|| {
+    run_blocking(|| {
         embed_stale_entries(
             entries_ref,
             &tmp_engine,

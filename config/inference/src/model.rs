@@ -3,6 +3,8 @@
 //!   NGramHash -> 4x KmeansEmbeddingLookup -> concat -> 3x FullyConnected -> Softmax
 //! Matches the reference numerically (float dequant of the int8 hybrid weights).
 
+use std::ffi::CString;
+
 use crate::utf;
 
 // ── Fixed architecture constants (from the tflite NGramHash custom_options) ──
@@ -170,6 +172,9 @@ pub struct Weights {
     pub fc2_ws: Vec<i32>,
     pub fc3_ws: Vec<i32>,
     pub labels: Vec<String>,
+    /// NUL-terminated copies of `labels`, so the C ABI can hand out a valid
+    /// C string pointer without over-reading past the `str` end.
+    pub labels_c: Vec<CString>,
 }
 
 /// Per-output-row sums of an `[n_out, n_in]` int8 weight matrix.
@@ -234,6 +239,10 @@ impl Weights {
             fc2_ws,
             fc3_ws,
             labels: labels_txt.lines().map(|s| s.to_string()).collect(),
+            labels_c: labels_txt
+                .lines()
+                .map(|s| CString::new(s).expect("label contains interior NUL"))
+                .collect(),
         }
     }
 }

@@ -2708,6 +2708,7 @@ dependencies = [
  "unicode-normalization",
  "ureq 3.3.0",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]
@@ -3666,6 +3667,7 @@ dependencies = [
  "hashlink 0.9.1",
  "libsqlite3-sys",
  "smallvec",
+ "uuid",
 ]
 
 [[package]]

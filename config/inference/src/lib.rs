@@ -91,16 +91,26 @@ pub fn detect_romaji(text: &str) -> Vec<String> {
     e.romaji.detect(text, &e.weights)
 }
 
-/// Top language code for `text` per the LangID model.
-pub fn detect_language(text: &str) -> &'static str {
+/// Index of the top language label for `text` per the LangID model.
+fn detect_language_idx(text: &str) -> usize {
     let e = engine();
     let probs = model::predict(text, &e.weights);
-    let (mi, _) = probs
+    probs
         .iter()
         .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-        .unwrap();
-    &e.weights.labels[mi]
+        .map(|(mi, _)| mi)
+        .unwrap()
+}
+
+/// Top language code for `text` per the LangID model.
+pub fn detect_language(text: &str) -> &'static str {
+    &engine().weights.labels[detect_language_idx(text)]
+}
+
+/// Top language code for `text` as a NUL-terminated C string, for the C ABI.
+fn detect_language_cstr(text: &str) -> &'static std::ffi::CStr {
+    &engine().weights.labels_c[detect_language_idx(text)]
 }
 
 /// Sentence embedding for `text` (L2-normalized), using the active backend.
@@ -140,8 +150,8 @@ pub fn embed_batch(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
 //   independently-heap-allocated strings; free with `inference_free_string_array`.
 // • `inference_embed_batch`   – returns a flat `*mut f32` buffer of
 //   `n_texts * *out_dim` values; free with `inference_free_float_array`.
-// • `inference_detect_language` – returns a pointer into static storage;
-//   always valid, no free needed.
+// • `inference_detect_language` – returns a NUL-terminated pointer into static
+//   storage (the interned per-label `CString`s); always valid, no free needed.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -195,7 +205,7 @@ pub unsafe extern "C" fn inference_detect_language(text: *const c_char) -> *cons
             return FALLBACK.as_ptr() as *const c_char;
         }
         match CStr::from_ptr(text).to_str() {
-            Ok(s) => detect_language(s).as_ptr() as *const c_char,
+            Ok(s) => detect_language_cstr(s).as_ptr(),
             Err(_) => FALLBACK.as_ptr() as *const c_char,
         }
     }

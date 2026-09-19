@@ -14,17 +14,14 @@ use musiclib_rs::{
     http::HttpClientConfig,
     musicdb::MusicDb,
     pipeline::{
-        dedup::{DedupConfig, dedup_db, merge_configs, reconcile_tags},
-        flush::flush,
-        importer::import,
+        dedup::{DedupConfig, dedup_db, merge_configs},
+        ingest::ingest_entry,
         progress,
-        softmatch::{SoftMatchConfig, match_new_entries},
-        state::State,
+        softmatch::default_soft_match_config,
     },
     providers::{
         fetch_options_yaml::load_from_file,
         registry::{RegistryConfig, build_providers},
-        std_values::StandardProviderKeys,
         types::{
             ChildMatcher, ChildMatcherExpr, ChildRule, EntryFetchOptions, EntryFetchOptionsPool,
         },
@@ -187,54 +184,29 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let state = Arc::new(State::new());
-
-    import(
-        Arc::clone(&state),
-        Arc::clone(&providers),
-        Arc::clone(&pool),
-        (StandardProviderKeys::UNKNOWN_URL.to_string(), args.url),
-        root_id,
-    )
-    .await;
-
     let merged = merge_configs(&dedup_configs);
-    let touched_ids = flush(state, providers.as_slice(), &db, &merged).await?;
-    if !dedup_configs.is_empty() {
-        reconcile_tags(providers.as_slice(), &db, &dedup_configs).await?;
+    let mut soft_cfg = (!args.skip_softmatch)
+        .then(default_soft_match_config)
+        .flatten();
+    if let Some(cfg) = soft_cfg.as_mut() {
+        cfg.http_client = Some(Arc::clone(&http_for_script));
+    }
+    let outcome = ingest_entry(
+        &db,
+        &providers,
+        &pool,
+        root_id,
+        &dedup_configs,
+        &merged,
+        soft_cfg.as_ref(),
+        args.url,
+    )
+    .await?;
+    match outcome.entry_id {
+        Some(id) => info!(entry_id = id, "Ingested"),
+        None => info!("No provider recognised the input URL; nothing ingested"),
     }
 
-    // RELATE and soft MERGE (same_identity) both write reversibly
-    // (tombstoned via `enabled`, never repoints `entry_source`) — no
-    // softmatch verdict destructively merges entries; that stays an
-    // import-time/dedup-barrier operation (docs/dedup-v2.md).
-    let script_path = config_dir.join("match.rhai");
-    if !args.skip_softmatch && script_path.exists() {
-        let embed_db = app_dirs::data_dir().join("embeddings.db");
-        let model_path = config_dir.join("dedup-model.json");
-        let persist_suggestions = model_path.exists();
-        let soft_cfg = SoftMatchConfig {
-            script_path: script_path.display().to_string(),
-            model_path: model_path
-                .exists()
-                .then(|| model_path.display().to_string()),
-            persist_suggestions,
-            apply_relates: true,
-            jev_entry_types: Default::default(),
-            csv_path: None,
-            embed_db_path: Some(embed_db.display().to_string()),
-            embed_model_id: None,
-            embed_dim: 256,
-            embed_k: 20,
-            embed_sim_threshold: 0.45,
-            embed_max_pages: 1,
-            candidate_max_block: 50,
-            candidate_ngram_k: 30,
-            verbose_decisions: false,
-            http_client: Some(http_for_script),
-        };
-        match_new_entries(&db, &touched_ids, &merged, providers.as_slice(), &soft_cfg).await?;
-    }
     info!(
         "YouTube Data API quota used: {} unit(s)",
         youtube_quota.load(Ordering::Relaxed),
