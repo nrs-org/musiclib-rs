@@ -673,6 +673,15 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
     let edges: Vec<_> = edges
         .iter()
         .map(|r| {
+            // `extra` holds the reason text and, for dedup-v2 primitive-relation
+            // kinds, the `relate(...)` script's metadata map (`transformation`,
+            // `derived_side`, …) — parse it so the frontend can render fields
+            // directly instead of a raw JSON string. Malformed/absent payloads
+            // just render as no metadata, never an error.
+            let extra = r
+                .extra
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
             json!({
                 "entry_a": r.entry_a,
                 "entry_b": r.entry_b,
@@ -680,6 +689,7 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
                 "origin": r.origin,
                 "confidence": r.confidence,
                 "enabled": r.enabled,
+                "extra": extra,
             })
         })
         .collect();
@@ -793,6 +803,14 @@ async fn unlink_relation(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
 /// `soft_identity_projection_for_display` treats as a same-identity signal)
 /// so this endpoint can't be used to sidestep the ledger-tracked link/unlink
 /// path for those.
+///
+/// Deliberately does **not** include the dedup-v2 primitive-relation
+/// predicates (`musicdb::{MEMBER_OF, DERIVED_FROM, PARTICIPATES_IN,
+/// FACET_OF}`, docs/dedup-v2.md) — those are pipeline-only assertions for
+/// now (e.g. `decide_track` relating a track to its instrumental via
+/// `derived_from`), read-only in the player UI (`entry_relations` still
+/// returns them; see `PRIMITIVE_RELATION_KIND_SET` in the frontend). Add a
+/// kind here only once manual curation for it has actually been designed.
 const RELATE_KINDS: &[&str] = &[
     "alt_version",
     "live",

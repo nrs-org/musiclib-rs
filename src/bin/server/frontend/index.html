@@ -4762,6 +4762,18 @@
   ];
   const RELATE_KIND_SET = new Set(RELATE_KINDS);
 
+  // The dedup-v2 primitive-relation predicates (docs/dedup-v2.md; constants
+  // `MEMBER_OF`/`DERIVED_FROM`/`PARTICIPATES_IN`/`FACET_OF` in
+  // `src/musicdb/mod.rs`) — asserted only by the pipeline (e.g. `decide_track`
+  // relating a track to its instrumental via `derived_from`), never through
+  // `/api/relations/relate`, so unlike `RELATE_KINDS` this isn't an allowlist
+  // the server accepts from the UI. A `different_identity` pair with one of
+  // these edges is exactly the v2 ontology's "relate" policy outcome — same
+  // display bucket as `RELATE_KINDS`, not the same-identity "active" one,
+  // since these rows never mean the two entries are the same recording/edit.
+  const PRIMITIVE_RELATION_KINDS = ["member_of", "derived_from", "participates_in", "facet_of"];
+  const PRIMITIVE_RELATION_KIND_SET = new Set(PRIMITIVE_RELATION_KINDS);
+
   // "active" mirrors the live component (same_identity/variant, enabled).
   // "suggested" is a plain-unlinked edge: disabled, but the row survives —
   // shown dashed, one click restores it. "blocked" is a force-unlinked
@@ -4769,11 +4781,14 @@
   // to neutral rather than trivially restoring it. "cleared" is a disabled
   // different_identity/relate-kind row with nothing currently asserted —
   // not rendered, it carries no actionable meaning. "related" is a
-  // RELATE_KINDS row (cover/remix/same_artist/…) — annotates a connection
-  // between two distinct entries, doesn't affect the identity graph at all.
+  // RELATE_KINDS row (cover/remix/same_artist/…) or a dedup-v2 primitive
+  // relation (`derived_from`/…) — annotates a connection between two
+  // distinct entries, doesn't affect the identity graph at all.
   function dedupEdgeState(edge) {
     if (edge.kind === "different_identity") return edge.enabled ? "blocked" : "cleared";
-    if (RELATE_KIND_SET.has(edge.kind)) return edge.enabled ? "related" : "cleared";
+    if (RELATE_KIND_SET.has(edge.kind) || PRIMITIVE_RELATION_KIND_SET.has(edge.kind)) {
+      return edge.enabled ? "related" : "cleared";
+    }
     return edge.enabled ? "active" : "suggested";
   }
 
@@ -5705,6 +5720,7 @@
           origin: e.origin,
           enabled: e.enabled,
           confidence: e.confidence,
+          extra: e.extra,
           state: dedupEdgeState(e),
         });
       }
@@ -5814,12 +5830,18 @@
 
     // Buttons for whatever's actually valid on this edge's kind — a
     // RELATE_KINDS edge only ever offers removal (it's an independent row,
-    // not a toggle), while same_identity/different_identity/variant get the
-    // same link/unlink/force-block/soften-block moves the old raw click and
+    // not a toggle), a dedup-v2 primitive-relation edge offers nothing
+    // (pipeline-only assertion — `/api/relations/relate`+`unrelate` reject
+    // these kinds server-side, see `RELATE_KINDS` in `src/bin/server/player.rs`),
+    // while same_identity/different_identity/variant get the same
+    // link/unlink/force-block/soften-block moves the old raw click and
     // shift-click used to perform directly.
     function edgeDetailActions(d) {
       const actions = el("div", { className: "graph-detail-actions" });
       const button = (text, onclick) => el("button", { className: "ghost-btn", type: "button", text, onclick });
+      if (PRIMITIVE_RELATION_KIND_SET.has(d.kind)) {
+        return actions;
+      }
       if (RELATE_KIND_SET.has(d.kind)) {
         actions.appendChild(
           d.state === "cleared"
@@ -5910,6 +5932,28 @@
       const bits = [`${endpointLabel(d.source)} ↔ ${endpointLabel(d.target)}`, d.origin, d.state];
       if (typeof d.confidence === "number") bits.push(`${Math.round(d.confidence * 100)}% confidence`);
       detailPanel.appendChild(el("p", { className: "graph-detail-type", text: bits.filter(Boolean).join(" · ") }));
+      // `extra` (entry_relation.extra) carries the RELATE reason and, for
+      // dedup-v2 primitive-relation kinds, the script's metadata map (e.g.
+      // `transformation`/`derived_side` for `derived_from` — see
+      // config/match.example.rhai). Surfaced as plain "key: value" lines,
+      // `reason` first since it's the one field every relate() call sets.
+      if (d.extra && typeof d.extra === "object") {
+        const { reason, ...rest } = d.extra;
+        const lines = [];
+        if (reason) lines.push(reason);
+        for (const [k, v] of Object.entries(rest)) lines.push(`${friendlyType(k)}: ${v}`);
+        for (const line of lines) {
+          detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: line }));
+        }
+      }
+      if (PRIMITIVE_RELATION_KIND_SET.has(d.kind)) {
+        detailPanel.appendChild(
+          el("p", {
+            className: "graph-detail-empty",
+            text: "Asserted by the dedup pipeline — not manually editable here.",
+          })
+        );
+      }
       detailPanel.appendChild(edgeDetailActions(d));
       detailPanel.appendChild(relateKindPicker(d.entry_a, d.entry_b));
     }

@@ -2095,14 +2095,7 @@ impl MusicDb {
             .all(&self.db)
             .await?
             .into_iter()
-            .map(|m| RelationRow {
-                entry_a: m.entry_a,
-                entry_b: m.entry_b,
-                kind: m.kind,
-                confidence: m.confidence,
-                origin: m.origin,
-                enabled: m.enabled,
-            })
+            .map(RelationRow::from)
             .collect())
     }
 }
@@ -2156,6 +2149,11 @@ pub struct RelationRow {
     pub confidence: f64,
     pub origin: String,
     pub enabled: bool,
+    /// Raw JSON payload (`entry_relation.extra`) — reason text and, for
+    /// dedup-v2 primitive-relation kinds (`derived_from`/`member_of`/…),
+    /// the `relate(...)` script's metadata map (e.g. `transformation`,
+    /// `derived_side`). Opaque here; callers that need it parse it.
+    pub extra: Option<String>,
 }
 
 impl From<entry_relation::Model> for RelationRow {
@@ -2167,6 +2165,7 @@ impl From<entry_relation::Model> for RelationRow {
             confidence: value.confidence,
             origin: value.origin,
             enabled: value.enabled,
+            extra: value.extra,
         }
     }
 }
