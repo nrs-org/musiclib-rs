@@ -1,0 +1,31 @@
+{
+  "id": "2b6b1d1e-9c1a-4e1f-8f0a-000000000001",
+  "title": "Beautiful Circle",
+  "length": 210000,
+  "disambiguation": "",
+  "video": false,
+  "first-release-date": "2020-01-01",
+  "artist-credit": [],
+  "relations": [],
+  "releases": [
+    {
+      "media": [
+        {
+          "tracks": [
+            { "length": 208000 }
+          ]
+        }
+      ]
+    },
+    {
+      "media": [
+        {
+          "tracks": [
+            { "length": 50000 },
+            { "length": 60000 }
+          ]
+        }
+      ]
+    }
+  ]
+}

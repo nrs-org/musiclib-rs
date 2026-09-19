@@ -33,7 +33,7 @@ pub(crate) struct RecordingResponse {
     pub first_release_date: Option<String>,
     #[serde(default)]
     pub relations: Vec<RecordingRelation>,
-    /// Populated when `inc=releases+media+recordings` is requested.
+    /// Populated when `inc=releases+media` is requested.
     #[serde(default)]
     pub releases: Vec<RecordingRelease>,
     #[serde(flatten)]
@@ -73,21 +73,19 @@ pub(crate) struct RecordingMedium {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RecordingTrack {
     pub length: Option<i64>,
-    /// Recording reference — present when `inc=recordings` is used, allowing
-    /// us to filter tracks that belong to this specific recording.
-    pub recording: Option<TrackRecordingRef>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TrackRecordingRef {
-    pub id: String,
 }
 
 // --- Constants ---
 
 pub(crate) const PARTS: &str = "artist-credits+artist-rels+url-rels";
-pub(crate) const PARTS_WITH_RELEASES: &str =
-    "artist-credits+artist-rels+url-rels+releases+media+recordings";
+/// No `+recordings`: MusicBrainz rejects it outright on this endpoint
+/// ("recordings is not a valid inc parameter for the recording resource"),
+/// unlike on a release lookup (`release.rs`'s own `PARTS`, where it *is*
+/// valid) — this asymmetry is easy to miss since both look like ordinary
+/// `inc` values. Without it, a track's medium never carries a `recording` id
+/// back to disambiguate which of its tracks is *this* recording; see the
+/// single-track-medium fallback in `get_recording` below.
+pub(crate) const PARTS_WITH_RELEASES: &str = "artist-credits+artist-rels+url-rels+releases+media";
 
 // --- Public API ---
 
@@ -181,17 +179,19 @@ pub async fn get_recording(
                     }
                 }
 
-                // Collect all per-release track lengths for this recording.
-                // When releases+media+recordings are included, each track has a
-                // `recording.id` field; we filter to only tracks that reference
-                // this recording so we don't pick up lengths from co-tracks on
-                // the same medium.
+                // Collect per-release track lengths for this recording. A
+                // recording lookup's `releases`/`media` inc has no way to
+                // say which track on a medium is *this* recording (see
+                // `PARTS_WITH_RELEASES`'s doc comment) — only single-track
+                // media are unambiguous, so multi-track media are skipped
+                // rather than risk attributing a co-track's length to this
+                // recording.
                 let mut duration_ms: Vec<i64> = r
                     .releases
                     .iter()
                     .flat_map(|rel| rel.media.iter())
+                    .filter(|med| med.tracks.len() == 1)
                     .flat_map(|med| med.tracks.iter())
-                    .filter(|t| t.recording.as_ref().is_none_or(|rec| rec.id == mbid))
                     .filter_map(|t| t.length)
                     .collect();
                 // Fall back to the recording-level aggregate when no track
@@ -240,6 +240,13 @@ mod tests {
 
     fn recording_api_url(mbid: &str) -> String {
         MusicBrainzClient::build_url(&format!("recording/{mbid}"), &[("inc", PARTS)])
+    }
+
+    fn recording_with_releases_api_url(mbid: &str) -> String {
+        MusicBrainzClient::build_url(
+            &format!("recording/{mbid}"),
+            &[("inc", super::PARTS_WITH_RELEASES)],
+        )
     }
 
     #[tokio::test]
@@ -291,6 +298,39 @@ mod tests {
         );
         assert_eq!(artist.contributions.len(), 1);
         assert!(artist.contributions[0].main_artist);
+
+        Ok(())
+    }
+
+    /// Regression test for the `@ShirakamiFubuki` channel import where every
+    /// MusicBrainz recording lookup failed with a 400: `PARTS_WITH_RELEASES`
+    /// used to include an `inc=recordings` MusicBrainz rejects outright on
+    /// the recording resource. This both pins the corrected `inc=` value (the
+    /// mock only matches that exact URL, so a regression here would 404, not
+    /// silently pass) and checks the single-track-medium fallback picks up
+    /// the unambiguous release's length while skipping the two-track one.
+    #[tokio::test]
+    async fn test_get_recording_with_release_durations() -> anyhow::Result<()> {
+        let mbid = "2b6b1d1e-9c1a-4e1f-8f0a-000000000001";
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route_json::<RecordingResponse>(
+            Method::GET,
+            &recording_with_releases_api_url(mbid),
+            include_str!("./recording_beautiful_circle_with_releases.json"),
+        );
+
+        let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
+        let rec = get_recording(
+            &client,
+            &format!("https://musicbrainz.org/recording/{mbid}"),
+            true,
+        )
+        .await?;
+
+        assert!(matches!(
+            rec.specific_data,
+            EntrySpecificData::Track { ref duration_ms, .. } if duration_ms == &vec![208000_i64]
+        ));
 
         Ok(())
     }
