@@ -559,16 +559,22 @@ fn version_token_symdiff(va, vb) {
 
 // Which of a/b (by the script's own a/b parameter naming, NOT the
 // canonicalized entry_a/entry_b the row eventually gets stored under -- see
-// `apply_candidate`'s `resolve_derived_side`) is specifically the
-// instrumental side, given each side's own version tokens. Returns "a", "b",
-// or "" if neither/both sides register as instrumental (shouldn't happen
-// when the caller already checked `version_token_symdiff(...).contains
-// ("instrumental")`, but stay conservative rather than guess).
-fn instrumental_side(va, vb) {
-    let a_instr = va.contains("instrumental");
-    let b_instr = vb.contains("instrumental");
-    if a_instr && !b_instr { return "a"; }
-    if b_instr && !a_instr { return "b"; }
+// `apply_candidate`'s `resolve_derived_side`) is the transformed/derived
+// side, given each side's own version tokens. A side counts as derived when
+// it carries version marker(s) -- live/remix/instrumental/acoustic/cover/
+// edit/etc. -- that the other side lacks entirely (an empty-marker side is
+// the plain/original recording). Returns "" when both sides carry marker(s)
+// the other lacks (e.g. "live" vs "remix") since title tokens alone can't
+// tell which one the other was transformed from.
+fn derived_side(va, vb) {
+    let at = []; for t in va.split(" ") { if t != "" { at.push(t); } }
+    let bt = []; for t in vb.split(" ") { if t != "" { bt.push(t); } }
+    let a_extra = false;
+    for t in at { if !bt.contains(t) { a_extra = true; } }
+    let b_extra = false;
+    for t in bt { if !at.contains(t) { b_extra = true; } }
+    if a_extra && !b_extra { return "a"; }
+    if b_extra && !a_extra { return "b"; }
     ""
 }
 
@@ -797,7 +803,6 @@ fn decide(ctx, a, b) {
 fn decide_track(ctx, a, b) {
     let MERGE_MIN      = 0.90;
     let RELATE_MIN     = 0.82;
-    let TITLE_ONLY_MIN = 0.95;
 
     if markers_conflict(ctx, a, b) { return distinct(); }
 
@@ -814,16 +819,18 @@ fn decide_track(ctx, a, b) {
 
     if same_release_position(a, b) {
         if t >= 0.70 && !version_differs { return merge(max(t, 0.90), "same release position"); }
-        // Validated dedup-v2 case: two sources catalogue the same disc/track
-        // slot but one side is specifically an instrumental/off-vocal/karaoke
-        // cut. That's a `derived_from` transformation of the vocal recording,
+        // Two sources catalogue the same disc/track slot but the version
+        // markers differ (instrumental/live/remix/acoustic/cover/edit/etc.)
+        // — that's a `derived_from` transformation of the plain recording,
         // not an undifferentiated "variant" — see docs/dedup-v2.md.
-        if version_differs && version_token_symdiff(va, vb).contains("instrumental") {
-            return relate("derived_from", 0.75, "same release position, instrumental vs vocal",
-                #{"transformation": "instrumental", "derived_side": instrumental_side(va, vb)});
+        if version_differs {
+            return relate("derived_from", 0.75, "same release position, version differs",
+                #{"transformation": version_token_symdiff(va, vb), "derived_side": derived_side(va, vb)});
         }
-        return relate("variant", 0.75, "same release position, titles differ",
-            #{"transformation": version_token_symdiff(va, vb)});
+        // Same slot, weak title similarity, no version marker either side --
+        // no known transformation to assert and no corroboration. Per
+        // docs/dedup-v2.md: "unknown relatedness creates no edge."
+        return distinct();
     }
 
     if t < RELATE_MIN { return distinct(); }
@@ -886,20 +893,19 @@ fn decide_track(ctx, a, b) {
         } else {
             "title match, no duration available"
         };
-        // Same dedup-v2 instrumental case as above, reached via the
+        // Same dedup-v2 transformation case as above, reached via the
         // corroborated-title path instead of a shared release position.
-        if version_differs && version_token_symdiff(va, vb).contains("instrumental") {
+        if version_differs {
             return relate("derived_from", t * 0.9, reason,
-                #{"transformation": "instrumental", "derived_side": instrumental_side(va, vb)});
+                #{"transformation": version_token_symdiff(va, vb), "derived_side": derived_side(va, vb)});
         }
-        return relate("variant", t * 0.9, reason,
-            #{"transformation": version_token_symdiff(va, vb)});
+        // Duration differs (or unknown), no version marker either side, no
+        // other corroboration -- no known transformation to assert.
+        return distinct();
     }
 
-    if !version_differs && t >= TITLE_ONLY_MIN {
-        return relate("variant", t * 0.75, "title match only, no corroboration");
-    }
-
+    // High title similarity alone, no corroboration, no version marker --
+    // same "unknown relatedness creates no edge" call as above.
     distinct()
 }
 
@@ -922,7 +928,10 @@ fn decide_artist(ctx, a, b) {
         });
     }
 
-    relate("variant", sim * 0.75, "alias match, no shared credits")
+    // Alias match with no corroborating shared credits -- no known
+    // relationship to assert; see docs/dedup-v2.md's "unknown relatedness
+    // creates no edge."
+    distinct()
 }
 
 // ── Releases ──────────────────────────────────────────────────────────────────
@@ -937,7 +946,12 @@ fn decide_release(ctx, a, b) {
     if title_exact(a, b) && shared_count_authoritative_ids(a, b) > 0 {
         return merge(max(t, MERGE_MIN), "exact title + shared authoritative ID");
     }
-    relate("variant", t, "title match — likely release variant")
+    // Title match alone, no shared authoritative ID. The v2-correct shape
+    // here is each release asserting `member_of` a shared release_group
+    // entry rather than a direct edge between the two releases (see
+    // docs/dedup-v2.md's release-group example) -- deferred until that
+    // wiring exists; for now this is "unknown relatedness creates no edge."
+    distinct()
 }
 
 // ── Release groups ────────────────────────────────────────────────────────────
