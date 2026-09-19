@@ -2863,6 +2863,28 @@ async fn score_candidates(
     Ok(stats)
 }
 
+/// Resolve a `derived_from` script's script-relative `"derived_side": "a"|"b"`
+/// metadata into the two absolute entry ids the direction is actually about
+/// (`derived_entry`/`source_entry`), and drop the transient `"a"`/`"b"` label
+/// -- it would be ambiguous to a later reader once `entry_a`/`entry_b` have
+/// been canonicalized to `(min(id), max(id))` by `upsert_relation_on`, which
+/// has nothing to do with which side is the original vs. the transformation.
+fn resolve_derived_side(extra: &mut serde_json::Value, ea_id: i64, eb_id: i64) {
+    let Some(obj) = extra.as_object_mut() else {
+        return;
+    };
+    let Some(side) = obj.remove("derived_side") else {
+        return;
+    };
+    let (derived, source) = match side.as_str() {
+        Some("a") => (ea_id, eb_id),
+        Some("b") => (eb_id, ea_id),
+        _ => return,
+    };
+    obj.insert("derived_entry".to_string(), serde_json::json!(derived));
+    obj.insert("source_entry".to_string(), serde_json::json!(source));
+}
+
 /// Score one candidate pair with the Rhai script, emit its CSV row and console
 /// log, apply the DB write when `apply_relates` is set, and bump `stats`. Returns
 /// the verdict so the caller can measure per-page merge rate for adaptive paging.
@@ -3028,6 +3050,12 @@ async fn apply_candidate(
                 {
                     obj.extend(meta.clone());
                 }
+                // `entry_relation` is undirected in storage (`upsert_relation_on`
+                // always canonicalizes to `(min(id), max(id))`), so a script's
+                // "a"/"b"-relative direction is meaningless once persisted --
+                // resolve it into absolute entry ids now, while `ea`/`eb` (the
+                // script's actual a/b) are still in scope.
+                resolve_derived_side(&mut extra, ea.entry_id, eb.entry_id);
                 let extra_json = serde_json::to_string(&extra)?;
 
                 db.upsert_relation(

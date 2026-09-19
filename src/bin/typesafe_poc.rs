@@ -127,19 +127,143 @@ struct EntryView {
     /// redundant-by-design for a track entry, since credited_names/
     /// track_positions already cover that ground).
     release_tracks: Vec<String>,
+    /// Human-readable handles/slugs pulled from source identifiers (e.g. a
+    /// YouTube `@handle`, a Twitter/Genius/Marshmallow username) -- NOT the
+    /// opaque per-platform IDs (channel IDs, UUIDs, base62 hashes, numeric
+    /// catalog IDs) that `sources` deliberately omits. A handle is content
+    /// (a name choice a human made), unlike an opaque ID, so exposing it
+    /// doesn't let the model trivially ID-match; it's evidence of the same
+    /// kind as a title alias.
+    handles: Vec<String>,
+    /// For releases: internal entry ids of the release_group(s) this release
+    /// belongs to (via `entry_child`, release_group as parent). NOT an
+    /// external provider id -- it's this DB's own structural edge, and its
+    /// only use is exact-match comparison against the other side's list, so
+    /// exposing it doesn't create an ID-shortcut the way a raw source
+    /// identifier would. The catalog (MusicBrainz/Discogs) deliberately
+    /// splits a release_group into multiple release entities for different
+    /// editions/pressings -- so two releases sharing a release_group id are
+    /// most likely intentionally-different editions, not a duplicate
+    /// catalogued twice, which is close to the opposite of what tracklist
+    /// overlap alone would suggest.
+    release_group_ids: Vec<i64>,
 }
 
 const TOP_TITLES: usize = 8;
 const CREDITED_NAMES_CAP: usize = 8;
 const CHILD_TRACKS_CAP: usize = 12;
 const TRACK_POSITIONS_CAP: usize = 5;
+const HANDLES_CAP: usize = 6;
+
+/// Pull a human-readable slug out of a source identifier (URL), or `None` if
+/// the trailing path segment looks like an opaque platform ID (numeric
+/// catalog ID, UUID, YouTube channel ID, base62 hash) rather than a name a
+/// human actually chose.
+fn extract_handle(identifier: &str) -> Option<String> {
+    let after_scheme = identifier.splitn(2, "://").nth(1)?;
+    let without_query = after_scheme
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let core = without_query.split('/').filter(|s| !s.is_empty()).last()?;
+    let core = core.trim_start_matches('@');
+    if core.is_empty() {
+        return None;
+    }
+    let is_all_digit = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    if is_all_digit(core) || is_all_digit(core.strip_prefix("id").unwrap_or(core)) {
+        return None; // apple/deezer/discogs/bilibili/etc numeric catalog id
+    }
+    if core.len() == 24
+        && core.starts_with("UC")
+        && core
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None; // youtube channel id
+    }
+    if core.len() == 36 && core.matches('-').count() == 4 {
+        return None; // musicbrainz uuid
+    }
+    if core.len() >= 20 && core.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None; // hex hash (e.g. an archived image url's content hash)
+    }
+    {
+        let mut chars = core.chars();
+        if let Some(first) = chars.next() {
+            if core.len() >= 5
+                && first.is_ascii_uppercase()
+                && chars.clone().all(|c| c.is_ascii_digit())
+            {
+                return None; // single-letter-prefixed numeric id (ASIN, wikidata Q-id, ...)
+            }
+        }
+    }
+    let has_digit = core.chars().any(|c| c.is_ascii_digit());
+    let has_upper = core.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = core.chars().any(|c| c.is_ascii_lowercase());
+    if core.len() >= 15 && has_digit && has_upper && has_lower {
+        return None; // spotify/discogs-style base62 opaque id
+    }
+    let decoded = urlencoding::decode(core)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| core.to_string());
+    if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
+    }
+}
 
 fn resolve_title(all: &HashMap<i64, EntryInfo>, id: i64) -> Option<String> {
     all.get(&id)
         .and_then(|e| e.best_title.clone().or_else(|| e.aliases.first().cloned()))
 }
 
-fn entry_view(e: &EntryInfo, all: &HashMap<i64, EntryInfo>) -> EntryView {
+/// Entry ids of any release_group entries that `entry_id` is linked to as a
+/// child (via `entry_child`, release_group as parent) -- a release's
+/// membership in a release_group is exactly the "different pressing/edition
+/// of the same overarching work" structural signal MusicBrainz/Discogs
+/// encode by deliberately keeping releases under one group as separate
+/// entities, so this is the opposite of "duplicate catalogued twice".
+fn release_group_ids_for(conn: &SqliteConnection, entry_id: i64) -> anyhow::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT es2.entry_id FROM entry_source es1 \
+         JOIN entry_child ec ON ec.child_source = es1.source AND ec.child_identifier = es1.identifier \
+         JOIN entry_source es2 ON es2.source = ec.parent_source AND es2.identifier = ec.parent_identifier \
+         JOIN entry e ON e.id = es2.entry_id \
+         WHERE es1.entry_id = ?1 AND e.entry_type = 'release_group'",
+    )?;
+    let ids = stmt
+        .query_map(rusqlite::params![entry_id], |row| row.get(0))?
+        .collect::<Result<Vec<i64>, _>>()?;
+    Ok(ids)
+}
+
+/// Batch version of `release_group_ids_for` for every id in `entry_ids`,
+/// opening one short-lived read-only connection.
+fn load_release_groups(
+    db_path: &std::path::Path,
+    entry_ids: &[i64],
+) -> anyhow::Result<HashMap<i64, Vec<i64>>> {
+    let conn =
+        SqliteConnection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("opening {} read-only via rusqlite", db_path.display()))?;
+    let mut out = HashMap::new();
+    for &id in entry_ids {
+        let groups = release_group_ids_for(&conn, id)?;
+        if !groups.is_empty() {
+            out.insert(id, groups);
+        }
+    }
+    Ok(out)
+}
+
+fn entry_view(
+    e: &EntryInfo,
+    all: &HashMap<i64, EntryInfo>,
+    release_groups: &HashMap<i64, Vec<i64>>,
+) -> EntryView {
     let mut credited_names: Vec<String> = e
         .peer_entry_ids
         .iter()
@@ -162,6 +286,15 @@ fn entry_view(e: &EntryInfo, all: &HashMap<i64, EntryInfo>) -> EntryView {
     let mut sources: Vec<String> = e.pairs.iter().map(|(src, _)| src.clone()).collect();
     sources.sort();
     sources.dedup();
+
+    let mut handles: Vec<String> = e
+        .pairs
+        .iter()
+        .filter_map(|(_, identifier)| extract_handle(identifier))
+        .collect();
+    handles.sort();
+    handles.dedup();
+    handles.truncate(HANDLES_CAP);
 
     let mut position_keys: Vec<(i64, Option<i32>, Option<i32>)> =
         e.track_positions.iter().copied().collect();
@@ -198,6 +331,8 @@ fn entry_view(e: &EntryInfo, all: &HashMap<i64, EntryInfo>) -> EntryView {
         credited_names,
         track_positions,
         release_tracks,
+        handles,
+        release_group_ids: release_groups.get(&e.entry_id).cloned().unwrap_or_default(),
     }
 }
 
@@ -259,58 +394,257 @@ struct TypesafeResponse {
     usage: Usage,
 }
 
-fn build_questions() -> BTreeMap<String, Question> {
-    let mut q = BTreeMap::new();
-    q.insert(
-        "identity".to_string(),
-        Question::Choice {
-            instructions: "Entries `a` and `b` are catalog metadata records aggregated from \
-                multiple independent music databases (YouTube, Spotify, MusicBrainz, Discogs, \
-                etc.) into one library. Both have the same `entry_type`. Decide whether `a` and \
-                `b` describe the same real-world track, release, or artist and should be merged \
-                into a single library entry (merging loses the ability to play either version on \
-                its own, so it should only happen when the underlying audio content is the \
-                same). Titles/aliases may legitimately differ by language, romanization, \
-                capitalization, a length/edition suffix like \"(TV size)\", or an appended \
-                performer/cover-credit tag layered on an otherwise matching base title (e.g. a \
-                bare song title on one source vs. \"<title> ／ <performer name>(Cover)\" on \
-                another, which is a common YouTube cataloguing convention for tagging who \
-                performed a given upload, not proof of a separate work) -- none of that alone is \
-                evidence of difference. By contrast, a suffix that names a DIFFERENT mix or \
-                component of the recording -- \"Instrumental\", \"Off Vocal\", \"Karaoke\", \
-                \"Acapella\", \"Remix\", a specific stem -- points at meaningfully different \
-                audio content (e.g. vocals present vs. absent) even when the base title, artist, \
-                and duration otherwise match closely; treat that as evidence for \
-                different_identity, not something to ignore, since the two entries would not be \
-                interchangeable if merged. Also treat it as different_identity when the base \
-                title/content genuinely differs: a different song, a materially different \
-                release edition, or an independent, unrelated performer's own separate recording \
-                of the same song (as opposed to the same performer's single recording simply \
-                being catalogued under a bare title in one place and a credited/cover-tagged \
-                title in another)."
-                .to_string(),
-            criteria: BTreeMap::from([
-                (
-                    "same_identity".to_string(),
-                    "a and b are the same underlying entity (the same actual audio content) and \
-                     should be merged."
-                        .to_string(),
-                ),
-                (
-                    "different_identity".to_string(),
-                    "a and b are different underlying entities -- either the base title/work \
-                     genuinely differs, or one is a different mix/component (e.g. instrumental \
-                     vs. vocal) of the same song, not merely a formatting, language, or \
-                     credit/cover-tag suffix."
-                        .to_string(),
-                ),
-                (
-                    "unsure".to_string(),
-                    "the evidence is genuinely insufficient to decide either way.".to_string(),
-                ),
-            ]),
-        },
+/// `criteria` is the type-specific set of non-`unsure` choices (each type
+/// picks its own vocabulary -- e.g. track's 3-way same_identity/
+/// related_variant/unrelated vs. artist's 2-way same_identity/
+/// different_identity); `unsure` is appended automatically since its meaning
+/// never varies by type.
+fn identity_choice(instructions: &str, criteria: &[(&str, &str)]) -> Question {
+    let mut map: BTreeMap<String, String> = criteria
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    map.insert(
+        "unsure".to_string(),
+        "the evidence is genuinely insufficient to decide either way.".to_string(),
     );
+    Question::Choice {
+        instructions: instructions.to_string(),
+        criteria: map,
+    }
+}
+
+/// `entry_type` selects a dedicated `identity` framing per type -- each has a
+/// different notion of what "the same entity" means and a different set of
+/// pitfalls, so one generic wording reused across all four systematically
+/// under- or over-fires depending on type (confirmed empirically: splitting
+/// out just the artist wording took MERGE/artist agreement from 47.4% to
+/// 89.5%, see [[typesafe-soft-dedup-poc-findings]] in project memory).
+fn build_questions(entry_type: &str) -> BTreeMap<String, Question> {
+    let mut q = BTreeMap::new();
+    let identity_question = match entry_type {
+        "artist" => identity_choice(
+            "`a`/`b` are music-artist records aggregated from multiple databases (YouTube, \
+                Spotify, MusicBrainz, Discogs, etc.). Are they the SAME real-world person, \
+                group, or act? Language, romanization, capitalization, or channel-naming \
+                differences (e.g. a YouTube auto \"<name> - Topic\" channel) are NOT evidence of \
+                difference. A shared handle/username/official-link between the two records IS \
+                strong evidence for same_identity even when display names differ. Use \
+                different_identity when one is an individual member and the other the \
+                group/duo/unit they belong to (never merge a member with their group, even if \
+                closely associated), or when the shared name is generic/common with no other \
+                corroborating overlap (handle, associated work, official link).",
+            &[
+                (
+                    "same_identity",
+                    "same real-world person/group/act (different script/romanization/\
+                     capitalization/channel-naming counts as this) -- merge.",
+                ),
+                (
+                    "different_identity",
+                    "different entities -- e.g. a group vs. one of its members, or unrelated \
+                     people/acts that merely share a name.",
+                ),
+            ],
+        ),
+        "release" => identity_choice(
+            "`a`/`b` are release (album/EP/single/compilation) records from multiple databases, \
+                each listing `release_tracks`. Substantial tracklist overlap plus a matching or \
+                near-matching title/date is strong evidence FOR same_identity, even with catalog \
+                numbering/romanization/minor track-order differences (the same release often \
+                gets catalogued independently by several providers). Evidence FOR \
+                different_identity: a materially different tracklist/edition (e.g. a \
+                Deluxe/Anniversary edition, a live/remix album, a separate regional release with \
+                different content), release dates far apart with no edition link, or a generic \
+                shared title (e.g. \"Various Artists\") that could label unrelated releases. \
+                OVERRIDE: if `a` and `b` share a `release_group_ids` value, treat that as strong \
+                evidence FOR different_identity instead -- MusicBrainz/Discogs deliberately split \
+                one release_group into separate release entities to represent distinct \
+                editions/pressings, so a shared group id means \"different edition\" far more \
+                often than \"duplicate catalogued twice\", even when title/tracklist look alike.",
+            &[
+                (
+                    "same_identity",
+                    "same release (overlapping tracklist, matching title/date) catalogued \
+                     independently by different providers -- merge.",
+                ),
+                (
+                    "different_identity",
+                    "different releases -- a materially different tracklist/edition, a shared \
+                     release_group id (distinct editions), unrelated dates, or a generic shared \
+                     title with no real tracklist overlap.",
+                ),
+            ],
+        ),
+        "release_group" => identity_choice(
+            "`a`/`b` are release-group records -- the overarching creative work (e.g. \"the \
+                album\") independent of any specific edition, pressing, or regional release. Are \
+                they the SAME overarching work? Unlike at the `release` level, differences in \
+                pressing, edition, bonus-track count, regional tracklist, or title \
+                language/romanization do NOT matter here -- all still the same release_group. \
+                Use different_identity only when the underlying creative work itself differs -- \
+                a distinct album/EP project, an unrelated work sharing a generic title, or a \
+                compilation vs. the original work it draws from.",
+            &[
+                (
+                    "same_identity",
+                    "same overarching creative work, regardless of edition/pressing differences \
+                     between member releases -- merge.",
+                ),
+                (
+                    "different_identity",
+                    "different creative works -- not merely a different edition of the same one.",
+                ),
+            ],
+        ),
+        _ => identity_choice(
+            "`a`/`b` are track records from multiple databases. Classify the relationship: \
+                same_identity (the same recording -- merge), related_variant (a different \
+                mix/arrangement/component of the same song -- e.g. Instrumental, Off Vocal, \
+                Karaoke, Acapella, Remix, Arrange/Arrangement, a named lineup/event version -- \
+                keep separate but linked), or unrelated (a different song, or an independent \
+                performer's own separate recording sharing only the title -- no real \
+                connection). Language, romanization, capitalization, an edition suffix like \
+                \"(TV size)\", or an appended cover-credit tag (e.g. \"<title> ／ \
+                <performer>(Cover)\", a common YouTube convention) are NOT evidence against \
+                same_identity. A suffix naming a different mix/arrangement/component means NOT \
+                same_identity, but IS related_variant, not unrelated -- don't collapse that \
+                distinction. When base titles are effectively identical (ignoring punctuation \
+                like full/half-width comma) with no version/arrangement suffix, default to \
+                same_identity even without a duration match: a music-video cut commonly runs \
+                10-30s longer than an audio cut of the same song, so that gap alone isn't \
+                contradicting evidence -- and neither is partial credited-artist overlap, since \
+                source data is often incomplete. EXCEPTION: a short generic label reused across \
+                releases (numbered MC/talk segments, \"Intro\", \"Outro\", \"Encore\") is weak \
+                evidence even on an exact match, since each event has its own distinct segment \
+                under the same name -- require other corroboration, defaulting to unrelated or \
+                unsure without it.",
+            &[
+                (
+                    "same_identity",
+                    "the same recording (the same actual audio content) -- merge.",
+                ),
+                (
+                    "related_variant",
+                    "a different version/mix/arrangement/component of the same song (e.g. \
+                     instrumental vs. vocal, a named arrangement/lineup) -- related, not merged.",
+                ),
+                (
+                    "unrelated",
+                    "no real connection -- a different song, or an independent performer's own \
+                     recording sharing only the title.",
+                ),
+            ],
+        ),
+    };
+    q.insert("identity".to_string(), identity_question);
+    // Only tracks have a `related_variant` identity answer, so only tracks
+    // need this follow-up. Always asked alongside `identity` (answers come
+    // back in one batched call) rather than conditioned on it -- give a
+    // `not_applicable` escape hatch for when identity turns out to be
+    // same_identity or unrelated instead.
+    if entry_type == "track" {
+        q.insert(
+            "variant_kind".to_string(),
+            identity_choice(
+                "HARD RULE, check this first: if your `identity` answer for this pair was \
+                    same_identity or unrelated, you MUST answer not_applicable here and skip the \
+                    rest of this question -- do not pick a specific category just because `a` \
+                    and `b` individually resemble that kind of thing in general (e.g. two \
+                    independent artists who each separately cover the same song are unrelated as \
+                    a PAIR even though each one is individually \"a cover\" -- with no evidenced \
+                    connection between `a` and `b` specifically, the right answer is \
+                    not_applicable, not a guess at a shared genre). Only when your `identity` \
+                    answer was related_variant, proceed: what kind of version difference is it? \
+                    Pick the single best-fitting category from the evidence (titles, aliases, \
+                    durations), or unsure if they're clearly connected but the specific kind \
+                    isn't evidenced.",
+                &[
+                    (
+                        "cover",
+                        "an independent performer's own vocal cover/rendition of the same song \
+                         (different singer from the original).",
+                    ),
+                    (
+                        "live",
+                        "a live performance recording vs. a studio recording of the same song.",
+                    ),
+                    (
+                        "remix",
+                        "an official or fan remix / DJ edit of the same track.",
+                    ),
+                    (
+                        "rearrangement",
+                        "a musical rearrangement/reinterpretation (different instrumentation or \
+                         style) of the same song, not a full remix.",
+                    ),
+                    (
+                        "instrumental",
+                        "an instrumental / off-vocal / karaoke version vs. the vocal version.",
+                    ),
+                    (
+                        "edition",
+                        "a different length/edition cut of the same recording (e.g. \"TV size\", \
+                         a short version, an extended cut).",
+                    ),
+                    (
+                        "lineup_version",
+                        "a named alternate-lineup or event-specific version of the same song -- \
+                         trigger on the STRUCTURAL pattern (one side has a parenthetical/named \
+                         suffix like \"(X ver.)\"/\"(X Ver)\" naming some lineup/event/occasion \
+                         that the other side lacks) even if you don't personally recognize what \
+                         the specific name X refers to; you don't need world knowledge of the \
+                         named event/lineup, only that it's a distinct named-occasion suffix.",
+                    ),
+                    (
+                        "not_applicable",
+                        "identity was same_identity or unrelated -- there is no version \
+                         relationship between `a` and `b` to classify.",
+                    ),
+                ],
+            ),
+        );
+        q.insert(
+            "variant_direction".to_string(),
+            identity_choice(
+                "Same hard rule as `variant_kind`: if your `identity` answer for this pair was \
+                    same_identity or unrelated, you MUST answer not_applicable here. Two more \
+                    HARD RULES, check these before picking a side: (1) if `a` and `b`'s titles/ \
+                    aliases are identical or differ only in trivial formatting/punctuation, with \
+                    NO distinguishing version/transformation suffix on either side, you MUST \
+                    answer not_applicable -- there is no textual basis to pick a direction, so do \
+                    not guess one anyway. (2) if `a` and `b` are each independently credited to a \
+                    DIFFERENT transformer/arranger/coverer (e.g. two different named arrangers, \
+                    two different cover singers), with neither side's title claiming to be the \
+                    untransformed base, answer not_applicable -- they are likely both derived \
+                    from a common original that is neither `a` nor `b`, so don't assume one \
+                    derives from the other just because they're linked. Only past both of those \
+                    checks, proceed: of `a` and `b`, which one is the derived/transformed side \
+                    (the cover, remix, arrangement, instrumental cut, edition cut, etc.), and \
+                    which is closer to the original/base recording? Base this on evidence like \
+                    which side's title names the transformation (\"(Instrumental)\", \"Arranged \
+                    by X\", \"(Cover)\") versus which has the bare/plain title, or which side's \
+                    title explicitly says \"original\".",
+                &[
+                    (
+                        "a_is_derived",
+                        "`a` is the derived/transformed version; `b` is closer to the \
+                         original/base recording.",
+                    ),
+                    (
+                        "b_is_derived",
+                        "`b` is the derived/transformed version; `a` is closer to the \
+                         original/base recording.",
+                    ),
+                    (
+                        "not_applicable",
+                        "identity was same_identity or unrelated, or a direction between `a` \
+                         and `b` specifically isn't evidenced/doesn't apply.",
+                    ),
+                ],
+            ),
+        );
+    }
     q.insert(
         "title_match".to_string(),
         Question::Noul {
@@ -464,6 +798,19 @@ struct PairScore {
     row: PairRow,
     entry_type: String,
     related: f64,
+    /// Raw `identity` Choice value when the question mode produces one (e.g.
+    /// track's 3-way same_identity/related_variant/unrelated) -- lets
+    /// downstream analysis distinguish "demote to RELATE" from "no
+    /// connection at all" instead of collapsing both into `related = 0.0`.
+    identity_choice: Option<String>,
+    /// Raw `variant_kind` Choice value (track only) -- which kind of
+    /// version difference a related_variant pair is (cover/live/remix/
+    /// rearrangement/instrumental/edition/lineup_version/not_applicable).
+    variant_kind: Option<String>,
+    /// Raw `variant_direction` Choice value (track only) -- which of a/b is
+    /// the derived/transformed side vs. the original/base
+    /// (a_is_derived/b_is_derived/not_applicable).
+    variant_direction: Option<String>,
     title_match: f64,
     duration_consistent: f64,
     input_tokens: u64,
@@ -472,6 +819,7 @@ struct PairScore {
 
 async fn run_relatedness_eval(
     db: &MusicDb,
+    db_path: &std::path::Path,
     api_key: Option<&str>,
     dry_run: bool,
     path: &str,
@@ -479,14 +827,16 @@ async fn run_relatedness_eval(
     concurrency: usize,
     question_mode: &str,
 ) -> anyhow::Result<()> {
-    let build_questions_for_mode = match question_mode {
-        "related" => build_relatedness_questions,
-        "identity" => build_questions,
-        "verdict" => build_verdict_questions,
-        other => anyhow::bail!(
-            "unknown --questions {other:?}, expected \"related\", \"identity\", or \"verdict\""
-        ),
-    };
+    let build_questions_for_mode: Box<dyn Fn(&str) -> BTreeMap<String, Question> + Send + Sync> =
+        match question_mode {
+            "related" => Box::new(|_entry_type: &str| build_relatedness_questions()),
+            "identity" => Box::new(build_questions),
+            "verdict" => Box::new(|_entry_type: &str| build_verdict_questions()),
+            other => anyhow::bail!(
+                "unknown --questions {other:?}, expected \"related\", \"identity\", or \"verdict\""
+            ),
+        };
+    let build_questions_for_mode = Arc::new(build_questions_for_mode);
     if question_mode == "verdict" && !dry_run {
         anyhow::bail!(
             "--questions verdict is a design sketch (see response_to_verdict/build_verdict_questions) \
@@ -502,6 +852,7 @@ async fn run_relatedness_eval(
 
     let ids: Vec<i64> = rows.iter().flat_map(|r| [r.a, r.b]).collect();
     let entries = Arc::new(load_entries_with_context(db, &ids).await?);
+    let release_groups = Arc::new(load_release_groups(db_path, &ids)?);
 
     if dry_run {
         for row in rows.iter().take(3) {
@@ -510,11 +861,11 @@ async fn run_relatedness_eval(
             };
             let request = TypesafeRequest {
                 state: StatePayload {
-                    a: entry_view(ea, &entries),
-                    b: entry_view(eb, &entries),
+                    a: entry_view(ea, &entries, &release_groups),
+                    b: entry_view(eb, &entries, &release_groups),
                 },
                 model: MODEL.to_string(),
-                questions: build_questions_for_mode(),
+                questions: build_questions_for_mode(&ea.entry_type),
             };
             println!("--- pair ({}, {})  label={} ---", row.a, row.b, row.label);
             println!("{}", serde_json::to_string_pretty(&request)?);
@@ -534,19 +885,21 @@ async fn run_relatedness_eval(
             let client = client.clone();
             let api_key = api_key.clone();
             let entries = Arc::clone(&entries);
+            let release_groups = Arc::clone(&release_groups);
+            let build_questions_for_mode = Arc::clone(&build_questions_for_mode);
             async move {
                 let (Some(ea), Some(eb)) = (entries.get(&row.a), entries.get(&row.b)) else {
                     anyhow::bail!("entry missing for pair ({}, {})", row.a, row.b);
                 };
+                let entry_type = ea.entry_type.clone();
                 let request = TypesafeRequest {
                     state: StatePayload {
-                        a: entry_view(ea, &entries),
-                        b: entry_view(eb, &entries),
+                        a: entry_view(ea, &entries, &release_groups),
+                        b: entry_view(eb, &entries, &release_groups),
                     },
                     model: MODEL.to_string(),
-                    questions: build_questions_for_mode(),
+                    questions: build_questions_for_mode(&entry_type),
                 };
-                let entry_type = ea.entry_type.clone();
                 let parsed = call_typesafe(&client, &api_key, &request)
                     .await
                     .with_context(|| format!("pair ({}, {})", row.a, row.b))?;
@@ -556,19 +909,31 @@ async fn run_relatedness_eval(
                 };
                 // "identity" mode's main answer is a Choice, not a Noul -- fold it into the
                 // same 0..1 "related" slot (1.0 = same_identity) so the existing aggregation
-                // and CSV output work unchanged for ad hoc identity-mode checks.
+                // and CSV output work unchanged for ad hoc identity-mode checks. The raw choice
+                // string is kept separately (identity_choice) so a 3-way vocabulary like track's
+                // same_identity/related_variant/unrelated isn't lossily collapsed to related=0.0
+                // for both "demote to RELATE" and "no connection at all".
+                let mut identity_choice = None;
                 let related = match parsed.answers.get("identity") {
                     Some(Answer::Choice { choice, .. }) => {
-                        if choice == "same_identity" {
-                            1.0
-                        } else {
-                            0.0
-                        }
+                        identity_choice = Some(choice.clone());
+                        if choice == "same_identity" { 1.0 } else { 0.0 }
                     }
                     _ => get_noul("related"),
                 };
+                let variant_kind = match parsed.answers.get("variant_kind") {
+                    Some(Answer::Choice { choice, .. }) => Some(choice.clone()),
+                    _ => None,
+                };
+                let variant_direction = match parsed.answers.get("variant_direction") {
+                    Some(Answer::Choice { choice, .. }) => Some(choice.clone()),
+                    _ => None,
+                };
                 Ok(PairScore {
                     related,
+                    identity_choice,
+                    variant_kind,
+                    variant_direction,
                     title_match: get_noul("title_match"),
                     duration_consistent: get_noul("duration_consistent"),
                     input_tokens: parsed.usage.input_tokens,
@@ -616,12 +981,12 @@ fn write_scored_csv(path: &str, scores: &[PairScore]) -> anyhow::Result<()> {
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
         f,
-        "entry_a,entry_b,label,heuristic_confidence,entry_type,related,title_match,duration_consistent"
+        "entry_a,entry_b,label,heuristic_confidence,entry_type,related,identity_choice,variant_kind,variant_direction,title_match,duration_consistent"
     )?;
     for s in scores {
         writeln!(
             f,
-            "{},{},{},{},{},{:.3},{:.3},{:.3}",
+            "{},{},{},{},{},{:.3},{},{},{},{:.3},{:.3}",
             s.row.a,
             s.row.b,
             s.row.label,
@@ -631,6 +996,9 @@ fn write_scored_csv(path: &str, scores: &[PairScore]) -> anyhow::Result<()> {
                 .unwrap_or_default(),
             s.entry_type,
             s.related,
+            s.identity_choice.as_deref().unwrap_or(""),
+            s.variant_kind.as_deref().unwrap_or(""),
+            s.variant_direction.as_deref().unwrap_or(""),
             s.title_match,
             s.duration_consistent,
         )?;
@@ -1014,6 +1382,8 @@ fn restricted_entry_view(
         credited_names: Vec::new(),
         track_positions: Vec::new(),
         release_tracks: Vec::new(),
+        handles: Vec::new(),
+        release_group_ids: Vec::new(),
     })
 }
 
@@ -1114,7 +1484,7 @@ async fn run_merge_eval(
                     b: case.b.clone(),
                 },
                 model: MODEL.to_string(),
-                questions: build_questions(),
+                questions: build_questions(&case.entry_type),
             };
             println!("--- {} case: {} ---", case.label, case.desc);
             println!("{}", serde_json::to_string_pretty(&request)?);
@@ -1140,7 +1510,7 @@ async fn run_merge_eval(
                         b: case.b.clone(),
                     },
                     model: MODEL.to_string(),
-                    questions: build_questions(),
+                    questions: build_questions(&case.entry_type),
                 };
                 let parsed = call_typesafe(&client, &api_key, &request)
                     .await
@@ -1282,6 +1652,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(path) = &args.pairs_file {
         return run_relatedness_eval(
             &db,
+            &db_path,
             api_key.as_deref(),
             dry_run,
             path,
@@ -1322,6 +1693,7 @@ async fn main() -> anyhow::Result<()> {
 
     let ids: Vec<i64> = pairs.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
     let entries = load_entries_with_context(&db, &ids).await?;
+    let release_groups = load_release_groups(&db_path, &ids)?;
 
     let client = reqwest::Client::new();
     let mut correct = 0usize;
@@ -1343,11 +1715,11 @@ async fn main() -> anyhow::Result<()> {
         };
         let request = TypesafeRequest {
             state: StatePayload {
-                a: entry_view(ea, &entries),
-                b: entry_view(eb, &entries),
+                a: entry_view(ea, &entries, &release_groups),
+                b: entry_view(eb, &entries, &release_groups),
             },
             model: MODEL.to_string(),
-            questions: build_questions(),
+            questions: build_questions(&ea.entry_type),
         };
 
         if dry_run || args.verbose {

@@ -557,6 +557,21 @@ fn version_token_symdiff(va, vb) {
     diff
 }
 
+// Which of a/b (by the script's own a/b parameter naming, NOT the
+// canonicalized entry_a/entry_b the row eventually gets stored under -- see
+// `apply_candidate`'s `resolve_derived_side`) is specifically the
+// instrumental side, given each side's own version tokens. Returns "a", "b",
+// or "" if neither/both sides register as instrumental (shouldn't happen
+// when the caller already checked `version_token_symdiff(...).contains
+// ("instrumental")`, but stay conservative rather than guess).
+fn instrumental_side(va, vb) {
+    let a_instr = va.contains("instrumental");
+    let b_instr = vb.contains("instrumental");
+    if a_instr && !b_instr { return "a"; }
+    if b_instr && !a_instr { return "b"; }
+    ""
+}
+
 // ── Per-entry helpers ─────────────────────────────────────────────────────────
 
 fn pick_main_title(entry) {
@@ -805,9 +820,10 @@ fn decide_track(ctx, a, b) {
         // not an undifferentiated "variant" — see docs/dedup-v2.md.
         if version_differs && version_token_symdiff(va, vb).contains("instrumental") {
             return relate("derived_from", 0.75, "same release position, instrumental vs vocal",
-                #{"transformation": "instrumental"});
+                #{"transformation": "instrumental", "derived_side": instrumental_side(va, vb)});
         }
-        return relate("variant", 0.75, "same release position, titles differ");
+        return relate("variant", 0.75, "same release position, titles differ",
+            #{"transformation": version_token_symdiff(va, vb)});
     }
 
     if t < RELATE_MIN { return distinct(); }
@@ -873,9 +889,11 @@ fn decide_track(ctx, a, b) {
         // Same dedup-v2 instrumental case as above, reached via the
         // corroborated-title path instead of a shared release position.
         if version_differs && version_token_symdiff(va, vb).contains("instrumental") {
-            return relate("derived_from", t * 0.9, reason, #{"transformation": "instrumental"});
+            return relate("derived_from", t * 0.9, reason,
+                #{"transformation": "instrumental", "derived_side": instrumental_side(va, vb)});
         }
-        return relate("variant", t * 0.9, reason);
+        return relate("variant", t * 0.9, reason,
+            #{"transformation": version_token_symdiff(va, vb)});
     }
 
     if !version_differs && t >= TITLE_ONLY_MIN {
