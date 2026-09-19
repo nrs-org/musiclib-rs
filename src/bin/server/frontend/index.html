@@ -415,6 +415,132 @@
 
   .ingest-job-detail.error { color: var(--danger); }
 
+  /* live activity panel: fetched/failed counters, recent fetch-event log,
+     per-domain HTTP in-flight/done — the server-side answer to the `import`
+     CLI's progress bars, rendered from `JobProgress.detail` (see
+     `ingest_progress::JobProgressSink`). */
+  .ingest-job-activity {
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: var(--paper-deep);
+    border: 1px solid var(--rail);
+  }
+
+  .ingest-job-counters {
+    margin: 0 0 4px;
+    display: flex;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+
+  .ingest-job-counter-failed { color: var(--danger); }
+
+  .ingest-job-failures {
+    margin: 0 0 4px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+  }
+
+  .ingest-job-failures summary {
+    cursor: pointer;
+    color: var(--danger);
+    list-style: none;
+  }
+
+  .ingest-job-failures summary::-webkit-details-marker { display: none; }
+  .ingest-job-failures summary::before { content: "▸ "; }
+  .ingest-job-failures[open] summary::before { content: "▾ "; }
+
+  .ingest-job-failures-list {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+    max-height: 160px;
+    overflow-y: auto;
+    line-height: 1.5;
+    color: var(--ink-soft);
+  }
+
+  .ingest-job-failures-list li {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    border-top: 1px solid var(--rail);
+    padding: 2px 0;
+  }
+
+  .ingest-job-failures-list li:first-child { border-top: none; }
+
+  .ingest-job-log {
+    list-style: none;
+    margin: 0 0 4px;
+    padding: 0;
+    max-height: 96px;
+    overflow-y: auto;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: var(--ink-faint);
+  }
+
+  .ingest-job-log li {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .ingest-job-log li:last-child { color: var(--ink-soft); }
+
+  .ingest-job-domains {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+  }
+
+  .ingest-job-domains li {
+    display: flex;
+    gap: 5px;
+    color: var(--ink-faint);
+  }
+
+  .ingest-job-domains li.active { color: var(--brass); }
+
+  .ingest-job-domain-host { overflow-wrap: anywhere; }
+
+  .ingest-job-cancel {
+    flex: none;
+    border: 1px solid var(--rail);
+    background: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 3px 8px;
+    line-height: 1;
+    align-self: flex-start;
+  }
+
+  .ingest-job-cancel:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  .ingest-job-cancel:disabled { opacity: 0.6; cursor: default; }
+
+  .ingest-job-download {
+    flex: none;
+    border: 1px solid var(--rail);
+    background: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 3px 8px;
+    line-height: 1;
+    align-self: flex-start;
+  }
+
+  .ingest-job-download:hover { border-color: var(--brass); color: var(--brass); }
+
   .ingest-job-link {
     display: inline-block;
     margin-top: 2px;
@@ -492,6 +618,98 @@
   .import-jobs .ingest-job-detail,
   .import-jobs .ingest-job-link {
     font-size: 12px;
+  }
+
+  /* ---------- settings mode ---------- */
+
+  .settings-view {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 44px 28px 40px;
+  }
+
+  .settings-section + .settings-section {
+    margin-top: 36px;
+  }
+
+  .settings-section h2 {
+    font-family: var(--serif);
+    font-size: 20px;
+    font-weight: 500;
+    margin: 0 0 4px;
+  }
+
+  .settings-section p.sub {
+    color: var(--ink-soft);
+    margin: 0 0 16px;
+  }
+
+  .provider-pref-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--rail);
+  }
+
+  .provider-pref-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    background: var(--paper-deep);
+  }
+
+  .provider-pref-row + .provider-pref-row {
+    border-top: 1px solid var(--rail);
+  }
+
+  .provider-pref-rank {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    width: 1.4em;
+    flex: none;
+  }
+
+  .provider-pref-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex: none;
+  }
+
+  .provider-pref-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .provider-pref-moves {
+    display: flex;
+    gap: 4px;
+    flex: none;
+  }
+
+  .provider-pref-moves button {
+    border: 1px solid var(--rail);
+    background: transparent;
+    color: inherit;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .provider-pref-moves button:hover:not([disabled]) { border-color: var(--brass); color: var(--brass-ink); }
+
+  .provider-pref-moves button[disabled] {
+    opacity: 0.3;
+    cursor: default;
   }
 
   /* ---------- main: browsing / entry detail ---------- */
@@ -1055,6 +1273,13 @@
     color: var(--ink-soft);
   }
 
+  .queue-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border-radius: 999px;
+  }
+
   .manifest-label {
     font-family: var(--mono);
     font-size: 11px;
@@ -1088,7 +1313,8 @@
     text-align: right;
   }
 
-  .manifest-play {
+  .manifest-play,
+  .manifest-queue {
     flex: none;
     display: flex;
     align-items: center;
@@ -1103,14 +1329,17 @@
     cursor: pointer;
   }
 
-  .manifest-play:hover { background: var(--paper-deeper); color: var(--ink); }
+  .manifest-play:hover,
+  .manifest-queue:hover { background: var(--paper-deeper); color: var(--ink); }
 
-  .manifest-play[disabled] {
+  .manifest-play[disabled],
+  .manifest-queue[disabled] {
     color: var(--ink-faint);
     cursor: default;
   }
 
-  .manifest-play[disabled]:hover { background: transparent; }
+  .manifest-play[disabled]:hover,
+  .manifest-queue[disabled]:hover { background: transparent; }
 
   .manifest-title {
     flex: 1;
@@ -1291,6 +1520,20 @@
   }
 
   .player-dock-queue-jump:hover { text-decoration: underline; }
+
+  /* Divider between the explicitly-queued layer and Post-queue (the
+     background playlist — shuffle-all/tracklist continuation/auto-recommend
+     filler) in the "up next" panel — see `renderDockQueue`. */
+  .player-dock-queue-divider {
+    margin: 0;
+    padding: 6px 10px 2px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-top: 1px solid var(--rail);
+  }
 
   .player-dock-queue-remove {
     flex: none;
@@ -1609,6 +1852,7 @@
           <button type="button" data-mode="graph" aria-pressed="false">Graph</button>
           <button type="button" data-mode="player" aria-pressed="false">Player</button>
           <button type="button" data-mode="import" aria-pressed="false">Import</button>
+          <button type="button" data-mode="settings" aria-pressed="false">Settings</button>
         </nav>
         <div class="search-slot">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -1640,6 +1884,7 @@
         </div>
       </div>
       <div id="view-import" hidden></div>
+      <div id="view-settings" hidden></div>
     </main>
   </div>
 
@@ -1711,6 +1956,7 @@
   const viewGraphEl = document.getElementById("view-graph");
   const viewPlayerEl = document.getElementById("view-player");
   const viewImportEl = document.getElementById("view-import");
+  const viewSettingsEl = document.getElementById("view-settings");
   const playerStageWrapEl = document.getElementById("player-stage-wrap");
   const playerStageMountEl = document.getElementById("player-stage-mount");
   const playerStageEmptyEl = document.getElementById("player-stage-empty");
@@ -1722,6 +1968,57 @@
     soundcloud: "#b5651d",
     nicovideo: "#5b5b52",
   };
+
+  const PROVIDER_LABEL = {
+    youtube: "YouTube",
+    spotify: "Spotify",
+    soundcloud: "SoundCloud",
+    nicovideo: "Niconico",
+  };
+
+  function providerLabel(provider) {
+    return PROVIDER_LABEL[provider] || provider;
+  }
+
+  // ---------- playback source preference ----------
+  //
+  // When a track is playable from more than one source, the player mounts
+  // whichever comes first in this order (`sortByProviderPreference`, used by
+  // `Player.mount`) — configured from Settings mode. Persisted client-side
+  // only (localStorage), same as every other bit of playback UI state (see
+  // e.g. `player_volume_by_provider` above). `PLATFORM_COLOR`'s keys are this
+  // app's current universe of known providers; that list is expected to grow
+  // (more direct-playback backends), so a stored preference that predates a
+  // new one just doesn't mention it — `sortByProviderPreference` sorts any
+  // provider absent from the list after every provider present in it, rather
+  // than erroring or ignoring the whole preference.
+  const PROVIDER_PREFERENCE_KEY = "provider_preference";
+
+  function getProviderPreference() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(PROVIDER_PREFERENCE_KEY) || "null");
+      if (Array.isArray(raw) && raw.every((p) => typeof p === "string")) return raw;
+    } catch {}
+    return Object.keys(PLATFORM_COLOR);
+  }
+
+  function setProviderPreference(list) {
+    try {
+      localStorage.setItem(PROVIDER_PREFERENCE_KEY, JSON.stringify(list));
+    } catch {}
+  }
+
+  function sortByProviderPreference(sources) {
+    const order = getProviderPreference();
+    const rank = (provider) => {
+      const idx = order.indexOf(provider);
+      return idx === -1 ? order.length : idx;
+    };
+    return sources
+      .map((s, i) => ({ s, i }))
+      .sort((a, b) => rank(a.s.provider) - rank(b.s.provider) || a.i - b.i)
+      .map(({ s }) => s);
+  }
 
   const TYPE_ORDER = ["track", "release", "release_group", "artist"];
   const TYPE_LABEL = {
@@ -1762,6 +2059,7 @@
     viewGraphEl.hidden = mode !== "graph";
     viewPlayerEl.hidden = mode !== "player";
     viewImportEl.hidden = mode !== "import";
+    viewSettingsEl.hidden = mode !== "settings";
     for (const btn of modeSwitcherEl.querySelectorAll("button[data-mode]")) {
       btn.setAttribute("aria-pressed", String(btn.dataset.mode === mode));
     }
@@ -1794,6 +2092,9 @@
     } else if (mode === "import") {
       history.pushState({}, "", "/import");
       setMode("import");
+    } else if (mode === "settings") {
+      history.pushState({}, "", "/settings");
+      setMode("settings");
     }
   }
 
@@ -1842,6 +2143,7 @@
     "chevron-down": '<polyline points="6 9 12 15 18 9"></polyline>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"></polyline>',
     x: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
+    plus: '<line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>',
     "volume-2":
       '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M19 5a10 10 0 0 1 0 14"></path>',
     "volume-x":
@@ -1857,6 +2159,12 @@
       '<rect x="2" y="5" width="20" height="14" rx="5"></rect><polygon points="10 9 16 12 10 15 10 9" fill="currentColor" stroke="none"></polygon>',
     spotify:
       '<circle cx="12" cy="12" r="10"></circle><path d="M6.5 9.5c3.5-1.2 8-1.2 11.5 1"></path><path d="M7 13c2.8-0.9 6.2-0.9 9.5 1"></path><path d="M7.5 16.3c2.2-0.6 5-0.6 7.5 0.8"></path>',
+    soundcloud:
+      '<path d="M4.5 16a3 3 0 0 1 .3-6 5 5 0 0 1 9.6-1.4A4 4 0 0 1 19.5 12.5 3.3 3.3 0 0 1 19 16H4.5z"></path><line x1="7" y1="16" x2="7" y2="12.5"></line><line x1="9.5" y1="16" x2="9.5" y2="10.5"></line><line x1="12" y1="16" x2="12" y2="9.5"></line>',
+    // "Nico nico" is a Japanese onomatopoeia for smiling — the outline mark
+    // nods to that rather than to the actual logotype.
+    nicovideo:
+      '<circle cx="12" cy="12" r="10"></circle><circle cx="8.5" cy="10" r="1" fill="currentColor" stroke="none"></circle><circle cx="15.5" cy="10" r="1" fill="currentColor" stroke="none"></circle><path d="M7.5 14a5 5 0 0 0 9 0"></path>',
   };
 
   function svgIcon(name, size = 16) {
@@ -1905,13 +2213,99 @@
     let entryPoints = [];
     let selectedEntryPoint = "main";
 
-    // { id, query, status, stage, message, entryId, errorMessage }
+    // { id, query, status, stage, message, detail, entryId, errorMessage, canceling }
     let jobs = [];
     let inputValue = "";
     let submitError = null;
 
     function findJob(id) {
       return jobs.find((j) => j.id === id);
+    }
+
+    const RUNNING = (job) => job.status === "pending" || job.status === "running";
+
+    // Renders `job.detail` (see `ingest_progress::JobProgressSink` on the
+    // server) as a CLI-import-style panel: fetched/failed counters, the
+    // handful of most recent per-pair fetch lines, and live per-domain HTTP
+    // in-flight/done counts — everything the `import` binary's terminal
+    // shows, minus the log-level-gated debug lines. Returns `null` while a
+    // job hasn't reported a detail payload yet (still `pending`, or a job
+    // kind that never sends one).
+    // The specific failures, not just a count — collapsed by default since
+    // there can be up to 100 of them (see `MAX_FAILURES` server-side), but
+    // present and searchable instead of scrolling out of a 6-line rolling
+    // log the moment the next successful fetch comes in. This is the record
+    // that was missing when a big `@ShirakamiFubuki` import had ~180
+    // failures no one could identify afterwards.
+    function renderFailures(detail) {
+      const failures = detail.failures;
+      if (!Array.isArray(failures) || !failures.length) return null;
+      const truncated = detail.entries_failed > failures.length;
+      const label =
+        `${detail.entries_failed} failed request${detail.entries_failed === 1 ? "" : "s"}` +
+        (truncated ? ` (first ${failures.length} shown)` : "");
+      return el("details", { className: "ingest-job-failures" }, [
+        el("summary", { text: label }),
+        el(
+          "ul",
+          { className: "ingest-job-failures-list" },
+          failures.map((line) => el("li", { text: line }))
+        ),
+      ]);
+    }
+
+    function renderActivity(detail, { compact = false } = {}) {
+      if (!detail) return null;
+
+      const counters = el("p", { className: "ingest-job-counters" }, [
+        el("span", { text: `${detail.entries_fetched ?? 0} fetched` }),
+        detail.entries_failed
+          ? el("span", { className: "ingest-job-counter-failed", text: `${detail.entries_failed} failed` })
+          : null,
+        detail.youtube_quota_units
+          ? el("span", {
+              text: `${detail.youtube_quota_units} YouTube quota unit${detail.youtube_quota_units === 1 ? "" : "s"}`,
+            })
+          : null,
+      ]);
+      const failures = renderFailures(detail);
+
+      // Once a job is done, the live fetch log and per-domain in-flight
+      // counts are just noise (frozen at whatever they were mid-flight) —
+      // the running totals are what's worth keeping around. Failed/canceled
+      // jobs are the exception: what was happening right before it stopped
+      // is exactly the forensic detail worth keeping visible. The failure
+      // list itself is worth keeping in every case, compact included — it's
+      // the one thing here that isn't just a snapshot of transient activity.
+      if (compact) {
+        return el("div", { className: "ingest-job-activity" }, [counters, failures]);
+      }
+
+      const recent = Array.isArray(detail.recent) && detail.recent.length
+        ? el(
+            "ul",
+            { className: "ingest-job-log" },
+            detail.recent.slice(-6).map((line) => el("li", { text: line }))
+          )
+        : null;
+
+      const domains = Array.isArray(detail.http) && detail.http.length
+        ? el(
+            "ul",
+            { className: "ingest-job-domains" },
+            detail.http.slice(0, 6).map((d) =>
+              el("li", { className: d.in_flight ? "active" : "" }, [
+                el("span", { className: "ingest-job-domain-host", text: d.host }),
+                el("span", {
+                  className: "ingest-job-domain-count",
+                  text: d.in_flight ? `${d.in_flight} in flight · ${d.done} done` : `${d.done} done`,
+                }),
+              ])
+            )
+          )
+        : null;
+
+      return el("div", { className: "ingest-job-activity" }, [counters, failures, recent, domains]);
     }
 
     function renderJob(job) {
@@ -1939,6 +2333,8 @@
             onclick: () => viewEntry(job.entryId),
           })
         );
+        const summary = renderActivity(job.detail, { compact: true });
+        if (summary) body.appendChild(summary);
       } else if (job.status === "failed" || job.status === "canceled") {
         body.appendChild(
           el("p", {
@@ -1946,24 +2342,146 @@
             text: job.errorMessage || (job.status === "canceled" ? "canceled" : "import failed"),
           })
         );
+        // A canceled/failed job can still carry a `detail` snapshot from its
+        // last tick before it stopped — worth keeping visible as a record of
+        // how far it got, not just clearing it.
+        const activity = renderActivity(job.detail);
+        if (activity) body.appendChild(activity);
       } else {
         body.appendChild(
           el("p", { className: "ingest-job-detail", text: job.message || job.stage || "queued…" })
         );
+        const activity = renderActivity(job.detail);
+        if (activity) body.appendChild(activity);
       }
 
-      const dismissBtn = el("button", {
-        className: "ingest-job-dismiss",
-        type: "button",
-        "aria-label": "Dismiss",
-        text: "×",
-        onclick: () => {
-          jobs = jobs.filter((j) => j.id !== job.id);
-          render();
-        },
-      });
+      const actions = [];
+      if (RUNNING(job)) {
+        actions.push(
+          el("button", {
+            className: "ingest-job-cancel",
+            type: "button",
+            text: job.canceling ? "Canceling…" : "Cancel",
+            disabled: job.canceling,
+            onclick: () => cancelJob(job.id),
+          })
+        );
+      }
+      if (job.detail) {
+        actions.push(
+          el("button", {
+            className: "ingest-job-download",
+            type: "button",
+            title: "Download this job's log as a text file",
+            text: "Log",
+            onclick: () => downloadJobLog(job),
+          })
+        );
+      }
+      actions.push(
+        el("button", {
+          className: "ingest-job-dismiss",
+          type: "button",
+          "aria-label": "Dismiss",
+          text: "×",
+          onclick: () => {
+            jobs = jobs.filter((j) => j.id !== job.id);
+            render();
+          },
+        })
+      );
 
-      return el("li", { className: "ingest-job" }, [statusEl, body, dismissBtn]);
+      return el("li", { className: "ingest-job" }, [statusEl, body, ...actions]);
+    }
+
+    // Plain-text rendering of everything a job's card knows, for people who'd
+    // rather read the outcome in a text editor / paste it somewhere than dig
+    // through the server's own log output (which needs shell access, and
+    // only has whatever the process's stdout was redirected to) or click
+    // open the collapsed failures list. This is the entire point of keeping
+    // `detail.failures` around uncapped-in-spirit (well, capped at 100, but
+    // far more than the 6-line activity log shows) — it's finally readable.
+    function jobLogText(job) {
+      const lines = [];
+      lines.push(`musiclib-rs import log`);
+      lines.push(`query: ${job.query}`);
+      lines.push(`job id: ${job.id}`);
+      lines.push(`status: ${job.status}`);
+      if (job.createdAt) lines.push(`started: ${job.createdAt}`);
+      if (job.updatedAt) lines.push(`last update: ${job.updatedAt}`);
+      if (job.status === "succeeded") lines.push(`entry id: ${job.entryId}`);
+      if (job.errorMessage) lines.push(`error: ${job.errorMessage}`);
+      lines.push("");
+
+      const d = job.detail;
+      if (!d) {
+        lines.push("(no progress was reported for this job)");
+        return lines.join("\n");
+      }
+
+      lines.push(
+        `summary: ${d.entries_fetched ?? 0} fetched, ${d.entries_failed ?? 0} failed` +
+          (d.youtube_quota_units ? `, ${d.youtube_quota_units} YouTube quota unit(s)` : "")
+      );
+      lines.push("");
+
+      lines.push(`failed requests (${d.entries_failed ?? 0}):`);
+      if (Array.isArray(d.failures) && d.failures.length) {
+        if (d.entries_failed > d.failures.length) {
+          lines.push(`  (showing the first ${d.failures.length})`);
+        }
+        for (const f of d.failures) lines.push(`  ${f}`);
+      } else {
+        lines.push("  (none)");
+      }
+      lines.push("");
+
+      if (Array.isArray(d.recent) && d.recent.length) {
+        lines.push("most recent activity:");
+        for (const r of d.recent) lines.push(`  ${r}`);
+        lines.push("");
+      }
+
+      if (Array.isArray(d.http) && d.http.length) {
+        lines.push("HTTP activity by domain:");
+        for (const h of d.http) {
+          lines.push(
+            `  ${h.host}: ${h.in_flight ? `${h.in_flight} in flight, ` : ""}${h.done} done`
+          );
+        }
+      }
+
+      return lines.join("\n");
+    }
+
+    function downloadJobLog(job) {
+      const blob = new Blob([jobLogText(job)], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = el("a", { href: url, download: `musiclib-import-${job.id}.log.txt` });
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    async function cancelJob(id) {
+      const job = findJob(id);
+      if (!job || job.canceling) return;
+      job.canceling = true;
+      render();
+      try {
+        await del(`/api/jobs/${id}`);
+      } catch (e) {
+        job.canceling = false;
+        submitError = e.message;
+        render();
+        return;
+      }
+      // Don't wait for the next scheduled poll tick (up to POLL_MS away) —
+      // fetch the now-canceled status right away for snappier feedback. The
+      // tick already in flight from the original `poll()` call still fires
+      // too, but by then the status is terminal, so it's a no-op re-render.
+      poll(id);
     }
 
     function render() {
@@ -2064,6 +2582,9 @@
       job.status = view.status;
       job.stage = view.progress?.stage || null;
       job.message = view.progress?.message || null;
+      job.detail = view.progress?.detail || null;
+      job.createdAt = job.createdAt || view.created_at || null;
+      job.updatedAt = view.updated_at || null;
       if (view.status === "succeeded") {
         job.entryId = view.result?.entry_id ?? null;
       } else if (view.status === "failed" || view.status === "canceled") {
@@ -2092,7 +2613,7 @@
         return;
       }
       jobs = [
-        { id: res.job_id, query, status: "pending", stage: null, message: null },
+        { id: res.job_id, query, status: "pending", stage: null, message: null, detail: null },
         ...jobs,
       ];
       render();
@@ -2143,6 +2664,78 @@
     }
 
     return { render: init };
+  })();
+
+  // ---------- settings mode: playback source preference ----------
+  //
+  // The one setting this app has right now: which provider the player
+  // should prefer when a track is playable from more than one (see
+  // `sortByProviderPreference`, used by `Player.mount`). A plain ordered
+  // list rather than a single "preferred provider" dropdown so it keeps
+  // making sense as more providers gain direct playback support — reordering
+  // is what "prefer Spotify over YouTube, but fall back to YouTube" means
+  // once there are more than two choices to fall back through.
+  const Settings = (() => {
+    const viewEl = document.getElementById("view-settings");
+
+    function move(order, from, to) {
+      const next = order.slice();
+      const [item] = next.splice(from, 1);
+      next.splice(to, 0, item);
+      setProviderPreference(next);
+      render();
+    }
+
+    function moveButton(label, disabled, iconName, onclick) {
+      const btn = el("button", { type: "button", "aria-label": label, disabled, onclick });
+      btn.innerHTML = svgIcon(iconName, 13);
+      return btn;
+    }
+
+    function render() {
+      viewEl.innerHTML = "";
+      const order = getProviderPreference();
+
+      const list = el(
+        "ul",
+        { className: "provider-pref-list" },
+        order.map((provider, i) =>
+          el("li", { className: "provider-pref-row" }, [
+            el("span", { className: "provider-pref-rank", text: `${i + 1}.` }),
+            el("span", {
+              className: "provider-pref-dot",
+              style: `background:${PLATFORM_COLOR[provider] || "var(--ink-faint)"}`,
+            }),
+            el("span", { className: "provider-pref-name", text: providerLabel(provider) }),
+            el("span", { className: "provider-pref-moves" }, [
+              moveButton(`Move ${providerLabel(provider)} up`, i === 0, "chevron-up", () => move(order, i, i - 1)),
+              moveButton(
+                `Move ${providerLabel(provider)} down`,
+                i === order.length - 1,
+                "chevron-down",
+                () => move(order, i, i + 1)
+              ),
+            ]),
+          ])
+        )
+      );
+
+      viewEl.appendChild(
+        el("div", { className: "settings-view" }, [
+          el("div", { className: "settings-section" }, [
+            el("h2", { text: "Playback source" }),
+            el("p", {
+              className: "sub",
+              text:
+                "When a track is available from more than one source, the player uses the first one from this order. Move a source up to prefer it.",
+            }),
+            list,
+          ]),
+        ])
+      );
+    }
+
+    return { render };
   })();
 
   // ---------- spotify: connect + playback, entirely client-side ----------
@@ -2672,6 +3265,18 @@
     let currentTitle = "";
     let provider = null;
     let ytPlayer = null;
+    // SoundCloud Widget JS API instance for whichever iframe is currently
+    // mounted (see `mountSoundcloud`) — null whenever `provider` isn't
+    // "soundcloud" or the widget hasn't fired its READY event yet.
+    let scWidget = null;
+    // NicoNico's embed talks over `window.postMessage`, not a JS API object —
+    // `nicoIframe` is the postMessage target and `nicoPlayerId` the id both
+    // sides tag every message with (see `mountNicovideo`/`nicoPostMessage`),
+    // bumped per mount so a stray message from a since-replaced iframe is
+    // ignored instead of corrupting the newly mounted one's state.
+    let nicoIframe = null;
+    let nicoPlayerId = 0;
+    let nicoPlaying = false;
     let expanded = true;
     // Whether the dock is currently reparented into Player mode's big stage
     // (see `setStageMode`) instead of floating over Library/Graph. Affects
@@ -2770,6 +3375,24 @@
       }, 500);
     }
 
+    // SoundCloud's Widget API is callback-, not promise-based, and has no
+    // "ended" event distinct from FINISH (bound where the widget is created,
+    // in `mountSoundcloud`) — this loop only has to cover position/duration.
+    function startSoundcloudProgressPolling() {
+      stopProgressPolling();
+      showProgress(true);
+      progressTimer = setInterval(() => {
+        if (!scWidget) return;
+        scWidget.getDuration((durationMs) => {
+          if (!durationMs || provider !== "soundcloud") return;
+          scWidget.getPosition((positionMs) => {
+            if (provider !== "soundcloud") return;
+            updateProgressUI(positionMs / 1000, durationMs / 1000);
+          });
+        });
+      }, 500);
+    }
+
     seekInput.addEventListener("input", () => {
       seeking = true;
       timeElapsedEl.textContent = formatTime(Number(seekInput.value));
@@ -2778,6 +3401,8 @@
       const value = Number(seekInput.value);
       if (provider === "youtube" && ytPlayer) ytPlayer.seekTo(value, true);
       else if (provider === "spotify") Spotify.seek(value * 1000).catch(() => {});
+      else if (provider === "soundcloud" && scWidget) scWidget.seekTo(value * 1000);
+      else if (provider === "nicovideo") nicoPostMessage({ eventName: "seek", data: { time: value * 1000 } });
       seeking = false;
     });
 
@@ -2820,7 +3445,7 @@
       const rawByProvider = localStorage.getItem("player_volume_by_provider");
       if (rawByProvider) {
         const parsed = JSON.parse(rawByProvider);
-        for (const key of ["youtube", "spotify"]) {
+        for (const key of Object.keys(PLATFORM_COLOR)) {
           const v = parsed?.[key];
           if (Number.isFinite(v) && v >= 0 && v <= 100) volumeByProvider[key] = v;
         }
@@ -2847,15 +3472,22 @@
       // The per-player dial's icon names whichever provider it's actually
       // scoped to right now — headphones is the fallback for "other"
       // embeds and the no-track-loaded state, which have no such mark.
-      const iconName = provider === "youtube" || provider === "spotify" ? provider : "headphones";
+      const iconName = provider in PLATFORM_COLOR ? provider : "headphones";
       volumePlayerIcon.innerHTML = svgIcon(iconName, 14);
       volumePlayerIcon.style.color = PLATFORM_COLOR[provider] || "";
     }
 
+    // NicoNico has no volume branch here — `volumeChange`/`mute` commands
+    // were tried against a live embed (0..1 scale, 0..100 scale, and a plain
+    // `mute` boolean) and none of them moved the `volume`/`muted` fields
+    // `playerMetadataChange` reports back, unlike `play`/`pause`/`seek`,
+    // which all took effect. `volumeControllable` is `false` for it in
+    // `mountSource` accordingly — same as a bare "other" embed.
     function applyVolume() {
       const effective = muted ? 0 : (volumeGlobal / 100) * (playerVolume() / 100) * 100;
       if (provider === "youtube" && ytPlayer) ytPlayer.setVolume(effective);
       else if (provider === "spotify") Spotify.setVolume(effective / 100).catch(() => {});
+      else if (provider === "soundcloud" && scWidget) scWidget.setVolume(effective);
     }
 
     setVolumeUI();
@@ -3084,6 +3716,140 @@
         });
     }
 
+    // ---- SoundCloud: Widget JS API over an iframe pointed at the widget
+    // embed URL `embed_for` built server-side (`https://w.soundcloud.com
+    // /player/?url=<canonical track URL>`) ----
+    //
+    // Mirrors the YouTube adapter above: `SC.Widget` wraps an iframe we
+    // create ourselves (rather than a bare `<iframe>` with no JS hook) so
+    // play/pause/seek/volume and the FINISH/ERROR events are all available,
+    // same shape as `mountYoutube`/plst4's `SoundCloud` player.
+    let scApiPromise = null;
+    function loadSoundcloudApi() {
+      if (window.SC && window.SC.Widget) return Promise.resolve(window.SC);
+      if (scApiPromise) return scApiPromise;
+      scApiPromise = new Promise((resolve) => {
+        const script = document.createElement("script");
+        script.src = "https://w.soundcloud.com/player/api.js";
+        script.onload = () => resolve(window.SC);
+        document.head.appendChild(script);
+      });
+      return scApiPromise;
+    }
+
+    function mountSoundcloud(embedUrl) {
+      const wrapper = el("div", { className: "yt-mount" });
+      const iframe = el("iframe", {
+        src: embedUrl,
+        allow: "autoplay",
+        scrolling: "no",
+        frameborder: "no",
+      });
+      wrapper.appendChild(iframe);
+      surfaceEl.appendChild(wrapper);
+      setPlayPauseUI(false, false);
+      const token = mountToken;
+      loadSoundcloudApi().then((SC) => {
+        // Same staleness guard as `mountYoutube` — the user may have moved
+        // on to a different source before the widget API script loaded.
+        if (!wrapper.isConnected || token !== mountToken) return;
+        const widget = new SC.Widget(iframe);
+        widget.bind(SC.Widget.Events.READY, () => {
+          if (token !== mountToken) return;
+          scWidget = widget;
+          applyVolume();
+          widget.play();
+        });
+        widget.bind(SC.Widget.Events.PLAY, () => setPlayPauseUI(true, true));
+        widget.bind(SC.Widget.Events.PAUSE, () => setPlayPauseUI(false, true));
+        widget.bind(SC.Widget.Events.FINISH, () => onEndedCallback?.());
+        widget.bind(SC.Widget.Events.ERROR, () => {
+          if (token !== mountToken) return;
+          setPlayPauseUI(false, false);
+          if (onEndedCallback) setTimeout(() => onEndedCallback?.(), 1800);
+        });
+      });
+      return wrapper;
+    }
+
+    // ---- NicoNico: `postMessage`-based `jsapi=1` protocol over a plain
+    // iframe (no widget object — unlike YouTube/SoundCloud there's no JS
+    // library to load, just a message contract with the embed) ----
+    //
+    // Unofficial reference (no first-party docs exist —
+    // https://gist.github.com/wkurosawa/903630fbcd01b300672053564c3a2916,
+    // matches plst4's `Niconico` player): the embed posts `playerStatusChange`
+    // ({ data: { playerStatus } }, 2 = playing / 3 = paused / 4 = ended) and
+    // `playerMetadataChange` ({ data: { currentTime, duration, ... } }) events,
+    // and accepts `play`/`pause`/`seek` ({ data: { time } }) and `volumeChange`
+    // ({ data: { volume } }) commands. Every message is tagged with a
+    // `playerId` both sides echo back — `nicoPlayerId` is bumped per mount so
+    // a message from a since-replaced iframe (still in flight when the user
+    // skips tracks) is ignored rather than corrupting the new one's state.
+    // `currentTime`/`duration`/`seek`'s `time` are all **milliseconds** —
+    // confirmed by watching a live embed's messages, not documented anywhere
+    // (the gist above, and plst4, only ever pass/observe `time: 0`, which is
+    // unit-ambiguous).
+    const NICONICO_ORIGIN = "https://embed.nicovideo.jp";
+
+    window.addEventListener("message", (e) => {
+      if (e.origin !== NICONICO_ORIGIN || !nicoIframe) return;
+      const msg = e.data;
+      if (!msg || String(msg.playerId) !== String(nicoPlayerId)) return;
+      if (msg.eventName === "playerStatusChange") {
+        const status = msg.data?.playerStatus;
+        if (status === 2) {
+          nicoPlaying = true;
+          setPlayPauseUI(true, true);
+        } else if (status === 3) {
+          nicoPlaying = false;
+          setPlayPauseUI(false, true);
+        } else if (status === 4) {
+          nicoPlaying = false;
+          onEndedCallback?.();
+        }
+      } else if (msg.eventName === "playerMetadataChange") {
+        // `currentTime`/`duration` are milliseconds, confirmed against a
+        // live embed (undocumented — see the adapter's module doc above);
+        // `updateProgressUI` takes seconds, same as every other provider.
+        const { currentTime, duration } = msg.data || {};
+        if (typeof currentTime === "number" && typeof duration === "number" && duration > 0) {
+          updateProgressUI(currentTime / 1000, duration / 1000);
+        }
+      } else if (msg.eventName === "error") {
+        setPlayPauseUI(false, false);
+        if (onEndedCallback) setTimeout(() => onEndedCallback?.(), 1800);
+      }
+    });
+
+    function nicoPostMessage(msg) {
+      if (!nicoIframe) return;
+      nicoIframe.contentWindow?.postMessage(
+        Object.assign({ sourceConnectorType: 1, playerId: String(nicoPlayerId) }, msg),
+        NICONICO_ORIGIN
+      );
+    }
+
+    function mountNicovideo(embedUrl) {
+      nicoPlayerId++;
+      nicoPlaying = false;
+      const myPlayerId = nicoPlayerId;
+      const wrapper = el("div", { className: "yt-mount" });
+      const iframe = el("iframe", {
+        src: `${embedUrl}&playerId=${myPlayerId}`,
+        allow: "autoplay; fullscreen",
+      });
+      wrapper.appendChild(iframe);
+      surfaceEl.appendChild(wrapper);
+      setPlayPauseUI(false, false);
+      iframe.addEventListener("load", () => {
+        if (!wrapper.isConnected || myPlayerId !== nicoPlayerId) return;
+        nicoIframe = iframe;
+        nicoPostMessage({ eventName: "play" });
+      });
+      return wrapper;
+    }
+
     function mountSource(source) {
       const isSpotify =
         source.provider === "spotify" && Spotify.isConnected() && source.identifier.startsWith(SPOTIFY_TRACK_PREFIX);
@@ -3098,6 +3864,8 @@
       mountToken++;
       surfaceEl.innerHTML = "";
       ytPlayer = null;
+      scWidget = null;
+      nicoIframe = null;
       surfaceEl.className = "player-dock-surface " + (isSpotify ? "compact" : "video");
       if (isSpotify) {
         provider = "spotify";
@@ -3120,6 +3888,21 @@
         updateBarMeta(currentTitle, "YouTube", `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`);
         startYoutubeProgressPolling();
         volumeControllable = true;
+      } else if (source.provider === "soundcloud") {
+        provider = "soundcloud";
+        mountSoundcloud(source.embed_url);
+        updateBarMeta(currentTitle, "SoundCloud", null);
+        startSoundcloudProgressPolling();
+        volumeControllable = true;
+      } else if (source.provider === "nicovideo") {
+        provider = "nicovideo";
+        mountNicovideo(source.embed_url);
+        updateBarMeta(currentTitle, "Niconico", null);
+        stopProgressPolling();
+        showProgress(true);
+        // See `applyVolume`'s doc comment — verified against a live embed to
+        // not respond to any volume/mute command tried.
+        volumeControllable = false;
       } else {
         provider = "other";
         surfaceEl.appendChild(
@@ -3163,8 +3946,11 @@
       onEndedCallback = (opts && opts.onEnded) || null;
       barEl.hidden = false;
       document.body.classList.add("has-player");
-      renderSwitcher(sources);
-      mountSource(sources[0]);
+      // Ordered by the user's Settings-mode source preference, not
+      // playable-sources' own (DB-row) order — see `sortByProviderPreference`.
+      const ordered = sortByProviderPreference(sources);
+      renderSwitcher(ordered);
+      mountSource(ordered[0]);
       setExpanded(firstPlay ? true : expanded);
     }
 
@@ -3174,6 +3960,10 @@
         else ytPlayer.playVideo();
       } else if (provider === "spotify") {
         Spotify.togglePlay();
+      } else if (provider === "soundcloud" && scWidget) {
+        scWidget.toggle();
+      } else if (provider === "nicovideo") {
+        nicoPostMessage({ eventName: nicoPlaying ? "pause" : "play" });
       }
     }
 
@@ -3215,8 +4005,20 @@
         dockQueueEl.appendChild(el("p", { className: "player-dock-queue-empty", text: "Nothing queued." }));
         return;
       }
+      // Divider between the explicitly-queued layer and Post-queue (the
+      // background playlist — shuffle-all/tracklist continuation/
+      // auto-recommend filler): shown once, right before the first
+      // Post-queue row, and only if something (current or queued) actually
+      // preceded it — otherwise the panel's own header already says it all.
+      let sawNonPostQueueRow = false;
       for (const item of items) {
         const isCurrent = !!item.isCurrent;
+        if (isCurrent || !item.isPostQueue) {
+          sawNonPostQueueRow = true;
+        } else if (sawNonPostQueueRow) {
+          dockQueueEl.appendChild(el("p", { className: "player-dock-queue-divider", text: "Post-queue" }));
+          sawNonPostQueueRow = false;
+        }
         const removeBtn = el("button", {
           type: "button",
           className: "player-dock-queue-remove",
@@ -3293,12 +4095,26 @@
   // always `order[pos + 1]` regardless of shuffle. Keeping the natural order
   // separate means switching shuffle off restores it exactly instead of
   // compounding reshuffles.
+  //
+  // Three layers, in play order: the current item (`order[pos]`), then the
+  // "Queue" layer — tracks explicitly added one at a time via `queueNext`
+  // (the UI's "Queue" button) — then "Post-queue": whatever background
+  // playlist is providing continuous playback (a release tracklist, a
+  // shuffle-all batch, auto-recommended filler) once the Queue layer is
+  // exhausted. `queueEnd` is the boundary between the two: order[pos+1 ..
+  // queueEnd) is Queue, order[queueEnd ..) is Post-queue. Critically, `set`
+  // (used by startQueue/playStandalone/shuffleLibrary to load a whole
+  // batch) puts its entire batch straight into Post-queue — none of it was
+  // an explicit one-at-a-time pick — so a `queueNext` afterwards still lands
+  // right after the current track instead of at the end of a 100-track
+  // shuffle batch.
   const Queue = (() => {
     let items = [];
     let order = [];
     let pos = -1;
     let shuffled = false;
     let repeatMode = "off"; // "off" | "all" | "one"
+    let queueEnd = 0;
 
     function identityOrder() {
       return items.map((_, i) => i);
@@ -3322,6 +4138,8 @@
       const anchor = items[startIndex] ? startIndex : 0;
       order = shuffled ? shuffleFrom(anchor) : identityOrder();
       pos = order.indexOf(anchor);
+      // The whole batch is Post-queue — see the module doc above.
+      queueEnd = pos + 1;
     }
 
     function current() {
@@ -3375,6 +4193,7 @@
       if (orderIndex === pos || orderIndex < 0 || orderIndex >= order.length) return false;
       order.splice(orderIndex, 1);
       if (orderIndex < pos) pos--;
+      if (orderIndex < queueEnd) queueEnd--;
       return true;
     }
 
@@ -3383,11 +4202,17 @@
       const anchor = current();
       if (!anchor) {
         order = shuffled ? order : identityOrder();
+        queueEnd = pos + 1;
         return;
       }
       const anchorIdx = order[pos];
       order = shuffled ? shuffleFrom(anchorIdx) : identityOrder();
       pos = order.indexOf(anchorIdx);
+      // Reshuffling scrambles the Queue/Post-queue split along with
+      // everything else — rather than tracking stale positions through it,
+      // treat the reshuffled upcoming list as pure Post-queue; it re-splits
+      // cleanly the next time something is queued.
+      queueEnd = pos + 1;
     }
 
     function cycleRepeat() {
@@ -3396,30 +4221,53 @@
     }
 
     // Everything after `pos` in play order, each tagged with its absolute
-    // position in `order` so the dock's queue panel can jump/remove by it.
+    // position in `order` (so the dock's queue panel can jump/remove by it)
+    // and whether it's past `queueEnd` — i.e. Post-queue rather than the
+    // explicitly-queued layer.
     function upcoming() {
-      return order.slice(pos + 1).map((itemIdx, i) => ({ ...items[itemIdx], orderIndex: pos + 1 + i }));
+      return order.slice(pos + 1).map((itemIdx, i) => {
+        const orderIndex = pos + 1 + i;
+        return { ...items[itemIdx], orderIndex, isPostQueue: orderIndex >= queueEnd };
+      });
     }
 
     // The whole play order — past, current, and upcoming — for Player
     // mode's full queue panel (see `Player.setStageMode`/`renderDockQueue`).
-    // Same `orderIndex` tagging as `upcoming()`, plus `isCurrent` so the
-    // renderer can mark and lock the playing row.
+    // Same `orderIndex`/`isPostQueue` tagging as `upcoming()`, plus
+    // `isCurrent` so the renderer can mark and lock the playing row.
     function all() {
-      return order.map((itemIdx, i) => ({ ...items[itemIdx], orderIndex: i, isCurrent: i === pos }));
+      return order.map((itemIdx, i) => ({
+        ...items[itemIdx],
+        orderIndex: i,
+        isCurrent: i === pos,
+        isPostQueue: i >= queueEnd,
+      }));
     }
 
-    // Append new items to the end of the queue without resetting position.
-    function append(newItems) {
+    // Manually queue a track: inserted right after whatever's already in
+    // the Queue layer but ahead of Post-queue (clamped to just after `pos`
+    // so it never lands behind a `queueEnd` left over from before playback
+    // caught up to it) — see the module doc above.
+    function queueNext(item) {
+      const idx = items.length;
+      items = items.concat([item]);
+      const insertAt = Math.max(queueEnd, pos + 1);
+      order.splice(insertAt, 0, idx);
+      queueEnd = insertAt + 1;
+      return true;
+    }
+
+    // Append items to the very end of Post-queue (auto-recommend's top-up),
+    // without resetting position. Never needs to touch `queueEnd` itself:
+    // new items always land contiguous with whatever Post-queue tail
+    // already ends the queue (or start one, if `queueEnd` was already
+    // `order.length`).
+    function appendPostQueue(newItems) {
       if (!newItems.length) return;
       const startIdx = items.length;
       items = items.concat(newItems);
       const newIndices = newItems.map((_, i) => startIdx + i);
-      if (shuffled) {
-        order = order.concat(newIndices);
-      } else {
-        order = identityOrder();
-      }
+      order = order.concat(newIndices);
     }
 
     return {
@@ -3436,7 +4284,8 @@
       cycleRepeat,
       upcoming,
       all,
-      append,
+      queueNext,
+      appendPostQueue,
       get shuffled() {
         return shuffled;
       },
@@ -3466,7 +4315,11 @@
 
   // Pushes the queue's current shape (transport enabled state, shuffle/
   // repeat button state, queue panel) into Player. Called after every Queue
-  // mutation that doesn't already remount a track.
+  // mutation that doesn't already remount a track. Also the single place
+  // that top-up auto-recommend fetches get triggered from — see
+  // `ensureAutoRecommend` — so any queue change (a track finishing, a
+  // manual add/remove, a reshuffle) is a chance to notice the upcoming list
+  // is running low and refill it ahead of time.
   function syncTransport() {
     Player.setTransportHandlers(
       () => {
@@ -3479,6 +4332,7 @@
       Queue.hasNext()
     );
     Player.setQueueUI(Queue.shuffled, Queue.repeatMode);
+    ensureAutoRecommend();
   }
 
   // Player mode's empty state ("nothing playing") vs. its stage/queue
@@ -3514,18 +4368,29 @@
   );
 
   function mountQueueItem(entryId, title, sources) {
-    Player.mount(entryId, sources, title, {
-      onEnded: () => {
-        if (Queue.advanceOnEnded()) {
-          playCurrent();
-        } else {
-          autoRecommend();
-        }
-      },
-    });
+    Player.mount(entryId, sources, title, { onEnded: handleTrackEnded });
     syncTransport();
     refreshPlayIndicators();
     refreshPlayerStageVisibility();
+  }
+
+  // Natural end-of-track: advance within the queue as already built. The
+  // proactive top-up in `syncTransport` (via `ensureAutoRecommend`) should
+  // normally mean there's already something next by the time a track ends,
+  // but `advanceOnEnded` returning nothing (repeat off, nothing queued or
+  // recommended yet) falls back to awaiting a fetch right here rather than
+  // replaying the track that just finished — `advanceOnEnded` doesn't move
+  // `pos` when it fails, so re-reading `Queue.current()` without first
+  // fetching+advancing would just hand `playCurrent` the same track again.
+  async function handleTrackEnded() {
+    if (Queue.advanceOnEnded()) {
+      playCurrent();
+      return;
+    }
+    await ensureAutoRecommend();
+    if (Queue.next()) {
+      playCurrent();
+    }
   }
 
   async function playCurrent() {
@@ -3550,6 +4415,23 @@
   function playStandalone(entryId, title, sources) {
     Queue.set([{ entry_id: entryId, title }], 0);
     mountQueueItem(entryId, title, sources);
+  }
+
+  // The "Queue" affordance on a track's play button / tracklist row: adds
+  // it to the Queue layer, ahead of Post-queue (a shuffle-all batch, a
+  // tracklist's own continuation, auto-recommend filler — see `Queue`'s
+  // module doc) — without disturbing what's currently playing. If nothing's
+  // playing yet there's nothing to queue *behind*, so this just starts it
+  // instead — matches what a lone "Queue" click on an idle player should do.
+  function queueTrack(entryId, title) {
+    if (!Queue.current()) {
+      Queue.set([{ entry_id: entryId, title }], 0);
+      playCurrent();
+      return;
+    }
+    Queue.queueNext({ entry_id: entryId, title });
+    syncTransport();
+    setStatus(`Queued "${title || "track"}".`);
   }
 
   /// "Shuffle all" in the rail header — there's no playlist concept yet, so
@@ -3577,18 +4459,40 @@
     playCurrent();
   }
 
-  // Auto-recommend: when the queue runs out naturally (repeat-off, last
-  // track finished), pull a fresh random batch from the library and continue
-  // playing instead of stopping. Failures are silent — the queue just ends.
-  async function autoRecommend() {
-    try {
-      const { tracks } = await api("/api/library/shuffle?limit=20");
-      if (!tracks.length) return;
-      Queue.append(tracks);
-      playCurrent();
-    } catch {
-      // library entirely unplayable — nothing to recommend
+  // How many upcoming tracks (queued or already recommended) to keep in
+  // view before topping the auto-recommended tail up again.
+  const AUTO_RECOMMEND_LOOKAHEAD = 3;
+  // Auto-recommend, proactive: keeps the auto-recommended tail topped up
+  // *before* the queue runs dry, both so playback doesn't hit a dead end
+  // waiting on a fetch and so "up next" shows recommended tracks ahead of
+  // time rather than only once nothing else is left. Called from
+  // `syncTransport` after every queue change; `inFlight` dedupes concurrent
+  // callers (including `handleTrackEnded`'s fallback awaiting the same
+  // fetch a proactive call already kicked off) onto one request. Repeat
+  // on/one never needs a recommendation (there's always a next track), so
+  // it's a no-op there. Failures are silent — a later queue change (or the
+  // ended-track fallback) just retries.
+  let autoRecommendInFlight = null;
+  function ensureAutoRecommend() {
+    if (Queue.repeatMode !== "off") return Promise.resolve();
+    if (Queue.upcoming().length >= AUTO_RECOMMEND_LOOKAHEAD) return Promise.resolve();
+    if (!autoRecommendInFlight) {
+      autoRecommendInFlight = (async () => {
+        try {
+          const { tracks } = await api("/api/library/shuffle?limit=20");
+          if (tracks.length) {
+            Queue.appendPostQueue(tracks);
+            syncTransport();
+          }
+        } catch {
+          // library entirely unplayable (or request failed) — nothing to
+          // recommend right now.
+        } finally {
+          autoRecommendInFlight = null;
+        }
+      })();
     }
+    return autoRecommendInFlight;
   }
 
   async function api(path) {
@@ -3609,6 +4513,18 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        message = (await res.json()).message || message;
+      } catch {}
+      throw new Error(message || `request failed (${res.status})`);
+    }
+    return res.json();
+  }
+
+  async function del(path) {
+    const res = await fetch(path, { method: "DELETE" });
     if (!res.ok) {
       let message = res.statusText;
       try {
@@ -5355,7 +6271,19 @@
       },
       [iconEl, el("span", { className: "play-cta-label", text: playing ? "Playing" : "Play" })]
     );
-    const row = el("div", { className: "play-cta-row" }, [btn]);
+    const queueIconEl = el("span", { className: "queue-cta-icon" });
+    queueIconEl.innerHTML = svgIcon("plus", 12);
+    const queueBtn = el(
+      "button",
+      {
+        className: "ghost-btn queue-cta",
+        type: "button",
+        "aria-label": "Add to queue",
+        onclick: () => queueTrack(entryId, title),
+      },
+      [queueIconEl, el("span", { text: "Queue" })]
+    );
+    const row = el("div", { className: "play-cta-row" }, [btn, queueBtn]);
     if (sources.length > 1) {
       row.appendChild(el("span", { className: "play-cta-hint", text: sources.map((s) => s.provider).join(" · ") }));
     }
@@ -5465,6 +6393,8 @@
           const queuePos = playableTracks.findIndex((pt) => pt.entry_id === t.entry_id);
           const playIcon = el("span", { className: "manifest-play-icon" });
           playIcon.innerHTML = svgIcon(Player.isPlayingEntry(t.entry_id) ? "pause" : "play", 12);
+          const queueIcon = el("span", { className: "manifest-play-icon" });
+          queueIcon.innerHTML = svgIcon("plus", 12);
           list.appendChild(
             el("li", {}, [
               el(
@@ -5497,6 +6427,18 @@
                     text: t.title || "(untitled)",
                     onclick: () => viewEntry(t.entry_id),
                   }),
+                  el("button", {
+                    className: "manifest-queue",
+                    type: "button",
+                    disabled: !t.playable,
+                    "aria-label": "Add to queue",
+                    onclick: t.playable
+                      ? (ev) => {
+                          ev.stopPropagation();
+                          queueTrack(t.entry_id, t.title);
+                        }
+                      : null,
+                  }, [queueIcon]),
                 ]
               ),
             ])
@@ -5566,6 +6508,8 @@
       setMode("player");
     } else if (path === "/import") {
       setMode("import");
+    } else if (path === "/settings") {
+      setMode("settings");
     } else {
       showInvite();
     }
@@ -5575,6 +6519,7 @@
   routeFromUrl(false);
 
   Ingest.render();
+  Settings.render();
   Spotify.render();
   Spotify.handleRedirect();
 })();

@@ -22,6 +22,7 @@ use musiclib_rs::{
     app_dirs,
     musicdb::{Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback},
     pipeline::ingest::ingest_entry,
+    providers::backends::soundcloud,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -46,6 +47,7 @@ pub fn handles(path: &str) -> bool {
         || path == "/graph"
         || path == "/player"
         || path == "/import"
+        || path == "/settings"
         || path.starts_with("/api/")
         || path.starts_with("/entry/")
         || path.starts_with("/graph/")
@@ -69,7 +71,8 @@ pub async fn route(
             || p == "/graph"
             || p.starts_with("/graph/")
             || p == "/player"
-            || p == "/import" =>
+            || p == "/import"
+            || p == "/settings" =>
         {
             if *method != Method::GET {
                 return respond::method_not_allowed();
@@ -170,13 +173,20 @@ fn parse_query(query: &str) -> HashMap<String, String> {
 /// iframe for. `identifier` here is musiclib-rs's canonical form, which is a
 /// full URL, not a bare provider id (e.g. `https://youtu.be/{id}` for a
 /// video — see `providers::backends::youtube_api::canonicalize::video_url`,
-/// `spotify::canonicalize::track_url`) — the `strip_prefix` below both
-/// extracts the id and filters to just the playable (video/track) shape,
-/// since the same source key also canonicalizes playlists/channels/albums to
-/// other URL shapes that aren't directly embeddable here.
-/// Sources with no known embed shape at all (SoundCloud/NicoNico need more
-/// than a bare id — see docs/plan-video-player.md §"Provider adapter
-/// boundary") are simply omitted, not errored.
+/// `spotify::canonicalize::track_url`) — the `strip_prefix`/`match_track_url`
+/// calls below both extract the id and filter to just the playable
+/// (video/track) shape, since the same source key also canonicalizes
+/// playlists/channels/albums to other URL shapes that aren't directly
+/// embeddable here.
+///
+/// SoundCloud and NicoNico (see docs/plan-video-player.md §"Provider adapter
+/// boundary", Phase 3) don't embed from a bare id like YouTube/Spotify do —
+/// the frontend drives each through its own JS widget API (`w.soundcloud.com
+/// /player/api.js`'s `Widget`, NicoNico's `postMessage`-based `jsapi=1`
+/// protocol — see `Player.mountSoundcloud`/`mountNicovideo` in
+/// `frontend/index.html`) rather than the plain IFrame Player API YouTube
+/// uses, but the embed URL shape is still just a static transform of the
+/// canonical identifier, computed here the same as the other two.
 fn embed_for(source: &str, identifier: &str) -> Option<(String, &'static [&'static str])> {
     match source {
         "youtube" => {
@@ -191,6 +201,26 @@ fn embed_for(source: &str, identifier: &str) -> Option<(String, &'static [&'stat
             Some((
                 format!("https://open.spotify.com/embed/track/{id}"),
                 &["play", "pause"][..],
+            ))
+        }
+        "soundcloud" => {
+            // Only the track shape is playable — `identifier` may also be a
+            // canonical playlist (`.../sets/...`) or artist URL, both of
+            // which share the same `soundcloud.com/...` prefix.
+            soundcloud::match_track_url(identifier)?;
+            Some((
+                format!(
+                    "https://w.soundcloud.com/player/?url={}",
+                    urlencoding::encode(identifier)
+                ),
+                &["play", "pause", "seek", "ended_event"][..],
+            ))
+        }
+        "nicovideo" => {
+            let id = identifier.strip_prefix("https://www.nicovideo.jp/watch/")?;
+            Some((
+                format!("https://embed.nicovideo.jp/watch/{id}?jsapi=1"),
+                &["play", "pause", "seek", "ended_event"][..],
             ))
         }
         _ => None,
@@ -406,6 +436,11 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     let job_state = Arc::clone(state);
     let job_id = state.jobs.spawn("ingest", move |handle| async move {
         handle.progress("fetching", "running import pipeline");
+        let sink = crate::ingest_progress::JobProgressSink::new(
+            handle.clone(),
+            Arc::clone(&job_state.activity),
+            Arc::clone(&job_state.youtube_quota),
+        );
         let result = ingest_entry(
             &job_state.db,
             &job_state.providers,
@@ -415,6 +450,7 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
             &job_state.merged_dedup,
             job_state.soft_cfg.as_ref(),
             query,
+            Some(sink),
         )
         .await;
         match result {
@@ -1017,4 +1053,46 @@ async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
         StatusCode::OK,
         json!({ "entry_id": entry_id, "tracks": tracks }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::embed_for;
+
+    #[test]
+    fn soundcloud_track_embeds() {
+        let (url, caps) = embed_for("soundcloud", "https://soundcloud.com/laserimouto/prismatix")
+            .expect("track URL should embed");
+        assert_eq!(
+            url,
+            "https://w.soundcloud.com/player/?url=https%3A%2F%2Fsoundcloud.com%2Flaserimouto%2Fprismatix"
+        );
+        assert_eq!(caps, ["play", "pause", "seek", "ended_event"]);
+    }
+
+    #[test]
+    fn soundcloud_playlist_and_artist_urls_are_not_embeddable() {
+        assert!(
+            embed_for(
+                "soundcloud",
+                "https://soundcloud.com/laserimouto/sets/anime"
+            )
+            .is_none()
+        );
+        assert!(embed_for("soundcloud", "https://soundcloud.com/laserimouto").is_none());
+    }
+
+    #[test]
+    fn nicovideo_watch_url_embeds() {
+        let (url, caps) = embed_for("nicovideo", "https://www.nicovideo.jp/watch/sm46158033")
+            .expect("watch URL should embed");
+        assert_eq!(url, "https://embed.nicovideo.jp/watch/sm46158033?jsapi=1");
+        assert_eq!(caps, ["play", "pause", "seek", "ended_event"]);
+    }
+
+    #[test]
+    fn nicovideo_non_video_urls_are_not_embeddable() {
+        assert!(embed_for("nicovideo", "https://www.nicovideo.jp/user/12345").is_none());
+        assert!(embed_for("nicovideo", "https://www.nicovideo.jp/mylist/12345").is_none());
+    }
 }
