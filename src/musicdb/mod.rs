@@ -901,6 +901,49 @@ impl MusicDb {
              CREATE INDEX IF NOT EXISTS idx_entry_child_child_pair ON entry_child(child_source, child_identifier);",
         )
         .await?;
+        // Full-text index over alias names backing the player's library
+        // search. `tokenize='trigram'` indexes overlapping 3-character
+        // sequences rather than whitespace-delimited words, so it matches
+        // substrings anywhere in a name (like the old `LIKE '%q%'` scan) and
+        // works uniformly on CJK aliases that have no word boundaries. It's
+        // an external-content table over `entry_alias` (no data duplicated);
+        // the trigger keeps it in sync with the only mutation path aliases
+        // ever go through (`insert_aliases_for_pair` — entry_alias rows are
+        // never updated or deleted).
+        sea_orm::ConnectionTrait::execute_unprepared(
+            &db,
+            "CREATE VIRTUAL TABLE IF NOT EXISTS entry_alias_fts USING fts5(
+                 name, content='entry_alias', content_rowid='id', tokenize='trigram'
+             );
+             CREATE TRIGGER IF NOT EXISTS entry_alias_ai AFTER INSERT ON entry_alias BEGIN
+                 INSERT INTO entry_alias_fts(rowid, name) VALUES (new.id, new.name);
+             END;",
+        )
+        .await?;
+        // Backfill: the trigger above only covers inserts from here on, so on
+        // an existing DB (or the first run after this index was added) any
+        // pre-existing alias rows still need to be indexed explicitly via a
+        // full 'rebuild'. Gated on `PRAGMA user_version` rather than
+        // comparing row counts: `entry_alias_fts` is an external-content
+        // table, so `COUNT(*)` on it just reflects `entry_alias`'s rowid
+        // range regardless of whether those rows were ever actually indexed
+        // — it can't tell us whether a rebuild is needed.
+        let user_version: i64 = db
+            .query_one_raw(Statement::from_string(
+                db.get_database_backend(),
+                "PRAGMA user_version".to_string(),
+            ))
+            .await?
+            .expect("PRAGMA user_version always returns one row")
+            .try_get("", "user_version")?;
+        if user_version < 1 {
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "INSERT INTO entry_alias_fts(entry_alias_fts) VALUES('rebuild'); \
+                 PRAGMA user_version = 1;",
+            )
+            .await?;
+        }
         Ok(Self { db })
     }
 
@@ -938,17 +981,56 @@ impl MusicDb {
     }
 
     /// Entry ids with at least one alias containing `query` (case-insensitive
-    /// substring match), most recently... actually unordered beyond SQLite's
-    /// natural row order — good enough for a bounded typeahead, not a ranked
-    /// search. Used by the player's library search endpoint.
+    /// substring match), ranked by `entry_alias_fts`'s bm25 score (best match
+    /// first). Backed by the trigram-tokenized FTS index (see `new`), so a
+    /// multi-alias entry ranks by its single best-matching alias. Used by the
+    /// player's library search endpoint.
     pub async fn search_entry_ids_by_alias(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<i64>, Error> {
-        if query.trim().is_empty() {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
             return Ok(Vec::new());
         }
+        // The trigram tokenizer indexes 3-character sequences, so it can't
+        // match anything shorter — fall back to an unranked substring scan
+        // rather than silently dropping short queries.
+        if trimmed.chars().count() < 3 {
+            return self
+                .search_entry_ids_by_alias_substring(trimmed, limit)
+                .await;
+        }
+        let phrase = format!("\"{}\"", trimmed.replace('"', "\"\""));
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "SELECT es.entry_id AS entry_id \
+             FROM entry_alias_fts \
+             JOIN entry_alias ea ON ea.id = entry_alias_fts.rowid \
+             JOIN entry_source es ON es.source = ea.source AND es.identifier = ea.identifier \
+             WHERE entry_alias_fts MATCH ? \
+             GROUP BY es.entry_id \
+             ORDER BY MIN(entry_alias_fts.rank) \
+             LIMIT ?",
+            [phrase.into(), (limit as i64).into()],
+        );
+        self.db
+            .query_all_raw(stmt)
+            .await?
+            .iter()
+            .map(|row| row.try_get::<i64>("", "entry_id").map_err(Error::from))
+            .collect()
+    }
+
+    /// Plain `LIKE '%query%'` fallback for queries too short for the trigram
+    /// FTS index (see `search_entry_ids_by_alias`). Unranked, matching the
+    /// original pre-FTS search behavior.
+    async fn search_entry_ids_by_alias_substring(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<i64>, Error> {
         let pattern = format!(
             "%{}%",
             query
@@ -2649,5 +2731,141 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn search_entry_ids_by_alias_falls_back_for_short_queries() {
+        let mdb = mem_db().await;
+        let matching = mdb.insert_entry(None).await.unwrap();
+        mdb.upsert_pair(
+            "youtube",
+            "v1",
+            matching,
+            None,
+            &EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Ab Ordinary Name")])
+            .await
+            .unwrap();
+
+        // Below the trigram tokenizer's 3-character minimum, so this exercises
+        // the plain LIKE fallback rather than the FTS index.
+        let ids = mdb.search_entry_ids_by_alias("ab", 10).await.unwrap();
+        assert_eq!(ids, vec![matching]);
+    }
+
+    #[tokio::test]
+    async fn search_entry_ids_by_alias_ranks_denser_match_first() {
+        let mdb = mem_db().await;
+        let exact = mdb.insert_entry(None).await.unwrap();
+        mdb.upsert_pair(
+            "youtube",
+            "exact",
+            exact,
+            None,
+            &EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        mdb.insert_aliases_for_pair("youtube", "exact", &[alias("Foo")])
+            .await
+            .unwrap();
+
+        let padded = mdb.insert_entry(None).await.unwrap();
+        mdb.upsert_pair(
+            "youtube",
+            "padded",
+            padded,
+            None,
+            &EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        mdb.insert_aliases_for_pair(
+            "youtube",
+            "padded",
+            &[alias("Foo Bar Baz Quux Something Else Entirely")],
+        )
+        .await
+        .unwrap();
+
+        let ids = mdb.search_entry_ids_by_alias("foo", 10).await.unwrap();
+        assert_eq!(
+            ids,
+            vec![exact, padded],
+            "bm25 should rank the shorter, denser match first"
+        );
+    }
+
+    /// Simulates opening a pre-FTS database: writes an `entry_alias` row
+    /// directly against a fresh connection (bypassing `MusicDb::new`, so
+    /// there's no trigger yet to index it), then opens it through
+    /// `MusicDb::new` and checks the backfill picks the row up.
+    #[tokio::test]
+    async fn search_entry_ids_by_alias_backfills_preexisting_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("preexisting.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+        {
+            let db = Database::connect(&db_url).await.unwrap();
+            db.get_schema_registry("musiclib_rs::musicdb::*")
+                .sync(&db)
+                .await
+                .unwrap();
+            entry::Entity::insert(entry::ActiveModel {
+                id: Set(1),
+                entry_type: Set("track".to_string()),
+            })
+            .exec(&db)
+            .await
+            .unwrap();
+            entry_source::Entity::insert(entry_source::ActiveModel {
+                source: Set("youtube".to_string()),
+                identifier: Set("v1".to_string()),
+                entry_id: Set(1),
+                release_date: Set(None),
+                fetched_at: Set(0),
+                duration_ms: Set(None),
+                duration_ms_all: Set(None),
+                release_type: Set(None),
+                num_discs: Set(None),
+                num_tracks: Set(None),
+                primary_type: Set(None),
+            })
+            .exec(&db)
+            .await
+            .unwrap();
+            entry_alias::Entity::insert(entry_alias::ActiveModel {
+                id: sea_orm::ActiveValue::NotSet,
+                source: Set("youtube".to_string()),
+                identifier: Set("v1".to_string()),
+                name: Set("Preexisting Alias".to_string()),
+                locale: Set(None),
+                extra: Set(None),
+                primary: Set(true),
+            })
+            .exec(&db)
+            .await
+            .unwrap();
+        }
+
+        let mdb = MusicDb::new(&db_url).await.unwrap();
+        let ids = mdb
+            .search_entry_ids_by_alias("preexisting", 10)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec![1]);
     }
 }
