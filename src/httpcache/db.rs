@@ -1,10 +1,11 @@
-use std::{borrow::Cow, str::FromStr, sync::Arc};
+use std::{borrow::Cow, io::Read, io::Write, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use reqwest::StatusCode;
 use sea_orm::{
-    ActiveValue::Set, ConnectOptions, Database, DatabaseConnection, DbErr, EntityTrait,
-    FromJsonQueryResult, sea_query,
+    ActiveModelTrait, ActiveValue::Set, ConnectOptions, ConnectionTrait, Database,
+    DatabaseConnection, DbErr, EntityTrait, FromJsonQueryResult, sea_query,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,12 @@ pub enum Error {
     Database(#[from] DbErr),
     #[error("Body read error: {0}")]
     BodyRead(#[from] Box<crate::http::Error>),
+    #[error("Body compression error: {0}")]
+    BodyCompression(#[source] std::io::Error),
+    #[error("Body decompression error: {0}")]
+    BodyDecompression(#[source] std::io::Error),
+    #[error("Unsupported HTTP cache body encoding: {0}")]
+    UnsupportedBodyEncoding(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -42,6 +49,8 @@ mod cache_entry {
         #[sea_orm(column_type = "JsonBinary")]
         pub headers: super::HeaderMap,
         pub body: Vec<u8>,
+        /// Internal storage encoding for `body`; `NULL` means identity.
+        pub body_encoding: Option<String>,
         pub created_at: OffsetDateTime,
         pub expires_at: OffsetDateTime,
         pub stale_at: OffsetDateTime,
@@ -54,6 +63,46 @@ mod cache_entry {
 
 pub struct DbHttpCache {
     db: DatabaseConnection,
+}
+
+const ZLIB_ENCODING: &str = "zlib";
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RecompressionStats {
+    pub scanned: usize,
+    pub compressed: usize,
+    pub unchanged: usize,
+    pub saved_bytes: u64,
+}
+
+fn encode_body(body: &[u8]) -> Result<(Vec<u8>, Option<String>), Error> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(body).map_err(Error::BodyCompression)?;
+    let compressed = encoder.finish().map_err(Error::BodyCompression)?;
+
+    // Small or already-compressed responses can grow under zlib. Keep those
+    // in their original form and mark them as identity by leaving the marker
+    // NULL.
+    if compressed.len() < body.len() {
+        Ok((compressed, Some(ZLIB_ENCODING.to_owned())))
+    } else {
+        Ok((body.to_vec(), None))
+    }
+}
+
+fn decode_body(body: Vec<u8>, encoding: Option<&str>) -> Result<Vec<u8>, Error> {
+    match encoding {
+        None | Some("identity") => Ok(body),
+        Some(ZLIB_ENCODING) => {
+            let mut decoder = ZlibDecoder::new(body.as_slice());
+            let mut decoded = Vec::new();
+            decoder
+                .read_to_end(&mut decoded)
+                .map_err(Error::BodyDecompression)?;
+            Ok(decoded)
+        }
+        Some(other) => Err(Error::UnsupportedBodyEncoding(other.to_owned())),
+    }
 }
 
 impl DbHttpCache {
@@ -116,6 +165,47 @@ impl DbHttpCache {
 }
 
 impl DbHttpCache {
+    /// Recompress all existing identity-encoded entries that benefit from
+    /// zlib. This is intentionally separate from opening the cache so normal
+    /// startup never rewrites the whole database.
+    pub async fn recompress_existing(&self) -> Result<RecompressionStats, Error> {
+        let entries = cache_entry::Entity::find().all(&self.db).await?;
+        let mut stats = RecompressionStats {
+            scanned: entries.len(),
+            ..Default::default()
+        };
+
+        for model in entries {
+            if model.body_encoding.as_deref() == Some(ZLIB_ENCODING) {
+                stats.unchanged += 1;
+                continue;
+            }
+
+            let old_len = model.body.len();
+            let (body, encoding) = encode_body(&model.body)?;
+            let Some(_) = encoding else {
+                stats.unchanged += 1;
+                continue;
+            };
+
+            let new_len = body.len();
+            let mut active: cache_entry::ActiveModel = model.into();
+            active.body = Set(body);
+            active.body_encoding = Set(encoding);
+            active.update(&self.db).await?;
+
+            stats.compressed += 1;
+            stats.saved_bytes += (old_len - new_len) as u64;
+        }
+
+        Ok(stats)
+    }
+
+    pub async fn vacuum(&self) -> Result<(), Error> {
+        self.db.execute_unprepared("VACUUM").await?;
+        Ok(())
+    }
+
     fn map_response(model: cache_entry::Model) -> Result<RawResponse<'static>, Error> {
         let status = u16::try_from(model.status)
             .map_err(|_| Error::InvalidStatusCode(model.status))
@@ -123,7 +213,7 @@ impl DbHttpCache {
                 StatusCode::from_u16(code).map_err(|_| Error::InvalidStatusCode(code as i32))
             })?;
 
-        let body = reqwest::Body::from(model.body);
+        let body = reqwest::Body::from(decode_body(model.body, model.body_encoding.as_deref())?);
         let mut headers = Vec::new();
 
         for (k, v) in model.headers.0 {
@@ -184,6 +274,13 @@ impl HttpCache for DbHttpCache {
             }
         };
 
+        let body = value
+            .body_to_bytes()
+            .await
+            .map_err(|err| Error::BodyRead(Box::new(err)))?
+            .to_vec();
+        let (body, body_encoding) = encode_body(&body)?;
+
         let entry = cache_entry::ActiveModel {
             key: Set(key),
             method: Set(method.to_string()),
@@ -196,11 +293,8 @@ impl HttpCache for DbHttpCache {
                     .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                     .collect(),
             )),
-            body: Set(value
-                .body_to_bytes()
-                .await
-                .map_err(|err| Error::BodyRead(Box::new(err)))?
-                .to_vec()),
+            body: Set(body),
+            body_encoding: Set(body_encoding),
             created_at: Set(time::OffsetDateTime::now_utc()),
             expires_at: Set(expires_at),
             stale_at: Set(stale_at),
@@ -212,6 +306,7 @@ impl HttpCache for DbHttpCache {
                 sea_query::OnConflict::column(cache_entry::Column::Key)
                     .update_columns([
                         cache_entry::Column::Body,
+                        cache_entry::Column::BodyEncoding,
                         cache_entry::Column::Method,
                         cache_entry::Column::Url,
                         cache_entry::Column::Headers,
@@ -246,5 +341,28 @@ impl HttpCache for DbHttpCache {
                 Ok(Some(Arc::new(Response::from_raw(raw, extractor))))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_body, encode_body};
+
+    #[test]
+    fn zlib_round_trip_preserves_body() {
+        let original =
+            br#"{"items":[{"name":"WATAME","description":"repeated response data"}]}"#.repeat(32);
+        let (encoded, encoding) = encode_body(&original).expect("compression succeeds");
+        assert_eq!(encoding.as_deref(), Some("zlib"));
+        assert!(encoded.len() < original.len());
+        assert_eq!(decode_body(encoded, encoding.as_deref()).unwrap(), original);
+    }
+
+    #[test]
+    fn incompressible_small_body_stays_identity() {
+        let original = [0_u8, 1, 2, 3, 4, 5, 6, 7];
+        let (encoded, encoding) = encode_body(&original).expect("compression succeeds");
+        assert_eq!(encoding, None);
+        assert_eq!(decode_body(encoded, None).unwrap(), original);
     }
 }
