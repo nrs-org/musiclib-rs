@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, Database, DatabaseConnection, DbErr,
-    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait, sea_query,
+    ActiveValue::Set, ColumnTrait, Condition, ConnectOptions, ConnectionTrait, Database,
+    DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Statement,
+    TransactionTrait, sea_query,
 };
 use tracing::warn;
 
@@ -306,8 +307,22 @@ mod entry_dedup {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+#[derive(Clone)]
 pub struct MusicDb {
     db: DatabaseConnection,
+    /// Serializes every write transaction issued through this handle (all
+    /// clones share the same lock, since it's an `Arc`). SQLite only ever
+    /// allows one writer regardless of pool size, so racing several
+    /// concurrent write-transactions against it (e.g. online soft-dedup's
+    /// `buffer_unordered(jev_concurrency)` scoring loop, which was never
+    /// about parallelizing DB writes -- see `pipeline::softmatch::score_candidates`'s
+    /// comment -- just the network-bound Jev path) buys nothing but
+    /// `SQLITE_BUSY`/`SQLITE_BUSY_SNAPSHOT` contention: proven insufficient
+    /// even with `retry_on_busy`'s 10-attempt backoff under sustained load.
+    /// Taking this lock for the duration of a write instead queues them
+    /// in-process, which costs nothing (they couldn't run in parallel at the
+    /// SQLite level anyway) and removes the race instead of retrying around it.
+    write_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 pub const SAME_IDENTITY: &str = "same_identity";
@@ -487,6 +502,67 @@ impl SoftIdentityProjection {
 
 fn ordered_pair(a: i64, b: i64) -> (i64, i64) {
     (a.min(b), a.max(b))
+}
+
+/// True for SQLite's whole "busy" error family (`SQLITE_BUSY` = 5,
+/// `SQLITE_BUSY_SNAPSHOT` = 517, `SQLITE_BUSY_RECOVERY` = 261, ...) --
+/// primary result code 5, regardless of the extended code's upper bits.
+/// `PRAGMA busy_timeout` (set in `MusicDb::new`) already makes SQLite wait
+/// out ordinary lock contention, but it can't help `SQLITE_BUSY_SNAPSHOT`:
+/// that fires when a transaction's own read snapshot goes stale because
+/// another connection committed in between, and no amount of waiting fixes
+/// a snapshot that's already stale -- the transaction has to be retried
+/// from scratch. See `retry_on_busy`.
+fn is_sqlite_busy(err: &Error) -> bool {
+    let Error::Database(db_err) = err else {
+        return false;
+    };
+    let (DbErr::Exec(runtime_err) | DbErr::Query(runtime_err)) = db_err else {
+        return false;
+    };
+    let sea_orm::RuntimeErr::SqlxError(sqlx_err) = runtime_err else {
+        return false;
+    };
+    let sea_orm::sqlx::Error::Database(db_specific) = sqlx_err.as_ref() else {
+        return false;
+    };
+    db_specific
+        .code()
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| code & 0xff == 5)
+}
+
+/// Retries `f` when it fails with a SQLite "busy" error, with exponential
+/// backoff. Needed for any multi-statement (read-then-write) transaction
+/// that can run concurrently with others of its own kind: online soft-dedup
+/// (`pipeline::softmatch`) scores up to `jev_concurrency` candidate pairs at
+/// once via `buffer_unordered`, so several `record_identity_feedback` calls
+/// can have their transactions genuinely interleaved (SQLite connections are
+/// only ever polled while awaiting I/O, and a real DB file's queries do
+/// await real I/O) -- if one's read snapshot goes stale because another
+/// committed first, SQLite refuses to let it write (`SQLITE_BUSY_SNAPSHOT`)
+/// rather than silently reading through a change it already missed. `f` must
+/// re-run its entire operation from scratch each attempt (a fresh `begin()`
+/// with a fresh snapshot), not resume a previous attempt's transaction.
+async fn retry_on_busy<T, F, Fut>(mut f: F) -> Result<T, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Error>>,
+{
+    const MAX_ATTEMPTS: u32 = 10;
+    let mut delay = std::time::Duration::from_millis(20);
+    for attempt in 1..=MAX_ATTEMPTS {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < MAX_ATTEMPTS && is_sqlite_busy(&e) => {
+                warn!(attempt, ?delay, "SQLite busy, retrying: {e}");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(2));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("the loop above always returns on its final attempt")
 }
 
 /// Groups identity-canonical ids (i.e. `SoftIdentityProjection::component_of`
@@ -1077,12 +1153,50 @@ async fn set_relation_enabled_on<C: ConnectionTrait>(
 
 impl MusicDb {
     pub async fn new(db_url: &str) -> Result<Self, Error> {
-        let db = Database::connect(db_url).await?;
-        sea_orm::ConnectionTrait::execute_unprepared(
-            &db,
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
-        )
-        .await?;
+        // A `:memory:` database is private per connection, so it must use a
+        // single pooled connection or every cursor sees an empty DB.
+        let is_memory = db_url.contains(":memory:") || db_url.contains("mode=memory");
+        let mut opts = ConnectOptions::new(db_url);
+        if is_memory {
+            opts.max_connections(1);
+        } else {
+            // sqlx's bare default (10 connections, 30s acquire timeout) is
+            // too small once online soft-dedup is running: its worker thread
+            // (see `pipeline::softmatch::match_new_entries_offloaded`) issues
+            // its own bursts of DB reads/writes concurrently with the
+            // importer's `buffer_unordered`-driven fan-out, and both compete
+            // for the same pool. `httpcache/db.rs` already learned this
+            // lesson for its own SQLite pool (`max_connections(32)`, same
+            // comment there); apply the same sizing here so a large ingest's
+            // dedup pass doesn't starve other pool waiters into a timeout.
+            opts.max_connections(32)
+                .acquire_timeout(std::time::Duration::from_secs(60));
+        }
+        // `busy_timeout` tells SQLite how long to wait for the write lock
+        // before returning `SQLITE_BUSY` ("database is locked") instead of
+        // blocking. Without it, a wider connection pool (above) makes things
+        // *worse* under write contention: SQLite only ever allows one
+        // writer, so more pooled connections just means more writers racing
+        // for that one lock.
+        //
+        // This MUST go through `map_sqlx_sqlite_opts`, not a `PRAGMA ...`
+        // statement run once against the pooled `DatabaseConnection` after
+        // connecting: `busy_timeout` (like `journal_mode`/`synchronous`) is a
+        // per-*connection* setting, and a statement run against the pool only
+        // ever lands on whichever single connection happens to service it.
+        // The other 31 connections the pool goes on to open would keep
+        // sqlx-sqlite's bare default (`sqlite3_busy_timeout`, 5s) — plausibly
+        // *the* cause of the `(code: 5) database is locked` failures this
+        // was meant to fix, since it silently didn't apply pool-wide.
+        // `map_sqlx_sqlite_opts` instead customizes the template
+        // `SqliteConnectOptions` the pool uses to establish every connection.
+        opts.map_sqlx_sqlite_opts(|o| {
+            use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
+            o.journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal)
+                .busy_timeout(std::time::Duration::from_secs(60))
+        });
+        let db = Database::connect(opts).await?;
         db.get_schema_registry("musiclib_rs::musicdb::*")
             .sync(&db)
             .await?;
@@ -1145,7 +1259,10 @@ impl MusicDb {
             )
             .await?;
         }
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     /// Look up the entry_id grouping a given (source, identifier) pair, if any.
@@ -1729,7 +1846,13 @@ impl MusicDb {
         origin: &str,
         extra: Option<&str>,
     ) -> Result<(), Error> {
-        upsert_relation_on(&self.db, entry_a, entry_b, kind, confidence, origin, extra).await
+        // See `write_lock` and `retry_on_busy`: serialize against every other
+        // write through this `MusicDb`, with a retry as a defensive fallback.
+        let _guard = self.write_lock.lock().await;
+        retry_on_busy(|| {
+            upsert_relation_on(&self.db, entry_a, entry_b, kind, confidence, origin, extra)
+        })
+        .await
     }
 
     /// Enable or tombstone one exact relation without deleting its provenance.
@@ -1822,6 +1945,19 @@ impl MusicDb {
     /// identity relation. `Unsure` acts as a retraction and disables both
     /// identity assertions while retaining all feedback rows.
     pub async fn record_identity_feedback(&self, feedback: NewDedupFeedback) -> Result<i64, Error> {
+        // See `write_lock` and `retry_on_busy`: serialize against every other
+        // write through this `MusicDb`, with a retry as a defensive fallback.
+        let _guard = self.write_lock.lock().await;
+        retry_on_busy(|| self.record_identity_feedback_once(feedback.clone())).await
+    }
+
+    /// The actual read-then-write transaction behind `record_identity_feedback`,
+    /// factored out so `retry_on_busy` can re-run it from scratch (fresh
+    /// `begin()`, fresh read snapshot) on `SQLITE_BUSY_SNAPSHOT`.
+    async fn record_identity_feedback_once(
+        &self,
+        feedback: NewDedupFeedback,
+    ) -> Result<i64, Error> {
         if feedback.entry_a == feedback.entry_b {
             return Err(Error::InvalidInput(
                 "identity feedback endpoints must differ".into(),
@@ -1954,6 +2090,16 @@ impl MusicDb {
     /// Insert or refresh a model suggestion without reopening an already
     /// reviewed row for the same model version.
     pub async fn upsert_dedup_suggestion(
+        &self,
+        suggestion: NewDedupSuggestion,
+    ) -> Result<(), Error> {
+        // See `write_lock` and `retry_on_busy`: serialize against every other
+        // write through this `MusicDb`, with a retry as a defensive fallback.
+        let _guard = self.write_lock.lock().await;
+        retry_on_busy(|| self.upsert_dedup_suggestion_once(suggestion.clone())).await
+    }
+
+    async fn upsert_dedup_suggestion_once(
         &self,
         suggestion: NewDedupSuggestion,
     ) -> Result<(), Error> {

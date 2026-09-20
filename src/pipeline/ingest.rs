@@ -18,7 +18,7 @@ use super::{
     dedup::DedupConfig,
     flush::flush,
     importer::import,
-    softmatch::{SoftMatchConfig, match_new_entries},
+    softmatch::{SoftMatchConfig, match_new_entries_offloaded},
     state::{ImportProgress, State},
 };
 
@@ -82,7 +82,14 @@ pub async fn ingest_entry(
         super::dedup::reconcile_tags(providers.as_slice(), db, dedup_configs).await?;
     }
     if let Some(cfg) = soft_cfg {
-        match_new_entries(db, &touched_ids, merged_dedup, providers.as_slice(), cfg).await?;
+        match_new_entries_offloaded(
+            db.clone(),
+            touched_ids.clone(),
+            merged_dedup.clone(),
+            Arc::clone(providers),
+            cfg.clone(),
+        )
+        .await?;
     }
 
     let entry_id = db

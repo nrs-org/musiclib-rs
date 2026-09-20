@@ -140,22 +140,26 @@ impl DbHttpCache {
             // default, so concurrent writers wait rather than erroring.
             opts.max_connections(32)
                 .acquire_timeout(std::time::Duration::from_secs(30));
+
+            // journal_mode/synchronous/busy_timeout are per-*connection*
+            // SQLite settings, so they must go through `map_sqlx_sqlite_opts`
+            // (which customizes the template `SqliteConnectOptions` the pool
+            // uses to establish every connection) rather than a `PRAGMA ...`
+            // statement run once against the pooled `DatabaseConnection`
+            // after connecting -- that only ever lands on whichever single
+            // connection happens to service it, leaving the other 31 at
+            // sqlx-sqlite's bare default (5s busy_timeout) instead of the 30s
+            // intended here to cover worst-case write queues when
+            // `buffer_unordered` fans out many concurrent cache writes.
+            opts.map_sqlx_sqlite_opts(|o| {
+                use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
+                o.journal_mode(SqliteJournalMode::Wal)
+                    .synchronous(SqliteSynchronous::Normal)
+                    .busy_timeout(std::time::Duration::from_secs(30))
+            });
         }
 
         let db = Database::connect(opts).await?;
-
-        if !is_memory {
-            // WAL is a persistent, DB-level setting; enabling it once lets many
-            // readers and one writer proceed concurrently (cache hits are reads).
-            // busy_timeout tells SQLite how long to spin-wait for the write lock
-            // before returning SQLITE_BUSY; 30 s covers worst-case write queues
-            // when buffer_unordered fans out many concurrent cache writes.
-            sea_orm::ConnectionTrait::execute_unprepared(
-                &db,
-                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000;",
-            )
-            .await?;
-        }
 
         db.get_schema_registry("musiclib_rs::httpcache::db::*")
             .sync(&db)

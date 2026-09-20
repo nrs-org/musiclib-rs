@@ -92,6 +92,7 @@ pub enum Verdict {
     Distinct,
 }
 
+#[derive(Clone)]
 pub struct SoftMatchConfig {
     pub script_path: String,
     /// Optional versioned logistic model. When set, it replaces Rhai verdict
@@ -3190,6 +3191,59 @@ pub async fn match_new_entries(
     )
     .await?;
     Ok(())
+}
+
+/// Runs [`match_new_entries`] on a dedicated OS thread with its own
+/// single-threaded Tokio runtime, so the synchronous Rhai/embedding work it
+/// does (see [`run_blocking`]) never stalls the *caller's* runtime.
+///
+/// This matters most for the `server` binary, whose main runtime is
+/// `current_thread` (required elsewhere because `rhai::Engine` isn't
+/// `Send`/`Sync`): calling `match_new_entries` directly there froze HTTP
+/// dispatch and `MusicDb` connection-pool acquisition for every other
+/// in-flight request for as long as scoring ran — for a large ingest, that
+/// starved queued pool waiters past `acquire_timeout` and failed the whole
+/// job. Offloading to its own thread fixes that without touching
+/// `match_new_entries` itself: `Engine`/`AST`/`Dynamic` values are built and
+/// consumed entirely inside the dedicated thread and never cross it, so
+/// rhai's `!Send` constraint is satisfied the same way `run_blocking`
+/// already satisfies it for the multi-thread case via `block_in_place` —
+/// just with a thread of our own instead of borrowing one from the runtime's
+/// pool, so it works uniformly regardless of the caller's runtime flavor.
+pub async fn match_new_entries_offloaded(
+    db: MusicDb,
+    new_entry_ids: HashSet<i64>,
+    dedup: DedupConfig,
+    providers: Arc<Vec<Arc<dyn FetchProvider>>>,
+    config: SoftMatchConfig,
+) -> anyhow::Result<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("softmatch-worker".to_string())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ =
+                        tx.send(Err(e).context("building softmatch worker thread's Tokio runtime"));
+                    return;
+                }
+            };
+            let result = rt.block_on(match_new_entries(
+                &db,
+                &new_entry_ids,
+                &dedup,
+                providers.as_slice(),
+                &config,
+            ));
+            let _ = tx.send(result);
+        })
+        .context("spawning softmatch worker thread")?;
+    rx.await
+        .context("softmatch worker thread panicked before sending a result")?
 }
 
 // ── Embedding cache helper ────────────────────────────────────────────────────
