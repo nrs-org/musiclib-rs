@@ -1,0 +1,46 @@
+{
+  "id": "7b11aea3-c733-42a5-a8cb-de0becb5f6ba",
+  "title": "KING",
+  "relations": [
+    {
+      "type": "performance",
+      "target-type": "recording",
+      "attributes": [],
+      "direction": "forward",
+      "recording": {
+        "id": "6472bbab-cec1-41b9-b19f-12232639f0dd",
+        "title": "KING"
+      }
+    },
+    {
+      "type": "performance",
+      "target-type": "recording",
+      "attributes": [],
+      "direction": "forward",
+      "recording": {
+        "id": "1ca1ed15-b54c-4d32-82d6-9c5271e3e07d",
+        "title": "KING"
+      }
+    },
+    {
+      "type": "performance",
+      "target-type": "recording",
+      "attributes": ["cover"],
+      "direction": "forward",
+      "recording": {
+        "id": "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391",
+        "title": "KING"
+      }
+    },
+    {
+      "type": "performance",
+      "target-type": "recording",
+      "attributes": ["live"],
+      "direction": "forward",
+      "recording": {
+        "id": "22222222-2222-2222-2222-222222222222",
+        "title": "KING (live)"
+      }
+    }
+  ]
+}

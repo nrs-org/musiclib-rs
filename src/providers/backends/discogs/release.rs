@@ -245,6 +245,7 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
                     name: Some(t.title.clone()),
                     position: Some(effective_pos),
                     contributions,
+                    original_relation_kind: None,
                 }
             })
             .collect();

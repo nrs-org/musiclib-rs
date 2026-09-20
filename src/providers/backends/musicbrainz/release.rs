@@ -161,6 +161,7 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
                             synthetic: false,
                         }),
                         contributions,
+                        original_relation_kind: None,
                     }
                 })
             })
@@ -373,7 +374,7 @@ mod tests {
             .and_then(|s| s.iter().next())
             .expect("expected recording source url")
             .clone();
-        let rec = get_recording(&client, &recording_url, false).await?;
+        let rec = get_recording(&client, &recording_url, false, true).await?;
 
         assert_eq!(rec.aliases.len(), 1);
         assert_eq!(rec.aliases[0].name, "Beautiful Circle");

@@ -223,6 +223,10 @@ pub fn import(
                             disc_no: pos.and_then(|p| p.disc_no),
                             track_no: pos.map(|p| p.track_no),
                             contributions: child_ref.contributions.clone(),
+                            original_relation_kind: child_ref
+                                .original_relation_kind
+                                .clone()
+                                .map(std::borrow::Cow::into_owned),
                         });
                         subs.push(import(
                             Arc::clone(&state),

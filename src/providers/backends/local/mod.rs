@@ -127,6 +127,7 @@ fn build_child_ref(child: &LocalChild, base: &std::path::Path) -> ChildRef {
         name: child.name.clone(),
         position,
         contributions,
+        original_relation_kind: None,
     }
 }
 

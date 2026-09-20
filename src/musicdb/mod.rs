@@ -341,6 +341,7 @@ pub const EDITION_KINDS: &[&str] = &[
     "instrumental",
     "cover",
     "medley",
+    "arrangement",
 ];
 
 /// `extra.transformation` tokens (see `version_tokens` in
@@ -542,10 +543,12 @@ impl EditionProjection {
 }
 
 /// Builds an `EditionProjection` over `identity`'s canonical ids from raw
-/// `EDITION_KINDS` relation rows. A `derived_from` row's `extra.derived_entry`
-/// (see `pipeline::softmatch::resolve_derived_side`) marks its canonical as
-/// the non-default side of its group; a group with no such marker (edges
-/// only via the manual version-kind taxonomy) falls back to its lowest id.
+/// `EDITION_KINDS` relation rows. Any such row's `extra.derived_entry` (see
+/// `pipeline::softmatch::resolve_derived_side` for the heuristic path, and
+/// `pipeline::flush`'s provider-asserted original->derived writes for
+/// cover/remix/arrangement) marks its canonical as the non-default side of
+/// its group; a group with no such marker (edges only via the manual
+/// version-kind taxonomy) falls back to its lowest id.
 fn build_edition_projection(
     identity: &SoftIdentityProjection,
     relations: impl IntoIterator<Item = RelationRow>,
@@ -594,11 +597,10 @@ fn build_edition_projection(
                 }
                 _ => None,
             });
-        if relation.kind == DERIVED_FROM
-            && let Some(derived_entry) = extra
-                .as_ref()
-                .and_then(|v| v.get("derived_entry"))
-                .and_then(|v| v.as_i64())
+        if let Some(derived_entry) = extra
+            .as_ref()
+            .and_then(|v| v.get("derived_entry"))
+            .and_then(|v| v.as_i64())
         {
             let derived_canonical = identity
                 .component_of(derived_entry)
@@ -2714,6 +2716,46 @@ mod tests {
         let (kind, transformation) = projection.edge_label(1, 2).unwrap();
         assert_eq!(kind, DERIVED_FROM);
         assert_eq!(transformation, Some("instrumental"));
+    }
+
+    /// Regression test for the pre-existing gate bug this feature exposed:
+    /// `build_edition_projection` used to only honor `extra.derived_entry`
+    /// when `relation.kind == DERIVED_FROM`, even though the enclosing loop
+    /// already filters to `EDITION_KINDS` — so a `"cover"` row (written by
+    /// `pipeline::flush`'s provider-asserted original->derived path) never
+    /// marked its derived side, and `default_member_of` silently fell back
+    /// to "lowest id" instead of "the original".
+    #[tokio::test]
+    async fn edition_projection_honors_derived_entry_on_non_derived_from_kinds() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2] {
+            insert_entry(db, id).await;
+        }
+        // Entry 1 is the *cover* (lower id) and entry 2 is the *original*
+        // (higher id) — deliberately the opposite of id order, so the buggy
+        // "falls back to lowest id" behavior would pick the cover as
+        // default and this test would fail without the gate fix.
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(1),
+            entry_b: Set(2),
+            kind: Set("cover".to_string()),
+            confidence: Set(0.85),
+            origin: Set("provider".to_string()),
+            enabled: Set(true),
+            extra: Set(Some(r#"{"derived_entry":1,"source_entry":2}"#.to_string())),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.group_of(1), projection.group_of(2));
+        assert_eq!(
+            projection.default_member_of(1),
+            2,
+            "original (higher id) is the default, not the cover"
+        );
     }
 
     /// `match.example.rhai`'s `version_token_symdiff` emits `transformation`

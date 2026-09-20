@@ -117,6 +117,12 @@ pub struct ChildRef {
     /// Note: there is no such contribution relationship from a track to its album/release,
     /// so this field is typically empty for track children.
     pub contributions: Vec<Contribution>,
+    /// Set when this child is the *original* recording that the parent is a
+    /// `kind`-transformation of (e.g. `"cover"`, `"remix"`, `"arrangement"`).
+    /// Consumed by `pipeline::flush` to write a directed original→derived
+    /// `entry_relation` row once both sides have resolved entry_ids. `None`
+    /// for the overwhelming majority of children.
+    pub original_relation_kind: Option<Cow<'static, str>>,
 }
 
 // contribution of an artist to an entry, with role (e.g. "main", "featured", "producer", etc.) and

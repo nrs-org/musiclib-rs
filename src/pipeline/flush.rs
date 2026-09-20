@@ -291,11 +291,53 @@ pub async fn flush(
         write_edge_contributions(db, edge).await?;
     }
 
+    // 10b. Provider-asserted original->derived relations (cover/remix/
+    // arrangement). Written directly from import data rather than the
+    // heuristic/Jev pass, since a cover and its original can be just as
+    // acoustically dissimilar as two unrelated covers — the whole point is
+    // to not depend on content-similarity rediscovering this link.
+    for edge in &has_rel {
+        let Some(kind) = &edge.original_relation_kind else {
+            continue;
+        };
+        let derived_id = entry_id_of(&edge.parent); // the cover/remix/arrangement
+        let original_id = entry_id_of(&edge.child); // the original
+        if derived_id == original_id {
+            continue; // already merged (e.g. by dedup) — nothing to relate
+        }
+        let extra = serde_json::json!({
+            "derived_entry": derived_id,
+            "source_entry": original_id,
+        })
+        .to_string();
+        db.upsert_relation(
+            original_id,
+            derived_id,
+            kind,
+            confidence_for_original_relation(kind),
+            "provider",
+            Some(&extra),
+        )
+        .await?;
+    }
+
     // 11. GC entries left empty by a split (their pairs were re-pointed above).
     db.delete_orphan_entries().await?;
 
     let touched: std::collections::HashSet<i64> = class_to_entry.values().copied().collect();
     Ok(touched)
+}
+
+/// Confidence for a provider-asserted original->derived relation. `"cover"`
+/// is Work-mediated (the "original" is inferred from an untagged Work
+/// performance, which can occasionally return more than one near-duplicate
+/// candidate — see the KING example in the design doc), so it gets a touch
+/// less confidence than the unambiguous direct-relation kinds.
+fn confidence_for_original_relation(kind: &str) -> f64 {
+    match kind {
+        "cover" => 0.85,
+        _ => 0.9,
+    }
 }
 
 async fn write_edge_contributions(db: &MusicDb, edge: &ChildEdge) -> anyhow::Result<()> {
@@ -588,5 +630,91 @@ mod tests {
         assert_eq!(uf.find(&m1), uf.find(&m2));
         // The absent pair is NOT in the same class as m1/m2 (skipped by loop).
         assert_ne!(uf.find(&absent), uf.find(&m1));
+    }
+
+    fn track_metadata() -> PairMetadata {
+        PairMetadata {
+            entry_type: EntryType::Track,
+            release_date: None,
+            extra: serde_json::Value::Null,
+            specific_data: crate::providers::types::EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: HashMap::new(),
+            },
+            aliases: vec![],
+        }
+    }
+
+    /// Two distinct covers of the same original, each carrying
+    /// `original_relation_kind: Some("cover")` on their `ChildEdge` to the
+    /// shared original — the exact "no sibling mesh" shape this feature
+    /// promises: two `entry_relation` rows (`original<->cover_1`,
+    /// `original<->cover_2`), and no row directly between the two covers.
+    #[tokio::test]
+    async fn flush_writes_original_relation_without_sibling_mesh() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let original = p("original");
+        let cover1 = p("cover_1");
+        let cover2 = p("cover_2");
+
+        let state = State::new();
+        for pair in [&original, &cover1, &cover2] {
+            state
+                .metadata
+                .lock()
+                .unwrap()
+                .insert(pair.clone(), track_metadata());
+        }
+        for cover in [&cover1, &cover2] {
+            state.has_rel.lock().unwrap().push(ChildEdge {
+                parent: cover.clone(),
+                child: original.clone(),
+                disc_no: None,
+                track_no: None,
+                contributions: vec![],
+                original_relation_kind: Some("cover".to_string()),
+            });
+        }
+
+        flush(Arc::new(state), &[], &db, &DedupConfig::default()).await?;
+
+        let original_id = db
+            .find_entry_id_by_pair(&original.0, &original.1)
+            .await?
+            .expect("original entry");
+        let cover1_id = db
+            .find_entry_id_by_pair(&cover1.0, &cover1.1)
+            .await?
+            .expect("cover_1 entry");
+        let cover2_id = db
+            .find_entry_id_by_pair(&cover2.0, &cover2.1)
+            .await?
+            .expect("cover_2 entry");
+
+        let relations = db.all_relations().await?;
+        assert_eq!(relations.len(), 2, "exactly one edge per cover, no more");
+        for rel in &relations {
+            assert_eq!(rel.kind, "cover");
+            assert_eq!(rel.origin, "provider");
+            let pair = (rel.entry_a.min(rel.entry_b), rel.entry_a.max(rel.entry_b));
+            assert_eq!(pair.0, original_id.min(pair.0));
+        }
+        // Both covers are linked to the original...
+        let linked_to_original: HashSet<i64> = relations
+            .iter()
+            .flat_map(|r| [r.entry_a, r.entry_b])
+            .filter(|id| *id != original_id)
+            .collect();
+        assert_eq!(linked_to_original, HashSet::from([cover1_id, cover2_id]));
+        // ...and never directly to each other.
+        assert!(
+            !relations.iter().any(|r| {
+                [r.entry_a, r.entry_b] == [cover1_id, cover2_id]
+                    || [r.entry_a, r.entry_b] == [cover2_id, cover1_id]
+            }),
+            "covers must not be related directly to one another"
+        );
+
+        Ok(())
     }
 }

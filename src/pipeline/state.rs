@@ -25,6 +25,9 @@ pub struct ChildEdge {
     pub disc_no: Option<i32>,
     pub track_no: Option<i32>,
     pub contributions: Vec<Contribution>,
+    /// Copied from `ChildRef::original_relation_kind`; when set, `child` is
+    /// the *original* and `parent` is the `kind`-transformation of it.
+    pub original_relation_kind: Option<String>,
 }
 
 /// Live observer for a single `import()` traversal — optional, purely

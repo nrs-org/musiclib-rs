@@ -1,0 +1,30 @@
+{
+  "id": "33333333-3333-3333-3333-333333333333",
+  "title": "Example Song (Remix)",
+  "length": 210000,
+  "disambiguation": null,
+  "artist-credit": [
+    {
+      "name": "Remixer",
+      "joinphrase": "",
+      "artist": {
+        "id": "44444444-4444-4444-4444-444444444444",
+        "name": "Remixer"
+      }
+    }
+  ],
+  "first-release-date": "2022-01-01",
+  "relations": [
+    {
+      "type": "remix",
+      "target-type": "recording",
+      "attributes": [],
+      "direction": "forward",
+      "recording": {
+        "id": "55555555-5555-5555-5555-555555555555",
+        "title": "Example Song"
+      }
+    }
+  ],
+  "releases": []
+}

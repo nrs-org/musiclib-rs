@@ -80,6 +80,7 @@ fn simplified_track_to_child_ref(track: &SimplifiedTrack) -> ChildRef {
             synthetic: false,
         }),
         contributions: vec![],
+        original_relation_kind: None,
     }
 }
 

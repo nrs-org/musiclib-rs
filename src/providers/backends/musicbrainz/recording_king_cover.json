@@ -1,0 +1,30 @@
+{
+  "id": "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391",
+  "title": "KING",
+  "length": 195000,
+  "disambiguation": "cover",
+  "artist-credit": [
+    {
+      "name": "Cover Artist",
+      "joinphrase": "",
+      "artist": {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "name": "Cover Artist"
+      }
+    }
+  ],
+  "first-release-date": "2023-01-01",
+  "relations": [
+    {
+      "type": "performance",
+      "target-type": "work",
+      "attributes": ["cover"],
+      "direction": "forward",
+      "work": {
+        "id": "7b11aea3-c733-42a5-a8cb-de0becb5f6ba",
+        "title": "KING"
+      }
+    }
+  ],
+  "releases": []
+}

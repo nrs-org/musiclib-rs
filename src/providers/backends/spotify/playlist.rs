@@ -133,6 +133,7 @@ fn playlist_items_to_child_refs(items: &[PlaylistItem]) -> Vec<ChildRef> {
                     synthetic: false,
                 }),
                 contributions,
+                original_relation_kind: None,
             }
         })
         .collect()

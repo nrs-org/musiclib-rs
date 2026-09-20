@@ -36,11 +36,20 @@ pub const EXTERNAL_TYPE_ARTIST: &str = "musicbrainz:artist";
 pub const EXTERNAL_TYPE_RELEASE_GROUP: &str = "musicbrainz:release_group";
 pub const EXTERNAL_TYPE_RELEASE: &str = "musicbrainz:release";
 pub const EXTERNAL_TYPE_RECORDING: &str = "musicbrainz:recording";
+/// Used only as a `ChildRef.external_type` label on the synthesized "original
+/// recording of a cover/remix/arrangement" children emitted by
+/// `recording::get_recording` — never returned by `canonicalize()`, so
+/// dispatch (`fetch_entry`, `raw_fetch`) still treats these as ordinary
+/// `EXTERNAL_TYPE_RECORDING` entries. Exists purely so `fetch_options` config
+/// authors can optionally match on it (e.g. to route it to a shallower
+/// options set).
+pub const EXTERNAL_TYPE_RECORDING_ORIGINAL: &str = "musicbrainz:recording:original";
 
 pub struct Provider {
     client: MusicBrainzClient,
     mirror_db: Option<Arc<Mutex<rusqlite::Connection>>>,
     pub fetch_release_durations: bool,
+    pub resolve_original_recordings: bool,
 }
 
 impl Provider {
@@ -49,6 +58,7 @@ impl Provider {
             client: MusicBrainzClient::new(token)?,
             mirror_db: None,
             fetch_release_durations: true,
+            resolve_original_recordings: true,
         })
     }
 
@@ -60,6 +70,7 @@ impl Provider {
             client: MusicBrainzClient::new_with_client(client, token)?,
             mirror_db: None,
             fetch_release_durations: true,
+            resolve_original_recordings: true,
         })
     }
 
@@ -72,6 +83,7 @@ impl Provider {
             client: MusicBrainzClient::new_with_client_and_base_url(client, token, base_url)?,
             mirror_db: None,
             fetch_release_durations: true,
+            resolve_original_recordings: true,
         })
     }
 
@@ -84,6 +96,11 @@ impl Provider {
 
     pub fn with_fetch_release_durations(mut self, enabled: bool) -> Self {
         self.fetch_release_durations = enabled;
+        self
+    }
+
+    pub fn with_resolve_original_recordings(mut self, enabled: bool) -> Self {
+        self.resolve_original_recordings = enabled;
         self
     }
 }
@@ -123,7 +140,13 @@ impl FetchProvider for Provider {
         .ok_or_else(|| Error::UnsupportedSourceKey(source_key.to_string()))?;
         let external_type: &str = &external_type;
         let result = if external_type == EXTERNAL_TYPE_RECORDING {
-            get_recording(&self.client, identifier, self.fetch_release_durations).await?
+            get_recording(
+                &self.client,
+                identifier,
+                self.fetch_release_durations,
+                self.resolve_original_recordings,
+            )
+            .await?
         } else if external_type == EXTERNAL_TYPE_RELEASE {
             get_release(&self.client, identifier).await?
         } else if external_type == EXTERNAL_TYPE_RELEASE_GROUP {

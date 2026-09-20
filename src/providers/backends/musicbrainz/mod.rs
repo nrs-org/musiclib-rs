@@ -9,5 +9,6 @@ pub mod release;
 pub mod release_group;
 pub mod types;
 pub mod url;
+pub mod work;
 
 pub const SOURCE: &str = "musicbrainz";

@@ -125,6 +125,15 @@ pub struct MusicBrainzConfig {
     /// and avoid the larger API response.
     #[serde(default = "MusicBrainzConfig::default_fetch_release_durations")]
     pub fetch_release_durations: bool,
+    /// When `true` (the default), a recording's `cover`/`remix`/arrangement
+    /// relations (MB's `performance`-of-Work attributes and direct
+    /// recording-recording relations) also fetch the *original* recording as
+    /// a child, linked by a directed `entry_relation` row so both land in
+    /// one switchable "edition" group. The `cover`/arrangement path costs an
+    /// extra `work/{id}` API call per such relation encountered; set to
+    /// `false` to skip all of this and fetch only the recording itself.
+    #[serde(default = "MusicBrainzConfig::default_resolve_original_recordings")]
+    pub resolve_original_recordings: bool,
 }
 
 impl MusicBrainzConfig {
@@ -143,6 +152,9 @@ impl MusicBrainzConfig {
     fn default_fetch_release_durations() -> bool {
         true
     }
+    fn default_resolve_original_recordings() -> bool {
+        true
+    }
 }
 
 impl Default for MusicBrainzConfig {
@@ -153,6 +165,7 @@ impl Default for MusicBrainzConfig {
             mirror_db: Self::default_mirror_db(),
             dump_base_url: Self::default_dump_base_url(),
             fetch_release_durations: Self::default_fetch_release_durations(),
+            resolve_original_recordings: Self::default_resolve_original_recordings(),
         }
     }
 }
@@ -334,6 +347,7 @@ pub fn build_providers(
             );
         }
         provider = provider.with_fetch_release_durations(cfg.fetch_release_durations);
+        provider = provider.with_resolve_original_recordings(cfg.resolve_original_recordings);
         providers.push(Arc::new(provider));
     }
 
