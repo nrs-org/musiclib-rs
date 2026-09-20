@@ -41,6 +41,16 @@ pub struct EntrySummary {
     /// matter which member you look at, so this is the only thing that
     /// actually tells soft-linked duplicates apart in a merge UI.
     pub members: Vec<MemberSources>,
+    /// Other identities in this entry's *edition group* (`musicdb::EDITION_KINDS`
+    /// — `derived_from` plus the version-ish `RELATE_KINDS`), this entry's own
+    /// identity included. A track and its instrumental are two distinct
+    /// identities (unlike `members`, which are the same identity) presented
+    /// as one library row with a picker — the same way the player already
+    /// treats multiple provider links to one identity as alternate playback
+    /// sources. Exactly one entry (`entry_id`) per underlying identity, even
+    /// though a caller may pass any member of that identity's own soft-identity
+    /// component. Length 1 (just this entry) for an entry with no edition links.
+    pub editions: Vec<EditionRef>,
 }
 
 #[derive(Clone, Serialize)]
@@ -49,12 +59,51 @@ pub struct MemberSources {
     pub sources: Vec<SourceRef>,
     /// This member's own title — picked the same way as `EntrySummary::title`
     /// but scoped to just this member's own sources, not the component-wide
-    /// union. Soft-linked members are frequently *not* the same title (e.g.
-    /// a track and its instrumental linked as the same underlying work), so
-    /// callers that render one member at a time (the relations graph, a node
-    /// dropped into it) need this instead of the merged `EntrySummary.title`
-    /// or every member renders identically.
+    /// union. Soft-linked members can still differ slightly in title text
+    /// (alias capitalization/romanization across providers), so callers that
+    /// render one member at a time (the relations graph, a node dropped into
+    /// it) need this instead of the merged `EntrySummary.title` or every
+    /// member renders identically. A track and its instrumental are *not*
+    /// soft-identity members of each other any more — see `EntrySummary::editions`.
     pub title: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct EditionRef {
+    pub entry_id: i64,
+    /// This edition's own display title — same derivation as `MemberSources::title`.
+    pub title: Option<String>,
+    /// The `entry_relation.kind` connecting this edition to the default one
+    /// (`None` for the default edition itself, or when it's related only
+    /// transitively through a third edition — see `EditionProjection::edge_label`).
+    pub kind: Option<String>,
+    /// `extra.transformation` off that same edge, when present (e.g.
+    /// `"instrumental"`, `"live"`) — a more specific label than `kind` alone.
+    pub transformation: Option<String>,
+    pub is_default: bool,
+    /// True for the one edition matching the requested entry's own identity
+    /// (`EntrySummary::entry_id`'s soft-identity component) — lets a switcher
+    /// highlight "you are here" even when `entry_id` isn't itself the
+    /// identity's canonical id.
+    pub is_current: bool,
+}
+
+/// Edition switcher order: the original first, then full alternate versions,
+/// then degenerate ones (`musicdb::DEGENERATE_MARKERS` — the same ranking
+/// `EditionProjection::default_member_of` uses to pick the playback default
+/// until per-user preference exists, so the switcher's left-to-right order
+/// matches what actually plays). `transformation` may hold several
+/// space-separated markers at once (e.g. `"instrumental named:long"`); one
+/// degenerate token is enough to sort the whole edition last.
+fn edition_sort_rank(ed: &EditionRef) -> u8 {
+    if ed.is_default {
+        return 0;
+    }
+    let degenerate = ed.transformation.as_deref().is_some_and(|t| {
+        t.split_whitespace()
+            .any(|tok| musiclib_rs::musicdb::DEGENERATE_MARKERS.contains(&tok))
+    });
+    if degenerate { 2 } else { 1 }
 }
 
 /// Every member of `entry_id`'s soft-identity component, `entry_id` included
@@ -69,20 +118,26 @@ pub async fn component_members(db: &MusicDb, entry_id: i64) -> anyhow::Result<Ve
         .unwrap_or_else(|| vec![entry_id]))
 }
 
-/// Fold `ids` down to one id per soft-identity component (first occurrence
-/// wins), so a caller presenting a list — search results in particular —
-/// doesn't show the same soft-linked song more than once.
-pub async fn dedupe_by_soft_identity(db: &MusicDb, ids: &[i64]) -> anyhow::Result<Vec<i64>> {
+/// Fold `ids` down to one id per *edition group* (`musicdb::EDITION_KINDS`,
+/// layered on top of soft-identity components), so a caller presenting a
+/// list — search results in particular — doesn't show the same song, or a
+/// different edition of it (a track and its instrumental), more than once.
+/// Each group is represented by its designated default edition
+/// (`EditionProjection::default_member_of`), not necessarily whichever
+/// member of `ids` triggered the fold.
+pub async fn dedupe_by_edition(db: &MusicDb, ids: &[i64]) -> anyhow::Result<Vec<i64>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let projection = db.soft_identity_projection_for_display().await?;
+    let identity = db.soft_identity_projection_for_display().await?;
+    let editions = db.edition_projection_for_display().await?;
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(ids.len());
     for &id in ids {
-        let canonical = projection.component_of(id).unwrap_or(id);
-        if seen.insert(canonical) {
-            out.push(canonical);
+        let canonical = identity.component_of(id).unwrap_or(id);
+        let group = editions.group_of(canonical);
+        if seen.insert(group) {
+            out.push(editions.default_member_of(canonical));
         }
     }
     Ok(out)
@@ -136,13 +191,16 @@ pub async fn entry_summaries(
     }
 
     let projection = db.soft_identity_projection_for_display().await?;
+    let editions = db.edition_projection_for_display().await?;
 
     // Resolve every requested id to its full soft-identity component (a
     // solo entry is its own one-member component), keyed by canonical id so
     // repeated requests for members of the same component don't redo work.
+    // Also resolve every edition sibling's own component the same way —
+    // `editions` only needs their *own* title (never a component-wide
+    // union across editions), but that still means fetching their sources.
     let mut components: HashMap<i64, Vec<i64>> = HashMap::new();
-    for &id in ids {
-        let canonical = projection.component_of(id).unwrap_or(id);
+    let fetch_component = |canonical: i64, components: &mut HashMap<i64, Vec<i64>>| {
         components.entry(canonical).or_insert_with(|| {
             projection
                 .members_by_component
@@ -150,6 +208,13 @@ pub async fn entry_summaries(
                 .cloned()
                 .unwrap_or_else(|| vec![canonical])
         });
+    };
+    for &id in ids {
+        let canonical = projection.component_of(id).unwrap_or(id);
+        fetch_component(canonical, &mut components);
+        for sibling in editions.members_of(canonical) {
+            fetch_component(sibling, &mut components);
+        }
     }
     let expanded_ids: Vec<i64> = components.values().flatten().copied().collect();
 
@@ -197,6 +262,36 @@ pub async fn entry_summaries(
         let title = pick_title(&member_sources, &aliases_by_pair);
         let release_date = member_sources.iter().find_map(|s| s.release_date.clone());
 
+        let default_canonical = editions.default_member_of(canonical);
+        let mut edition_list: Vec<EditionRef> = editions
+            .members_of(canonical)
+            .into_iter()
+            .map(|sib| {
+                let sib_sources: Vec<&musiclib_rs::musicdb::SourceRow> = components
+                    .get(&sib)
+                    .cloned()
+                    .unwrap_or_else(|| vec![sib])
+                    .iter()
+                    .flat_map(|m| sources_by_entry.get(m).cloned().unwrap_or_default())
+                    .collect();
+                let (kind, transformation) = editions
+                    .edge_label(sib, default_canonical)
+                    .map(|(kind, transformation)| {
+                        (Some(kind.to_string()), transformation.map(str::to_string))
+                    })
+                    .unwrap_or((None, None));
+                EditionRef {
+                    entry_id: sib,
+                    title: pick_title(&sib_sources, &aliases_by_pair),
+                    kind,
+                    transformation,
+                    is_default: sib == default_canonical,
+                    is_current: sib == canonical,
+                }
+            })
+            .collect();
+        edition_list.sort_by_key(|ed| (edition_sort_rank(ed), ed.entry_id));
+
         out.insert(
             id,
             EntrySummary {
@@ -229,6 +324,7 @@ pub async fn entry_summaries(
                         }
                     })
                     .collect(),
+                editions: edition_list,
             },
         );
     }

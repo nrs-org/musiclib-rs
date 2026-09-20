@@ -28,7 +28,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    entries::{component_members, dedupe_by_soft_identity, entry_summaries},
+    entries::{component_members, dedupe_by_edition, entry_summaries},
     fetch_options,
     respond::{self, HyperResponse},
     state::AppState,
@@ -245,9 +245,10 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
             );
         }
     };
-    // Fold soft-linked matches together so the same soft-deduped song
-    // doesn't show up as separate-looking rows.
-    let ids = match dedupe_by_soft_identity(&state.db, &raw_ids).await {
+    // Fold soft-linked matches, and edition-linked ones (a track and its
+    // instrumental), together so the same song doesn't show up as
+    // separate-looking rows.
+    let ids = match dedupe_by_edition(&state.db, &raw_ids).await {
         Ok(ids) => ids,
         Err(e) => {
             return respond::error(
@@ -297,7 +298,7 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
             );
         }
     };
-    let ids = match dedupe_by_soft_identity(&state.db, &raw_ids).await {
+    let ids = match dedupe_by_edition(&state.db, &raw_ids).await {
         Ok(ids) => ids,
         Err(e) => {
             return respond::error(
@@ -727,8 +728,8 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
 /// uses, so this is real calibration data (`dedup_feedback`), not a
 /// UI-only toggle. `entry_summaries` already unions sources across a
 /// component regardless of which member id is requested, and
-/// `dedupe_by_soft_identity` already folds search results down to one
-/// (lowest-id) row per component, so both merge and hide fall out of
+/// `dedupe_by_edition` already folds search results down to one
+/// (default-edition) row per component, so both merge and hide fall out of
 /// existing read paths for free — nothing else needs updating here.
 async fn link_relation(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     let req = match parse_relation_body(body) {

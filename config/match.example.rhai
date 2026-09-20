@@ -791,6 +791,13 @@ fn same_release_position(a, b) {
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 fn decide(ctx, a, b) {
+    // Candidate retrieval (notably semantic_ann, which can carry a stale
+    // embedding cached under the wrong type after an entry's entry_type
+    // changed) is best-effort and not guaranteed type-pure. Every decide_*
+    // below assumes both sides share a's type, so a cross-type pair must
+    // never reach one — score it distinct rather than merge/relate on a
+    // title collision between unrelated entity kinds.
+    if a.entry_type != b.entry_type    { return distinct(); }
     if a.entry_type == "track"         { return decide_track(ctx, a, b); }
     if a.entry_type == "artist"        { return decide_artist(ctx, a, b); }
     if a.entry_type == "release"       { return decide_release(ctx, a, b); }

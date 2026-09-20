@@ -832,6 +832,34 @@
     margin-bottom: 28px;
   }
 
+  .editions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+
+  .editions[hidden] { display: none; }
+
+  .edition-btn {
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+    color: var(--ink-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+
+  .edition-btn:hover { border-color: var(--ink-soft); color: var(--ink); }
+
+  .edition-btn[aria-current="true"] {
+    border-color: var(--verdigris);
+    color: var(--verdigris);
+    background: var(--paper-deeper);
+    cursor: default;
+  }
+
   /* ---------- manual soft-merge (dedup calibration) ---------- */
 
   .merge-section {
@@ -4553,6 +4581,29 @@
     return (t || "unknown").replace(/_/g, " ");
   }
 
+  // Fills the edition switcher (`EntrySummary.editions`, see
+  // `musicdb::EDITION_KINDS`) into `host`, or leaves it empty/hidden for a
+  // solo entry. Shared by `viewEntry` (initial render) and `refreshAfterEdit`
+  // (a manual relate/unrelate can change which editions this entry belongs
+  // to without a full card reload).
+  function fillEditions(host, editionsList) {
+    host.innerHTML = "";
+    const list = editionsList || [];
+    host.hidden = list.length <= 1;
+    for (const ed of list) {
+      host.appendChild(
+        el("button", {
+          className: "edition-btn",
+          type: "button",
+          "aria-current": String(!!ed.is_current),
+          disabled: ed.is_current,
+          text: friendlyType(ed.transformation || ed.kind || (ed.is_default ? "original" : "edition")),
+          onclick: ed.is_current ? null : () => viewEntry(ed.entry_id),
+        })
+      );
+    }
+  }
+
   // ---------- search ----------
 
   shuffleLibraryBtn.addEventListener("click", shuffleLibrary);
@@ -6132,6 +6183,7 @@
     cardEls.title.textContent = entry.title || "(untitled)";
     const date = friendlyDate(entry.release_date);
     cardEls.meta.textContent = date ? `Released ${date}` : "Release date unknown";
+    fillEditions(cardEls.editions, entry.editions);
     cardEls.stamps.innerHTML = "";
     for (const s of entry.sources) {
       cardEls.stamps.appendChild(stamp(s.source, s.identifier, s.source in PLATFORM_COLOR));
@@ -6377,6 +6429,18 @@
     const metaEl = el("p", { className: "card-meta", text: date ? `Released ${date}` : "Release date unknown" });
     detail.appendChild(metaEl);
 
+    // A track and its instrumental (or other `EDITION_KINDS` relation, see
+    // `musicdb::EDITION_KINDS`) are distinct identities, unlike `members`
+    // below — the library list already collapsed them into this one row
+    // (`dedupe_by_edition`), so switching here just navigates to the other
+    // identity's own entry page instead of merging anything. Always mounted
+    // (like `stampsEl` below) so `refreshAfterEdit` has a stable element to
+    // refill if a manual relate/unrelate edit changes the edition set of the
+    // entry already on screen.
+    const editionsEl = el("div", { className: "editions" });
+    fillEditions(editionsEl, entry.editions);
+    detail.appendChild(editionsEl);
+
     // Always mounted (just hidden when empty) rather than conditionally
     // appended, so `refreshAfterEdit` has a stable element to refill in
     // place if a dedup edit changes the source union from empty to
@@ -6386,7 +6450,7 @@
       stampsEl.appendChild(stamp(s.source, s.identifier, s.source in PLATFORM_COLOR));
     }
     detail.appendChild(stampsEl);
-    cardEls = { title: titleEl, meta: metaEl, stamps: stampsEl };
+    cardEls = { title: titleEl, meta: metaEl, stamps: stampsEl, editions: editionsEl };
 
     // Relations/dedup calibration lives in its own full-screen mode now
     // (see `viewGraph`) rather than embedded here — just a way in.

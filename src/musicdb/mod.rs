@@ -324,6 +324,35 @@ pub const DERIVED_FROM: &str = "derived_from";
 pub const PARTICIPATES_IN: &str = "participates_in";
 pub const FACET_OF: &str = "facet_of";
 
+/// Relation kinds that group distinct-identity entries into switchable
+/// "editions" of one library item — a track and its instrumental keep
+/// separate identities (`docs/dedup-v2.md`'s type-specific granularity
+/// table), but the player presents them as one row with a picker, the same
+/// way it already treats multiple provider links to one identity as
+/// alternate playback sources. Deliberately does not include
+/// `release_variant` / `in_release_group` / `same_artist` — those relate
+/// different entities (releases, artists), not alternate takes of one
+/// track. See `build_edition_projection`.
+pub const EDITION_KINDS: &[&str] = &[
+    DERIVED_FROM,
+    "alt_version",
+    "live",
+    "remix",
+    "instrumental",
+    "cover",
+    "medley",
+];
+
+/// `extra.transformation` tokens (see `version_tokens` in
+/// `match.example.rhai`) that strip content from the original recording
+/// (vocals removed, length cut) rather than offer a full alternate
+/// performance (live/remix/cover/acoustic/medley/named variant). Used to
+/// rank a `derived_from` edge's transformed side last among a group's
+/// editions — both for display order (`entries::edition_sort_rank`) and,
+/// until per-user playback preference exists, for `default_member_of`'s
+/// pick of which edition plays by default.
+pub const DEGENERATE_MARKERS: &[&str] = &["instrumental", "short_ver", "tv_size", "game_ver"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityJudgment {
     Same,
@@ -457,6 +486,176 @@ impl SoftIdentityProjection {
 
 fn ordered_pair(a: i64, b: i64) -> (i64, i64) {
     (a.min(b), a.max(b))
+}
+
+/// Groups identity-canonical ids (i.e. `SoftIdentityProjection::component_of`
+/// outputs) that are linked by an `EDITION_KINDS` relation into one
+/// switchable "edition group" — distinct from identity itself, which
+/// `SoftIdentityProjection` already owns. Built fresh from `entry_relation`
+/// on every read, same as `SoftIdentityProjection`.
+#[derive(Debug, Clone, Default)]
+pub struct EditionProjection {
+    group_by_canonical: HashMap<i64, i64>,
+    pub members_by_group: BTreeMap<i64, Vec<i64>>,
+    default_by_group: HashMap<i64, i64>,
+    /// `(unordered identity-canonical pair) -> (kind, transformation)` for
+    /// the edition edge directly connecting them, when one exists — used to
+    /// label a non-default edition relative to the default member (e.g.
+    /// "instrumental"). Absent for pairs related only transitively through a
+    /// third member.
+    edge_labels: HashMap<(i64, i64), (String, Option<String>)>,
+}
+
+impl EditionProjection {
+    /// The edition-group root for `identity_canonical` — itself if it has no
+    /// edition edges (a solo group of one).
+    pub fn group_of(&self, identity_canonical: i64) -> i64 {
+        self.group_by_canonical
+            .get(&identity_canonical)
+            .copied()
+            .unwrap_or(identity_canonical)
+    }
+
+    /// Every identity-canonical id in `identity_canonical`'s edition group,
+    /// itself included.
+    pub fn members_of(&self, identity_canonical: i64) -> Vec<i64> {
+        let group = self.group_of(identity_canonical);
+        self.members_by_group
+            .get(&group)
+            .cloned()
+            .unwrap_or_else(|| vec![identity_canonical])
+    }
+
+    /// The edition a bare library-list row should show: the recorded
+    /// non-derived side of a `derived_from` edge when known, else the
+    /// group's lowest id.
+    pub fn default_member_of(&self, identity_canonical: i64) -> i64 {
+        let group = self.group_of(identity_canonical);
+        self.default_by_group.get(&group).copied().unwrap_or(group)
+    }
+
+    pub fn edge_label(&self, a: i64, b: i64) -> Option<(&str, Option<&str>)> {
+        self.edge_labels
+            .get(&ordered_pair(a, b))
+            .map(|(kind, transformation)| (kind.as_str(), transformation.as_deref()))
+    }
+}
+
+/// Builds an `EditionProjection` over `identity`'s canonical ids from raw
+/// `EDITION_KINDS` relation rows. A `derived_from` row's `extra.derived_entry`
+/// (see `pipeline::softmatch::resolve_derived_side`) marks its canonical as
+/// the non-default side of its group; a group with no such marker (edges
+/// only via the manual version-kind taxonomy) falls back to its lowest id.
+fn build_edition_projection(
+    identity: &SoftIdentityProjection,
+    relations: impl IntoIterator<Item = RelationRow>,
+) -> EditionProjection {
+    let canonical_ids: HashSet<i64> = identity.component_by_entry.values().copied().collect();
+    let mut dsu = IdentityDsu::new(canonical_ids.iter().copied());
+    let mut is_derived_side: HashSet<i64> = HashSet::new();
+    let mut is_degenerate_side: HashSet<i64> = HashSet::new();
+    let mut edge_labels: HashMap<(i64, i64), (String, Option<String>)> = HashMap::new();
+
+    for relation in relations
+        .into_iter()
+        .filter(|r| r.enabled && EDITION_KINDS.contains(&r.kind.as_str()))
+    {
+        let a = identity
+            .component_of(relation.entry_a)
+            .unwrap_or(relation.entry_a);
+        let b = identity
+            .component_of(relation.entry_b)
+            .unwrap_or(relation.entry_b);
+        if a == b {
+            continue;
+        }
+        dsu.union(a, b);
+
+        let extra: Option<serde_json::Value> = relation
+            .extra
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok());
+        let transformation = extra
+            .as_ref()
+            .and_then(|v| v.get("transformation"))
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                // `version_token_symdiff` in the match script emits an array
+                // -- a track can carry more than one marker at once (e.g.
+                // both "instrumental" and "named:long") -- space-joined to
+                // match that script's own `version_tokens()` convention.
+                serde_json::Value::Array(items) => {
+                    let joined = items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    (!joined.is_empty()).then_some(joined)
+                }
+                _ => None,
+            });
+        if relation.kind == DERIVED_FROM
+            && let Some(derived_entry) = extra
+                .as_ref()
+                .and_then(|v| v.get("derived_entry"))
+                .and_then(|v| v.as_i64())
+        {
+            let derived_canonical = identity
+                .component_of(derived_entry)
+                .unwrap_or(derived_entry);
+            is_derived_side.insert(derived_canonical);
+            if transformation.as_deref().is_some_and(|t| {
+                t.split_whitespace()
+                    .any(|tok| DEGENERATE_MARKERS.contains(&tok))
+            }) {
+                is_degenerate_side.insert(derived_canonical);
+            }
+        }
+        edge_labels
+            .entry(ordered_pair(a, b))
+            .or_insert((relation.kind.clone(), transformation));
+    }
+
+    let ids: Vec<i64> = dsu.parent.keys().copied().collect();
+    let mut raw_groups: HashMap<i64, Vec<i64>> = HashMap::new();
+    for id in ids {
+        let root = dsu.find(id);
+        raw_groups.entry(root).or_default().push(id);
+    }
+    let mut group_by_canonical = HashMap::new();
+    let mut members_by_group = BTreeMap::new();
+    let mut default_by_group = HashMap::new();
+    for mut members in raw_groups.into_values() {
+        members.sort_unstable();
+        let canonical = members[0];
+        // Playback default until per-user preference exists (see
+        // `DEGENERATE_MARKERS`): original first, then a full alternate
+        // version, then a degenerate one; ties broken by lowest id via the
+        // stable sort above.
+        let default = members
+            .iter()
+            .min_by_key(
+                |m| match (is_derived_side.contains(m), is_degenerate_side.contains(m)) {
+                    (false, _) => 0,
+                    (true, false) => 1,
+                    (true, true) => 2,
+                },
+            )
+            .copied()
+            .unwrap_or(members[0]);
+        for &member in &members {
+            group_by_canonical.insert(member, canonical);
+        }
+        members_by_group.insert(canonical, members);
+        default_by_group.insert(canonical, default);
+    }
+
+    EditionProjection {
+        group_by_canonical,
+        members_by_group,
+        default_by_group,
+        edge_labels,
+    }
 }
 
 /// Max pairs per `pair_condition` query. Each pair becomes one OR branch;
@@ -1596,6 +1795,27 @@ impl MusicDb {
         ))
     }
 
+    /// Project enabled `EDITION_KINDS` assertions (over the display
+    /// soft-identity projection's canonical ids) into edition groups — see
+    /// `EditionProjection`. Read-only display data, same "presentation
+    /// only" caveat as `soft_identity_projection_for_display`.
+    pub async fn edition_projection_for_display(&self) -> Result<EditionProjection, Error> {
+        let identity = self.soft_identity_projection_for_display().await?;
+        let mut kind_filter = Condition::any();
+        for kind in EDITION_KINDS {
+            kind_filter = kind_filter.add(entry_relation::Column::Kind.eq(*kind));
+        }
+        let relations = entry_relation::Entity::find()
+            .filter(entry_relation::Column::Enabled.eq(true))
+            .filter(kind_filter)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect::<Vec<_>>();
+        Ok(build_edition_projection(&identity, relations))
+    }
+
     /// Append a user/model judgment and atomically update the active soft
     /// identity relation. `Unsure` acts as a retraction and disables both
     /// identity assertions while retaining all feedback rows.
@@ -2451,6 +2671,81 @@ mod tests {
         let again = combine_extra(&Some(combined.clone()), &a).unwrap();
         let arr2: serde_json::Value = serde_json::from_str(&again).unwrap();
         assert_eq!(arr2.as_array().unwrap().len(), 2, "converges, no growth");
+    }
+
+    /// A `derived_from` edge groups its two entries into one edition group
+    /// and picks the `source_entry` side (the original, not the
+    /// instrumental) as the default, while an unrelated entry stays its own
+    /// solo group.
+    #[tokio::test]
+    async fn edition_projection_groups_derived_from_and_picks_source_as_default() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2, 3] {
+            insert_entry(db, id).await;
+        }
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(1),
+            entry_b: Set(2),
+            kind: Set(DERIVED_FROM.to_string()),
+            confidence: Set(0.75),
+            origin: Set("heuristic".to_string()),
+            enabled: Set(true),
+            extra: Set(Some(
+                r#"{"derived_entry":2,"source_entry":1,"transformation":"instrumental"}"#
+                    .to_string(),
+            )),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.group_of(1), projection.group_of(2));
+        assert_ne!(projection.group_of(1), projection.group_of(3));
+        assert_eq!(
+            projection.default_member_of(2),
+            1,
+            "original is the default, not the instrumental"
+        );
+        let mut members = projection.members_of(1);
+        members.sort_unstable();
+        assert_eq!(members, vec![1, 2]);
+        let (kind, transformation) = projection.edge_label(1, 2).unwrap();
+        assert_eq!(kind, DERIVED_FROM);
+        assert_eq!(transformation, Some("instrumental"));
+    }
+
+    /// `match.example.rhai`'s `version_token_symdiff` emits `transformation`
+    /// as a JSON array (a track can carry more than one marker at once);
+    /// `edge_label` must space-join it rather than silently dropping it.
+    #[tokio::test]
+    async fn edition_projection_reads_array_transformation() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2] {
+            insert_entry(db, id).await;
+        }
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(1),
+            entry_b: Set(2),
+            kind: Set(DERIVED_FROM.to_string()),
+            confidence: Set(0.75),
+            origin: Set("heuristic".to_string()),
+            enabled: Set(true),
+            extra: Set(Some(
+                r#"{"derived_entry":2,"source_entry":1,"transformation":["instrumental","named:long"]}"#
+                    .to_string(),
+            )),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        let (kind, transformation) = projection.edge_label(1, 2).unwrap();
+        assert_eq!(kind, DERIVED_FROM);
+        assert_eq!(transformation, Some("instrumental named:long"));
     }
 
     /// Endpoint order is normalized: a relation stored as (loser, x) with
