@@ -21,6 +21,15 @@ main:
           - { name_regex: "歌枠" }
       fetch: null
 
+    # Priority 50 — blacklist Hakui Koyori's FF7 let's-play playlist: it's not
+    # music, but its Japanese description contains "オリジナル" ("original"),
+    # a false-positive match against the generic whitelist below.
+    - match:
+        all:
+          - { external_type: "youtube:playlist" }
+          - { name_regex: "FINAL FANTASY" }
+      fetch: null
+
     # Priority 20 — per-artist whitelists/blacklists
     - match:
         all:
@@ -58,5 +67,14 @@ playlist_all:
   child_rules:
     - match: { entry_type: artist }
       fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
+
+    # Drop full-length stream VODs that slip into whitelisted playlists —
+    # title matching alone can't tell a short song upload from a raw stream.
+    - match:
+        all:
+          - { entry_type: track }
+          - { duration_range: { min: 3600001 } }  # > 1h, in ms
+      fetch: null
+
     - match: { not: { entry_type: artist } }
       fetch: playlist_all                       # fetch all tracks, no filtering
