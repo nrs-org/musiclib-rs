@@ -261,21 +261,37 @@ impl HttpCache for DbHttpCache {
         };
 
         // Resolve cache policy for this status code, then compute expiry times.
-        let (expires_at, stale_at) = match policy.and_then(|p| p.resolve(status)) {
+        // Two distinct "no policy" cases, handled differently:
+        //   - No `CachePolicy` configured at all: cache with a short default,
+        //     no SWR — a reasonable default for a minimal setup.
+        //   - A `CachePolicy` *is* configured but has nothing to say about
+        //     this exact status (no matching rule, or a matching rule with an
+        //     explicit `policy: None`): don't cache at all. Falling back to
+        //     the 1-day default here previously meant any status the policy
+        //     author didn't anticipate — e.g. 429 — got cached as if it were
+        //     a stable result, silently replaying our own cached rate-limit
+        //     response for a day even after the real rate limit had cleared.
+        //     An unconfigured status must default to "don't cache", not "cache
+        //     for a day" — caching is an opt-in optimization, and the safe
+        //     default on the "I didn't think about this" path is to just make
+        //     the live request again next time.
+        let (expires_at, stale_at) = match policy {
             None => {
-                // No policy or no matching rule: cache with a short default, no SWR.
                 let now = time::OffsetDateTime::now_utc();
                 (now + time::Duration::days(1), now)
             }
-            Some(response_policy) => {
-                let ttl = response_policy.ttl.compute(consecutive_count as u32);
-                let ttl = time::Duration::try_from(ttl).unwrap_or(time::Duration::days(1));
-                let swr =
-                    time::Duration::try_from(response_policy.swr).unwrap_or(time::Duration::ZERO);
+            Some(p) => match p.resolve(status) {
+                None => return Ok(()),
+                Some(response_policy) => {
+                    let ttl = response_policy.ttl.compute(consecutive_count as u32);
+                    let ttl = time::Duration::try_from(ttl).unwrap_or(time::Duration::days(1));
+                    let swr = time::Duration::try_from(response_policy.swr)
+                        .unwrap_or(time::Duration::ZERO);
 
-                let now = time::OffsetDateTime::now_utc();
-                (now + ttl, now + ttl + swr)
-            }
+                    let now = time::OffsetDateTime::now_utc();
+                    (now + ttl, now + ttl + swr)
+                }
+            },
         };
 
         let body = value
@@ -350,7 +366,15 @@ impl HttpCache for DbHttpCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_body, encode_body};
+    use std::{borrow::Cow, time::Duration};
+
+    use super::{DbHttpCache, decode_body, encode_body};
+    use crate::{
+        http::{BodyExtractor, Method, RawResponse, bytes_body_extractor},
+        httpcache::{
+            CachePolicy, HttpCache, ResponseCachePolicy, StatusCacheRule, StatusMatcher, TtlPolicy,
+        },
+    };
 
     #[test]
     fn zlib_round_trip_preserves_body() {
@@ -368,5 +392,120 @@ mod tests {
         let (encoded, encoding) = encode_body(&original).expect("compression succeeds");
         assert_eq!(encoding, None);
         assert_eq!(decode_body(encoded, None).unwrap(), original);
+    }
+
+    async fn response_with_status(status: reqwest::StatusCode) -> super::Response {
+        bytes_body_extractor()
+            .extract_response(RawResponse {
+                status,
+                headers: Cow::Borrowed(&[]),
+                body: reqwest::Body::from(&[] as &[u8]),
+            })
+            .await
+            .expect("constructing a bare response never fails")
+    }
+
+    /// A `CachePolicy` that only says anything about 200 — the shape of a
+    /// real deployment's config (see `http.yaml`'s `default_policy`), which
+    /// has no rule for 429 at all.
+    fn policy_covering_only_200() -> CachePolicy {
+        CachePolicy {
+            status_rules: vec![StatusCacheRule {
+                status: StatusMatcher::Exact(200),
+                policy: Some(ResponseCachePolicy {
+                    ttl: TtlPolicy::Fixed(Duration::from_secs(3600)),
+                    swr: Duration::ZERO,
+                }),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn status_with_no_matching_rule_is_not_cached() {
+        // Regression test: a status the policy author never anticipated (429,
+        // in the incident this guards against — Spotify rate-limiting us for
+        // ~8.3h) must not fall back to a default cache duration. Caching an
+        // unconfigured status silently replays that response — a rate limit
+        // in this case — long after the real condition may have cleared.
+        let cache = DbHttpCache::new_in_memory().await.unwrap();
+        let policy = policy_covering_only_200();
+        let res = response_with_status(reqwest::StatusCode::TOO_MANY_REQUESTS).await;
+
+        cache
+            .set(
+                "key:429".to_string(),
+                &Method::GET,
+                Some(&policy),
+                std::sync::Arc::new(res),
+            )
+            .await
+            .unwrap();
+
+        let hit = cache
+            .get("key:429", bytes_body_extractor().into())
+            .await
+            .unwrap();
+        assert!(
+            hit.is_none(),
+            "429 with no matching rule must not be cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_none_policy_is_not_cached() {
+        // A rule that matches but explicitly opts out (`policy: None`) must
+        // behave the same as "no rule at all" — not fall back to a default.
+        let cache = DbHttpCache::new_in_memory().await.unwrap();
+        let policy = CachePolicy {
+            status_rules: vec![StatusCacheRule {
+                status: StatusMatcher::Exact(429),
+                policy: None,
+            }],
+        };
+        let res = response_with_status(reqwest::StatusCode::TOO_MANY_REQUESTS).await;
+
+        cache
+            .set(
+                "key:429-explicit".to_string(),
+                &Method::GET,
+                Some(&policy),
+                std::sync::Arc::new(res),
+            )
+            .await
+            .unwrap();
+
+        let hit = cache
+            .get("key:429-explicit", bytes_body_extractor().into())
+            .await
+            .unwrap();
+        assert!(hit.is_none(), "explicit `policy: None` must not be cached");
+    }
+
+    #[tokio::test]
+    async fn status_with_a_configured_rule_is_still_cached() {
+        // Contrast case: this behavior change must not stop statuses that
+        // *are* configured from caching normally.
+        let cache = DbHttpCache::new_in_memory().await.unwrap();
+        let policy = policy_covering_only_200();
+        let res = response_with_status(reqwest::StatusCode::OK).await;
+
+        cache
+            .set(
+                "key:200".to_string(),
+                &Method::GET,
+                Some(&policy),
+                std::sync::Arc::new(res),
+            )
+            .await
+            .unwrap();
+
+        let hit = cache
+            .get("key:200", bytes_body_extractor().into())
+            .await
+            .unwrap();
+        assert!(
+            hit.is_some(),
+            "a status with a configured rule must still cache"
+        );
     }
 }
