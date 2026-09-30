@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use http_body_util::BodyExt;
 use serde::{Serialize, de::DeserializeOwned};
 
+pub mod activity;
 mod cache;
 pub mod coalescer;
 mod default;
@@ -11,6 +12,7 @@ pub mod quota;
 pub mod scheduler;
 mod types;
 
+pub use activity::Activity;
 pub use coalescer::{CoalesceKey, CoalesceRule, Coalescer, SplitResponse};
 pub use quota::QuotaCounter;
 use tokio::sync::RwLock;
@@ -289,6 +291,13 @@ pub struct HttpClientConfig {
     #[serde(skip)]
     pub coalescer_rules: Vec<Arc<dyn CoalesceRule>>,
 
+    /// Liveness backstop for the coalescer: fire a partial batch once its
+    /// oldest request has waited this long, even if other work is still
+    /// running (e.g. `"30s"`). `None` (the default) never fires a partial
+    /// batch early — see `http::coalescer` for the firing rule.
+    #[serde(deserialize_with = "crate::duration::option::deserialize")]
+    pub coalescer_max_hold: Option<std::time::Duration>,
+
     /// When `Some`, every outgoing YouTube Data API request increments this
     /// counter. Cache hits don't count (the counter sits below the cache
     /// layers); scheduler retries each count as a separate request, matching
@@ -324,7 +333,12 @@ impl HttpClientConfig {
         let with_coalescer: Arc<dyn HttpClient> = if self.coalescer_rules.is_empty() {
             scheduled
         } else {
-            Coalescer::new(scheduled, self.coalescer_rules)
+            Coalescer::new(
+                scheduled,
+                self.coalescer_rules,
+                Activity::global().clone(),
+                self.coalescer_max_hold,
+            )
         };
 
         // Optional DB cache layer
@@ -340,11 +354,15 @@ impl HttpClientConfig {
             None => with_coalescer,
         };
 
-        // Optional memory cache layer (outermost)
-        Ok(if self.memory_cache {
+        // Optional memory cache layer
+        let with_memory: Arc<dyn HttpClient> = if self.memory_cache {
             Arc::new(with_db.into_cached::<MemoryHttpCache>())
         } else {
             with_db
-        })
+        };
+
+        // Activity tracking (outermost): a request counts as running work
+        // everywhere in the stack except while parked in the coalescer.
+        Ok(Activity::global().layer(with_memory))
     }
 }

@@ -116,6 +116,7 @@ Cache hits at an outer layer bypass all inner layers, including scheduling.
 | `memory_cache` | bool | `false` | Wrap the stack in an in-process memory cache (no TTL; lives for the duration of the process) |
 | `db_cache` | object? | absent | Persistent SQLite cache; see below |
 | `schedulers` | map | `{}` | Per-domain scheduler configs; see below |
+| `coalescer_max_hold` | duration? | absent | Fire a partial batch once its oldest request has waited this long, even while other work is still running (e.g. `"30s"`). Absent = only fire partial batches when nothing else could add ids to them |
 
 ### `db_cache`
 

@@ -1,5 +1,16 @@
 # Batching providers — design plan
 
+> **Status: implemented** (`src/http/coalescer.rs`, `src/http/activity.rs`).
+> The *firing rule* below (tick-boundary drain) was superseded: the coalescer
+> now never sends a partial batch while any still-running work could add ids
+> to it. A process-wide activity counter (`http::Activity`) tracks traversal
+> roots while polled, requests anywhere in the HTTP stack, and in-flight merged
+> calls; requests parked in a coalescer queue don't count. Full batches fire
+> immediately; when the counter hits zero the coordinator fires the single
+> fullest partial batch, then waits for idleness again. Identical queued
+> requests share one slot. `coalescer_max_hold` in `http.yaml` is an optional
+> liveness backstop. See the module docs for the exact accounting.
+
 ## Motivation
 
 Several upstream APIs accept multiple entity IDs per call:

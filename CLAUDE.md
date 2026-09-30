@@ -105,10 +105,12 @@ Each backend module mirrors the API entity it wraps (e.g. `musicbrainz/{artist,r
 `HttpClientConfig::build()` composes a layered client, innermost → outermost:
 
 ```
-DefaultHttpClient → DomainScheduler → DB cache (opt) → Memory cache (opt)
+DefaultHttpClient → DomainScheduler → Coalescer (opt) → DB cache (opt) → Memory cache (opt) → Activity layer
 ```
 
-Cache hits at an outer layer bypass scheduling. `DomainScheduler` (`http/scheduler.rs`) enforces per-domain concurrency and a two-phase retry on 429 (and per-domain extra statuses like MusicBrainz's 503): phase 1 honours `Retry-After` for N attempts, phase 2 is exponential backoff. The special host key `"*"` is the default applied to unlisted domains.
+Cache hits at an outer layer bypass scheduling and batching.
+
+`Coalescer` (`http/coalescer.rs`) merges single-entity requests matched by per-backend `CoalesceRule`s (YouTube `videos`/`channels`/`playlists.list`, Spotify tracks/albums/artists) into batched calls. Full batches fire immediately; partial batches fire only when `http::Activity` (`http/activity.rs`) reports the process idle, i.e. every piece of running work is parked in a coalescer queue. Traversal roots must be wrapped in `Activity::global().track(..)` (the pipeline does this) so CPU work between awaits isn't mistaken for idleness. `DomainScheduler` (`http/scheduler.rs`) enforces per-domain concurrency and a two-phase retry on 429 (and per-domain extra statuses like MusicBrainz's 503): phase 1 honours `Retry-After` for N attempts, phase 2 is exponential backoff. The special host key `"*"` is the default applied to unlisted domains.
 
 `HttpCache` (`src/httpcache/`) has two impls: `MemoryHttpCache` (in-process) and `DbHttpCache` (SQLite/SeaORM). Cache keys default to `"{METHOD}:{url}"` but can be overridden per-request via `Request::cache_key`.
 
@@ -167,6 +169,6 @@ Each backend ships checked-in JSON fixtures next to its source (e.g. `youtube_ap
 - `scripts/import.sh` is a convenience wrapper — it re-runs the importer against a fixed example URL with vtuber fetch options, relying on the default config directory for `http.yaml` and `providers.yaml`.
 - `scripts/dedup.sh` and `scripts/clear_yt_cache.sh` are similar convenience wrappers.
 - Edition: 2024.
-- `docs/BATCHING_PROVIDERS.md` documents a planned coalescer layer in the HTTP stack for batching multi-ID API calls (YouTube, Spotify) — not yet implemented.
+- `docs/BATCHING_PROVIDERS.md` is the original design doc for the coalescer; its firing rule section is superseded (see the status note at its top).
 - `docs/CONFIG_REFERENCE.md` has full annotated examples for `providers.yaml`, `http.yaml`, fetch-options files, and dedup barrier files.
 - `docs/DEV.md` covers dev environment setup (Nix and non-Nix paths).
