@@ -185,6 +185,15 @@ async fn dispatch_with_retry(
             // No Retry-After header — skip straight to phase 2.
             break;
         };
+        // A server can send an arbitrarily large Retry-After (observed: Spotify
+        // returning ~8.3 hours under heavy sustained traffic) — honoring that
+        // verbatim looks indistinguishable from a hung process for any
+        // practical session length. Cap it at `max_backoff`, the same ceiling
+        // phase 2 already uses for "how long we're willing to wait between
+        // retries" — a real multi-hour block still gets *some* retry instead
+        // of silently parking the whole request tree until the process is
+        // manually killed.
+        let delay = delay.min(retry.max_backoff);
 
         if retry_after_remaining == 0 {
             break;
@@ -526,6 +535,69 @@ mod tests {
         let res = client.get(req).await?;
         assert_eq!(res.status, ResponseStatus::OK);
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_retry_after_capped_at_max_backoff() -> anyhow::Result<()> {
+        init_test_logger();
+        // A server can send an absurd Retry-After (observed for real: Spotify
+        // returning ~8.3 hours under sustained load) — honoring it verbatim
+        // would sleep the request, and everything queued behind it on a
+        // max_concurrent-limited domain, for that whole span. Verify it's
+        // capped at `max_backoff` instead.
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+        let server = MockServer::new(move |_| {
+            let count = call_count_clone.clone();
+            async move {
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Ok(HyperResponse::builder()
+                        .status(429)
+                        .header("retry-after", "36000") // 10 hours
+                        .body(Full::new(Bytes::from("slow down")))
+                        .unwrap())
+                } else {
+                    Ok(HyperResponse::new(Full::new(Bytes::from("ok"))))
+                }
+            }
+        })
+        .await?;
+
+        let client = DomainScheduler::new(
+            default_http_client(),
+            SchedulerConfig {
+                max_concurrent: None,
+                retry: Some(RetryConfig {
+                    retry_after_attempts: 1,
+                    backoff_attempts: 0,
+                    initial_backoff: Duration::from_millis(1),
+                    backoff_multiplier: 2.0,
+                    max_backoff: Duration::from_millis(20), // the cap under test
+                    rate_limit_statuses: Vec::new(),
+                }),
+                channel_capacity: 64,
+            },
+        );
+        let req = Request {
+            url: server.route("/"),
+            ..Default::default()
+        };
+
+        let started = std::time::Instant::now();
+        let res = tokio::time::timeout(Duration::from_secs(5), client.get(req)).await??;
+        assert_eq!(res.status, ResponseStatus::OK);
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        // If the 10h Retry-After weren't capped, this wouldn't complete inside
+        // the 5s timeout at all; also check it took roughly `max_backoff`, not
+        // something merely-smaller-but-still-huge, to catch a cap that's
+        // computed but not actually applied.
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "took {:?} — Retry-After cap doesn't seem to be applied",
+            started.elapsed()
+        );
         Ok(())
     }
 
