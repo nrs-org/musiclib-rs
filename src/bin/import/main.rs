@@ -15,7 +15,7 @@ use musiclib_rs::{
     musicdb::MusicDb,
     pipeline::{
         dedup::{DedupConfig, dedup_db, merge_configs},
-        ingest::ingest_entry,
+        ingest::ingest_entries,
         progress,
         softmatch::default_soft_match_config,
     },
@@ -32,7 +32,14 @@ use tracing::info;
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    url: String,
+    /// URL(s) to import. All are traversed together in one run, so their
+    /// fetches share API batches.
+    #[arg(required_unless_present = "url_file")]
+    urls: Vec<String>,
+    /// File with more URLs to import, one per line (blank lines and lines
+    /// starting with `#` are ignored).
+    #[arg(long)]
+    url_file: Option<PathBuf>,
     /// Fetch-options YAML file. A bare filename (no path separator) is resolved
     /// relative to <config_dir>/fetch_options/.
     #[arg(long)]
@@ -132,6 +139,27 @@ async fn main() -> anyhow::Result<()> {
     let youtube_quota = Arc::new(AtomicU64::new(0));
     http_config.youtube_quota_counter = Some(Arc::clone(&youtube_quota));
 
+    // The quota total is otherwise only logged once, at clean exit — a killed
+    // process (SIGTERM during a batch, common when driving many imports and
+    // culling stuck/unwanted ones) leaves no record at all of what it really
+    // consumed, even though the counter itself was tracking correctly the
+    // whole time. Log it periodically too so a killed run's log still has a
+    // recent, accurate figure instead of nothing.
+    {
+        let youtube_quota = Arc::clone(&youtube_quota);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                info!(
+                    "YouTube Data API quota used so far: {} unit(s)",
+                    youtube_quota.load(Ordering::Relaxed),
+                );
+            }
+        });
+    }
+
     let http = http_config.build().await?;
     // Cloned before `http` is wrapped/consumed below — see softmatch.rs's
     // analogous clone for why the script-facing `http_call(...)` primitive
@@ -191,7 +219,24 @@ async fn main() -> anyhow::Result<()> {
     if let Some(cfg) = soft_cfg.as_mut() {
         cfg.http_client = Some(Arc::clone(&http_for_script));
     }
-    let outcome = ingest_entry(
+    let mut urls = args.urls;
+    if let Some(path) = &args.url_file {
+        let text = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))?;
+        urls.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_owned),
+        );
+    }
+    if urls.is_empty() {
+        anyhow::bail!("no URLs to import");
+    }
+    info!("Importing {} URL(s)", urls.len());
+
+    let outcome = ingest_entries(
         &db,
         &providers,
         &pool,
@@ -199,13 +244,18 @@ async fn main() -> anyhow::Result<()> {
         &dedup_configs,
         &merged,
         soft_cfg.as_ref(),
-        args.url,
+        urls.clone(),
         None,
     )
     .await?;
-    match outcome.entry_id {
-        Some(id) => info!(entry_id = id, "Ingested"),
-        None => info!("No provider recognised the input URL; nothing ingested"),
+    for (url, entry_id) in urls.iter().zip(&outcome.entry_ids) {
+        match entry_id {
+            Some(id) => info!(entry_id = id, url, "Ingested"),
+            None => info!(
+                url,
+                "No provider recognised the input URL; nothing ingested"
+            ),
+        }
     }
 
     info!(

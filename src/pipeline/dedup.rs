@@ -267,9 +267,11 @@ pub async fn dedup_db(
                 root,
             )
         });
-        futures::future::join_all(subs).await;
+        crate::http::Activity::global()
+            .track(futures::future::join_all(subs))
+            .await;
         let merged = merge_configs(configs);
-        flush(state, providers.as_slice(), db, &merged).await?;
+        flush(state, providers.as_slice(), db, &merged, None, true).await?;
     }
 
     // Persist mtimes and refresh tags for present files; drop removed files.

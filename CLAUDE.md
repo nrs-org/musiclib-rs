@@ -16,7 +16,7 @@ cargo run --bin update_fixtures
 cargo run --bin update_fixtures -- fixtures.yaml <filter>   # filter by path/url/backend
 
 # End-to-end import (see import.sh for the canonical invocation)
-RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url> \
+RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url>... [--url-file urls.txt] \
   --fetch-options config/fetch_options/fetch_discography.yaml
 
 # Re-apply dedup barrier to an existing DB (no new URLs ingested)

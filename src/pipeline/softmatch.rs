@@ -3381,6 +3381,7 @@ mod tests {
                 duration_ms: vec![duration_ms],
                 positions: Default::default(),
             },
+            None,
         )
         .await
         .unwrap();
@@ -3394,6 +3395,7 @@ mod tests {
                 extra: serde_json::Value::Null,
                 primary: true,
             }],
+            None,
         )
         .await
         .unwrap();

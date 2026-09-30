@@ -58,11 +58,7 @@ pub fn import(
         // 2. Link the input pair to the canonical pair if they differ. Done
         //    before the claim so a losing claimer still records the link.
         if input != canonical {
-            state
-                .is_rel
-                .lock()
-                .unwrap()
-                .push((input.clone(), canonical.clone()));
+            state.push_is_rel(input.clone(), canonical.clone());
         }
 
         // 3. Claim the canonical pair. If another task owns it, we're done —
@@ -94,7 +90,12 @@ pub fn import(
         let EntityResult {
             release_date,
             mut sources,
-            extra,
+            // Not retained: fetch-options matchers that need raw provider data
+            // (youtube/musicbrainz-specific fields) do their own independent,
+            // HTTP-cache-backed fetch via `MatchContext::get_entity` rather
+            // than reading this — keeping the whole raw response alive in
+            // `PairMetadata` for the rest of the import serves nothing.
+            extra: _,
             specific_data,
             children,
             aliases,
@@ -102,12 +103,11 @@ pub fn import(
         let entry_type = entry_type_of(&specific_data);
 
         // 5. Store per-pair metadata on the canonical pair.
-        state.metadata.lock().unwrap().insert(
+        state.insert_metadata(
             canonical.clone(),
             PairMetadata {
                 entry_type,
                 release_date,
-                extra,
                 specific_data,
                 aliases,
             },
@@ -183,11 +183,7 @@ pub fn import(
                 );
                 continue;
             }
-            state
-                .is_rel
-                .lock()
-                .unwrap()
-                .push((canonical.clone(), src.clone()));
+            state.push_is_rel(canonical.clone(), src.clone());
             subs.push(import(
                 Arc::clone(&state),
                 Arc::clone(&providers),
@@ -210,14 +206,10 @@ pub fn import(
                             continue;
                         };
                         for sibling in child_pairs.iter().skip(1) {
-                            state
-                                .is_rel
-                                .lock()
-                                .unwrap()
-                                .push((primary.clone(), sibling.clone()));
+                            state.push_is_rel(primary.clone(), sibling.clone());
                         }
                         let pos = child_ref.position.as_ref();
-                        state.has_rel.lock().unwrap().push(ChildEdge {
+                        state.push_has_rel(ChildEdge {
                             parent: canonical.clone(),
                             child: primary.clone(),
                             disc_no: pos.and_then(|p| p.disc_no),

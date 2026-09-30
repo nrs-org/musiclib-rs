@@ -21,6 +21,28 @@ use super::state::{ChildEdge, Pair, PairMetadata, State};
 /// 4. Write pair metadata (real rows for fetched pairs, stub rows for the
 ///    rest), aliases, child edges, contributions.
 ///
+/// `run_id`, if given, tags every row this call inserts (see the `run_id`
+/// column on `entry_source`/`entry_alias`/`entry_child`/`contribution`) so a
+/// run interrupted by a crash can be found and purged later by
+/// `MusicDb::recover_pending_import_runs`.
+///
+/// `final_flush` distinguishes the run's last flush (called once the whole
+/// traversal has finished, or a one-shot caller like the `dedup` binary that
+/// only ever flushes once) from a periodic mid-run flush triggered to relieve
+/// memory pressure (see `pipeline::ingest`'s watchdog). A periodic flush only
+/// ever *creates* rows — any equivalence class that would touch a pair
+/// already present in the DB (whether from earlier history or from an
+/// earlier periodic flush of this same still-pending run) is left buffered in
+/// `state` instead of being written, and gets picked up again by the next
+/// call. This is what makes a periodic flush's writes cleanly undoable by a
+/// plain "delete everything tagged with this run_id": it never merges,
+/// splits, or otherwise mutates a pre-existing row, so there's never
+/// anything to unwind besides freshly inserted rows. `final_flush = true`
+/// processes every class regardless (today's original, single-flush
+/// behaviour) — this is safe to interrupt only in the same sense today's
+/// single end-of-import flush already is (not perfectly atomic against a
+/// crash mid-call), which is unchanged by this feature.
+///
 /// Returns the set of entry_ids written or surviving after merges in this flush.
 /// The caller can pass this set to `softmatch::match_new_entries` for online
 /// soft-dedup without re-scanning previously compared pairs.
@@ -29,10 +51,26 @@ pub async fn flush(
     providers: &[Arc<dyn FetchProvider>],
     db: &MusicDb,
     dedup: &DedupConfig,
+    run_id: Option<i64>,
+    final_flush: bool,
 ) -> anyhow::Result<std::collections::HashSet<i64>> {
     let metadata = std::mem::take(&mut *state.metadata.lock().unwrap());
     let is_rel = std::mem::take(&mut *state.is_rel.lock().unwrap());
     let has_rel = std::mem::take(&mut *state.has_rel.lock().unwrap());
+
+    // Account for what was just drained; anything re-buffered below (step 4b,
+    // deferred classes) goes back in through `State::insert_metadata`/
+    // `push_is_rel`/`push_has_rel`, which re-adds it to the counter.
+    let drained_bytes: usize = metadata
+        .iter()
+        .map(|(p, m)| super::state::pair_bytes(p) + super::state::metadata_bytes(m))
+        .sum::<usize>()
+        + is_rel
+            .iter()
+            .map(|(a, b)| super::state::pair_bytes(a) + super::state::pair_bytes(b) + 16)
+            .sum::<usize>()
+        + has_rel.iter().map(super::state::edge_bytes).sum::<usize>();
+    state.sub_bytes(drained_bytes);
 
     // 0. Canonicalize every pair referenced by any event. `canonicalize` is
     //    offline shape-matching, so this works even for children we never
@@ -182,6 +220,77 @@ pub async fn flush(
         classes.entry(repr.clone()).or_default().push(pair.clone());
     }
 
+    // 4b. In a periodic (non-final) flush, only write classes made up
+    //     entirely of brand-new pairs. A class that touches any pair already
+    //     present in the DB (whether from earlier history or an earlier
+    //     periodic flush within this same still-pending run) is deferred:
+    //     its metadata/edges are handed back to `state` instead of being
+    //     written, so a later flush (another periodic one, or the run's
+    //     final flush) picks it up. See `flush`'s doc comment for why this
+    //     is what keeps a periodic flush's writes cleanly undoable.
+    //
+    //     A `ChildEdge` carrying `original_relation_kind` is deferred as a
+    //     whole regardless of its endpoints' freshness too: writing it needs
+    //     `entry_id_of` for both ends (step 10b), and deferring only the
+    //     entry_relation row while still writing the edge/contributions now
+    //     would split one logical edge across two flush calls.
+    let deferred_pairs: HashSet<Pair> = if final_flush {
+        HashSet::new()
+    } else {
+        classes
+            .values()
+            .filter(|members| members.iter().any(|p| existing[p].is_some()))
+            .flatten()
+            .cloned()
+            .collect()
+    };
+
+    let (metadata, deferred_metadata): (HashMap<Pair, PairMetadata>, HashMap<Pair, PairMetadata>) =
+        metadata
+            .into_iter()
+            .partition(|(p, _)| !deferred_pairs.contains(p));
+    // `is_rel` itself is never read again below (its only job was driving the
+    // union-find above); only the deferred half needs to survive, so it can
+    // be re-buffered for a later flush to redo that union-find with.
+    let deferred_is_rel: Vec<(Pair, Pair)> = is_rel
+        .into_iter()
+        .filter(|(a, b)| deferred_pairs.contains(a) || deferred_pairs.contains(b))
+        .collect();
+    let defer_edge = |edge: &ChildEdge| -> bool {
+        !final_flush
+            && (deferred_pairs.contains(&edge.parent)
+                || deferred_pairs.contains(&edge.child)
+                || edge.original_relation_kind.is_some())
+    };
+    let (has_rel, deferred_has_rel): (Vec<ChildEdge>, Vec<ChildEdge>) =
+        has_rel.into_iter().partition(|e| !defer_edge(e));
+
+    if !deferred_pairs.is_empty() || !deferred_has_rel.is_empty() {
+        debug!(
+            "flush: deferring {} pair(s) and {} edge(s) touching existing/related entries to a later flush",
+            deferred_metadata.len().max(deferred_pairs.len()),
+            deferred_has_rel.len(),
+        );
+    }
+    for (pair, meta) in deferred_metadata {
+        state.insert_metadata(pair, meta);
+    }
+    for (a, b) in deferred_is_rel {
+        state.push_is_rel(a, b);
+    }
+    for edge in deferred_has_rel {
+        state.push_has_rel(edge);
+    }
+
+    let classes: HashMap<Pair, Vec<Pair>> = classes
+        .into_iter()
+        .filter(|(_, members)| !members.iter().any(|p| deferred_pairs.contains(p)))
+        .collect();
+    let all_pairs: HashSet<Pair> = all_pairs
+        .into_iter()
+        .filter(|p| !deferred_pairs.contains(p))
+        .collect();
+
     // 5. Assign an entry_id to each class; collect merges where a class spans
     //    multiple existing entry_ids. Reconcile the class's entry_type from
     //    members' fresh metadata: new entries get the type at creation; existing
@@ -255,22 +364,47 @@ pub async fn flush(
                 entry_id,
                 meta.release_date.as_deref(),
                 &meta.specific_data,
+                run_id,
             )
             .await?;
         } else if existing[pair].is_none() {
-            db.insert_stub_pair(&pair.0, &pair.1, entry_id).await?;
+            db.insert_stub_pair(&pair.0, &pair.1, entry_id, run_id)
+                .await?;
         } else if existing[pair] != Some(entry_id) {
             // Existing stub pair that a split moved to a different entry.
             db.set_pair_entry(&pair.0, &pair.1, entry_id).await?;
         }
     }
 
-    // 8. Aliases: one batch per fetched pair.
+    // 8. Aliases: one batch per fetched pair. `insert_aliases_for_pair` has no
+    //    uniqueness constraint to lean on (a pair can legitimately carry two
+    //    same-named aliases from different sources), so dedupe the exact
+    //    (name, source, locale, primary) repeats here — an entity referenced
+    //    by many children (e.g. an artist credited on hundreds of tracks) can
+    //    otherwise accumulate thousands of identical observations.
     for (pair, meta) in &metadata {
-        if !meta.aliases.is_empty() {
-            db.insert_aliases_for_pair(&pair.0, &pair.1, &meta.aliases)
-                .await?;
+        if meta.aliases.is_empty() {
+            continue;
         }
+        let mut seen = HashSet::new();
+        let deduped: Vec<_> = meta
+            .aliases
+            .iter()
+            .filter(|a| seen.insert((&a.name, &a.source, &a.locale, a.primary)))
+            .cloned()
+            .collect();
+        if meta.aliases.len() >= 50 && deduped.len() * 4 < meta.aliases.len() {
+            warn!(
+                source = %pair.0,
+                identifier = %pair.1,
+                raw = meta.aliases.len(),
+                deduped = deduped.len(),
+                sample = ?deduped.iter().take(5).map(|a| (&a.name, &a.source, &a.locale)).collect::<Vec<_>>(),
+                "pair accumulated a heavily duplicated alias list",
+            );
+        }
+        db.insert_aliases_for_pair(&pair.0, &pair.1, &deduped, run_id)
+            .await?;
     }
 
     // 9. Child edges: deduped on the composite PK by `insert_child_edge`.
@@ -282,13 +416,14 @@ pub async fn flush(
             &edge.child.1,
             edge.disc_no,
             edge.track_no,
+            run_id,
         )
         .await?;
     }
 
     // 10. Contributions: one per (parent_pair, child_pair, role) observation.
     for edge in &has_rel {
-        write_edge_contributions(db, edge).await?;
+        write_edge_contributions(db, edge, run_id).await?;
     }
 
     // 10b. Provider-asserted original->derived relations (cover/remix/
@@ -340,7 +475,11 @@ fn confidence_for_original_relation(kind: &str) -> f64 {
     }
 }
 
-async fn write_edge_contributions(db: &MusicDb, edge: &ChildEdge) -> anyhow::Result<()> {
+async fn write_edge_contributions(
+    db: &MusicDb,
+    edge: &ChildEdge,
+    run_id: Option<i64>,
+) -> anyhow::Result<()> {
     for contrib in &edge.contributions {
         db.insert_contribution(
             &edge.parent.0,
@@ -348,6 +487,7 @@ async fn write_edge_contributions(db: &MusicDb, edge: &ChildEdge) -> anyhow::Res
             &edge.child.0,
             &edge.child.1,
             contrib,
+            run_id,
         )
         .await?;
     }
@@ -636,7 +776,6 @@ mod tests {
         PairMetadata {
             entry_type: EntryType::Track,
             release_date: None,
-            extra: serde_json::Value::Null,
             specific_data: crate::providers::types::EntrySpecificData::Track {
                 duration_ms: vec![],
                 positions: HashMap::new(),
@@ -676,7 +815,15 @@ mod tests {
             });
         }
 
-        flush(Arc::new(state), &[], &db, &DedupConfig::default()).await?;
+        flush(
+            Arc::new(state),
+            &[],
+            &db,
+            &DedupConfig::default(),
+            None,
+            true,
+        )
+        .await?;
 
         let original_id = db
             .find_entry_id_by_pair(&original.0, &original.1)
@@ -713,6 +860,121 @@ mod tests {
                     || [r.entry_a, r.entry_b] == [cover2_id, cover1_id]
             }),
             "covers must not be related directly to one another"
+        );
+
+        Ok(())
+    }
+
+    /// A periodic (non-final) flush writes a brand-new pair immediately and
+    /// tags its row with the given run_id -- verified indirectly by rolling
+    /// that run back afterwards and confirming the row disappears, since only
+    /// something the periodic flush itself wrote could vanish that way.
+    #[tokio::test]
+    async fn periodic_flush_writes_fresh_pairs_tagged_with_run_id() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let track = p("brand_new_track");
+
+        let state = Arc::new(State::new());
+        state
+            .metadata
+            .lock()
+            .unwrap()
+            .insert(track.clone(), track_metadata());
+
+        flush(
+            Arc::clone(&state),
+            &[],
+            &db,
+            &DedupConfig::default(),
+            Some(42),
+            false,
+        )
+        .await?;
+
+        let entry_id = db.find_entry_id_by_pair(&track.0, &track.1).await?;
+        assert!(
+            entry_id.is_some(),
+            "periodic flush should write brand-new pairs immediately"
+        );
+
+        db.rollback_import_run(42).await?;
+        let entry_id_after_rollback = db.find_entry_id_by_pair(&track.0, &track.1).await?;
+        assert!(
+            entry_id_after_rollback.is_none(),
+            "rolling back the run should undo what the periodic flush wrote"
+        );
+
+        Ok(())
+    }
+
+    /// A periodic flush defers an entire class once any member already has a
+    /// DB row: a sibling pair linked to it via is_rel is held back too, not
+    /// written under a fresh entry of its own. The run's final flush picks
+    /// the deferred class back up and resolves it onto the existing entry.
+    #[tokio::test]
+    async fn periodic_flush_defers_classes_touching_existing_entries() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let existing_pair = p("already_in_library");
+        let new_sibling = p("newly_discovered_sibling");
+
+        // Simulate a pre-existing (already committed, no run_id) entry.
+        let pre_existing_entry = db.insert_entry(Some(EntryType::Track)).await?;
+        db.upsert_pair(
+            &existing_pair.0,
+            &existing_pair.1,
+            pre_existing_entry,
+            None,
+            &track_metadata().specific_data,
+            None,
+        )
+        .await?;
+
+        let state = Arc::new(State::new());
+        state
+            .metadata
+            .lock()
+            .unwrap()
+            .insert(existing_pair.clone(), track_metadata());
+        state
+            .metadata
+            .lock()
+            .unwrap()
+            .insert(new_sibling.clone(), track_metadata());
+        state
+            .is_rel
+            .lock()
+            .unwrap()
+            .push((existing_pair.clone(), new_sibling.clone()));
+
+        // Periodic flush: the class {existing_pair, new_sibling} touches the
+        // pre-existing entry, so it must be deferred whole.
+        flush(
+            Arc::clone(&state),
+            &[],
+            &db,
+            &DedupConfig::default(),
+            Some(7),
+            false,
+        )
+        .await?;
+        let sibling_id = db
+            .find_entry_id_by_pair(&new_sibling.0, &new_sibling.1)
+            .await?;
+        assert!(
+            sibling_id.is_none(),
+            "a class touching a pre-existing entry must not be written by a periodic flush"
+        );
+
+        // The run's final flush resolves the deferred class onto the
+        // pre-existing entry.
+        flush(state, &[], &db, &DedupConfig::default(), Some(7), true).await?;
+        let sibling_id = db
+            .find_entry_id_by_pair(&new_sibling.0, &new_sibling.1)
+            .await?
+            .expect("final flush should write the deferred pair");
+        assert_eq!(
+            sibling_id, pre_existing_entry,
+            "sibling should land on the pre-existing entry, not a new one"
         );
 
         Ok(())

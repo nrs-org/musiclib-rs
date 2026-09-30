@@ -38,6 +38,41 @@ mod entry {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// One `ingest_entry` run. Rows written during the run (`entry_source`,
+/// `entry_alias`, `entry_child`, `contribution` -- see their `run_id`
+/// columns) are tagged with this id so a run abandoned by a crash (OOM kill,
+/// power loss) can be found and purged on the next startup, instead of
+/// leaving a half-imported artist sitting in the library. A still-`pending`
+/// run only ever creates brand-new rows before it commits -- periodic
+/// flushes during the run defer any equivalence class that would touch a
+/// pre-existing entry to the run's single final flush (see
+/// `pipeline::flush`'s `final_flush` handling) -- so purging by tag on
+/// recovery never needs to unwind a merge or restore data that predates the
+/// run. See `MusicDb::recover_pending_import_runs`.
+mod import_run {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "import_run")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub started_at: i64,
+        /// "pending" | "committed" | "rolled_back"
+        pub status: String,
+        /// PID of the process that started this run. Lets
+        /// `MusicDb::recover_pending_import_runs`, called once at each
+        /// binary's startup, tell "abandoned by a crash" (pid no longer
+        /// alive) apart from "another process is still legitimately running
+        /// this import right now" (pid alive) -- the latter must never be
+        /// purged out from under it.
+        pub pid: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 mod entry_source {
     use sea_orm::entity::prelude::*;
 
@@ -64,6 +99,12 @@ mod entry_source {
         pub num_tracks: Option<i32>,
         // ReleaseGroup-specific
         pub primary_type: Option<String>,
+        /// The `import_run` that created this row, if any (rows written
+        /// outside a tracked run, e.g. by the standalone `dedup` binary, are
+        /// NULL). Set only on insert, never touched by `upsert_pair`'s
+        /// on-conflict update -- see `import_run`'s module doc for why that
+        /// matters for crash recovery.
+        pub run_id: Option<i64>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -84,6 +125,8 @@ mod entry_alias {
         pub locale: Option<String>,
         pub extra: Option<String>,
         pub primary: bool,
+        /// See `entry_source::Model::run_id`.
+        pub run_id: Option<i64>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -106,6 +149,8 @@ mod entry_child {
         pub child_identifier: String,
         pub disc_no: Option<i32>,
         pub track_no: Option<i32>,
+        /// See `entry_source::Model::run_id`.
+        pub run_id: Option<i64>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -127,6 +172,8 @@ mod contribution {
         pub role: String,
         pub main_artist: bool,
         pub extra: Option<String>,
+        /// See `entry_source::Model::run_id`.
+        pub run_id: Option<i64>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -781,6 +828,29 @@ where
     Ok(out)
 }
 
+/// SQLite's bound-parameter limit (`SQLITE_MAX_VARIABLE_NUMBER`) is as low as
+/// 999 on some builds; a caller-supplied `is_in(ids)` list isn't bounded like
+/// the focused/online dedup path's pair sets are, so anything driven off a
+/// large import (candidate ids from a heavily cross-linked entry, a big
+/// barrier backfill) must chunk. One variable per id, so this can run larger
+/// than `PAIR_QUERY_CHUNK` (two variables per pair) and still stay well clear
+/// of the limit.
+const ID_QUERY_CHUNK: usize = 500;
+
+/// Runs `query` once per `ID_QUERY_CHUNK`-sized slice of `ids`, concatenating
+/// results. See `ID_QUERY_CHUNK` for why this exists.
+async fn chunked_id_query<T, F, Fut>(ids: &[i64], query: F) -> Result<Vec<T>, Error>
+where
+    F: Fn(&[i64]) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<T>, DbErr>>,
+{
+    let mut out = Vec::new();
+    for chunk in ids.chunks(ID_QUERY_CHUNK) {
+        out.extend(query(chunk).await?);
+    }
+    Ok(out)
+}
+
 fn source_row_from_model(m: entry_source::Model) -> SourceRow {
     let duration_ms = if let Some(all) = &m.duration_ms_all {
         serde_json::from_str::<Vec<i64>>(all).unwrap_or_default()
@@ -1213,7 +1283,12 @@ impl MusicDb {
              CREATE INDEX IF NOT EXISTS idx_contribution_track_pair ON contribution(source, identifier);
              CREATE INDEX IF NOT EXISTS idx_contribution_artist_pair ON contribution(artist_source, artist_identifier);
              CREATE INDEX IF NOT EXISTS idx_entry_child_parent_pair ON entry_child(parent_source, parent_identifier);
-             CREATE INDEX IF NOT EXISTS idx_entry_child_child_pair ON entry_child(child_source, child_identifier);",
+             CREATE INDEX IF NOT EXISTS idx_entry_child_child_pair ON entry_child(child_source, child_identifier);
+             CREATE INDEX IF NOT EXISTS idx_entry_source_run_id ON entry_source(run_id);
+             CREATE INDEX IF NOT EXISTS idx_entry_alias_run_id ON entry_alias(run_id);
+             CREATE INDEX IF NOT EXISTS idx_entry_child_run_id ON entry_child(run_id);
+             CREATE INDEX IF NOT EXISTS idx_contribution_run_id ON contribution(run_id);
+             CREATE INDEX IF NOT EXISTS idx_import_run_status ON import_run(status);",
         )
         .await?;
         // Full-text index over alias names backing the player's library
@@ -1289,13 +1364,15 @@ impl MusicDb {
         if entry_ids.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(entry_source::Entity::find()
-            .filter(entry_source::Column::EntryId.is_in(entry_ids.iter().copied()))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(|m| (m.source, m.identifier))
-            .collect())
+        Ok(chunked_id_query(entry_ids, |chunk| {
+            entry_source::Entity::find()
+                .filter(entry_source::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(|m| (m.source, m.identifier))
+        .collect())
     }
 
     /// Entry ids with at least one alias containing `query` (case-insensitive
@@ -1499,9 +1576,126 @@ impl MusicDb {
         Ok(())
     }
 
+    /// Start a new import run and return its id. `pipeline::ingest::ingest_entry`
+    /// calls this once per ingest, threads the id through every write
+    /// `pipeline::flush::flush` makes during the run, and calls
+    /// `commit_import_run` once the run finishes successfully. See
+    /// `import_run`'s module doc for why this makes periodic flushing safe to
+    /// interrupt.
+    pub async fn start_import_run(&self) -> Result<i64, Error> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let result = import_run::Entity::insert(import_run::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            started_at: Set(now),
+            status: Set("pending".to_string()),
+            pid: Set(std::process::id() as i64),
+        })
+        .exec(&self.db)
+        .await?;
+        Ok(result.last_insert_id)
+    }
+
+    /// Mark a run as finished successfully. Its tagged rows are left as-is
+    /// (`run_id` doubles as provenance of which run brought in which data)
+    /// but the run is no longer eligible for `recover_pending_import_runs`.
+    pub async fn commit_import_run(&self, run_id: i64) -> Result<(), Error> {
+        import_run::Entity::update_many()
+            .col_expr(
+                import_run::Column::Status,
+                sea_query::Expr::value("committed"),
+            )
+            .filter(import_run::Column::Id.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Explicitly abandon a run: purge everything it wrote and mark it
+    /// "rolled_back". Called by `pipeline::ingest::ingest_entry` from its own
+    /// error path, so an ordinary (non-crash) failure -- a fetch erroring
+    /// out, a flush failing -- is cleaned up immediately rather than waiting
+    /// for a future process restart to notice a still-"pending" row.
+    pub async fn rollback_import_run(&self, run_id: i64) -> Result<(), Error> {
+        self.purge_run_rows(run_id).await
+    }
+
+    /// Find every run still marked "pending" whose recorded pid is no longer
+    /// alive, and purge everything it wrote: every
+    /// `entry_source`/`entry_alias`/`entry_child`/`contribution` row tagged
+    /// with its id, then any `entry` row left with no remaining source. A
+    /// completed run is always marked "committed" before its process exits,
+    /// and a failed-but-not-crashed run is cleaned up immediately by
+    /// `rollback_import_run`, so a "pending" row with a dead pid at startup
+    /// can only mean the process that owned it was killed (OOM, power loss)
+    /// before either of those could run. The pid check is what keeps this
+    /// safe to call when another process is legitimately still importing
+    /// against the same DB file right now -- its still-alive pid means its
+    /// run is left untouched. Call once at each binary's startup, before any
+    /// new ingest work. Returns the ids that were purged, for logging.
+    pub async fn recover_pending_import_runs(&self) -> Result<Vec<i64>, Error> {
+        let pending: Vec<(i64, i64)> = import_run::Entity::find()
+            .filter(import_run::Column::Status.eq("pending"))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| (m.id, m.pid))
+            .collect();
+        let mut purged = Vec::new();
+        for (run_id, pid) in pending {
+            if pid_is_alive(pid) {
+                continue;
+            }
+            self.purge_run_rows(run_id).await?;
+            purged.push(run_id);
+        }
+        Ok(purged)
+    }
+
+    /// Shared by `rollback_import_run` and `recover_pending_import_runs`:
+    /// delete every row tagged with `run_id` across the four pair-keyed
+    /// tables, GC any `entry` row left empty, and mark the run
+    /// "rolled_back". Safe unconditionally because a still-pending run only
+    /// ever creates brand-new rows -- see the `import_run` module doc.
+    async fn purge_run_rows(&self, run_id: i64) -> Result<(), Error> {
+        entry_source::Entity::delete_many()
+            .filter(entry_source::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        entry_alias::Entity::delete_many()
+            .filter(entry_alias::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        entry_child::Entity::delete_many()
+            .filter(entry_child::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        contribution::Entity::delete_many()
+            .filter(contribution::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        self.delete_orphan_entries().await?;
+        import_run::Entity::update_many()
+            .col_expr(
+                import_run::Column::Status,
+                sea_query::Expr::value("rolled_back"),
+            )
+            .filter(import_run::Column::Id.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
     /// Insert or update the metadata row for a pair. Updates every metadata
     /// column on conflict — the importer is the only writer and its final
     /// observation wins.
+    /// `run_id` tags the row if this call performs an INSERT; on a conflict
+    /// (the row already exists) it is deliberately left out of the update, so
+    /// re-touching a pair from a different run never reassigns its
+    /// provenance or makes it eligible for that other run's crash-recovery
+    /// purge (`recover_pending_import_runs`).
     pub async fn upsert_pair(
         &self,
         source: &str,
@@ -1509,6 +1703,7 @@ impl MusicDb {
         entry_id: i64,
         release_date: Option<&str>,
         specific_data: &EntrySpecificData,
+        run_id: Option<i64>,
     ) -> Result<(), Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1548,6 +1743,7 @@ impl MusicDb {
             num_discs: Set(num_discs),
             num_tracks: Set(num_tracks),
             primary_type: Set(primary_type),
+            run_id: Set(run_id),
         })
         .on_conflict(
             sea_query::OnConflict::columns([
@@ -1564,6 +1760,7 @@ impl MusicDb {
                 entry_source::Column::NumDiscs,
                 entry_source::Column::NumTracks,
                 entry_source::Column::PrimaryType,
+                // RunId intentionally omitted -- see the doc comment above.
             ])
             .to_owned(),
         )
@@ -1582,6 +1779,7 @@ impl MusicDb {
         source: &str,
         identifier: &str,
         entry_id: i64,
+        run_id: Option<i64>,
     ) -> Result<(), Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1600,6 +1798,7 @@ impl MusicDb {
                 num_discs: Set(None),
                 num_tracks: Set(None),
                 primary_type: Set(None),
+                run_id: Set(run_id),
             })
             .on_conflict(
                 sea_query::OnConflict::columns([
@@ -1616,35 +1815,46 @@ impl MusicDb {
 
     /// Insert aliases for a pair. Caller is responsible for deduping if needed
     /// — the table has no uniqueness constraint on (pair, name, locale).
+    /// Chunked: an entity referenced by many children (e.g. an artist credited
+    /// on hundreds of tracks) can accumulate an alias list large enough that
+    /// one `insert_many` (6 bound variables/row) would exceed SQLite's
+    /// bound-parameter limit — see `ID_QUERY_CHUNK`'s doc for the same concern
+    /// on the read side.
     pub async fn insert_aliases_for_pair(
         &self,
         source: &str,
         identifier: &str,
         aliases: &[Alias],
+        run_id: Option<i64>,
     ) -> Result<(), Error> {
         if aliases.is_empty() {
             return Ok(());
         }
-        let models: Vec<entry_alias::ActiveModel> = aliases
-            .iter()
-            .map(|alias| entry_alias::ActiveModel {
-                id: sea_orm::ActiveValue::NotSet,
-                source: Set(source.to_string()),
-                identifier: Set(identifier.to_string()),
-                name: Set(alias.name.clone()),
-                locale: Set(alias.locale.clone()),
-                extra: Set(Some(alias.extra.to_string())),
-                primary: Set(alias.primary),
-            })
-            .collect();
-        entry_alias::Entity::insert_many(models)
-            .exec(&self.db)
-            .await?;
+        const ALIAS_INSERT_CHUNK: usize = 150;
+        for chunk in aliases.chunks(ALIAS_INSERT_CHUNK) {
+            let models: Vec<entry_alias::ActiveModel> = chunk
+                .iter()
+                .map(|alias| entry_alias::ActiveModel {
+                    id: sea_orm::ActiveValue::NotSet,
+                    source: Set(source.to_string()),
+                    identifier: Set(identifier.to_string()),
+                    name: Set(alias.name.clone()),
+                    locale: Set(alias.locale.clone()),
+                    extra: Set(Some(alias.extra.to_string())),
+                    primary: Set(alias.primary),
+                    run_id: Set(run_id),
+                })
+                .collect();
+            entry_alias::Entity::insert_many(models)
+                .exec(&self.db)
+                .await?;
+        }
         Ok(())
     }
 
     /// Insert a parent→child edge between two pairs. Idempotent on the
     /// composite PK (parent_pair, child_pair).
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_child_edge(
         &self,
         parent_source: &str,
@@ -1653,6 +1863,7 @@ impl MusicDb {
         child_identifier: &str,
         disc_no: Option<i32>,
         track_no: Option<i32>,
+        run_id: Option<i64>,
     ) -> Result<(), Error> {
         ignore_not_inserted(
             entry_child::Entity::insert(entry_child::ActiveModel {
@@ -1662,6 +1873,7 @@ impl MusicDb {
                 child_identifier: Set(child_identifier.to_string()),
                 disc_no: Set(disc_no),
                 track_no: Set(track_no),
+                run_id: Set(run_id),
             })
             .on_conflict(
                 sea_query::OnConflict::columns([
@@ -1686,6 +1898,7 @@ impl MusicDb {
         artist_source: &str,
         artist_identifier: &str,
         contrib: &Contribution,
+        run_id: Option<i64>,
     ) -> Result<(), Error> {
         contribution::Entity::insert(contribution::ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
@@ -1696,6 +1909,7 @@ impl MusicDb {
             role: Set(contrib.role.clone()),
             main_artist: Set(contrib.main_artist),
             extra: Set(Some(contrib.extra.to_string())),
+            run_id: Set(run_id),
         })
         .exec(&self.db)
         .await?;
@@ -2265,16 +2479,18 @@ impl MusicDb {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(entry::Entity::find()
-            .filter(entry::Column::Id.is_in(ids.iter().copied()))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(|m| EntryRow {
-                id: m.id,
-                entry_type: m.entry_type,
-            })
-            .collect())
+        Ok(chunked_id_query(ids, |chunk| {
+            entry::Entity::find()
+                .filter(entry::Column::Id.is_in(chunk.iter().copied()))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(|m| EntryRow {
+            id: m.id,
+            entry_type: m.entry_type,
+        })
+        .collect())
     }
 
     /// entry_source rows for exactly `ids` (indexed on entry_id).
@@ -2282,13 +2498,15 @@ impl MusicDb {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(entry_source::Entity::find()
-            .filter(entry_source::Column::EntryId.is_in(ids.iter().copied()))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(source_row_from_model)
-            .collect())
+        Ok(chunked_id_query(ids, |chunk| {
+            entry_source::Entity::find()
+                .filter(entry_source::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(source_row_from_model)
+        .collect())
     }
 
     /// entry_source rows for exactly `pairs` (primary-key lookup).
@@ -2681,6 +2899,18 @@ fn entry_type_str(entry_type: Option<EntryType>) -> &'static str {
     }
 }
 
+/// Linux-only liveness check for `recover_pending_import_runs`: `/proc/<pid>`
+/// exists iff that pid is currently running. Defaults to "alive" (don't
+/// purge) when the check itself can't be done, since wrongly leaving a
+/// genuinely dead run's rows in place for one more startup is far cheaper
+/// than wrongly deleting a live process's in-progress import.
+fn pid_is_alive(pid: i64) -> bool {
+    if cfg!(not(target_os = "linux")) || pid <= 0 {
+        return true;
+    }
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
 fn ignore_not_inserted<T: sea_orm::ActiveModelTrait>(
     result: Result<sea_orm::InsertResult<T>, DbErr>,
 ) -> Result<(), Error> {
@@ -2696,6 +2926,72 @@ mod tests {
 
     async fn mem_db() -> MusicDb {
         MusicDb::new("sqlite::memory:").await.unwrap()
+    }
+
+    /// `recover_pending_import_runs` purges a "pending" run whose recorded
+    /// pid is no longer alive, but leaves one whose pid is (this test
+    /// process's own) still alive untouched -- the pid check is what makes
+    /// it safe to call even while another process is legitimately still
+    /// importing against the same DB file.
+    #[tokio::test]
+    async fn recover_pending_import_runs_purges_dead_pid_but_not_alive_pid() {
+        let mdb = mem_db().await;
+
+        async fn pending_run(mdb: &MusicDb, pid: i64) -> i64 {
+            import_run::Entity::insert(import_run::ActiveModel {
+                id: sea_orm::ActiveValue::NotSet,
+                started_at: Set(0),
+                status: Set("pending".to_string()),
+                pid: Set(pid),
+            })
+            .exec(&mdb.db)
+            .await
+            .unwrap()
+            .last_insert_id
+        }
+
+        async fn tag_pair(mdb: &MusicDb, identifier: &str, run_id: i64) {
+            let entry_id = mdb.insert_entry(None).await.unwrap();
+            mdb.upsert_pair(
+                "youtube",
+                identifier,
+                entry_id,
+                None,
+                &EntrySpecificData::Track {
+                    duration_ms: vec![],
+                    positions: Default::default(),
+                },
+                Some(run_id),
+            )
+            .await
+            .unwrap();
+        }
+
+        // A run "owned" by a pid that can't possibly be running.
+        let dead = pending_run(&mdb, i64::MAX).await;
+        tag_pair(&mdb, "dead-run", dead).await;
+
+        // A run "owned" by this test process's own (definitely alive) pid.
+        let alive = pending_run(&mdb, std::process::id() as i64).await;
+        tag_pair(&mdb, "alive-run", alive).await;
+
+        let purged = mdb.recover_pending_import_runs().await.unwrap();
+        assert_eq!(purged, vec![dead]);
+
+        assert!(
+            mdb.find_entry_id_by_pair("youtube", "dead-run")
+                .await
+                .unwrap()
+                .is_none(),
+            "dead pid's abandoned run should be purged"
+        );
+        assert!(
+            mdb.find_entry_id_by_pair("youtube", "alive-run")
+                .await
+                .unwrap()
+                .is_some(),
+            "alive pid's still-pending run must not be touched"
+        );
     }
 
     async fn insert_entry(db: &DatabaseConnection, id: i64) {
@@ -3172,10 +3468,11 @@ mod tests {
                 duration_ms: vec![],
                 positions: Default::default(),
             },
+            None,
         )
         .await
         .unwrap();
-        mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Ridiculous Fervor")])
+        mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Ridiculous Fervor")], None)
             .await
             .unwrap();
 
@@ -3189,10 +3486,11 @@ mod tests {
                 duration_ms: vec![],
                 positions: Default::default(),
             },
+            None,
         )
         .await
         .unwrap();
-        mdb.insert_aliases_for_pair("youtube", "v2", &[alias("Totally Different")])
+        mdb.insert_aliases_for_pair("youtube", "v2", &[alias("Totally Different")], None)
             .await
             .unwrap();
 
@@ -3229,10 +3527,11 @@ mod tests {
                 duration_ms: vec![],
                 positions: Default::default(),
             },
+            None,
         )
         .await
         .unwrap();
-        mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Ab Ordinary Name")])
+        mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Ab Ordinary Name")], None)
             .await
             .unwrap();
 
@@ -3255,10 +3554,11 @@ mod tests {
                 duration_ms: vec![],
                 positions: Default::default(),
             },
+            None,
         )
         .await
         .unwrap();
-        mdb.insert_aliases_for_pair("youtube", "exact", &[alias("Foo")])
+        mdb.insert_aliases_for_pair("youtube", "exact", &[alias("Foo")], None)
             .await
             .unwrap();
 
@@ -3272,6 +3572,7 @@ mod tests {
                 duration_ms: vec![],
                 positions: Default::default(),
             },
+            None,
         )
         .await
         .unwrap();
@@ -3279,6 +3580,7 @@ mod tests {
             "youtube",
             "padded",
             &[alias("Foo Bar Baz Quux Something Else Entirely")],
+            None,
         )
         .await
         .unwrap();
@@ -3326,6 +3628,7 @@ mod tests {
                 num_discs: Set(None),
                 num_tracks: Set(None),
                 primary_type: Set(None),
+                run_id: Set(None),
             })
             .exec(&db)
             .await
@@ -3338,6 +3641,7 @@ mod tests {
                 locale: Set(None),
                 extra: Set(None),
                 primary: Set(true),
+                run_id: Set(None),
             })
             .exec(&db)
             .await

@@ -92,7 +92,7 @@ pub enum EntryType {
 }
 
 // entry alias, with optional locale and extra metadata
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Alias {
     pub name: String,
     pub source: String,
