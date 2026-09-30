@@ -1,6 +1,7 @@
 use std::{collections::HashSet, future::Future, sync::Arc};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tracing::warn;
 
 use crate::providers::{
     backends::discogs::{
@@ -197,13 +198,33 @@ pub async fn get_artist(client: &DiscogsClient, url: &str) -> Result<EntityResul
             primary: true,
             ..Default::default()
         }];
-        for variation in &a.namevariations {
-            aliases.push(Alias {
-                name: variation.clone(),
-                source: SOURCE.into(),
-                primary: false,
-                ..Default::default()
-            });
+        // Generic composer-credit buckets ("Traditional", "Various", "Folk", …)
+        // carry Discogs "name variations" lists running into the thousands —
+        // every distinct work ever credited to them, not real aliases of one
+        // artist. This cap is deliberately generous: it's a ceiling against
+        // that pathological volume (and the SQLite bound-parameter crash it
+        // caused), not an attempt to classify "generic bucket" vs "real
+        // artist" by count alone — a genuinely prolific/long-credited act
+        // (e.g. a hit-factory production team spelled a few hundred
+        // different ways across decades of liner notes) can legitimately
+        // reach into the hundreds without being bucket noise.
+        const MAX_NAME_VARIATIONS: usize = 1000;
+        if a.namevariations.len() > MAX_NAME_VARIATIONS {
+            warn!(
+                artist = %a.name,
+                url,
+                count = a.namevariations.len(),
+                "discogs artist has an implausibly large name-variations list (likely a generic composer-credit bucket like \"Traditional\") — dropping variations",
+            );
+        } else {
+            for variation in &a.namevariations {
+                aliases.push(Alias {
+                    name: variation.clone(),
+                    source: SOURCE.into(),
+                    primary: false,
+                    ..Default::default()
+                });
+            }
         }
 
         let releases_source = PaginatedChildSource::new(Box::new(ArtistReleasesPageFetcher {

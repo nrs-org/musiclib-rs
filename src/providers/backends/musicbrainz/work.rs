@@ -11,8 +11,24 @@
 //! them as valid originals rather than trying to pick just one.
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::providers::{backends::musicbrainz::client::MusicBrainzClient, types::Error};
+
+/// Above this count, the "originals" aren't the near-duplicate MB entries
+/// for one physical original recording that this signal is meant to catch
+/// (this module's doc comment) — they're every recording of a heavily
+/// covered, often public-domain standard where most performances simply
+/// never got explicitly tagged `cover` by a MusicBrainz editor. Observed for
+/// real: a single work ("Silent Night") returning 700 "originals", each
+/// imported as a full recursive entity by `recording.rs`'s caller — and
+/// since some of *those* recordings are themselves tagged `cover` of the
+/// same work, the same 700-item lookup can re-fire from multiple points in
+/// the tree, without `state.claim()` catching it (Work lookups aren't
+/// deduped — this module is deliberately not a modeled/tracked entity).
+/// Capping bounds a single popular song from pulling in an entire genre's
+/// discography.
+const MAX_ORIGINALS: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkResponse {
@@ -53,7 +69,7 @@ pub(crate) async fn find_original_performances(
             &format!("work/{work_mbid}"),
             &[("inc", "recording-rels")],
             |resp| {
-                let originals: Vec<(String, String)> = resp
+                let mut originals: Vec<(String, String)> = resp
                     .relations
                     .iter()
                     .filter(|r| {
@@ -64,6 +80,16 @@ pub(crate) async fn find_original_performances(
                     .filter_map(|r| r.recording.as_ref())
                     .map(|rec| (rec.id.clone(), rec.title.clone()))
                     .collect();
+                if originals.len() > MAX_ORIGINALS {
+                    warn!(
+                        work_id = work_mbid,
+                        count = originals.len(),
+                        "musicbrainz: implausibly large 'original performance' set for a work \
+                         (likely a heavily-covered/public-domain standard, not near-duplicate \
+                         MB entries) — capping",
+                    );
+                    originals.truncate(MAX_ORIGINALS);
+                }
                 async move { Ok(originals) }
             },
         )
@@ -114,5 +140,87 @@ pub(crate) async fn find_arrangement_source_work(
         Ok(source) => Ok(source),
         Err(Error::NotFound(_)) => Ok(None),
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use http::Method;
+
+    use super::{MAX_ORIGINALS, find_original_performances};
+    use crate::{
+        http::ResponseStatus, providers::backends::musicbrainz::client::MusicBrainzClient,
+        test_utils::MockHttpClient,
+    };
+
+    fn work_api_url(mbid: &str) -> String {
+        MusicBrainzClient::build_url(&format!("work/{mbid}"), &[("inc", "recording-rels")])
+    }
+
+    /// Real-world case this guards against: a heavily-covered, poorly-tagged
+    /// standard ("Silent Night" returned 700) where most performances simply
+    /// never got the `cover` attribute set by a MusicBrainz editor, rather
+    /// than the few near-duplicate MB entries the underlying signal is meant
+    /// to represent.
+    #[tokio::test]
+    async fn caps_an_implausibly_large_originals_set() -> anyhow::Result<()> {
+        let mbid = "590e5567-c188-31f0-b7a8-a94e7e51c7b3";
+        let raw_count = MAX_ORIGINALS + 50;
+        let relations: Vec<serde_json::Value> = (0..raw_count)
+            .map(|i| {
+                serde_json::json!({
+                    "type": "performance",
+                    "target-type": "recording",
+                    "attributes": [],
+                    "recording": { "id": format!("rec-{i}"), "title": format!("Take {i}") },
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "relations": relations }).to_string();
+
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route(
+            Method::GET,
+            &work_api_url(mbid),
+            ResponseStatus::OK,
+            Bytes::from(body),
+        );
+        let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
+
+        let originals = find_original_performances(&client, mbid).await?;
+        assert_eq!(originals.len(), MAX_ORIGINALS);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn leaves_a_small_originals_set_untouched() -> anyhow::Result<()> {
+        let mbid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let relations: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                serde_json::json!({
+                    "type": "performance",
+                    "target-type": "recording",
+                    "attributes": [],
+                    "recording": { "id": format!("rec-{i}"), "title": format!("Take {i}") },
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "relations": relations }).to_string();
+
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route(
+            Method::GET,
+            &work_api_url(mbid),
+            ResponseStatus::OK,
+            Bytes::from(body),
+        );
+        let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
+
+        let originals = find_original_performances(&client, mbid).await?;
+        assert_eq!(originals.len(), 3);
+        Ok(())
     }
 }

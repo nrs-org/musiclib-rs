@@ -1,6 +1,7 @@
 use std::{collections::HashSet, future::Future, sync::Arc};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tracing::warn;
 
 use crate::providers::{
     backends::musicbrainz::{
@@ -433,19 +434,36 @@ pub async fn get_artist(client: &MusicBrainzClient, url: &str) -> Result<EntityR
             primary: true,
             ..Default::default()
         }];
-        // Aliases from the API.
-        for alias in &a.aliases {
-            if let Some(name) = &alias.name {
-                aliases.push(Alias {
-                    name: name.clone(),
-                    source: SOURCE.into(),
-                    primary: match &alias.primary {
-                        Some(serde_json::Value::String(s)) => s == "primary",
-                        Some(serde_json::Value::Bool(b)) => *b,
-                        _ => false,
-                    },
-                    ..Default::default()
-                });
+        // Aliases from the API. MusicBrainz's special-purpose artists
+        // ("[unknown]", "Various Artists", …) carry an official localized
+        // name in dozens of languages, topping out a few hundred rows —
+        // real per-locale data, just not useful for a real artist's alias
+        // list. `insert_aliases_for_pair` is chunked, so this cap is no
+        // longer load-bearing for crash-safety, only for keeping genuinely
+        // pathological volumes (see the Discogs equivalent) out; set well
+        // above anything a real artist's name-variant history could reach.
+        const MAX_ALIASES: usize = 1000;
+        if a.aliases.len() > MAX_ALIASES {
+            warn!(
+                artist = %a.name,
+                url,
+                count = a.aliases.len(),
+                "musicbrainz artist has an implausibly large alias list (likely a special-purpose artist like \"[unknown]\"/\"Various Artists\") — dropping aliases",
+            );
+        } else {
+            for alias in &a.aliases {
+                if let Some(name) = &alias.name {
+                    aliases.push(Alias {
+                        name: name.clone(),
+                        source: SOURCE.into(),
+                        primary: match &alias.primary {
+                            Some(serde_json::Value::String(s)) => s == "primary",
+                            Some(serde_json::Value::Bool(b)) => *b,
+                            _ => false,
+                        },
+                        ..Default::default()
+                    });
+                }
             }
         }
 
