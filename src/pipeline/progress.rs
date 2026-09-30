@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -211,8 +211,17 @@ impl Drop for MultiProgressWriter {
         let s = String::from_utf8_lossy(&self.buf);
         // println adds its own newline, strip the trailing one from the formatter
         let line = s.trim_end_matches('\n');
-        if !line.is_empty() {
+        if line.is_empty() {
+            return;
+        }
+        // `MultiProgress::println` suspends/redraws the bars, which relies on
+        // real terminal control codes — when stderr isn't a tty (piped to a
+        // file/log, as in non-interactive/batch runs) it silently drops the
+        // line instead, so fall back to a plain write in that case.
+        if io::stderr().is_terminal() {
             let _ = self.multi.println(line);
+        } else {
+            eprintln!("{line}");
         }
     }
 }
