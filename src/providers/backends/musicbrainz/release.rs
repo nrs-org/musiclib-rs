@@ -152,6 +152,7 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
                             .clone()
                             .or_else(|| rec.and_then(|r| r.title.clone())),
                         duration_ms: track.length.or_else(|| rec.and_then(|r| r.length)),
+                        appears_on: false,
                         position: Some(TrackPosition {
                             disc_no: if num_discs > 1 {
                                 Some(medium.position)

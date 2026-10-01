@@ -13,6 +13,8 @@
 # - Every discography track fetches its album(s), credited artists and, for a
 #   cover, its original, each as a leaf (`track`). An album reached this way
 #   records its other tracks as stubs.
+# - Releases the artist only appears on (various-artists compilations) are
+#   leaves: fetched with their tracklist as stubs.
 # - Artist children are stored as leaves (no recursive discography fetch).
 
 main:
@@ -69,6 +71,8 @@ main:
 
     - match: { entry_type: artist }
       fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
+    - match: { appears_on: true }
+      fetch: ./no_fetch_discography.yaml::main  # releases they only appear on: tracklist as stubs
     - match: { entry_type: track }
       fetch: track
     - match: always

@@ -128,6 +128,7 @@ pub enum YamlMatcherExpr {
     ExternalType(String),
     NameRegex(String),
     HasSource(String),
+    AppearsOn(bool),
     DurationRange { min: Option<u64>, max: Option<u64> },
     IndexRange { min: Option<u32>, max: Option<u32> },
     YouTube(YamlYouTubeMatcher),
@@ -183,6 +184,7 @@ impl Serialize for YamlMatcherExpr {
             Self::ExternalType(t) => serialize_single_map(s, "external_type", t),
             Self::NameRegex(p) => serialize_single_map(s, "name_regex", p),
             Self::HasSource(src) => serialize_single_map(s, "has_source", src),
+            Self::AppearsOn(b) => serialize_single_map(s, "appears_on", b),
             Self::DurationRange { min, max } => serialize_single_map(
                 s,
                 "duration_range",
@@ -237,6 +239,7 @@ impl<'de> Deserialize<'de> for YamlMatcherExpr {
                     "external_type" => YamlMatcherExpr::ExternalType(map.next_value()?),
                     "name_regex" => YamlMatcherExpr::NameRegex(map.next_value()?),
                     "has_source" => YamlMatcherExpr::HasSource(map.next_value()?),
+                    "appears_on" => YamlMatcherExpr::AppearsOn(map.next_value()?),
                     "duration_range" => {
                         let r: RangeU64 = map.next_value()?;
                         YamlMatcherExpr::DurationRange {
@@ -265,6 +268,7 @@ impl<'de> Deserialize<'de> for YamlMatcherExpr {
                                 "external_type",
                                 "name_regex",
                                 "has_source",
+                                "appears_on",
                                 "duration_range",
                                 "index_range",
                                 "youtube",
@@ -633,6 +637,9 @@ fn convert_matcher_expr(expr: &YamlMatcherExpr) -> Result<ChildMatcherExpr, Yaml
             EntryDataMatcher::NameRegex(p.clone()),
         )),
 
+        YamlMatcherExpr::AppearsOn(b) => {
+            ChildMatcherExpr::Matcher(ChildMatcher::EntryData(EntryDataMatcher::AppearsOn(*b)))
+        }
         YamlMatcherExpr::HasSource(s) => ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
             EntryDataMatcher::HasSource(s.clone()),
         )),
@@ -844,6 +851,7 @@ fn emit_matcher_expr(expr: &ChildMatcherExpr) -> YamlMatcherExpr {
                 EntryDataMatcher::ExternalType(t) => YamlMatcherExpr::ExternalType(t.clone()),
                 EntryDataMatcher::NameRegex(p) => YamlMatcherExpr::NameRegex(p.clone()),
                 EntryDataMatcher::HasSource(s) => YamlMatcherExpr::HasSource(s.clone()),
+                EntryDataMatcher::AppearsOn(b) => YamlMatcherExpr::AppearsOn(*b),
                 EntryDataMatcher::DurationRange { min, max } => YamlMatcherExpr::DurationRange {
                     min: *min,
                     max: *max,
@@ -1556,6 +1564,26 @@ main:
             let rules = &pool.get(track).child_rules;
             assert_eq!(rules.len(), 1, "{name}");
             let leaf = rules[0].options_id.expect("track children are fetched");
+            assert!(pool.get(leaf).child_rules.is_empty(), "{name}: leaf");
+        }
+
+        // `main` sends releases the artist only appears on to the leaf set.
+        for name in ["fetch_discography.yaml", "vtuber_fetch_discography.yaml"] {
+            let (pool, main, _) = load_from_file(&dir.join(name)).await.unwrap();
+            let rule = pool
+                .get(main)
+                .child_rules
+                .iter()
+                .find(|r| {
+                    matches!(
+                        r.matcher,
+                        ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                            EntryDataMatcher::AppearsOn(true)
+                        ))
+                    )
+                })
+                .unwrap_or_else(|| panic!("{name}: no appears_on rule"));
+            let leaf = rule.options_id.expect("appearances are fetched");
             assert!(pool.get(leaf).child_rules.is_empty(), "{name}: leaf");
         }
     }

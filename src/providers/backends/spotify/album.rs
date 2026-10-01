@@ -71,6 +71,7 @@ fn simplified_track_to_child_ref(track: &SimplifiedTrack) -> ChildRef {
         sources: [(SOURCE.into(), HashSet::from([track_url(&track.id)]))].into(),
         name: Some(track.name.clone()),
         duration_ms: Some(track.duration_ms),
+        appears_on: false,
         position: Some(TrackPosition {
             disc_no: if track.disc_number > 1 {
                 Some(track.disc_number)

@@ -127,6 +127,11 @@ pub struct ChildRef {
     /// still be stored with a duration, and lets `duration_range` matchers
     /// decide without fetching the child.
     pub duration_ms: Option<i64>,
+    /// Set on an artist's discography child when the artist only appears on
+    /// that release (Spotify `album_group: appears_on`, Discogs role
+    /// `Appearance`/`TrackAppearance`) rather than it being their own, e.g. a
+    /// various-artists compilation. Matched by `EntryDataMatcher::AppearsOn`.
+    pub appears_on: bool,
     pub position: Option<TrackPosition>,
     /// Contributions here represent the child's relationship to its parent
     /// (e.g. an artist's role on a release they contributed to).
@@ -211,6 +216,7 @@ pub enum EntryDataMatcher {
     NameRegex(String),
     DurationRange { min: Option<u64>, max: Option<u64> },
     HasSource(String),
+    AppearsOn(bool),
 
     // Backend-specific
     YouTube(YouTubeDataMatcher),
@@ -332,6 +338,7 @@ pub enum CompiledEntryDataMatcher {
     NameRegex(Arc<Regex>),
     DurationRange { min: Option<u64>, max: Option<u64> },
     HasSource(String),
+    AppearsOn(bool),
     YouTube(CompiledYouTubeDataMatcher),
     MusicBrainz(CompiledMusicBrainzDataMatcher),
 }
@@ -805,6 +812,7 @@ fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: u
                     Tribool::False
                 }
             }
+            CompiledEntryDataMatcher::AppearsOn(want) => (child.appears_on == *want).into(),
             CompiledEntryDataMatcher::ExternalType(t) => {
                 (child.external_type.as_ref() == t.as_str()).into()
             }

@@ -38,6 +38,10 @@ pub struct SimplifiedAlbum {
     pub release_date: Option<String>,
     pub release_date_precision: Option<String>,
     pub total_tracks: Option<u32>,
+    /// The artist's relation to the album when listed under
+    /// `/artists/{id}/albums`: "album", "single", "compilation" or "appears_on".
+    #[serde(default)]
+    pub album_group: Option<String>,
 }
 
 // --- Constants ---
@@ -90,6 +94,7 @@ impl PageFetcher for ArtistAlbumsPageFetcher {
                 entry_type: EntryType::Release,
                 external_type: EXTERNAL_TYPE_ALBUM.into(),
                 sources: [(SOURCE.into(), HashSet::from([album_url(&album.id)]))].into(),
+                appears_on: album.album_group.as_deref() == Some("appears_on"),
                 name: Some(album.name),
                 ..Default::default()
             })
@@ -281,6 +286,14 @@ mod tests {
             .await?
             .expect("expected second album");
         assert_eq!(second_album.name.as_deref(), Some("わためのうた vol.２"));
+
+        // Albums she only appears on (album_group "appears_on") are flagged.
+        let mut replay = artist.children[0].cursor();
+        let mut appears_on = 0;
+        while let Some((album, _)) = child_next(&mut replay).await? {
+            appears_on += usize::from(album.appears_on);
+        }
+        assert_eq!(appears_on, 9);
 
         Ok(())
     }

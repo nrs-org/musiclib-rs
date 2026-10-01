@@ -324,6 +324,7 @@ in order; the first match wins.
 | `{ external_type: "youtube:video" }` | Exact `source:entity` type string (e.g. `"spotify:track"`, `"musicbrainz:recording"`) |
 | `{ name_regex: "pattern" }` | Entry name matches the regex (requires fetching the entry) |
 | `{ has_source: spotify }` | Entry has at least one identifier in the `spotify` source namespace |
+| `{ appears_on: true }` | In an artist's discography: a release the artist only appears on (Spotify `appears_on`, Discogs `Appearance`/`TrackAppearance`), e.g. a various-artists compilation |
 | `{ duration_range: { min: 60000, max: 1200000 } }` | Duration in milliseconds; both `min` and `max` are optional |
 | `{ index_range: { min: 0, max: 50 } }` | Child's position in the parent's child list; both optional |
 

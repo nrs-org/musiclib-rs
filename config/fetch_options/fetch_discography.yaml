@@ -10,6 +10,9 @@
 # - A discography track fetches its album(s), credited artists and, for a
 #   cover, its original, each as a leaf: complete on its own, nothing beyond.
 #   An album reached this way records its other tracks as stubs.
+# - Releases the artist only appears on (various-artists compilations) are
+#   leaves: fetched with their tracklist as stubs, the other tracks not
+#   fetched.
 # - Artists encountered along the way are leaves: their own discographies
 #   are NOT fetched.
 #
@@ -19,6 +22,8 @@ main:
   child_rules:
     - match: { entry_type: artist }
       fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
+    - match: { appears_on: true }
+      fetch: ./no_fetch_discography.yaml::main  # releases they only appear on: tracklist as stubs
     - match:
         all:
           - { entry_type: track }

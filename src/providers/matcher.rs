@@ -42,6 +42,7 @@ fn compiled_expr_cost(expr: &CompiledMatcherExpr) -> u32 {
                 CompiledEntryDataMatcher::EntryType(_) => 2,
                 CompiledEntryDataMatcher::ExternalType(_) => 2,
                 CompiledEntryDataMatcher::HasSource(_) => 2,
+                CompiledEntryDataMatcher::AppearsOn(_) => 1,
                 CompiledEntryDataMatcher::NameRegex(_) => 5,
                 CompiledEntryDataMatcher::DurationRange { .. } => 20,
                 CompiledEntryDataMatcher::YouTube(_) => 20,
@@ -104,6 +105,7 @@ fn compile_entry_data(d: &EntryDataMatcher) -> Result<CompiledEntryDataMatcher, 
             max: *max,
         },
         EntryDataMatcher::HasSource(s) => CompiledEntryDataMatcher::HasSource(s.clone()),
+        EntryDataMatcher::AppearsOn(b) => CompiledEntryDataMatcher::AppearsOn(*b),
         EntryDataMatcher::YouTube(yt) => CompiledEntryDataMatcher::YouTube(match yt {
             YouTubeDataMatcher::DescriptionRegex(p) => {
                 CompiledYouTubeDataMatcher::DescriptionRegex(Arc::new(
@@ -415,6 +417,7 @@ async fn evaluate_entry_data(
             .map(|n| regex.is_match(n))
             .unwrap_or(false)),
         CompiledEntryDataMatcher::HasSource(source) => Ok(ctx.child.sources.get(source).is_some()),
+        CompiledEntryDataMatcher::AppearsOn(want) => Ok(ctx.child.appears_on == *want),
         CompiledEntryDataMatcher::DurationRange { min, max } => {
             // The listing's own duration, when it has one, saves fetching the
             // child just to read it.
@@ -1417,5 +1420,23 @@ mod tests {
                 ("unmatched".to_string(), false),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn appears_on_filter() {
+        let own = make_child(EntryType::Release, "own album", "spotify");
+        let mut compilation = make_child(EntryType::Release, "compilation", "spotify");
+        compilation.appears_on = true;
+        let mut pool = EntryFetchOptionsPool::default();
+        let options_id = Some(pool.insert(EntryFetchOptions::default()));
+        let rule = ChildRule {
+            matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                EntryDataMatcher::AppearsOn(true),
+            )),
+            options_id,
+        };
+        let result = run_filter(vec![own, compilation], pool, vec![rule]).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0.name.as_deref(), Some("compilation"));
     }
 }

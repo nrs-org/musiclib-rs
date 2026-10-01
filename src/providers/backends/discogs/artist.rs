@@ -113,6 +113,10 @@ impl PageFetcher for ArtistReleasesPageFetcher {
                     external_type,
                     sources: [(SOURCE.into(), HashSet::from([url]))].into(),
                     name: rel.title,
+                    appears_on: matches!(
+                        rel.role.as_deref(),
+                        Some("Appearance" | "TrackAppearance")
+                    ),
                     ..Default::default()
                 }
             })
@@ -377,6 +381,14 @@ mod tests {
             child_next(&mut releases).await?.expect("expected release");
         }
         assert!(child_next(&mut releases).await?.is_none());
+
+        // Releases she only appears on (role Appearance/TrackAppearance) are flagged.
+        let mut replay = artist.children[0].cursor();
+        let mut appears_on = 0;
+        while let Some((release, _)) = child_next(&mut replay).await? {
+            appears_on += usize::from(release.appears_on);
+        }
+        assert_eq!(appears_on, 8);
 
         Ok(())
     }
