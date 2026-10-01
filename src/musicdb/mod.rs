@@ -1334,6 +1334,12 @@ impl MusicDb {
             )
             .await?;
         }
+        if user_version < 2 {
+            sea_orm::ConnectionTrait::execute_unprepared(&db, CONTRIBUTION_DEDUP_MIGRATION).await?;
+        }
+        if user_version < 3 {
+            sea_orm::ConnectionTrait::execute_unprepared(&db, ALIAS_DEDUP_MIGRATION).await?;
+        }
         Ok(Self {
             db,
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -1813,8 +1819,7 @@ impl MusicDb {
         )
     }
 
-    /// Insert aliases for a pair. Caller is responsible for deduping if needed
-    /// — the table has no uniqueness constraint on (pair, name, locale).
+    /// Insert aliases for a pair, skipping ones it already has.
     /// Chunked: an entity referenced by many children (e.g. an artist credited
     /// on hundreds of tracks) can accumulate an alias list large enough that
     /// one `insert_many` (6 bound variables/row) would exceed SQLite's
@@ -1830,6 +1835,43 @@ impl MusicDb {
         if aliases.is_empty() {
             return Ok(());
         }
+        // Skip aliases the pair already has (a re-import, or a stub's listing
+        // name seen once per reference), and repeats within `aliases`. A
+        // lookup rather than a UNIQUE index: see `CONTRIBUTION_DEDUP_MIGRATION`.
+        let key = |name: &str, locale: Option<&str>, extra: &str, primary: bool| {
+            (
+                name.to_string(),
+                locale.map(str::to_string),
+                extra.to_string(),
+                primary,
+            )
+        };
+        let mut seen: HashSet<(String, Option<String>, String, bool)> = entry_alias::Entity::find()
+            .filter(entry_alias::Column::Source.eq(source))
+            .filter(entry_alias::Column::Identifier.eq(identifier))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|a| {
+                key(
+                    &a.name,
+                    a.locale.as_deref(),
+                    a.extra.as_deref().unwrap_or("null"),
+                    a.primary,
+                )
+            })
+            .collect();
+        let aliases: Vec<&Alias> = aliases
+            .iter()
+            .filter(|a| {
+                seen.insert(key(
+                    &a.name,
+                    a.locale.as_deref(),
+                    &a.extra.to_string(),
+                    a.primary,
+                ))
+            })
+            .collect();
         const ALIAS_INSERT_CHUNK: usize = 150;
         for chunk in aliases.chunks(ALIAS_INSERT_CHUNK) {
             let models: Vec<entry_alias::ActiveModel> = chunk
@@ -1900,19 +1942,39 @@ impl MusicDb {
         contrib: &Contribution,
         run_id: Option<i64>,
     ) -> Result<(), Error> {
-        contribution::Entity::insert(contribution::ActiveModel {
-            id: sea_orm::ActiveValue::NotSet,
-            source: Set(source.to_string()),
-            identifier: Set(identifier.to_string()),
-            artist_source: Set(artist_source.to_string()),
-            artist_identifier: Set(artist_identifier.to_string()),
-            role: Set(contrib.role.clone()),
-            main_artist: Set(contrib.main_artist),
-            extra: Set(Some(contrib.extra.to_string())),
-            run_id: Set(run_id),
-        })
-        .exec(&self.db)
-        .await?;
+        // Skips an identical existing row (a re-import, or the same edge pushed
+        // twice in one run), which keeps its original `run_id`, like
+        // `insert_child_edge`. A NOT EXISTS check rather than a UNIQUE index:
+        // see `CONTRIBUTION_DEDUP_MIGRATION` for why. Served by
+        // `idx_contribution_track_pair`.
+        let extra = contrib.extra.to_string();
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "INSERT INTO contribution \
+                 (source, identifier, artist_source, artist_identifier, role, main_artist, extra, run_id) \
+             SELECT ?, ?, ?, ?, ?, ?, ?, ? \
+             WHERE NOT EXISTS (SELECT 1 FROM contribution \
+                 WHERE source = ? AND identifier = ? AND artist_source = ? \
+                   AND artist_identifier = ? AND role = ? AND main_artist = ? AND extra = ?)",
+            [
+                source.into(),
+                identifier.into(),
+                artist_source.into(),
+                artist_identifier.into(),
+                contrib.role.clone().into(),
+                contrib.main_artist.into(),
+                extra.clone().into(),
+                run_id.into(),
+                source.into(),
+                identifier.into(),
+                artist_source.into(),
+                artist_identifier.into(),
+                contrib.role.clone().into(),
+                contrib.main_artist.into(),
+                extra.into(),
+            ],
+        );
+        self.db.execute_raw(stmt).await?;
         Ok(())
     }
 
@@ -2911,6 +2973,38 @@ fn pid_is_alive(pid: i64) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// Contributions had no uniqueness check, so every re-import of a pair
+/// appended another copy of each of its contributions (~5× on a real DB).
+/// Collapse exact duplicates onto the oldest row; `insert_contribution` now
+/// skips existing rows. `extra` NULLs are normalized to the `'null'` the
+/// importer writes, so they compare equal.
+///
+/// Deliberately no UNIQUE index: SeaORM's schema sync (run on every
+/// `MusicDb::new`) drops unique indexes the entity models don't declare, and
+/// these can't be declared there (aliases need `COALESCE` over NULL locales;
+/// a declared key would also be created before this cleanup could run).
+/// The `DROP INDEX` lines remove the indexes an earlier build of these
+/// migrations created, in case a DB still has them.
+const CONTRIBUTION_DEDUP_MIGRATION: &str = "
+    DROP INDEX IF EXISTS idx_contribution_unique;
+    UPDATE contribution SET extra = 'null' WHERE extra IS NULL;
+    DELETE FROM contribution WHERE id NOT IN (
+        SELECT MIN(id) FROM contribution
+        GROUP BY source, identifier, artist_source, artist_identifier, role, main_artist, extra
+    );
+    PRAGMA user_version = 2;";
+
+/// Same problem as `CONTRIBUTION_DEDUP_MIGRATION`, for aliases (~6× on a real
+/// DB); `insert_aliases_for_pair` now skips existing rows. The FTS index is
+/// external-content, so deleting rows under it requires a rebuild.
+const ALIAS_DEDUP_MIGRATION: &str = "
+    DROP INDEX IF EXISTS idx_entry_alias_unique;
+    DELETE FROM entry_alias WHERE id NOT IN (
+        SELECT MIN(id) FROM entry_alias
+        GROUP BY source, identifier, name, locale, extra, \"primary\"
+    );
+    INSERT INTO entry_alias_fts(entry_alias_fts) VALUES('rebuild');
+    PRAGMA user_version = 3;";
 fn ignore_not_inserted<T: sea_orm::ActiveModelTrait>(
     result: Result<sea_orm::InsertResult<T>, DbErr>,
 ) -> Result<(), Error> {
@@ -3654,5 +3748,199 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ids, vec![1]);
+    }
+
+    fn contribution_row(role: &str, extra: Option<&str>) -> contribution::ActiveModel {
+        contribution::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            source: Set("spotify".to_string()),
+            identifier: Set("track1".to_string()),
+            artist_source: Set("spotify".to_string()),
+            artist_identifier: Set("artist1".to_string()),
+            role: Set(role.to_string()),
+            main_artist: Set(true),
+            extra: Set(extra.map(str::to_owned)),
+            run_id: Set(None),
+        }
+    }
+
+    async fn contribution_count(mdb: &MusicDb) -> u64 {
+        use sea_orm::PaginatorTrait;
+        contribution::Entity::find().count(&mdb.db).await.unwrap()
+    }
+
+    /// Re-inserting an identical contribution (a re-import, or the same edge
+    /// pushed twice in one run) keeps a single row.
+    #[tokio::test]
+    async fn insert_contribution_is_idempotent() {
+        let mdb = mem_db().await;
+        let contrib = Contribution {
+            role: "performer".to_string(),
+            main_artist: true,
+            extra: serde_json::Value::Null,
+            source: "spotify".into(),
+        };
+        for run_id in [None, Some(7)] {
+            mdb.insert_contribution("spotify", "track1", "spotify", "artist1", &contrib, run_id)
+                .await
+                .unwrap();
+        }
+        assert_eq!(contribution_count(&mdb).await, 1);
+
+        let other_role = Contribution {
+            role: "composer".to_string(),
+            ..contrib
+        };
+        mdb.insert_contribution("spotify", "track1", "spotify", "artist1", &other_role, None)
+            .await
+            .unwrap();
+        assert_eq!(contribution_count(&mdb).await, 2);
+    }
+
+    /// Opening a pre-v2 database collapses duplicate contributions (treating
+    /// a NULL `extra` like the `'null'` the importer writes) and enforces
+    /// uniqueness from then on.
+    #[tokio::test]
+    async fn contribution_migration_collapses_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dup_contributions.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        {
+            let db = Database::connect(&db_url).await.unwrap();
+            db.get_schema_registry("musiclib_rs::musicdb::*")
+                .sync(&db)
+                .await
+                .unwrap();
+            for row in [
+                contribution_row("performer", Some("null")),
+                contribution_row("performer", Some("null")),
+                contribution_row("performer", None),
+                contribution_row("composer", Some("null")),
+            ] {
+                contribution::Entity::insert(row).exec(&db).await.unwrap();
+            }
+        }
+
+        let mdb = MusicDb::new(&db_url).await.unwrap();
+        assert_eq!(contribution_count(&mdb).await, 2);
+
+        let kept = contribution::Entity::find()
+            .order_by_asc(contribution::Column::Id)
+            .all(&mdb.db)
+            .await
+            .unwrap();
+        assert_eq!(kept[0].id, 1, "the oldest duplicate survives");
+
+        // Re-inserting through the importer's path is a no-op, and stays one
+        // after the DB is opened again (schema sync on open must not undo it).
+        drop(mdb);
+        let mdb = MusicDb::new(&db_url).await.unwrap();
+        let contrib = Contribution {
+            role: "performer".to_string(),
+            main_artist: true,
+            extra: serde_json::Value::Null,
+            source: "spotify".into(),
+        };
+        mdb.insert_contribution("spotify", "track1", "spotify", "artist1", &contrib, None)
+            .await
+            .unwrap();
+        assert_eq!(contribution_count(&mdb).await, 2);
+    }
+
+    async fn alias_count(mdb: &MusicDb) -> u64 {
+        use sea_orm::PaginatorTrait;
+        entry_alias::Entity::find().count(&mdb.db).await.unwrap()
+    }
+
+    /// Re-inserting the same aliases (a re-import, or a stub's listing name
+    /// seen once per reference) keeps one row each, NULL locale included,
+    /// and search still finds the entry.
+    #[tokio::test]
+    async fn insert_aliases_for_pair_is_idempotent() {
+        let mdb = mem_db().await;
+        let entry_id = mdb.insert_entry(None).await.unwrap();
+        mdb.upsert_pair(
+            "youtube",
+            "v1",
+            entry_id,
+            None,
+            &EntrySpecificData::Artist,
+            None,
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            mdb.insert_aliases_for_pair(
+                "youtube",
+                "v1",
+                &[alias("Watame"), alias("角巻わため")],
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(alias_count(&mdb).await, 2);
+        assert_eq!(
+            mdb.search_entry_ids_by_alias("watame", 10).await.unwrap(),
+            vec![entry_id]
+        );
+    }
+
+    /// Opening a pre-v3 database collapses duplicate aliases (NULL locales
+    /// compare equal) and rebuilds the FTS index over what's left.
+    #[tokio::test]
+    async fn alias_migration_collapses_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dup_aliases.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            let entry_id = mdb.insert_entry(None).await.unwrap();
+            mdb.upsert_pair(
+                "youtube",
+                "v1",
+                entry_id,
+                None,
+                &EntrySpecificData::Artist,
+                None,
+            )
+            .await
+            .unwrap();
+            // Simulate the pre-v3 state: duplicate rows written by the old,
+            // unchecked insert.
+            sea_orm::ConnectionTrait::execute_unprepared(&mdb.db, "PRAGMA user_version = 2;")
+                .await
+                .unwrap();
+            for _ in 0..3 {
+                entry_alias::Entity::insert(entry_alias::ActiveModel {
+                    id: sea_orm::ActiveValue::NotSet,
+                    source: Set("youtube".to_string()),
+                    identifier: Set("v1".to_string()),
+                    name: Set("Watame".to_string()),
+                    locale: Set(None),
+                    extra: Set(Some("null".to_string())),
+                    primary: Set(true),
+                    run_id: Set(None),
+                })
+                .exec(&mdb.db)
+                .await
+                .unwrap();
+            }
+            assert_eq!(alias_count(&mdb).await, 3);
+        }
+
+        let mdb = MusicDb::new(&db_url).await.unwrap();
+        assert_eq!(alias_count(&mdb).await, 1);
+        assert_eq!(
+            mdb.search_entry_ids_by_alias("watame", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Watame")], None)
+            .await
+            .unwrap();
+        assert_eq!(alias_count(&mdb).await, 1);
     }
 }
