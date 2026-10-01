@@ -1615,15 +1615,84 @@ impl MusicDb {
     /// Mark a run as finished successfully. Its tagged rows are left as-is
     /// (`run_id` doubles as provenance of which run brought in which data)
     /// but the run is no longer eligible for `recover_pending_import_runs`.
-    pub async fn commit_import_run(&self, run_id: i64) -> Result<(), Error> {
+    ///
+    /// `replaced` lists parents this run fetched completely, with the edges
+    /// each one has now. Any older `entry_child`/`contribution` row under such
+    /// a parent that isn't in its current set (a track dropped from an album,
+    /// a removed credit) is deleted in the same transaction as the status
+    /// update. Doing it here rather than at flush time keeps rollback
+    /// correct: a run that fails or crashes never got to delete anything.
+    pub async fn commit_import_run(
+        &self,
+        run_id: i64,
+        replaced: &HashMap<(String, String), ParentEdges>,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        let (mut stale_children, mut stale_contributions) = (0usize, 0usize);
+        for ((source, identifier), current) in replaced {
+            let children = entry_child::Entity::find()
+                .filter(entry_child::Column::ParentSource.eq(source.as_str()))
+                .filter(entry_child::Column::ParentIdentifier.eq(identifier.as_str()))
+                .all(&txn)
+                .await?;
+            for row in children {
+                if current
+                    .children
+                    .contains(&(row.child_source.clone(), row.child_identifier.clone()))
+                {
+                    continue;
+                }
+                entry_child::Entity::delete_many()
+                    .filter(entry_child::Column::ParentSource.eq(source.as_str()))
+                    .filter(entry_child::Column::ParentIdentifier.eq(identifier.as_str()))
+                    .filter(entry_child::Column::ChildSource.eq(row.child_source))
+                    .filter(entry_child::Column::ChildIdentifier.eq(row.child_identifier))
+                    .exec(&txn)
+                    .await?;
+                stale_children += 1;
+            }
+
+            let stale_ids: Vec<i64> = contribution::Entity::find()
+                .filter(contribution::Column::Source.eq(source.as_str()))
+                .filter(contribution::Column::Identifier.eq(identifier.as_str()))
+                .all(&txn)
+                .await?
+                .into_iter()
+                .filter(|c| {
+                    let key: ContributionKey = (
+                        (c.artist_source.clone(), c.artist_identifier.clone()),
+                        c.role.clone(),
+                        c.main_artist,
+                        c.extra.clone().unwrap_or_else(|| "null".to_string()),
+                    );
+                    !current.contributions.contains(&key)
+                })
+                .map(|c| c.id)
+                .collect();
+            if !stale_ids.is_empty() {
+                stale_contributions += stale_ids.len();
+                contribution::Entity::delete_many()
+                    .filter(contribution::Column::Id.is_in(stale_ids))
+                    .exec(&txn)
+                    .await?;
+            }
+        }
         import_run::Entity::update_many()
             .col_expr(
                 import_run::Column::Status,
                 sea_query::Expr::value("committed"),
             )
             .filter(import_run::Column::Id.eq(run_id))
-            .exec(&self.db)
+            .exec(&txn)
             .await?;
+        txn.commit().await?;
+        if stale_children + stale_contributions > 0 {
+            tracing::info!(
+                "run {run_id}: removed {stale_children} stale child edge(s) and \
+                 {stale_contributions} stale contribution(s) under {} re-fetched parent(s)",
+                replaced.len()
+            );
+        }
         Ok(())
     }
 
@@ -2902,6 +2971,18 @@ pub struct ContribRow {
     pub identifier: String,
     pub artist_source: String,
     pub artist_identifier: String,
+}
+
+/// A contribution's identity under its parent pair: (artist pair, role,
+/// main_artist, extra as stored).
+pub type ContributionKey = ((String, String), String, bool, String);
+
+/// The edges a fully fetched non-artist parent has as of the current run.
+/// See `MusicDb::commit_import_run`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ParentEdges {
+    pub children: HashSet<(String, String)>,
+    pub contributions: HashSet<ContributionKey>,
 }
 
 pub struct ChildRow {

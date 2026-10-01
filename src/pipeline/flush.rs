@@ -124,6 +124,20 @@ pub async fn flush(
         })
         .collect();
 
+    // Remember, for the whole run, which non-artist parents were fetched and
+    // every edge seen, by canonical pair: at commit these replace older edges
+    // under re-fetched parents. Recorded before deferral so it doesn't matter
+    // which flush ends up writing them. (A parent's metadata and its edges can
+    // land in different flushes, so the two are tracked separately.)
+    for (pair, meta) in &metadata {
+        if meta.entry_type != EntryType::Artist {
+            state.note_fetched_parent(pair.clone());
+        }
+    }
+    for edge in &has_rel {
+        state.note_edge(edge);
+    }
+
     // Two raw forms of one child can collapse to the same canonical pair;
     // keep whichever listing gave a name/duration.
     let mut canon_stubs: HashMap<Pair, StubInfo> = HashMap::new();
@@ -1212,6 +1226,151 @@ mod tests {
             aliases_of(&db, &track).await?,
             vec![("Song".to_string(), false)]
         );
+        Ok(())
+    }
+
+    fn artist_metadata() -> PairMetadata {
+        PairMetadata {
+            entry_type: EntryType::Artist,
+            release_date: None,
+            specific_data: crate::providers::types::EntrySpecificData::Artist,
+            aliases: vec![],
+        }
+    }
+
+    fn edge(parent: &Pair, child: &Pair, role: Option<&str>) -> ChildEdge {
+        ChildEdge {
+            parent: parent.clone(),
+            child: child.clone(),
+            disc_no: None,
+            track_no: None,
+            contributions: role
+                .map(|role| crate::providers::types::Contribution {
+                    role: role.to_string(),
+                    main_artist: true,
+                    extra: serde_json::Value::Null,
+                    source: "x".into(),
+                })
+                .into_iter()
+                .collect(),
+            original_relation_kind: None,
+        }
+    }
+
+    /// One import run over `fetched` (pair, metadata) and `edges`: flush, then
+    /// commit (`commit = true`) or roll back.
+    async fn run(
+        db: &MusicDb,
+        fetched: Vec<(Pair, PairMetadata)>,
+        edges: Vec<ChildEdge>,
+        commit: bool,
+    ) -> anyhow::Result<()> {
+        let state = Arc::new(State::new());
+        for (pair, meta) in fetched {
+            state.insert_metadata(pair, meta);
+        }
+        for e in edges {
+            state.push_has_rel(e);
+        }
+        let run_id = db.start_import_run().await?;
+        flush(
+            Arc::clone(&state),
+            &[],
+            db,
+            &DedupConfig::default(),
+            Some(run_id),
+            true,
+        )
+        .await?;
+        if commit {
+            db.commit_import_run(run_id, &state.take_replacements())
+                .await?;
+        } else {
+            db.rollback_import_run(run_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn children_of(db: &MusicDb, parent: &Pair) -> anyhow::Result<Vec<String>> {
+        let mut out: Vec<String> = db
+            .all_child_rows()
+            .await?
+            .into_iter()
+            .filter(|r| r.parent_source == parent.0 && r.parent_identifier == parent.1)
+            .map(|r| r.child_identifier)
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    async fn credited_on(db: &MusicDb, track: &Pair) -> anyhow::Result<Vec<String>> {
+        let mut out: Vec<String> = db
+            .all_contrib_rows()
+            .await?
+            .into_iter()
+            .filter(|r| r.source == track.0 && r.identifier == track.1)
+            .map(|r| r.artist_identifier)
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    /// Re-fetching an album and a track replaces their edges at commit: a
+    /// track dropped from the album and a removed credit disappear. An
+    /// artist's discography edges are only ever added to, and a rolled-back
+    /// run deletes nothing.
+    #[tokio::test]
+    async fn refetch_replaces_stale_edges_at_commit() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let (artist, album, t1, t2) = (p("artist"), p("album"), p("t1"), p("t2"));
+        let (performer, composer) = (p("performer"), p("composer"));
+
+        run(
+            &db,
+            vec![
+                (artist.clone(), artist_metadata()),
+                (album.clone(), release_metadata()),
+                (t1.clone(), track_metadata()),
+            ],
+            vec![
+                edge(&artist, &album, None),
+                edge(&artist, &t2, None),
+                edge(&album, &t1, None),
+                edge(&album, &t2, None),
+                edge(&t1, &performer, Some("performer")),
+                edge(&t1, &composer, Some("composer")),
+            ],
+            true,
+        )
+        .await?;
+
+        // Upstream changed: t2 left the album, the composer credit was removed,
+        // and the artist listing (policy-filtered) now shows only the album.
+        let refetch = || {
+            (
+                vec![
+                    (artist.clone(), artist_metadata()),
+                    (album.clone(), release_metadata()),
+                    (t1.clone(), track_metadata()),
+                ],
+                vec![
+                    edge(&artist, &album, None),
+                    edge(&album, &t1, None),
+                    edge(&t1, &performer, Some("performer")),
+                ],
+            )
+        };
+
+        let (fetched, edges) = refetch();
+        run(&db, fetched, edges, false).await?;
+        assert_eq!(children_of(&db, &album).await?, vec!["t1", "t2"]);
+        assert_eq!(credited_on(&db, &t1).await?, vec!["composer", "performer"]);
+
+        let (fetched, edges) = refetch();
+        run(&db, fetched, edges, true).await?;
+        assert_eq!(children_of(&db, &album).await?, vec!["t1"]);
+        assert_eq!(credited_on(&db, &t1).await?, vec!["performer"]);
+        assert_eq!(children_of(&db, &artist).await?, vec!["album", "t2"]);
         Ok(())
     }
 }

@@ -179,7 +179,8 @@ pub async fn ingest_entries(
 
     let touched_ids = match result {
         Ok(touched_ids) => {
-            db.commit_import_run(run_id).await?;
+            db.commit_import_run(run_id, &state.take_replacements())
+                .await?;
             touched_ids
         }
         Err(e) => {

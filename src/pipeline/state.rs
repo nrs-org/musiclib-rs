@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::musicdb::ParentEdges;
 use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType, OptionsId};
 
 /// A `(source_key, identifier)` pair. The only unit of identity during import.
@@ -26,6 +27,12 @@ pub struct StubInfo {
     pub entry_type: EntryType,
     pub name: Option<String>,
     pub duration_ms: Option<i64>,
+}
+
+#[derive(Default)]
+struct RunEdges {
+    fetched: HashSet<Pair>,
+    edges: HashMap<Pair, ParentEdges>,
 }
 
 /// A "parent has child" edge between two pairs, with the structural position
@@ -64,6 +71,13 @@ pub struct State {
     pub is_rel: Mutex<Vec<(Pair, Pair)>>,
     pub has_rel: Mutex<Vec<ChildEdge>>,
     pub stubs: Mutex<HashMap<Pair, StubInfo>>,
+    /// Every non-artist pair fetched completely in this run, and every edge
+    /// seen under any parent, by canonical pair (recorded by `flush`). Kept
+    /// for the whole run: unlike the buffers above, flush never drains it,
+    /// and it isn't counted in `approx_bytes` (which only measures what a
+    /// flush can drain). At commit, it's what replaces older edges under
+    /// re-fetched parents (see `MusicDb::commit_import_run`).
+    run_edges: Mutex<RunEdges>,
     /// Running estimate, in bytes, of everything currently buffered in
     /// `metadata`/`is_rel`/`has_rel`. This is what `pipeline::ingest`'s
     /// periodic-flush watchdog watches to decide when to drain the buffer.
@@ -99,6 +113,7 @@ impl State {
             is_rel: Mutex::new(Vec::new()),
             has_rel: Mutex::new(Vec::new()),
             stubs: Mutex::new(HashMap::new()),
+            run_edges: Mutex::new(RunEdges::default()),
             approx_bytes: AtomicUsize::new(0),
             progress,
         }
@@ -184,6 +199,41 @@ impl State {
             }
         }
     }
+
+    /// Record that `pair` (canonical) was fetched completely as a non-artist
+    /// entity in this run, so its edges as of this run replace older ones.
+    pub(super) fn note_fetched_parent(&self, pair: Pair) {
+        self.run_edges.lock().unwrap().fetched.insert(pair);
+    }
+
+    /// Record an edge (canonical pairs) as current for its parent.
+    pub(super) fn note_edge(&self, edge: &ChildEdge) {
+        let mut run_edges = self.run_edges.lock().unwrap();
+        let current = run_edges.edges.entry(edge.parent.clone()).or_default();
+        current.children.insert(edge.child.clone());
+        for c in &edge.contributions {
+            current.contributions.insert((
+                edge.child.clone(),
+                c.role.clone(),
+                c.main_artist,
+                c.extra.to_string(),
+            ));
+        }
+    }
+
+    /// The current edges of every non-artist parent fetched in this run (an
+    /// empty set for one that listed nothing), for `MusicDb::commit_import_run`.
+    pub fn take_replacements(&self) -> HashMap<Pair, ParentEdges> {
+        let RunEdges { fetched, mut edges } = std::mem::take(&mut *self.run_edges.lock().unwrap());
+        fetched
+            .into_iter()
+            .map(|pair| {
+                let current = edges.remove(&pair).unwrap_or_default();
+                (pair, current)
+            })
+            .collect()
+    }
+
     /// Current estimated size of buffered state, in bytes.
     pub fn approx_bytes(&self) -> usize {
         self.approx_bytes.load(Ordering::Relaxed)
