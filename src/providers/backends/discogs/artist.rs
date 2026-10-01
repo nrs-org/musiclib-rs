@@ -131,8 +131,14 @@ impl PageFetcher for ArtistReleasesPageFetcher {
 
 fn release_or_release_group_eval(expr: &CompiledMatcherExpr) -> Tribool {
     static_eval_expr(expr, &|matcher| match matcher {
+        // Items mix releases and masters (release groups), so neither type
+        // holds for every item; anything else holds for none.
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
-            (*t == EntryType::Release || *t == EntryType::ReleaseGroup).into()
+            if *t == EntryType::Release || *t == EntryType::ReleaseGroup {
+                Tribool::Indeterminate
+            } else {
+                Tribool::False
+            }
         }
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
             // Items are always one of these two; can never be True (mixed), but can be False.

@@ -600,6 +600,56 @@ pub struct PaginatedChildSource<
 > {
     stream: BoxStream<'static, Result<(ChildRef, ()), Error>>,
     static_eval: F,
+    /// Cleared once an item contradicts `static_eval`; from then on the source
+    /// declares nothing (see `declaration_contradictions`).
+    trusted: bool,
+}
+
+/// Ways `child` contradicts what `eval` declares about every item of its
+/// listing. A declaration is hand-written next to the code that builds the
+/// items, and nothing else ties the two together; a wrong one makes filtering
+/// skip a listing it shouldn't (`matcher::filter_children`) or take a wrong
+/// shortcut in quantifier matching, both silently. This compares each item
+/// read against the facts declarations make (`entry_type`, `external_type`,
+/// `appears_on`): a `True` claim the item doesn't satisfy, or a `False` claim
+/// it does. `Indeterminate` claims are never wrong.
+pub fn declaration_contradictions(
+    eval: &dyn Fn(&CompiledMatcherExpr) -> Tribool,
+    child: &ChildRef,
+) -> Vec<String> {
+    let leaf = |m: CompiledEntryDataMatcher| {
+        CompiledMatcherExpr::Matcher(CompiledChildMatcher::EntryData(m))
+    };
+    let mut out = Vec::new();
+    let mut check = |what: String, claim: Tribool, holds: bool| match claim {
+        Tribool::True if !holds => out.push(format!("declares every item `{what}`")),
+        Tribool::False if holds => out.push(format!("declares no item `{what}`")),
+        _ => {}
+    };
+    for t in [
+        EntryType::Artist,
+        EntryType::ReleaseGroup,
+        EntryType::Release,
+        EntryType::Track,
+    ] {
+        let claim = eval(&leaf(CompiledEntryDataMatcher::EntryType(t)));
+        check(format!("entry_type: {t:?}"), claim, child.entry_type == t);
+    }
+    // Equality-style declarations answer `False` for any type other than the
+    // declared one, so checking the item's own type also catches a wrong
+    // `True` for some other type.
+    let ext = child.external_type.to_string();
+    let claim = eval(&leaf(CompiledEntryDataMatcher::ExternalType(ext.clone())));
+    check(format!("external_type: {ext:?}"), claim, true);
+    for want in [true, false] {
+        let claim = eval(&leaf(CompiledEntryDataMatcher::AppearsOn(want)));
+        check(
+            format!("appears_on: {want}"),
+            claim,
+            child.appears_on == want,
+        );
+    }
+    out
 }
 
 fn indeterminate_eval(_: &CompiledMatcherExpr) -> Tribool {
@@ -650,6 +700,7 @@ impl PaginatedChildSource {
         Self {
             stream: paginated_stream(fetcher),
             static_eval: indeterminate_eval,
+            trusted: true,
         }
     }
 }
@@ -664,6 +715,7 @@ impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> PaginatedChildSource<F> {
         PaginatedChildSource {
             stream: self.stream,
             static_eval: f,
+            trusted: true,
         }
     }
 }
@@ -672,7 +724,31 @@ impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> Stream for PaginatedChildSou
     type Item = Result<(ChildRef, ()), Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.stream.as_mut().poll_next(cx)
+        let item = self.stream.as_mut().poll_next(cx);
+        if self.trusted
+            && let Poll::Ready(Some(Ok((child, ())))) = &item
+        {
+            let wrong = declaration_contradictions(&self.static_eval, child);
+            if !wrong.is_empty() {
+                // Tests read every fixture listing, so they catch a declaration
+                // drifting from the code that builds its items.
+                if cfg!(test) {
+                    panic!(
+                        "listing declaration contradicted by {:?}: {wrong:?}",
+                        child.name
+                    );
+                }
+                tracing::warn!(
+                    "listing declaration contradicted by item {:?} ({:?}): {}; \
+                     no longer trusting it for this listing",
+                    child.name,
+                    child.sources.first_identifier(),
+                    wrong.join("; ")
+                );
+                self.trusted = false;
+            }
+        }
+        item
     }
 }
 
@@ -680,7 +756,11 @@ impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> Unpin for PaginatedChildSour
 
 impl<F: Fn(&CompiledMatcherExpr) -> Tribool + Send> ChildSource for PaginatedChildSource<F> {
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
-        (self.static_eval)(expr)
+        if self.trusted {
+            (self.static_eval)(expr)
+        } else {
+            Tribool::Indeterminate
+        }
     }
 }
 
@@ -1062,5 +1142,60 @@ mod cached_source_tests {
         assert_eq!(a, expected);
         // The second cursor replays the same buffered children from index 0.
         assert_eq!(b, expected);
+    }
+
+    fn video(entry_type: EntryType, external_type: &'static str, appears_on: bool) -> ChildRef {
+        ChildRef {
+            entry_type,
+            external_type: external_type.into(),
+            appears_on,
+            ..Default::default()
+        }
+    }
+
+    /// "Every item is a `youtube:video` track", like the YouTube uploads source.
+    fn uploads_eval(expr: &CompiledMatcherExpr) -> Tribool {
+        static_eval_expr(expr, &|m| match m {
+            CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
+                (*t == EntryType::Track).into()
+            }
+            CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+                (t == "youtube:video").into()
+            }
+            _ => default_eval_leaf(m),
+        })
+    }
+
+    #[test]
+    fn declaration_contradictions_flags_wrong_claims_only() {
+        assert!(
+            declaration_contradictions(
+                &uploads_eval,
+                &video(EntryType::Track, "youtube:video", false)
+            )
+            .is_empty()
+        );
+
+        // An item of another external type contradicts "every item is a
+        // youtube:video" (caught through the item's own type).
+        let wrong = declaration_contradictions(
+            &uploads_eval,
+            &video(EntryType::Track, "youtube:playlist", false),
+        );
+        assert_eq!(wrong.len(), 1, "{wrong:?}");
+
+        // A release contradicts both "every item is a track" and "no item is
+        // a release".
+        let wrong = declaration_contradictions(
+            &uploads_eval,
+            &video(EntryType::Release, "youtube:video", false),
+        );
+        assert_eq!(wrong.len(), 2, "{wrong:?}");
+
+        // A declaration that says nothing is never wrong.
+        assert!(
+            declaration_contradictions(&indeterminate_eval, &video(EntryType::Artist, "", true))
+                .is_empty()
+        );
     }
 }
