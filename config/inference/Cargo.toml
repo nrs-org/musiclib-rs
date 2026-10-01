@@ -10,15 +10,22 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Baseline build is the lightweight Model2Vec static-embedding path (always on):
-# no candle, no MKL, no transformer. The heavyweight MiniLM path is opt-in via
-# `minilm`.
+# Baseline build is LangID + romaji detection only: no embedding backend, so
+# `embed`/`embed_batch` fail and the host script falls back to its own path.
 default = []
 
-# Full MiniLM transformer embeddings via candle (CPU). Heavyweight: pulls candle
-# (core/nn/transformers). When enabled, this becomes the active backend behind
+# MiniLM transformer embeddings via candle (CPU). Heavyweight: pulls candle
+# (core/nn/transformers), tokenizers and hf-hub. The only backend behind
 # `embed`/`embed_batch`.
-minilm = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
+minilm = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:hf-hub",
+    "dep:anyhow",
+    "dep:serde_json",
+]
 
 # CPU BLAS backends for candle's float GEMMs (MiniLM) — CPU-only, no CUDA. `mkl`
 # links Intel MKL (Linux/Windows), `accelerate` links Apple's Accelerate (macOS).
@@ -39,17 +46,15 @@ mkl-langid = ["mkl"]
 
 [dependencies]
 fancy-regex = "0.13"
-# Shared by both embedding paths: tokenization and model download/caching.
-tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
-hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
-anyhow = "1"
-serde_json = "1"
 
 # MiniLM embeddings — CPU-only candle (feature `minilm`; BLAS via `mkl`/`accelerate`).
 candle-core = { version = "0.9", optional = true }
 candle-nn = { version = "0.9", optional = true }
 candle-transformers = { version = "0.9", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"], optional = true }
+hf-hub = { version = "0.4", default-features = false, features = ["ureq"], optional = true }
+anyhow = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
 
-# Model2Vec static-embedding path (baseline): read the F16 embedding table
-# directly, no candle/MKL needed.
-safetensors = "0.7"
+[dev-dependencies]
+serde_json = "1"

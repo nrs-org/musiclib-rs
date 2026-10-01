@@ -627,8 +627,8 @@ file**, not the process working directory.
 #### `config/inference/` cdylib
 
 The workspace member `config/inference` (package name `inference`) builds a
-`libinference.so` cdylib providing real semantic embeddings (Model2Vec, 256-d by
-default; `--features minilm` for MiniLM 384-d):
+`libinference.so` cdylib providing romaji detection and LangID; real semantic
+embeddings (MiniLM, 384-d) need `--features minilm`:
 
 ```bash
 cargo build -p inference --release --lib

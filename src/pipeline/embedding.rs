@@ -550,7 +550,7 @@ fn report_embed_health(dim: usize, max_nonzero: usize) {
     if dim == 0 {
         return;
     }
-    // Real embedders (Model2Vec / MiniLM / LaBSE) are essentially fully dense;
+    // Real embedders (MiniLM / LaBSE) are essentially fully dense;
     // the naive histogram lights up only as many dims as a title has distinct
     // token buckets. Anything under 25% density across the *whole* batch means
     // no real model ran.

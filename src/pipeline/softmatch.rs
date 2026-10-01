@@ -130,8 +130,8 @@ pub struct SoftMatchConfig {
     /// artifacts use this to reject a mismatched embedding vector space.
     pub embed_model_id: Option<String>,
     /// Embedding vector dimension — must match the model used in the Rhai `embed()`
-    /// function. Default script + default inference backend is 256 (Model2Vec);
-    /// use 384 when the inference cdylib is built with `--features minilm`.
+    /// function. Default script's naive fallback is 256; use 384 when the
+    /// inference cdylib is built with `--features minilm`.
     pub embed_dim: usize,
     /// Number of semantic KNN neighbours per entry and type. Default: 20.
     pub embed_k: usize,

@@ -2212,7 +2212,6 @@ dependencies = [
  "candle-transformers",
  "fancy-regex 0.13.0",
  "hf-hub",
- "safetensors",
  "serde_json",
  "tokenizers",
 ]

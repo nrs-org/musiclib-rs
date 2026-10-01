@@ -12,13 +12,11 @@
 //!
 //!   * `inference_detect_romaji(text)`   -> tokens classified as romanised JP.
 //!   * `inference_detect_language(text)` -> top BCP-47 language code (LangID).
-//!   * `inference_embed_batch(texts)`    -> sentence embeddings via the active
-//!     backend (default: Model2Vec 256-d; `minilm` feature: MiniLM 384-d).
+//!   * `inference_embed_batch(texts)`    -> sentence embeddings (MiniLM 384-d,
+//!     `minilm` feature only; without it every call fails).
 
 #[cfg(feature = "minilm")]
 mod embed;
-#[cfg(not(feature = "minilm"))]
-mod m2v;
 mod model;
 mod romaji;
 mod tables;
@@ -72,15 +70,8 @@ fn embedder() -> Result<&'static Embedder, String> {
         .map_err(|e| e.clone())
 }
 
-/// Lazily-loaded Model2Vec static embedder (default backend). Same
-/// caching/error strategy as the MiniLM embedder above.
 #[cfg(not(feature = "minilm"))]
-fn static_embedder() -> Result<&'static m2v::StaticEmbedder, String> {
-    static E: OnceLock<Result<m2v::StaticEmbedder, String>> = OnceLock::new();
-    E.get_or_init(|| m2v::StaticEmbedder::load().map_err(|e| format!("{e:#}")))
-        .as_ref()
-        .map_err(|e| e.clone())
-}
+const NO_EMBEDDER: &str = "no embedding backend compiled in (build with --features minilm)";
 
 // Public accessors so the crate can also be used as an `rlib` (tests, direct
 // host linking) without going through the dylib boundary.
@@ -119,10 +110,10 @@ pub fn embed(text: &str) -> Result<Vec<f32>, String> {
     embedder()?.embed(text).map_err(|e| format!("{e:#}"))
 }
 
-/// Sentence embedding for `text` (L2-normalized), using the active backend.
+/// Always fails: no embedding backend without the `minilm` feature.
 #[cfg(not(feature = "minilm"))]
-pub fn embed(text: &str) -> Result<Vec<f32>, String> {
-    static_embedder()?.embed(text).map_err(|e| format!("{e:#}"))
+pub fn embed(_text: &str) -> Result<Vec<f32>, String> {
+    Err(NO_EMBEDDER.to_owned())
 }
 
 /// Sentence embeddings for a batch of texts, using the active backend.
@@ -131,12 +122,10 @@ pub fn embed_batch(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     embedder()?.embed_batch(texts).map_err(|e| format!("{e:#}"))
 }
 
-/// Sentence embeddings for a batch of texts, using the active backend.
+/// Always fails: no embedding backend without the `minilm` feature.
 #[cfg(not(feature = "minilm"))]
-pub fn embed_batch(texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-    static_embedder()?
-        .embed_batch(texts)
-        .map_err(|e| format!("{e:#}"))
+pub fn embed_batch(_texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    Err(NO_EMBEDDER.to_owned())
 }
 
 // ── Stable C ABI (version 1) ──────────────────────────────────────────────────

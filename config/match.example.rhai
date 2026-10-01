@@ -124,9 +124,9 @@
 // --lib` and musiclib with `--features ffi` to get backend 1.
 //
 // Both backends emit EMBED_DIM-dimensional vectors so they're interchangeable
-// in the cache. Keep EMBED_DIM == the host's `embed_dim` config (default 256;
-// the inference default backend, Model2Vec, is also 256-d — set both to 384 if
-// you build inference with `--features minilm`).
+// in the cache. Keep EMBED_DIM == the host's `embed_dim` config (default 256,
+// the naive fallback). The cdylib only embeds when built with `--features
+// minilm` (384-d) — set both to 384 then; without it, backend 2 is used.
 
 // ── Lifecycle: init() → context object ───────────────────────────────────────
 //
