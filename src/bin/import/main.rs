@@ -63,6 +63,12 @@ struct Args {
     /// Skip the post-import online soft-match pass.
     #[arg(long)]
     skip_softmatch: bool,
+    /// Safety cap on entity fetches for the whole run. If the traversal
+    /// needs more, it stops fetching and the run fails and is rolled back,
+    /// rather than committing a partial import (re-running with a higher cap
+    /// is cheap: responses are in the HTTP cache).
+    #[arg(long)]
+    max_fetches: Option<usize>,
 }
 
 /// Load YAML config from an explicit path (errors if missing) or a default
@@ -246,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
         soft_cfg.as_ref(),
         urls.clone(),
         None,
+        args.max_fetches,
     )
     .await?;
     for (url, entry_id) in urls.iter().zip(&outcome.entry_ids) {

@@ -72,7 +72,11 @@ pub fn import(
             return;
         }
 
-        // 4. Fetch. On failure we log and bail.
+        // 4. Fetch. On failure we log and bail. Past the run's fetch budget,
+        //    nothing more is fetched (the run will be rolled back).
+        if !state.charge_fetch() {
+            return;
+        }
         debug!("fetching {}:{}", canonical.0, canonical.1);
         if let Some(p) = state.progress() {
             p.fetching(&canonical);
@@ -713,5 +717,32 @@ mod tests {
             a.0.contains(&pair("t2")),
             "the album's other track is fetched"
         );
+    }
+
+    /// Past the fetch budget nothing more is fetched, and the run reports
+    /// itself over budget (so `ingest_entries` rolls it back).
+    #[tokio::test]
+    async fn fetch_budget_stops_the_walk() {
+        let (pool, main, _) = catalogue_pool();
+        let state = Arc::new(State::new());
+        state.set_fetch_budget(Some(2));
+        let providers: Arc<Vec<Arc<dyn FetchProvider>>> =
+            Arc::new(vec![Arc::new(CatalogueProvider)]);
+        import(
+            Arc::clone(&state),
+            providers,
+            pool,
+            (
+                StandardProviderKeys::UNKNOWN_URL.to_string(),
+                "artist".to_string(),
+            ),
+            main,
+        )
+        .await;
+        let (fetches, over) = state.fetch_count();
+        assert!(over, "{fetches} fetches");
+        let fetched = state.metadata.lock().unwrap();
+        assert!(fetched.contains_key(&pair("artist")));
+        assert!(!fetched.contains_key(&pair("album")), "beyond the budget");
     }
 }

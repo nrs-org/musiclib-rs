@@ -78,6 +78,9 @@ pub struct State {
     /// flush can drain). At commit, it's what replaces older edges under
     /// re-fetched parents (see `MusicDb::commit_import_run`).
     run_edges: Mutex<RunEdges>,
+    /// Safety cap on fetches per run (see `charge_fetch`); `usize::MAX` = none.
+    fetch_budget: AtomicUsize,
+    fetches: AtomicUsize,
     /// Running estimate, in bytes, of everything currently buffered in
     /// `metadata`/`is_rel`/`has_rel`. This is what `pipeline::ingest`'s
     /// periodic-flush watchdog watches to decide when to drain the buffer.
@@ -114,6 +117,8 @@ impl State {
             has_rel: Mutex::new(Vec::new()),
             stubs: Mutex::new(HashMap::new()),
             run_edges: Mutex::new(RunEdges::default()),
+            fetch_budget: AtomicUsize::new(usize::MAX),
+            fetches: AtomicUsize::new(0),
             approx_bytes: AtomicUsize::new(0),
             progress,
         }
@@ -172,6 +177,26 @@ impl State {
         let size = edge_bytes(&edge);
         self.has_rel.lock().unwrap().push(edge);
         self.approx_bytes.fetch_add(size, Ordering::Relaxed);
+    }
+
+    /// Cap the number of fetches this run may make. Once reached, further
+    /// fetches are refused (`charge_fetch` returns false) so the traversal
+    /// winds down quickly, and `ingest_entries` fails the run (rolling it
+    /// back) instead of committing a partial import.
+    pub fn set_fetch_budget(&self, max: Option<usize>) {
+        self.fetch_budget
+            .store(max.unwrap_or(usize::MAX), Ordering::Relaxed);
+    }
+
+    /// Count one fetch against the budget. `false` once it's exhausted.
+    pub(super) fn charge_fetch(&self) -> bool {
+        self.fetches.fetch_add(1, Ordering::Relaxed) < self.fetch_budget.load(Ordering::Relaxed)
+    }
+
+    /// Fetches attempted so far, and whether the budget was exceeded.
+    pub fn fetch_count(&self) -> (usize, bool) {
+        let n = self.fetches.load(Ordering::Relaxed);
+        (n, n > self.fetch_budget.load(Ordering::Relaxed))
     }
 
     /// Record what a listing said about `pair`. A pair listed several times

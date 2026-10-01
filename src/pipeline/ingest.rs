@@ -82,6 +82,7 @@ pub async fn ingest_entry(
         soft_cfg,
         vec![url],
         progress,
+        None,
     )
     .await?;
     Ok(IngestOutcome {
@@ -130,6 +131,7 @@ pub async fn ingest_entries(
     soft_cfg: Option<&SoftMatchConfig>,
     urls: Vec<String>,
     progress: Option<Arc<dyn ImportProgress>>,
+    max_fetches: Option<usize>,
 ) -> anyhow::Result<MultiIngestOutcome> {
     // A run abandoned by a crash in some earlier invocation (this process or
     // another one that has since died) is only safe to clean up before new
@@ -165,6 +167,7 @@ pub async fn ingest_entries(
     let run_id = db.start_import_run().await?;
 
     let state = Arc::new(State::with_progress(progress));
+    state.set_fetch_budget(max_fetches);
     let result = run_traversal_with_watchdog(
         Arc::clone(&state),
         providers,
@@ -284,6 +287,17 @@ async fn run_traversal_with_watchdog(
     let _ = stop_tx.send(true);
     if let Err(e) = watchdog.await {
         warn!("periodic flush watchdog panicked (run {run_id}): {e}");
+    }
+
+    // Over the fetch budget, the traversal stopped fetching partway, so what
+    // it collected is incomplete. Fail instead of flushing; the caller rolls
+    // the run back (including anything periodic flushes already wrote).
+    let (fetches, over_budget) = state.fetch_count();
+    tracing::info!("run {run_id}: {fetches} fetch(es)");
+    if over_budget {
+        anyhow::bail!(
+            "fetch budget exceeded ({fetches} fetches attempted); run {run_id} rolled back"
+        );
     }
 
     flush(
