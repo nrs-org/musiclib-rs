@@ -180,23 +180,30 @@ fn filtering_stream(
     // listing early-exits via `can_future_items_match` once no rule could
     // ever match further items; an exhaustive one is always walked to the
     // end, since every child is recorded.
-    let child_stream = futures::stream::unfold((cursor, 0usize), move |(mut cursor, index)| {
-        let rules = Arc::clone(&rules_pull);
-        async move {
-            if !exhaustive
-                && !rules
-                    .iter()
-                    .any(|r| can_future_items_match(&r.matcher, index))
-            {
-                return None;
+    // The `bool` is set once the listing fails: the error is yielded and the
+    // stream ends there, rather than re-requesting the failed page on the
+    // next poll (which `buffer_unordered` below would do eagerly).
+    let child_stream = futures::stream::unfold(
+        (cursor, 0usize, false),
+        move |(mut cursor, index, failed)| {
+            let rules = Arc::clone(&rules_pull);
+            async move {
+                if failed
+                    || (!exhaustive
+                        && !rules
+                            .iter()
+                            .any(|r| can_future_items_match(&r.matcher, index)))
+                {
+                    return None;
+                }
+                match child_next(&mut cursor).await {
+                    Ok(Some((child, _))) => Some((Ok((child, index)), (cursor, index + 1, false))),
+                    Ok(None) => None,
+                    Err(e) => Some((Err(e), (cursor, index, true))),
+                }
             }
-            match child_next(&mut cursor).await {
-                Ok(Some((child, _))) => Some((Ok((child, index)), (cursor, index + 1))),
-                Ok(None) => None,
-                Err(e) => Some((Err(e), (cursor, index))),
-            }
-        }
-    });
+        },
+    );
 
     child_stream
         .map(move |item| {
@@ -1438,5 +1445,67 @@ mod tests {
         let result = run_filter(vec![own, compilation], pool, vec![rule]).await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0.name.as_deref(), Some("compilation"));
+    }
+
+    /// Yields `items`, then a listing error, then `after` (if polled again).
+    struct FailingListing {
+        items: std::vec::IntoIter<ChildRef>,
+        after: Option<ChildRef>,
+        polls_after_error: Arc<AtomicUsize>,
+        failed: bool,
+    }
+
+    impl Stream for FailingListing {
+        type Item = Result<(ChildRef, ()), Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(c) = self.items.next() {
+                return Poll::Ready(Some(Ok((c, ()))));
+            }
+            if !self.failed {
+                self.failed = true;
+                return Poll::Ready(Some(Err(Error::InvalidUrl("page 2: 429".into()))));
+            }
+            self.polls_after_error.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.after.take().map(|c| Ok((c, ()))))
+        }
+    }
+
+    impl Unpin for FailingListing {}
+    impl ChildSource for FailingListing {}
+
+    /// After a listing error the filtered stream ends instead of polling the
+    /// listing again: `buffer_unordered` would otherwise re-request the
+    /// failed page ahead of a consumer that has already stopped reading,
+    /// leaving that request in flight (and `http::Activity` busy) forever.
+    #[tokio::test]
+    async fn listing_error_ends_the_filtered_stream() {
+        let polls_after_error = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(CachedChildSource::new(Box::new(FailingListing {
+            items: vec![make_child(EntryType::Track, "before", "youtube")].into_iter(),
+            after: Some(make_child(EntryType::Track, "after", "youtube")),
+            polls_after_error: Arc::clone(&polls_after_error),
+            failed: false,
+        })));
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = always_rule(&mut pool, EntryFetchOptions::default());
+        let root_id = pool.insert(EntryFetchOptions {
+            child_rules: vec![rule],
+        });
+        let filtered = filter_children(
+            source,
+            Arc::new(pool),
+            root_id,
+            Arc::new(PanicProvider),
+            EntryType::Release,
+        )
+        .unwrap();
+
+        let mut cursor = filtered.cursor();
+        let first = child_next(&mut cursor).await.unwrap().unwrap();
+        assert_eq!(first.0.name.as_deref(), Some("before"));
+        assert!(child_next(&mut cursor).await.is_err());
+        assert!(child_next(&mut cursor).await.unwrap().is_none());
+        assert_eq!(polls_after_error.load(Ordering::SeqCst), 0);
     }
 }

@@ -283,6 +283,15 @@ pub fn import(
             }
         }
 
+        // Drop this entity's child listings before waiting on the children.
+        // A listing we stopped reading early (it failed partway) can still
+        // hold requests its stream had already started ahead of us
+        // (`buffer_unordered` prefetch). Kept alive but never polled, each
+        // keeps `http::Activity` busy forever, so the coalescer never sees
+        // the process idle and every parked request waits on it: the import
+        // hangs. Dropping the streams cancels those requests.
+        drop(children);
+
         // 8. Await all sub-tasks. Each handles its own errors.
         join_all(subs).await;
     })
