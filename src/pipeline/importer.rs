@@ -8,7 +8,7 @@ use crate::providers::{
     },
 };
 use futures::future::join_all;
-use tracing::{debug, warn};
+use tracing::{Instrument, debug, warn};
 
 use super::state::{ChildEdge, Pair, PairMetadata, State, StubInfo};
 
@@ -83,6 +83,12 @@ pub fn import(
         }
         let result = match provider
             .fetch_entry(&canonical.0, &canonical.1, pool.clone(), options_id)
+            // Names the entity in anything logged while fetching it (e.g.
+            // `matcher::filter_children` skipping one of its listings).
+            .instrument(tracing::info_span!(
+                "fetch",
+                entity = %format!("{}:{}", canonical.0, canonical.1)
+            ))
             .await
         {
             Ok(r) => r,

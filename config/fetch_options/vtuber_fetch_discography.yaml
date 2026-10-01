@@ -23,6 +23,13 @@ main:
     - match: { external_type: "youtube:video" }
       fetch: null
 
+    # Same for a Niconico account's uploads: mostly stream archives, and can
+    # run to tens of thousands (Roboco's: 14,000+), each a separate yt-dlp
+    # fetch. Under a non-artist parent (e.g. a mylist reached with `main`)
+    # these become stubs rather than being dropped.
+    - match: { external_type: "nicovideo:video" }
+      fetch: null
+
     # Playlist title filters (priority order, first match wins)
 
     # Priority 50 — blacklist singing streams

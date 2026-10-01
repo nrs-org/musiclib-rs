@@ -308,6 +308,22 @@ pub fn filter_children(
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
+    // An artist's listing whose every item the rules would drop is never read,
+    // so a lazy listing never makes its request (a channel's uploads pages, a
+    // Niconico account's full upload list).
+    if parent_type == EntryType::Artist
+        && let Some(reason) = drops_every_item(&source, &rules)
+    {
+        // A leaf (no rules at all) is the common, uninteresting case. The
+        // rest are worth seeing: a skip trusts the listing's declaration, and
+        // a wrong one would otherwise hide data silently. The importer's
+        // `fetch` span names the entity.
+        if !rules.is_empty() {
+            tracing::info!("listing skipped without reading it: {reason}");
+        }
+        return Ok(CachedChildSource::from_vec(Vec::new()));
+    }
+
     Ok(CachedChildSource::new(Box::new(FilteringChildSource {
         stream: filtering_stream(
             source.owned_cursor(),
@@ -317,6 +333,35 @@ pub fn filter_children(
             parent_type != EntryType::Artist,
         ),
     })))
+}
+
+/// Decide, from what `source` declares about all of its items (its static
+/// `evaluate_expr`), whether every item would end up with no options, i.e.
+/// dropped under an artist parent, without reading the listing.
+///
+/// Rules are first-match-wins, so they're checked in order: a rule that
+/// matches **no** item can be passed over; one that matches **every** item
+/// settles the outcome for all of them (no earlier rule matched any), and it's
+/// a skip only if that rule says `fetch: null`. Anything the source can't
+/// answer is `Indeterminate`, which means the listing has to be read. A source
+/// that declares nothing therefore never gets skipped.
+///
+/// Returns why the listing can be skipped, for logging.
+fn drops_every_item(source: &CachedChildSource, rules: &[CompiledChildRule]) -> Option<String> {
+    let cursor = source.cursor();
+    for (i, rule) in rules.iter().enumerate() {
+        match cursor.evaluate_expr(&rule.matcher) {
+            Tribool::True => {
+                return rule
+                    .options_id
+                    .is_none()
+                    .then(|| format!("rule {} (`fetch: null`) matches every item", i + 1));
+            }
+            Tribool::False => continue,
+            Tribool::Indeterminate => return None,
+        }
+    }
+    Some("no rule matches any item".to_string())
 }
 
 // --- Evaluation ---
@@ -1507,5 +1552,220 @@ mod tests {
         assert!(child_next(&mut cursor).await.is_err());
         assert!(child_next(&mut cursor).await.unwrap().is_none());
         assert_eq!(polls_after_error.load(Ordering::SeqCst), 0);
+    }
+
+    /// A listing that declares what its items are (like YouTube uploads) and
+    /// counts how often it's read.
+    struct DeclaredListing {
+        items: std::vec::IntoIter<ChildRef>,
+        reads: Arc<AtomicUsize>,
+        external_type: &'static str,
+        entry_type: EntryType,
+    }
+
+    impl Stream for DeclaredListing {
+        type Item = Result<(ChildRef, ()), Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.items.next().map(|c| Ok((c, ()))))
+        }
+    }
+
+    impl Unpin for DeclaredListing {}
+    impl ChildSource for DeclaredListing {
+        fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
+            use crate::providers::types::static_eval_expr;
+            static_eval_expr(expr, &|m| match m {
+                CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
+                    (*t == self.entry_type).into()
+                }
+                CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+                    (t == self.external_type).into()
+                }
+                _ => crate::providers::types::default_eval_leaf(m),
+            })
+        }
+    }
+
+    fn declared(
+        external_type: &'static str,
+        entry_type: EntryType,
+        names: &[&str],
+    ) -> (Arc<CachedChildSource>, Arc<AtomicUsize>) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let items: Vec<ChildRef> = names
+            .iter()
+            .map(|n| ChildRef {
+                external_type: external_type.into(),
+                ..make_child(entry_type, n, "youtube")
+            })
+            .collect();
+        let source = DeclaredListing {
+            items: items.into_iter(),
+            reads: Arc::clone(&reads),
+            external_type,
+            entry_type,
+        };
+        (Arc::new(CachedChildSource::new(Box::new(source))), reads)
+    }
+
+    fn ext_rule(t: &str, options_id: Option<OptionsId>) -> ChildRule {
+        ChildRule {
+            matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                EntryDataMatcher::ExternalType(t.to_string()),
+            )),
+            options_id,
+        }
+    }
+
+    /// Filter `source` with `rules` under a parent of `parent_type`; returns
+    /// (children yielded, with whether each is fetched).
+    async fn filter_declared(
+        source: Arc<CachedChildSource>,
+        mut pool: EntryFetchOptionsPool,
+        rules: Vec<ChildRule>,
+        parent_type: EntryType,
+    ) -> Vec<(String, bool)> {
+        let root_id = pool.insert(EntryFetchOptions { child_rules: rules });
+        let filtered = filter_children(
+            source,
+            Arc::new(pool),
+            root_id,
+            Arc::new(PanicProvider),
+            parent_type,
+        )
+        .unwrap();
+        drain(filtered)
+            .await
+            .into_iter()
+            .map(|(c, o)| (c.name.unwrap(), o.id.is_some()))
+            .collect()
+    }
+
+    /// An artist listing whose first statically-certain rule is `fetch: null`
+    /// is never read.
+    #[tokio::test]
+    async fn artist_listing_dropped_by_rule_is_not_read() {
+        let (source, reads) = declared("youtube:video", EntryType::Track, &["a", "b"]);
+        let got = filter_declared(
+            source,
+            EntryFetchOptionsPool::default(),
+            vec![ext_rule("youtube:video", None)],
+            EntryType::Artist,
+        )
+        .await;
+        assert!(got.is_empty());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    /// Rules that match no item are passed over; if none matches anything, the
+    /// listing is skipped too (every item would be dropped).
+    #[tokio::test]
+    async fn artist_listing_matched_by_no_rule_is_not_read() {
+        let (source, reads) = declared("nicovideo:video", EntryType::Track, &["a"]);
+        let mut pool = EntryFetchOptionsPool::default();
+        let fetch = Some(pool.insert(EntryFetchOptions::default()));
+        let got = filter_declared(
+            source,
+            pool,
+            vec![
+                ext_rule("youtube:video", None),
+                ext_rule("youtube:playlist", fetch),
+            ],
+            EntryType::Artist,
+        )
+        .await;
+        assert!(got.is_empty());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    /// The listing is read when its items are wanted, or when an earlier rule
+    /// can't be decided without them (first match wins).
+    #[tokio::test]
+    async fn artist_listing_is_read_when_items_may_be_wanted() {
+        let mut pool = EntryFetchOptionsPool::default();
+        let fetch = Some(pool.insert(EntryFetchOptions::default()));
+
+        let (source, reads) = declared("youtube:video", EntryType::Track, &["a"]);
+        let got = filter_declared(
+            source,
+            pool,
+            vec![ext_rule("youtube:video", fetch)],
+            EntryType::Artist,
+        )
+        .await;
+        assert_eq!(got, vec![("a".to_string(), true)]);
+        assert!(reads.load(Ordering::SeqCst) > 0);
+
+        let (source, reads) = declared("youtube:video", EntryType::Track, &["MV", "stream"]);
+        let mut pool = EntryFetchOptionsPool::default();
+        let fetch = Some(pool.insert(EntryFetchOptions::default()));
+        let mv_rule = ChildRule {
+            matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                EntryDataMatcher::NameRegex("MV".to_string()),
+            )),
+            options_id: fetch,
+        };
+        let got = filter_declared(
+            source,
+            pool,
+            vec![mv_rule, ext_rule("youtube:video", None)],
+            EntryType::Artist,
+        )
+        .await;
+        assert_eq!(got, vec![("MV".to_string(), true)]);
+        assert!(reads.load(Ordering::SeqCst) > 0);
+    }
+
+    /// A non-artist listing is structural: always read, its dropped items
+    /// recorded as stubs.
+    #[tokio::test]
+    async fn non_artist_listing_is_always_read() {
+        let (source, reads) = declared("youtube:video", EntryType::Track, &["a"]);
+        let got = filter_declared(
+            source,
+            EntryFetchOptionsPool::default(),
+            vec![ext_rule("youtube:video", None)],
+            EntryType::Release,
+        )
+        .await;
+        assert_eq!(got, vec![("a".to_string(), false)]);
+        assert!(reads.load(Ordering::SeqCst) > 0);
+    }
+
+    /// With the shipped vtuber config, a channel's uploads and a Niconico
+    /// account's uploads are skipped unread; its playlists are still read.
+    #[tokio::test]
+    async fn vtuber_config_skips_upload_listings() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config/fetch_options/vtuber_fetch_discography.yaml");
+        let (pool, main, _) = crate::providers::fetch_options_yaml::load_from_file(&path)
+            .await
+            .unwrap();
+        let filter = |source: Arc<CachedChildSource>| {
+            filter_children(
+                source,
+                Arc::clone(&pool),
+                main,
+                Arc::new(PanicProvider),
+                EntryType::Artist,
+            )
+            .unwrap()
+        };
+
+        for t in ["youtube:video", "nicovideo:video"] {
+            let (source, reads) = declared(t, EntryType::Track, &["stream archive"]);
+            assert!(drain(filter(source)).await.is_empty());
+            assert_eq!(reads.load(Ordering::SeqCst), 0, "{t} listing was read");
+        }
+
+        let (source, reads) = declared(
+            "youtube:playlist",
+            EntryType::Release,
+            &["Original Songs / オリジナル曲"],
+        );
+        assert_eq!(drain(filter(source)).await.len(), 1);
+        assert!(reads.load(Ordering::SeqCst) > 0);
     }
 }

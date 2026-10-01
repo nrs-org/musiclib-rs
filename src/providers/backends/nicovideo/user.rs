@@ -5,12 +5,34 @@ use serde::{Deserialize, de::DeserializeOwned};
 use crate::providers::{
     backends::{nicovideo::SOURCE, ytdlp::YtdlpClient},
     types::{
-        Alias, CachedChildSource, ChildRef, EntityResult, EntrySpecificData, EntryType, Error,
-        ExternalSources,
+        Alias, CachedChildSource, ChildRef, CompiledChildMatcher, CompiledEntryDataMatcher,
+        CompiledMatcherExpr, EntityResult, EntrySpecificData, EntryType, Error, ExternalSources,
+        Tribool, default_eval_leaf, static_eval_expr,
     },
 };
 
 use super::EXTERNAL_TYPE_VIDEO;
+
+/// What every item of a user's uploads listing is, known without fetching it:
+/// the endpoint only returns the user's own videos. Lets an artist's fetch
+/// options skip the listing entirely when they'd drop every video (see
+/// `matcher::filter_children`), so the full-upload yt-dlp call (tens of
+/// thousands of videos for some accounts) never runs. Only state facts the
+/// endpoint guarantees; anything else must stay `Indeterminate`.
+fn upload_eval(expr: &CompiledMatcherExpr) -> Tribool {
+    static_eval_expr(expr, &|matcher| match matcher {
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
+            (*t == EntryType::Track).into()
+        }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
+            (t == EXTERNAL_TYPE_VIDEO).into()
+        }
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::AppearsOn(want)) => {
+            (!*want).into()
+        }
+        _ => default_eval_leaf(matcher),
+    })
+}
 
 #[derive(Clone, Deserialize)]
 pub struct UserResponse {
@@ -56,20 +78,23 @@ pub async fn get_user(client: Arc<YtdlpClient>, url: &str) -> Result<EntityResul
         .or_default()
         .insert(meta.webpage_url);
 
-    let video_source = client.lazy_children(url.to_string(), |value| {
-        let response: UserResponse = serde_json::from_value(value)
-            .map_err(|e| Error::InvalidUrl(format!("failed to deserialize user videos: {e}")))?;
-        Ok(response
-            .entries
-            .into_iter()
-            .map(|entry| ChildRef {
-                entry_type: EntryType::Track,
-                external_type: EXTERNAL_TYPE_VIDEO.into(),
-                sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
-                ..Default::default()
-            })
-            .collect())
-    });
+    let video_source = client
+        .lazy_children(url.to_string(), |value| {
+            let response: UserResponse = serde_json::from_value(value).map_err(|e| {
+                Error::InvalidUrl(format!("failed to deserialize user videos: {e}"))
+            })?;
+            Ok(response
+                .entries
+                .into_iter()
+                .map(|entry| ChildRef {
+                    entry_type: EntryType::Track,
+                    external_type: EXTERNAL_TYPE_VIDEO.into(),
+                    sources: [(SOURCE.into(), HashSet::from([entry.url]))].into(),
+                    ..Default::default()
+                })
+                .collect())
+        })
+        .with_static_eval(upload_eval);
 
     Ok(EntityResult {
         release_date: None,
@@ -138,6 +163,24 @@ mod tests {
         );
 
         assert_eq!(user.children.len(), 1);
+
+        // The uploads listing declares its items before being read, so an
+        // artist's filter can skip it without the full yt-dlp call.
+        {
+            use crate::providers::types::{
+                ChildSource, CompiledChildMatcher, CompiledEntryDataMatcher, CompiledMatcherExpr,
+                Tribool,
+            };
+            let is = |t: &str| {
+                CompiledMatcherExpr::Matcher(CompiledChildMatcher::EntryData(
+                    CompiledEntryDataMatcher::ExternalType(t.to_string()),
+                ))
+            };
+            let unread = user.children[0].cursor();
+            assert!(unread.evaluate_expr(&is("nicovideo:video")) == Tribool::True);
+            assert!(unread.evaluate_expr(&is("youtube:video")) == Tribool::False);
+        }
+
         let mut videos = user.children[0].cursor();
         let (first_video, _) = child_next(&mut videos)
             .await?
