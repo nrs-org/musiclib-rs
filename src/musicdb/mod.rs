@@ -86,7 +86,11 @@ mod entry_source {
         pub identifier: String,
         pub entry_id: i64,
         pub release_date: Option<String>,
-        pub fetched_at: i64,
+        /// When this pair's own record was last fetched (unix seconds). NULL
+        /// marks a *stub*: a pair known only because something referenced it
+        /// (a tracklist entry, a credit, a cross-link), whose own record was
+        /// never fetched.
+        pub fetched_at: Option<i64>,
         // Track-specific
         pub duration_ms: Option<i64>,
         /// JSON array of all known durations in milliseconds, sorted and deduped.
@@ -865,6 +869,7 @@ fn source_row_from_model(m: entry_source::Model) -> SourceRow {
         release_type: m.release_type,
         primary_type: m.primary_type,
         release_date: m.release_date,
+        fetched_at: m.fetched_at,
     }
 }
 
@@ -1340,6 +1345,9 @@ impl MusicDb {
         if user_version < 3 {
             sea_orm::ConnectionTrait::execute_unprepared(&db, ALIAS_DEDUP_MIGRATION).await?;
         }
+        if user_version < 4 {
+            migrate_stub_fetched_at(&db).await?;
+        }
         Ok(Self {
             db,
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -1742,7 +1750,7 @@ impl MusicDb {
             identifier: Set(identifier.to_string()),
             entry_id: Set(entry_id),
             release_date: Set(release_date.map(|s| s.to_string())),
-            fetched_at: Set(now),
+            fetched_at: Set(Some(now)),
             duration_ms: Set(duration_ms),
             duration_ms_all: Set(duration_ms_all),
             release_type: Set(release_type),
@@ -1776,47 +1784,78 @@ impl MusicDb {
     }
 
     /// Insert a stub row for a pair we never fetched but which is referenced by
-    /// an is_rel / has_rel / contribution. Binds the pair to its assigned
-    /// `entry_id` so equivalence-class queries see it. Uses `entry_type =
-    /// "unknown"` and leaves other metadata NULL. Does nothing on conflict so a
-    /// stub will never overwrite a real metadata row.
-    pub async fn insert_stub_pair(
+    /// an is_rel / has_rel / contribution, binding it to its assigned
+    /// `entry_id` so equivalence-class queries see it. `fetched_at` is NULL
+    /// (that's what marks a stub); `duration_ms` comes from the parent's
+    /// listing when it had one.
+    ///
+    /// On conflict the existing row is kept, so a stub never overwrites a
+    /// fetched row or moves a pair to another entry (`set_pair_entry` does
+    /// that). The one exception: an existing *stub* row with no duration yet
+    /// takes this one, so stubs written before listings carried durations
+    /// fill in as they're seen again.
+    pub async fn upsert_stub_pair(
         &self,
         source: &str,
         identifier: &str,
         entry_id: i64,
+        duration_ms: Option<i64>,
         run_id: Option<i64>,
     ) -> Result<(), Error> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        ignore_not_inserted(
-            entry_source::Entity::insert(entry_source::ActiveModel {
-                source: Set(source.to_string()),
-                identifier: Set(identifier.to_string()),
-                entry_id: Set(entry_id),
-                release_date: Set(None),
-                fetched_at: Set(now),
-                duration_ms: Set(None),
-                duration_ms_all: Set(None),
-                release_type: Set(None),
-                num_discs: Set(None),
-                num_tracks: Set(None),
-                primary_type: Set(None),
-                run_id: Set(run_id),
-            })
-            .on_conflict(
-                sea_query::OnConflict::columns([
-                    entry_source::Column::Source,
-                    entry_source::Column::Identifier,
-                ])
-                .do_nothing()
-                .to_owned(),
-            )
-            .exec(&self.db)
-            .await,
-        )
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "INSERT INTO entry_source (source, identifier, entry_id, fetched_at, duration_ms, run_id) \
+             VALUES (?, ?, ?, NULL, ?, ?) \
+             ON CONFLICT (source, identifier) DO UPDATE \
+             SET duration_ms = excluded.duration_ms \
+             WHERE entry_source.fetched_at IS NULL \
+               AND entry_source.duration_ms IS NULL \
+               AND excluded.duration_ms IS NOT NULL",
+            [
+                source.into(),
+                identifier.into(),
+                entry_id.into(),
+                duration_ms.into(),
+                run_id.into(),
+            ],
+        );
+        self.db.execute_raw(stmt).await?;
+        Ok(())
+    }
+
+    /// Record the name a parent's listing gave a stub pair, as a non-primary
+    /// alias (so a later fetch's own primary alias still wins the title).
+    /// Only applies while the pair is still a stub: a fetched pair's names
+    /// come from its own record, not from how some listing labelled it.
+    pub async fn insert_stub_alias(
+        &self,
+        source: &str,
+        identifier: &str,
+        name: &str,
+        run_id: Option<i64>,
+    ) -> Result<(), Error> {
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "INSERT INTO entry_alias (source, identifier, name, locale, extra, \"primary\", run_id) \
+             SELECT ?, ?, ?, NULL, 'null', 0, ? \
+             WHERE EXISTS (SELECT 1 FROM entry_source \
+                           WHERE source = ? AND identifier = ? AND fetched_at IS NULL) \
+               AND NOT EXISTS (SELECT 1 FROM entry_alias \
+                           WHERE source = ? AND identifier = ? AND name = ?)",
+            [
+                source.into(),
+                identifier.into(),
+                name.into(),
+                run_id.into(),
+                source.into(),
+                identifier.into(),
+                source.into(),
+                identifier.into(),
+                name.into(),
+            ],
+        );
+        self.db.execute_raw(stmt).await?;
+        Ok(())
     }
 
     /// Insert aliases for a pair, skipping ones it already has.
@@ -2846,6 +2885,8 @@ pub struct SourceRow {
     pub release_type: Option<String>,
     pub primary_type: Option<String>,
     pub release_date: Option<String>,
+    /// NULL for a stub: a pair only ever seen in some listing, never fetched.
+    pub fetched_at: Option<i64>,
 }
 
 pub struct AliasRow {
@@ -3005,6 +3046,80 @@ const ALIAS_DEDUP_MIGRATION: &str = "
     );
     INSERT INTO entry_alias_fts(entry_alias_fts) VALUES('rebuild');
     PRAGMA user_version = 3;";
+
+/// `entry_source.fetched_at` becomes nullable, NULL marking a stub (see the
+/// model). SQLite can't drop a NOT NULL constraint in place, so the table is
+/// rebuilt from its own DDL with that one column changed, and its indexes are
+/// recreated from `sqlite_master`. A DB created after the model change
+/// already has the nullable column and skips the rebuild.
+///
+/// Existing stub rows (written with `fetched_at = now` like a real fetch) are
+/// then identified as rows with no metadata, no aliases and no outgoing
+/// edges, and set to NULL. A fetched pair always has at least an alias, so
+/// this only misses stubs that a fetch never reached anyway; they're corrected
+/// the next time they're fetched.
+async fn migrate_stub_fetched_at(db: &DatabaseConnection) -> Result<(), Error> {
+    const OLD_COLUMN: &str = "\"fetched_at\" integer NOT NULL";
+    let backend = db.get_database_backend();
+    let ddl_of = |kind: &str| {
+        Statement::from_sql_and_values(
+            backend,
+            "SELECT sql FROM sqlite_master \
+             WHERE type = ? AND tbl_name = 'entry_source' AND sql IS NOT NULL",
+            [kind.into()],
+        )
+    };
+    let table_sql: String = db
+        .query_one_raw(ddl_of("table"))
+        .await?
+        .expect("entry_source exists after schema sync")
+        .try_get("", "sql")?;
+
+    let txn = db.begin().await?;
+    if table_sql.contains(OLD_COLUMN) {
+        // Through `txn`, not `db`: a `:memory:` pool has one connection,
+        // which the open transaction already holds.
+        let index_sqls: Vec<String> = txn
+            .query_all_raw(ddl_of("index"))
+            .await?
+            .iter()
+            .map(|row| row.try_get::<String>("", "sql"))
+            .collect::<Result<_, _>>()?;
+        let new_table_sql = table_sql
+            .replacen(OLD_COLUMN, "\"fetched_at\" integer", 1)
+            .replacen("\"entry_source\"", "\"entry_source_v4\"", 1);
+        txn.execute_unprepared(&new_table_sql).await?;
+        txn.execute_unprepared(
+            "INSERT INTO entry_source_v4 SELECT * FROM entry_source; \
+             DROP TABLE entry_source; \
+             ALTER TABLE entry_source_v4 RENAME TO entry_source;",
+        )
+        .await?;
+        for sql in index_sqls {
+            txn.execute_unprepared(&sql).await?;
+        }
+    }
+    txn.execute_unprepared(
+        "UPDATE entry_source SET fetched_at = NULL
+         WHERE release_date IS NULL AND duration_ms IS NULL AND duration_ms_all IS NULL
+           AND release_type IS NULL AND num_discs IS NULL AND num_tracks IS NULL
+           AND primary_type IS NULL
+           AND NOT EXISTS (SELECT 1 FROM entry_alias a
+                           WHERE a.source = entry_source.source
+                             AND a.identifier = entry_source.identifier)
+           AND NOT EXISTS (SELECT 1 FROM entry_child c
+                           WHERE c.parent_source = entry_source.source
+                             AND c.parent_identifier = entry_source.identifier)
+           AND NOT EXISTS (SELECT 1 FROM contribution c
+                           WHERE c.source = entry_source.source
+                             AND c.identifier = entry_source.identifier);
+         PRAGMA user_version = 4;",
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(())
+}
+
 fn ignore_not_inserted<T: sea_orm::ActiveModelTrait>(
     result: Result<sea_orm::InsertResult<T>, DbErr>,
 ) -> Result<(), Error> {
@@ -3715,7 +3830,7 @@ mod tests {
                 identifier: Set("v1".to_string()),
                 entry_id: Set(1),
                 release_date: Set(None),
-                fetched_at: Set(0),
+                fetched_at: Set(Some(0)),
                 duration_ms: Set(None),
                 duration_ms_all: Set(None),
                 release_type: Set(None),
@@ -3942,5 +4057,116 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(alias_count(&mdb).await, 1);
+    }
+
+    /// Opening a pre-v4 database rebuilds `entry_source` with a nullable
+    /// `fetched_at` (keeping rows and indexes), and marks rows that were never
+    /// fetched (no metadata, aliases or outgoing edges) as stubs.
+    #[tokio::test]
+    async fn stub_migration_nulls_fetched_at_for_unfetched_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("pre_stub.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        {
+            let db = Database::connect(&db_url).await.unwrap();
+            // The pre-v4 DDL, as created by the old model.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "CREATE TABLE \"entry_source\" ( \"source\" varchar NOT NULL, \"identifier\" varchar NOT NULL, \
+                 \"entry_id\" integer NOT NULL, \"release_date\" varchar, \"fetched_at\" integer NOT NULL, \
+                 \"duration_ms\" integer, \"duration_ms_all\" varchar, \"release_type\" varchar, \
+                 \"num_discs\" integer, \"num_tracks\" integer, \"primary_type\" varchar, \"run_id\" integer, \
+                 CONSTRAINT \"pk-entry_source\" PRIMARY KEY (\"source\", \"identifier\") );
+                 INSERT INTO entry_source (source, identifier, entry_id, fetched_at, duration_ms)
+                     VALUES ('spotify', 'fetched', 1, 5, 180000);
+                 INSERT INTO entry_source (source, identifier, entry_id, fetched_at)
+                     VALUES ('isrc', 'JPX000000001', 1, 5);",
+            )
+            .await
+            .unwrap();
+        }
+
+        let mdb = MusicDb::new(&db_url).await.unwrap();
+        let rows = mdb.all_source_rows().await.unwrap();
+        let fetched_at = |id: &str| rows.iter().find(|r| r.identifier == id).unwrap().fetched_at;
+        assert_eq!(fetched_at("fetched"), Some(5));
+        assert_eq!(fetched_at("JPX000000001"), None);
+
+        let backend = mdb.db.get_database_backend();
+        let table_sql: String = mdb
+            .db
+            .query_one_raw(Statement::from_string(
+                backend,
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entry_source'"
+                    .to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "sql")
+            .unwrap();
+        assert!(
+            !table_sql.contains("NOT NULL, \"duration_ms\""),
+            "{table_sql}"
+        );
+        assert!(table_sql.contains("\"entry_source\""), "{table_sql}");
+        let index_count: i64 = mdb
+            .db
+            .query_one_raw(Statement::from_string(
+                backend,
+                "SELECT count(*) AS n FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_entry_source_entry_id'"
+                    .to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "n")
+            .unwrap();
+        assert_eq!(index_count, 1, "indexes survive the rebuild");
+
+        // New stubs can now be written with a NULL fetched_at.
+        mdb.upsert_stub_pair("spotify", "new_stub", 1, Some(1000), None)
+            .await
+            .unwrap();
+    }
+
+    /// Dedup must survive reopening the DB: `MusicDb::new` runs SeaORM schema
+    /// sync, which drops undeclared unique indexes, so nothing may depend on
+    /// one. (An earlier build did, and the second open of a fresh DB broke
+    /// every insert with "ON CONFLICT clause does not match".)
+    #[tokio::test]
+    async fn dedup_survives_reopening_the_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("reopen.db").display()
+        );
+        let contrib = Contribution {
+            role: "performer".to_string(),
+            main_artist: true,
+            extra: serde_json::Value::Null,
+            source: "spotify".into(),
+        };
+        for _ in 0..3 {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            mdb.upsert_pair("youtube", "v1", 1, None, &EntrySpecificData::Artist, None)
+                .await
+                .unwrap();
+            mdb.insert_contribution("spotify", "track1", "spotify", "artist1", &contrib, None)
+                .await
+                .unwrap();
+            mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Watame")], None)
+                .await
+                .unwrap();
+            mdb.upsert_stub_pair("spotify", "stub", 1, Some(1000), None)
+                .await
+                .unwrap();
+            mdb.insert_stub_alias("spotify", "stub", "Stub Name", None)
+                .await
+                .unwrap();
+            assert_eq!(contribution_count(&mdb).await, 1);
+            assert_eq!(alias_count(&mdb).await, 2);
+        }
     }
 }

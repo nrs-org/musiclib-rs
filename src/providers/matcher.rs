@@ -395,12 +395,16 @@ async fn evaluate_entry_data(
             .unwrap_or(false)),
         CompiledEntryDataMatcher::HasSource(source) => Ok(ctx.child.sources.get(source).is_some()),
         CompiledEntryDataMatcher::DurationRange { min, max } => {
-            let entity = ctx.get_entity(provider).await?;
-            let duration = match &entity.specific_data {
-                EntrySpecificData::Track { duration_ms, .. } => {
-                    duration_ms.first().map(|d| *d as u64)
-                }
-                _ => None,
+            // The listing's own duration, when it has one, saves fetching the
+            // child just to read it.
+            let duration = match ctx.child.duration_ms {
+                Some(d) => Some(d as u64),
+                None => match &ctx.get_entity(provider).await?.specific_data {
+                    EntrySpecificData::Track { duration_ms, .. } => {
+                        duration_ms.first().map(|d| *d as u64)
+                    }
+                    _ => None,
+                },
             };
             let Some(duration) = duration else {
                 return Ok(false);
@@ -1284,5 +1288,29 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["ok1", "ok2"]);
+    }
+
+    /// `duration_range` uses the listing's own duration when it has one,
+    /// without fetching the child (`PanicProvider` would panic if it did).
+    #[tokio::test]
+    async fn duration_range_uses_listing_duration_without_fetching() {
+        let mut short = make_child(EntryType::Track, "short", "youtube");
+        short.duration_ms = Some(240_000);
+        let mut vod = make_child(EntryType::Track, "vod", "youtube");
+        vod.duration_ms = Some(3 * 3_600_000);
+        let mut pool = EntryFetchOptionsPool::default();
+        let options_id = Some(pool.insert(EntryFetchOptions::default()));
+        let rule = ChildRule {
+            matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                EntryDataMatcher::DurationRange {
+                    min: None,
+                    max: Some(3_600_000),
+                },
+            )),
+            options_id,
+        };
+        let result = run_filter(vec![short, vod], pool, vec![rule]).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0.name.as_deref(), Some("short"));
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +15,17 @@ pub struct PairMetadata {
     pub release_date: Option<String>,
     pub specific_data: EntrySpecificData,
     pub aliases: Vec<Alias>,
+}
+
+/// What a parent's listing said about a child (from its `ChildRef`). Kept so a
+/// child that never gets fetched is still stored as a stub with a type, name
+/// and duration instead of an anonymous pair. Ignored at flush time for pairs
+/// that were fetched.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StubInfo {
+    pub entry_type: EntryType,
+    pub name: Option<String>,
+    pub duration_ms: Option<i64>,
 }
 
 /// A "parent has child" edge between two pairs, with the structural position
@@ -51,6 +62,7 @@ pub struct State {
     pub metadata: Mutex<HashMap<Pair, PairMetadata>>,
     pub is_rel: Mutex<Vec<(Pair, Pair)>>,
     pub has_rel: Mutex<Vec<ChildEdge>>,
+    pub stubs: Mutex<HashMap<Pair, StubInfo>>,
     /// Running estimate, in bytes, of everything currently buffered in
     /// `metadata`/`is_rel`/`has_rel`. This is what `pipeline::ingest`'s
     /// periodic-flush watchdog watches to decide when to drain the buffer.
@@ -85,6 +97,7 @@ impl State {
             metadata: Mutex::new(HashMap::new()),
             is_rel: Mutex::new(Vec::new()),
             has_rel: Mutex::new(Vec::new()),
+            stubs: Mutex::new(HashMap::new()),
             approx_bytes: AtomicUsize::new(0),
             progress,
         }
@@ -120,6 +133,31 @@ impl State {
         self.approx_bytes.fetch_add(size, Ordering::Relaxed);
     }
 
+    /// Record what a listing said about `pair`. A pair listed several times
+    /// (an artist credited on many tracks) keeps the first non-empty name and
+    /// duration seen.
+    pub fn insert_stub(&self, pair: Pair, info: StubInfo) {
+        let mut stubs = self.stubs.lock().unwrap();
+        match stubs.entry(pair) {
+            Entry::Vacant(v) => {
+                let size = pair_bytes(v.key()) + stub_bytes(&info);
+                v.insert(info);
+                self.approx_bytes.fetch_add(size, Ordering::Relaxed);
+            }
+            Entry::Occupied(mut o) => {
+                let existing = o.get_mut();
+                if existing.name.is_none()
+                    && let Some(name) = info.name
+                {
+                    self.approx_bytes.fetch_add(name.len(), Ordering::Relaxed);
+                    existing.name = Some(name);
+                }
+                if existing.duration_ms.is_none() {
+                    existing.duration_ms = info.duration_ms;
+                }
+            }
+        }
+    }
     /// Current estimated size of buffered state, in bytes.
     pub fn approx_bytes(&self) -> usize {
         self.approx_bytes.load(Ordering::Relaxed)
@@ -166,6 +204,10 @@ fn specific_data_bytes(d: &EntrySpecificData) -> usize {
         }
         EntrySpecificData::Artist => 0,
     }
+}
+
+pub(super) fn stub_bytes(s: &StubInfo) -> usize {
+    32 + s.name.as_ref().map_or(0, |n| n.len())
 }
 
 pub(super) fn alias_bytes(a: &Alias) -> usize {

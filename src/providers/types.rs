@@ -111,6 +111,11 @@ pub struct ChildRef {
     pub external_type: Cow<'static, str>,
     pub sources: ExternalSources,
     pub name: Option<String>,
+    /// Duration as given by the parent's listing (e.g. an album tracklist),
+    /// when the listing payload carries one. Lets a child that's never fetched
+    /// still be stored with a duration, and lets `duration_range` matchers
+    /// decide without fetching the child.
+    pub duration_ms: Option<i64>,
     pub position: Option<TrackPosition>,
     /// Contributions here represent the child's relationship to its parent
     /// (e.g. an artist's role on a release they contributed to).

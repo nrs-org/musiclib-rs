@@ -125,6 +125,7 @@ fn build_child_ref(child: &LocalChild, base: &std::path::Path) -> ChildRef {
         external_type: EXTERNAL_TYPE_ENTRY.into(),
         sources,
         name: child.name.clone(),
+        duration_ms: None,
         position,
         contributions,
         original_relation_kind: None,

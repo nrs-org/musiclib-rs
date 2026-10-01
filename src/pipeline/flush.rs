@@ -7,7 +7,7 @@ use crate::providers::types::EntryType;
 use tracing::{debug, info, warn};
 
 use super::dedup::{AnchorId, DedupConfig};
-use super::state::{ChildEdge, Pair, PairMetadata, State};
+use super::state::{ChildEdge, Pair, PairMetadata, State, StubInfo};
 
 /// Reduce all collected events to DB writes.
 ///
@@ -57,6 +57,7 @@ pub async fn flush(
     let metadata = std::mem::take(&mut *state.metadata.lock().unwrap());
     let is_rel = std::mem::take(&mut *state.is_rel.lock().unwrap());
     let has_rel = std::mem::take(&mut *state.has_rel.lock().unwrap());
+    let stubs = std::mem::take(&mut *state.stubs.lock().unwrap());
 
     // Account for what was just drained; anything re-buffered below (step 4b,
     // deferred classes) goes back in through `State::insert_metadata`/
@@ -69,7 +70,11 @@ pub async fn flush(
             .iter()
             .map(|(a, b)| super::state::pair_bytes(a) + super::state::pair_bytes(b) + 16)
             .sum::<usize>()
-        + has_rel.iter().map(super::state::edge_bytes).sum::<usize>();
+        + has_rel.iter().map(super::state::edge_bytes).sum::<usize>()
+        + stubs
+            .iter()
+            .map(|(p, s)| super::state::pair_bytes(p) + super::state::stub_bytes(s))
+            .sum::<usize>();
     state.sub_bytes(drained_bytes);
 
     // 0. Canonicalize every pair referenced by any event. `canonicalize` is
@@ -91,6 +96,9 @@ pub async fn flush(
     for edge in &has_rel {
         raw_pairs.insert(edge.parent.clone());
         raw_pairs.insert(edge.child.clone());
+    }
+    for p in stubs.keys() {
+        raw_pairs.insert(p.clone());
     }
     let mut canon: HashMap<Pair, Pair> = HashMap::new();
     for pair in &raw_pairs {
@@ -115,6 +123,20 @@ pub async fn flush(
             edge
         })
         .collect();
+
+    // Two raw forms of one child can collapse to the same canonical pair;
+    // keep whichever listing gave a name/duration.
+    let mut canon_stubs: HashMap<Pair, StubInfo> = HashMap::new();
+    for (p, info) in stubs {
+        let entry = canon_stubs.entry(canon[&p].clone()).or_insert(StubInfo {
+            entry_type: info.entry_type,
+            name: None,
+            duration_ms: None,
+        });
+        entry.name = entry.name.take().or(info.name);
+        entry.duration_ms = entry.duration_ms.or(info.duration_ms);
+    }
+    let stubs = canon_stubs;
 
     info!(
         "flushing: {} pair(s), {} is_rel, {} has_rel",
@@ -291,6 +313,18 @@ pub async fn flush(
         .filter(|p| !deferred_pairs.contains(p))
         .collect();
 
+    // Stub info is recorded when a child is listed, but its edge only once
+    // the parent's whole listing has finished (importer step 7), so it can
+    // arrive a flush early. Keep it for pairs written now; hand the rest back
+    // to `state` until the final flush, which drops what nothing references.
+    let (stubs, pending_stubs): (HashMap<Pair, StubInfo>, HashMap<Pair, StubInfo>) =
+        stubs.into_iter().partition(|(p, _)| all_pairs.contains(p));
+    if !final_flush {
+        for (pair, info) in pending_stubs {
+            state.insert_stub(pair, info);
+        }
+    }
+
     // 5. Assign an entry_id to each class; collect merges where a class spans
     //    multiple existing entry_ids. Reconcile the class's entry_type from
     //    members' fresh metadata: new entries get the type at creation; existing
@@ -310,7 +344,10 @@ pub async fn flush(
         // Existing ids uniquely owned by this class (sorted, min first).
         let owned = owned_ids[repr].clone();
         let entry_id = if owned.is_empty() {
-            let new_id = db.insert_entry(class_type).await?;
+            // A class nobody fetched takes its type from what listed it. Only
+            // for new entries: an existing entry's type came from a fetch.
+            let new_type = class_type.or_else(|| stub_type(members, &stubs));
+            let new_id = db.insert_entry(new_type).await?;
             // Referencing existing entries but owning none => the barrier split
             // this class off a shared (contaminated) entry onto a fresh one.
             let referenced: BTreeSet<i64> = members.iter().filter_map(|p| existing[p]).collect();
@@ -367,12 +404,28 @@ pub async fn flush(
                 run_id,
             )
             .await?;
-        } else if existing[pair].is_none() {
-            db.insert_stub_pair(&pair.0, &pair.1, entry_id, run_id)
-                .await?;
-        } else if existing[pair] != Some(entry_id) {
-            // Existing stub pair that a split moved to a different entry.
-            db.set_pair_entry(&pair.0, &pair.1, entry_id).await?;
+        } else {
+            let duration_ms = stubs.get(pair).and_then(|s| s.duration_ms);
+            if existing[pair].is_none() || duration_ms.is_some() {
+                // New stub row, or a duration for an existing stub that had
+                // none; never touches a fetched row or its entry_id.
+                db.upsert_stub_pair(&pair.0, &pair.1, entry_id, duration_ms, run_id)
+                    .await?;
+            }
+            if existing[pair].is_some_and(|id| id != entry_id) {
+                // Existing stub pair that a split moved to a different entry.
+                db.set_pair_entry(&pair.0, &pair.1, entry_id).await?;
+            }
+        }
+    }
+
+    // 7b. Listing names for pairs that are still stubs (no-op once fetched).
+    for (pair, info) in &stubs {
+        if metadata.contains_key(pair) {
+            continue;
+        }
+        if let Some(name) = &info.name {
+            db.insert_stub_alias(&pair.0, &pair.1, name, run_id).await?;
         }
     }
 
@@ -525,6 +578,17 @@ fn owned_existing_ids(
 /// Compute the entry_type for an equivalence class from its members' metadata.
 /// A `len() > 1` result means Part B missed a cross-type link — logged as a
 /// warning and the lexically-smallest type is chosen deterministically.
+/// The entry type the listings gave a class's stub members, if they agree.
+fn stub_type(members: &[Pair], stubs: &HashMap<Pair, StubInfo>) -> Option<EntryType> {
+    let types: HashSet<EntryType> = members
+        .iter()
+        .filter_map(|p| stubs.get(p).map(|s| s.entry_type))
+        .collect();
+    (types.len() == 1)
+        .then(|| types.into_iter().next())
+        .flatten()
+}
+
 fn reconcile_type(members: &[Pair], metadata: &HashMap<Pair, PairMetadata>) -> Option<EntryType> {
     let types: HashSet<EntryType> = members
         .iter()
@@ -977,6 +1041,177 @@ mod tests {
             "sibling should land on the pre-existing entry, not a new one"
         );
 
+        Ok(())
+    }
+
+    fn release_metadata() -> PairMetadata {
+        PairMetadata {
+            entry_type: EntryType::Release,
+            release_date: None,
+            specific_data: crate::providers::types::EntrySpecificData::Release {
+                release_type: None,
+                num_discs: None,
+                num_tracks: None,
+            },
+            aliases: vec![],
+        }
+    }
+
+    fn listed_track(state: &State, parent: &Pair, child: &Pair, name: &str) {
+        state.push_has_rel(ChildEdge {
+            parent: parent.clone(),
+            child: child.clone(),
+            disc_no: None,
+            track_no: Some(1),
+            contributions: vec![],
+            original_relation_kind: None,
+        });
+        state.insert_stub(
+            child.clone(),
+            StubInfo {
+                entry_type: EntryType::Track,
+                name: Some(name.to_string()),
+                duration_ms: Some(180_000),
+            },
+        );
+    }
+
+    async fn flush_final(db: &MusicDb, state: State) -> anyhow::Result<()> {
+        flush(
+            Arc::new(state),
+            &[],
+            db,
+            &DedupConfig::default(),
+            None,
+            true,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn aliases_of(db: &MusicDb, pair: &Pair) -> anyhow::Result<Vec<(String, bool)>> {
+        Ok(db
+            .all_alias_rows()
+            .await?
+            .into_iter()
+            .filter(|a| a.source == pair.0 && a.identifier == pair.1)
+            .map(|a| (a.name, a.primary_alias))
+            .collect())
+    }
+
+    /// A listed-but-never-fetched child is stored as a stub carrying the
+    /// listing's type, name and duration. A later fetch promotes it in place,
+    /// and after that listings no longer add names to it.
+    #[tokio::test]
+    async fn unfetched_child_is_stored_as_stub_and_promoted_by_fetch() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let album = p("album");
+        let track = p("track");
+
+        let state = State::new();
+        state.insert_metadata(album.clone(), release_metadata());
+        listed_track(&state, &album, &track, "Song");
+        flush_final(&db, state).await?;
+
+        let track_id = db
+            .find_entry_id_by_pair(&track.0, &track.1)
+            .await?
+            .expect("stub row");
+        let row = db.source_rows_by_entry_ids(&[track_id]).await?.remove(0);
+        assert_eq!(row.fetched_at, None);
+        assert_eq!(row.duration_ms, vec![180_000]);
+        assert_eq!(
+            db.entry_rows_by_ids(&[track_id]).await?[0].entry_type,
+            "track"
+        );
+        assert_eq!(
+            aliases_of(&db, &track).await?,
+            vec![("Song".to_string(), false)]
+        );
+
+        let state = State::new();
+        state.insert_metadata(track.clone(), track_metadata());
+        flush_final(&db, state).await?;
+        assert_eq!(
+            db.find_entry_id_by_pair(&track.0, &track.1).await?,
+            Some(track_id)
+        );
+        let row = db.source_rows_by_entry_ids(&[track_id]).await?.remove(0);
+        assert!(row.fetched_at.is_some(), "a fetch promotes the stub");
+
+        let state = State::new();
+        state.insert_metadata(album.clone(), release_metadata());
+        listed_track(&state, &album, &track, "Song (Some Other Listing)");
+        flush_final(&db, state).await?;
+        assert_eq!(
+            aliases_of(&db, &track).await?,
+            vec![("Song".to_string(), false)]
+        );
+        Ok(())
+    }
+
+    /// Stub info is recorded when a child is listed, but the edge only once
+    /// the whole listing finished, so it can reach a periodic flush first. It
+    /// must survive until the flush that writes the pair.
+    #[tokio::test]
+    async fn stub_info_waits_for_its_edge() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let album = p("album");
+        let track = p("track");
+
+        let state = Arc::new(State::new());
+        state.insert_stub(
+            track.clone(),
+            StubInfo {
+                entry_type: EntryType::Track,
+                name: Some("Song".to_string()),
+                duration_ms: Some(180_000),
+            },
+        );
+        flush(
+            Arc::clone(&state),
+            &[],
+            &db,
+            &DedupConfig::default(),
+            None,
+            false,
+        )
+        .await?;
+        assert!(
+            db.find_entry_id_by_pair(&track.0, &track.1)
+                .await?
+                .is_none()
+        );
+        assert_eq!(state.stubs.lock().unwrap().len(), 1, "stub info is kept");
+
+        state.insert_metadata(album.clone(), release_metadata());
+        state.push_has_rel(ChildEdge {
+            parent: album.clone(),
+            child: track.clone(),
+            disc_no: None,
+            track_no: Some(1),
+            contributions: vec![],
+            original_relation_kind: None,
+        });
+        flush(
+            Arc::clone(&state),
+            &[],
+            &db,
+            &DedupConfig::default(),
+            None,
+            true,
+        )
+        .await?;
+        let track_id = db
+            .find_entry_id_by_pair(&track.0, &track.1)
+            .await?
+            .expect("stub row");
+        let row = db.source_rows_by_entry_ids(&[track_id]).await?.remove(0);
+        assert_eq!(row.duration_ms, vec![180_000]);
+        assert_eq!(
+            aliases_of(&db, &track).await?,
+            vec![("Song".to_string(), false)]
+        );
         Ok(())
     }
 }

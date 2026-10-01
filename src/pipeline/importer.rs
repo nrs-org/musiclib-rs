@@ -11,7 +11,7 @@ use crate::providers::{
 use futures::future::join_all;
 use tracing::{debug, warn};
 
-use super::state::{ChildEdge, Pair, PairMetadata, State};
+use super::state::{ChildEdge, Pair, PairMetadata, State, StubInfo};
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'static>>;
 
@@ -214,6 +214,15 @@ pub fn import(
                         for sibling in child_pairs.iter().skip(1) {
                             state.push_is_rel(primary.clone(), sibling.clone());
                         }
+                        // Used only if the child ends up never fetched.
+                        state.insert_stub(
+                            primary.clone(),
+                            StubInfo {
+                                entry_type: child_ref.entry_type,
+                                name: child_ref.name.clone(),
+                                duration_ms: child_ref.duration_ms,
+                            },
+                        );
                         let pos = child_ref.position.as_ref();
                         edges.push(ChildEdge {
                             parent: canonical.clone(),

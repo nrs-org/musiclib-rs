@@ -273,6 +273,7 @@ impl PageFetcher for ArtistRecordingsPageFetcher {
                 external_type: EXTERNAL_TYPE_RECORDING.into(),
                 sources: [(SOURCE.into(), HashSet::from([recording_url(&rec.id)]))].into(),
                 name: rec.title,
+                duration_ms: rec.length,
                 ..Default::default()
             })
             .collect();
@@ -500,6 +501,7 @@ pub async fn get_artist(client: &MusicBrainzClient, url: &str) -> Result<EntityR
                 external_type: EXTERNAL_TYPE_RECORDING.into(),
                 sources: [(SOURCE.into(), HashSet::from([recording_url(&rec.id)]))].into(),
                 name: rec.title.clone(),
+                duration_ms: rec.length,
                 ..Default::default()
             })
             .collect();
