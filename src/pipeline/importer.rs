@@ -102,19 +102,15 @@ pub fn import(
         } = result;
         let entry_type = entry_type_of(&specific_data);
 
-        // 5. Store per-pair metadata on the canonical pair.
-        state.insert_metadata(
-            canonical.clone(),
-            PairMetadata {
-                entry_type,
-                release_date,
-                specific_data,
-                aliases,
-            },
-        );
-        if let Some(p) = state.progress() {
-            p.fetched(&canonical);
-        }
+        // 5. Per-pair metadata for the canonical pair. Stored only after
+        //    step 7 has listed every child (see there), so a truncated
+        //    listing never leaves a pair that looks fully fetched.
+        let metadata = PairMetadata {
+            entry_type,
+            release_date,
+            specific_data,
+            aliases,
+        };
 
         // 5b. Cross-link: ask every other provider to enrich `sources` with
         //     IDs in its own namespace. Fixed-point: each pass calls every
@@ -195,6 +191,16 @@ pub fn import(
 
         // 7. has_rel for every child. Pick one pair from the child's sources
         //    as the edge's child end (others are linked via is_rel) and recurse.
+        //    Edges are buffered: if a listing fails partway (e.g. a 429 on a
+        //    later page), a non-artist parent is treated as a failed fetch and
+        //    neither its edges nor its metadata are stored, so an album never
+        //    ends up with a tracklist that silently stops at page 2. Artists
+        //    keep what was listed: a discography is policy-filtered anyway, so
+        //    a partial one claims nothing. Children already listed are still
+        //    imported either way, and their sibling is_rel links are kept:
+        //    those are facts about the child, not about this listing.
+        let mut edges: Vec<ChildEdge> = Vec::new();
+        let mut listing_error: Option<String> = None;
         for child_source in &children {
             let mut cursor = child_source.owned_cursor();
             loop {
@@ -209,7 +215,7 @@ pub fn import(
                             state.push_is_rel(primary.clone(), sibling.clone());
                         }
                         let pos = child_ref.position.as_ref();
-                        state.push_has_rel(ChildEdge {
+                        edges.push(ChildEdge {
                             parent: canonical.clone(),
                             child: primary.clone(),
                             disc_no: pos.and_then(|p| p.disc_no),
@@ -230,9 +236,31 @@ pub fn import(
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        warn!("child cursor error: {}", error_chain(&e));
+                        let msg = error_chain(&e);
+                        warn!(
+                            "child listing failed for {}:{}: {}",
+                            canonical.0, canonical.1, msg
+                        );
+                        listing_error.get_or_insert(msg);
                         break;
                     }
+                }
+            }
+        }
+
+        match listing_error {
+            Some(msg) if entry_type != EntryType::Artist => {
+                if let Some(p) = state.progress() {
+                    p.fetch_failed(&canonical, &format!("child listing incomplete: {msg}"));
+                }
+            }
+            _ => {
+                state.insert_metadata(canonical.clone(), metadata);
+                for edge in edges {
+                    state.push_has_rel(edge);
+                }
+                if let Some(p) = state.progress() {
+                    p.fetched(&canonical);
                 }
             }
         }
@@ -307,4 +335,181 @@ fn flatten_pairs(sources: &ExternalSources) -> Vec<Pair> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        borrow::Cow,
+        collections::HashSet,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use futures::Stream;
+
+    use super::*;
+    use crate::providers::{
+        CanonicalizeProvider,
+        types::{
+            CachedChildSource, CanonicalizeResult, ChildFetchOptions, ChildRef, ChildSource,
+            EntrySpecificData, Error,
+        },
+    };
+
+    const SOURCE: &str = "fake";
+
+    /// Yields its children, then one listing error (like a 429 on page 2).
+    struct TruncatedListing {
+        items: std::vec::IntoIter<ChildRef>,
+        failed: bool,
+    }
+
+    impl Stream for TruncatedListing {
+        type Item = Result<(ChildRef, ChildFetchOptions), Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let pool = Arc::new(EntryFetchOptionsPool::default());
+            if let Some(c) = self.items.next() {
+                return Poll::Ready(Some(Ok((
+                    c,
+                    ChildFetchOptions::new(pool, EntryFetchOptionsPool::DEFAULT_ID),
+                ))));
+            }
+            if !self.failed {
+                self.failed = true;
+                return Poll::Ready(Some(Err(Error::InvalidUrl("page 2: 429".into()))));
+            }
+            Poll::Ready(None)
+        }
+    }
+
+    impl ChildSource<ChildFetchOptions> for TruncatedListing {}
+
+    /// `"album"` (a release) and `"artist"` each list `"track1"` and then fail;
+    /// `"track1"` is a leaf track.
+    struct FakeProvider;
+
+    fn entry_type_for(identifier: &str) -> Option<EntryType> {
+        match identifier {
+            "album" => Some(EntryType::Release),
+            "artist" => Some(EntryType::Artist),
+            "track1" => Some(EntryType::Track),
+            _ => None,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CanonicalizeProvider for FakeProvider {
+        async fn canonicalize(
+            &self,
+            _source_key: &str,
+            identifier: &str,
+        ) -> Option<CanonicalizeResult> {
+            Some(CanonicalizeResult {
+                canonical_source_key: Cow::Borrowed(SOURCE),
+                canonical_identifier: identifier.to_string(),
+                entry_type: entry_type_for(identifier)?,
+                external_type: Cow::Borrowed(""),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FetchProvider for FakeProvider {
+        async fn fetch_entry(
+            self: Arc<Self>,
+            _source_key: &str,
+            identifier: &str,
+            _pool: Arc<EntryFetchOptionsPool>,
+            _root_id: OptionsId,
+        ) -> Result<EntityResult, Error> {
+            let (specific_data, children) = match identifier {
+                "track1" => (
+                    EntrySpecificData::Track {
+                        duration_ms: vec![],
+                        positions: Default::default(),
+                    },
+                    vec![],
+                ),
+                parent => {
+                    let track = ChildRef {
+                        entry_type: EntryType::Track,
+                        name: Some("Track 1".to_string()),
+                        sources: [(Cow::Borrowed(SOURCE), HashSet::from(["track1".to_string()]))]
+                            .into(),
+                        ..Default::default()
+                    };
+                    let listing = TruncatedListing {
+                        items: vec![track].into_iter(),
+                        failed: false,
+                    };
+                    let specific_data = if parent == "artist" {
+                        EntrySpecificData::Artist
+                    } else {
+                        EntrySpecificData::Release {
+                            release_type: None,
+                            num_discs: None,
+                            num_tracks: None,
+                        }
+                    };
+                    (
+                        specific_data,
+                        vec![Arc::new(CachedChildSource::new(Box::new(listing)))],
+                    )
+                }
+            };
+            Ok(EntityResult {
+                release_date: None,
+                sources: Default::default(),
+                extra: Default::default(),
+                specific_data,
+                children,
+                aliases: vec![],
+            })
+        }
+    }
+
+    async fn import_root(identifier: &str) -> Arc<State> {
+        let state = Arc::new(State::new());
+        let providers: Arc<Vec<Arc<dyn FetchProvider>>> = Arc::new(vec![Arc::new(FakeProvider)]);
+        import(
+            Arc::clone(&state),
+            providers,
+            Arc::new(EntryFetchOptionsPool::default()),
+            (
+                StandardProviderKeys::UNKNOWN_URL.to_string(),
+                identifier.to_string(),
+            ),
+            EntryFetchOptionsPool::DEFAULT_ID,
+        )
+        .await;
+        state
+    }
+
+    fn pair(identifier: &str) -> Pair {
+        (SOURCE.to_string(), identifier.to_string())
+    }
+
+    /// An album whose tracklist fails partway is stored as neither fetched nor
+    /// partially listed; the track it did list is still imported on its own.
+    #[tokio::test]
+    async fn truncated_listing_fails_non_artist_parent() {
+        let state = import_root("album").await;
+        let metadata = state.metadata.lock().unwrap();
+        assert!(!metadata.contains_key(&pair("album")));
+        assert!(metadata.contains_key(&pair("track1")));
+        assert!(state.has_rel.lock().unwrap().is_empty());
+    }
+
+    /// An artist keeps its metadata and the partial discography it listed.
+    #[tokio::test]
+    async fn truncated_listing_keeps_artist_and_partial_discography() {
+        let state = import_root("artist").await;
+        assert!(state.metadata.lock().unwrap().contains_key(&pair("artist")));
+        let edges = state.has_rel.lock().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].parent, pair("artist"));
+        assert_eq!(edges[0].child, pair("track1"));
+    }
 }

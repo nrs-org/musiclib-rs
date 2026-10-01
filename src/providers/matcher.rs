@@ -198,6 +198,8 @@ fn filtering_stream(
             let pool = Arc::clone(&pool);
             let provider = Arc::clone(&provider);
             async move {
+                // A listing error (the parent's pagination failed) propagates:
+                // the importer must know the child list is incomplete.
                 let (child, child_index) = item?;
                 let entity_cell = OnceCell::new();
                 let matched_id: Option<Option<OptionsId>> = {
@@ -208,9 +210,26 @@ fn filtering_stream(
                     };
                     let mut found = None;
                     for rule in rules.iter() {
-                        if evaluate_expr(&rule.matcher, &ctx, provider.clone()).await? {
-                            found = Some(rule.options_id);
-                            break;
+                        match evaluate_expr(&rule.matcher, &ctx, provider.clone()).await {
+                            Ok(true) => {
+                                found = Some(rule.options_id);
+                                break;
+                            }
+                            Ok(false) => {}
+                            // A matcher error (e.g. `duration_range` fetching a
+                            // deleted video) only concerns this child, so it
+                            // must not end the listing. Treat the child as
+                            // unmatched (not fetched) rather than trying
+                            // lower-priority rules: if a VOD filter can't be
+                            // evaluated, falling through to a catch-all would
+                            // import it.
+                            Err(e) => {
+                                tracing::warn!(
+                                    "matcher failed for child {:?}; not fetching it: {e}",
+                                    child.name
+                                );
+                                break;
+                            }
                         }
                     }
                     found
@@ -1190,5 +1209,80 @@ mod tests {
         // 6 next() calls: 1 evaluated + 4 drained + 1 None sentinel. Items 2-5 skip
         // per-item evaluation thanks to evaluate_expr returning True.
         assert_eq!(call_count.load(Ordering::SeqCst), 6);
+    }
+
+    /// Fetch fails for `"deleted"`; every other child is a 3-minute track.
+    struct FlakyProvider;
+
+    #[async_trait::async_trait]
+    impl crate::providers::CanonicalizeProvider for FlakyProvider {
+        async fn canonicalize(
+            &self,
+            _source_key: &str,
+            _identifier: &str,
+        ) -> Option<CanonicalizeResult> {
+            None
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FetchProvider for FlakyProvider {
+        async fn fetch_entry(
+            self: Arc<Self>,
+            _source_key: &str,
+            identifier: &str,
+            _pool: Arc<EntryFetchOptionsPool>,
+            _root_id: OptionsId,
+        ) -> Result<EntityResult, Error> {
+            if identifier == "deleted" {
+                return Err(Error::InvalidUrl("video unavailable".into()));
+            }
+            Ok(EntityResult {
+                release_date: None,
+                sources: Default::default(),
+                extra: Default::default(),
+                specific_data: EntrySpecificData::Track {
+                    duration_ms: vec![180_000],
+                    positions: Default::default(),
+                },
+                children: vec![],
+                aliases: vec![],
+            })
+        }
+    }
+
+    /// A matcher that fails on one child (its fetch errors) skips that child
+    /// without ending the listing: the children after it still come through.
+    #[tokio::test]
+    async fn matcher_error_skips_only_that_child() {
+        let children = vec![
+            make_child(EntryType::Track, "ok1", "youtube"),
+            make_child(EntryType::Track, "deleted", "youtube"),
+            make_child(EntryType::Track, "ok2", "youtube"),
+        ];
+        let mut pool = EntryFetchOptionsPool::default();
+        let options_id = Some(pool.insert(EntryFetchOptions::default()));
+        let root_id = pool.insert(EntryFetchOptions {
+            child_rules: vec![ChildRule {
+                matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                    EntryDataMatcher::DurationRange {
+                        min: None,
+                        max: Some(3_600_000),
+                    },
+                )),
+                options_id,
+            }],
+        });
+        let source = Arc::new(CachedChildSource::from_children(children));
+        let filtered =
+            filter_children(source, Arc::new(pool), root_id, Arc::new(FlakyProvider)).unwrap();
+
+        let mut names: Vec<String> = drain(filtered)
+            .await
+            .into_iter()
+            .filter_map(|(c, _)| c.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["ok1", "ok2"]);
     }
 }
