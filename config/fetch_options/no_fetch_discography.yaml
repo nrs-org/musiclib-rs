@@ -1,8 +1,12 @@
-# Store the artist entry only — do not fetch any children.
+# Fetch an entity on its own and follow nothing.
 #
-# Use this when you want an artist record in the database without pulling
-# in their releases or tracks (e.g. for collaborators discovered while
-# importing someone else's discography).
+# The entity is still complete: fetching always records all of its structural
+# children (an album's tracklist, a track's credits and album) as stubs. For an
+# artist, its discography is not fetched or recorded.
+#
+# Used as the leaf options for things a discography points at (an album a
+# track is on, a credited artist, the original of a cover), and on its own
+# when you want an artist record without their releases.
 
 main:
   child_rules: []

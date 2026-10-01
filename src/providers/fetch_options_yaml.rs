@@ -1534,4 +1534,29 @@ main:
             "hash must change when a referenced file changes"
         );
     }
+
+    /// The shipped configs under `config/fetch_options/` load, and a
+    /// discography's tracks get the `track` set, whose children are leaves.
+    #[tokio::test]
+    async fn shipped_configs_load() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/fetch_options");
+        for name in [
+            "fetch_discography.yaml",
+            "no_fetch_discography.yaml",
+            "vtuber_fetch_discography.yaml",
+        ] {
+            load_from_file(&dir.join(name))
+                .await
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        for name in ["fetch_discography.yaml", "vtuber_fetch_discography.yaml"] {
+            let (pool, track, _) = load_from_file_with_root(&dir.join(name), "track")
+                .await
+                .unwrap();
+            let rules = &pool.get(track).child_rules;
+            assert_eq!(rules.len(), 1, "{name}");
+            let leaf = rules[0].options_id.expect("track children are fetched");
+            assert!(pool.get(leaf).child_rules.is_empty(), "{name}: leaf");
+        }
+    }
 }

@@ -250,13 +250,27 @@ Fetch-options files control which **child entries** are fetched when importing a
 parent entry, and with what options. The `import` binary takes a
 `--fetch-options` argument pointing at one of these files.
 
+Rules decide which children are **fetched**, not which are **recorded**:
+
+- Fetching a non-artist entity (a release, release group or track) always
+  records all of its children: an album's full tracklist, a track's credits
+  and album. Children the rules don't fetch are stored as **stubs**: the pair,
+  plus the type, name and duration the parent's listing gave it, with
+  `entry_source.fetched_at` NULL. A later fetch fills the stub in.
+- An artist's children are its discography, which is opt-in: only children
+  the rules fetch are recorded.
+
+An entity reached under several option sets in one run (say, an album reached
+as a leaf from a track and with `main` from its artist) is processed under
+each of them, so the result doesn't depend on which path arrives first.
+
 Three ready-made files live in `config/fetch_options/`:
 
 | File | Purpose |
 |---|---|
-| `fetch_discography.yaml` | Recursively fetch all releases and tracks; visit artist children as leaves only |
+| `fetch_discography.yaml` | Fetch an artist's releases and their tracks; each track also fetches its album(s), credited artists and original as leaves (`track`) |
 | `vtuber_fetch_discography.yaml` | Like above but skip YouTube videos at channel level; whitelist/blacklist playlists by title |
-| `no_fetch_discography.yaml` | Store the entry itself but fetch no children |
+| `no_fetch_discography.yaml` | Fetch the entry itself, follow nothing (its structural children become stubs) |
 
 ### File structure
 
@@ -297,7 +311,7 @@ in order; the first match wins.
 | Field | Notes |
 |---|---|
 | `match` | A matcher expression (see below) |
-| `fetch` | Named set, cross-file ref, or `null` to skip the child entirely. Omitting `fetch` uses the default (no child rules). |
+| `fetch` | Named set, cross-file ref, or `null` to not fetch the child (a non-artist parent still records it as a stub; an artist parent drops it). Omitting `fetch` uses the default (no child rules). |
 
 ### Matcher expressions
 

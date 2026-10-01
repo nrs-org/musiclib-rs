@@ -1,20 +1,35 @@
 # Fetch the full discography of an artist.
 #
-# - Non-artist children (releases, release groups, tracks, …) recurse with
-#   the same options, so the whole tree is traversed.
-# - Artist children encountered along the way (collaborators, credited artists, …)
-#   are stored as leaf entries — their own discographies are NOT fetched.
+# Fetching an entity always records all of its structural children (an
+# album's tracklist, a track's credits and album); rules only decide which of
+# them are also fetched. Children that aren't fetched are stored as stubs. An
+# artist's children are its discography, and are recorded only when fetched.
+#
+# - The root artist's releases and release groups are fetched, and so are
+#   their tracks (with `track`).
+# - A discography track fetches its album(s), credited artists and, for a
+#   cover, its original, each as a leaf: complete on its own, nothing beyond.
+#   An album reached this way records its other tracks as stubs.
+# - Artists encountered along the way are leaves: their own discographies
+#   are NOT fetched.
 #
 # Use no_fetch_discography.yaml as the options when you want the opposite.
 
 main:
   child_rules:
+    - match: { entry_type: artist }
+      fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
     - match:
         all:
           - { entry_type: track }
           - { not: { duration_range: { min: 60000, max: 1200000 } } }
       fetch: null                               # skip tracks <1m or >20m (shorts, long streams)
-    - match: { not: { entry_type: artist } }
-      fetch: main                               # non-artists recurse
-    - match: { entry_type: artist }
-      fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
+    - match: { entry_type: track }
+      fetch: track
+    - match: always
+      fetch: main                               # releases / release groups: their tracklists
+
+track:
+  child_rules:
+    - match: always
+      fetch: ./no_fetch_discography.yaml::main  # album(s), credits, original: one hop

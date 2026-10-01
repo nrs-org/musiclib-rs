@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType};
+use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType, OptionsId};
 
 /// A `(source_key, identifier)` pair. The only unit of identity during import.
 pub type Pair = (String, String);
@@ -58,7 +58,8 @@ pub trait ImportProgress: Send + Sync {
 /// can hand some of it back — see `pipeline::flush`'s deferral of classes
 /// that touch pre-existing entries).
 pub struct State {
-    claimed: Mutex<HashSet<Pair>>,
+    /// Claimed pairs → the option sets each has been processed under.
+    claimed: Mutex<HashMap<Pair, HashSet<OptionsId>>>,
     pub metadata: Mutex<HashMap<Pair, PairMetadata>>,
     pub is_rel: Mutex<Vec<(Pair, Pair)>>,
     pub has_rel: Mutex<Vec<ChildEdge>>,
@@ -93,7 +94,7 @@ impl State {
 
     pub fn with_progress(progress: Option<Arc<dyn ImportProgress>>) -> Self {
         Self {
-            claimed: Mutex::new(HashSet::new()),
+            claimed: Mutex::new(HashMap::new()),
             metadata: Mutex::new(HashMap::new()),
             is_rel: Mutex::new(Vec::new()),
             has_rel: Mutex::new(Vec::new()),
@@ -103,18 +104,43 @@ impl State {
         }
     }
 
-    /// Returns `true` if this call is the first to claim `pair` (caller should
-    /// fetch). Returns `false` if another task already owns it.
-    pub fn claim(&self, pair: &Pair) -> bool {
-        self.claimed.lock().unwrap().insert(pair.clone())
+    /// Returns `true` if the caller should process `pair` under `options`:
+    /// it hasn't been processed under them yet, and they can add something.
+    /// `leaf` options (no child rules) add nothing once the pair has been
+    /// processed under any options, since every pass records the pair's own
+    /// data and structural edges; only child rules differ between passes.
+    ///
+    /// Claims accumulate instead of first-claimer-wins, so the result doesn't
+    /// depend on arrival order: a collaborator artist reached as a leaf from a
+    /// collab track still gets its discography when its own root import
+    /// reaches it, and a pair reached under two different option sets is
+    /// walked under both. Option sets are never merged into one rule list
+    /// (rules are first-match-wins, so concatenation order would matter);
+    /// each is evaluated on its own pass.
+    pub fn claim(&self, pair: &Pair, options: OptionsId, leaf: bool) -> bool {
+        let mut claimed = self.claimed.lock().unwrap();
+        match claimed.entry(pair.clone()) {
+            Entry::Vacant(v) => {
+                v.insert(HashSet::from([options]));
+                true
+            }
+            Entry::Occupied(_) if leaf => false,
+            Entry::Occupied(mut o) => o.get_mut().insert(options),
+        }
     }
 
     /// Record a pair's fetched metadata. Prefer this over locking `metadata`
     /// directly so the size counter stays accurate.
     pub fn insert_metadata(&self, pair: Pair, meta: PairMetadata) {
-        let size = pair_bytes(&pair) + metadata_bytes(&meta);
-        self.metadata.lock().unwrap().insert(pair, meta);
+        let key_size = pair_bytes(&pair);
+        let size = key_size + metadata_bytes(&meta);
+        // A pair upgraded from a leaf claim (see `claim`) is inserted twice.
+        let old = self.metadata.lock().unwrap().insert(pair, meta);
         self.approx_bytes.fetch_add(size, Ordering::Relaxed);
+        if let Some(old) = old {
+            self.approx_bytes
+                .fetch_sub(key_size + metadata_bytes(&old), Ordering::Relaxed);
+        }
     }
 
     /// Record an is_rel edge. Prefer this over locking `is_rel` directly so
@@ -240,5 +266,30 @@ fn json_bytes(v: &serde_json::Value) -> usize {
         serde_json::Value::String(s) => s.len(),
         serde_json::Value::Array(a) => a.iter().map(json_bytes).sum(),
         serde_json::Value::Object(m) => m.iter().map(|(k, v)| k.len() + json_bytes(v)).sum(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claims_accumulate_per_options() {
+        let state = State::new();
+        let pair: Pair = ("x".into(), "album".into());
+        assert!(state.claim(&pair, 1, false), "first claim");
+        assert!(!state.claim(&pair, 1, false), "same options again");
+        assert!(state.claim(&pair, 2, false), "different options");
+        assert!(
+            !state.claim(&pair, 0, true),
+            "a leaf adds nothing once claimed"
+        );
+
+        let other: Pair = ("x".into(), "artist".into());
+        assert!(state.claim(&other, 0, true), "a leaf can claim first");
+        assert!(
+            state.claim(&other, 1, false),
+            "then expanding options still run"
+        );
     }
 }

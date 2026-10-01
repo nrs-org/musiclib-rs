@@ -4,8 +4,7 @@ use crate::providers::{
     FetchProvider,
     std_values::StandardProviderKeys,
     types::{
-        EntityResult, EntryFetchOptionsPool, EntrySpecificData, EntryType, ExternalSources,
-        OptionsId, child_next,
+        EntityResult, EntryFetchOptionsPool, EntryType, ExternalSources, OptionsId, child_next,
     },
 };
 use futures::future::join_all;
@@ -61,9 +60,15 @@ pub fn import(
             state.push_is_rel(input.clone(), canonical.clone());
         }
 
-        // 3. Claim the canonical pair. If another task owns it, we're done —
-        //    the is_rel above (and our caller's has_rel/is_rel) is preserved.
-        if !state.claim(&canonical) {
+        // 3. Claim (canonical pair, options). If this pair was already
+        //    processed under these options (or these options add nothing),
+        //    we're done — the is_rel above (and our caller's has_rel/is_rel)
+        //    is preserved. Otherwise the pair is processed again under these
+        //    options too: each pair ends up walked under the union of every
+        //    option set that reached it, whatever order they arrived in (see
+        //    `State::claim`). The refetch is served from the HTTP cache.
+        let leaf = pool.get(options_id).child_rules.is_empty();
+        if !state.claim(&canonical, options_id, leaf) {
             return;
         }
 
@@ -100,7 +105,7 @@ pub fn import(
             children,
             aliases,
         } = result;
-        let entry_type = entry_type_of(&specific_data);
+        let entry_type = specific_data.entry_type();
 
         // 5. Per-pair metadata for the canonical pair. Stored only after
         //    step 7 has listed every child (see there), so a truncated
@@ -235,13 +240,17 @@ pub fn import(
                                 .clone()
                                 .map(std::borrow::Cow::into_owned),
                         });
-                        subs.push(import(
-                            Arc::clone(&state),
-                            Arc::clone(&providers),
-                            Arc::clone(&pool),
-                            primary,
-                            child_fetch_opts.id,
-                        ));
+                        // `None`: listed but not to be fetched; the edge and
+                        // stub info above are all it gets.
+                        if let Some(child_options) = child_fetch_opts.id {
+                            subs.push(import(
+                                Arc::clone(&state),
+                                Arc::clone(&providers),
+                                Arc::clone(&pool),
+                                primary,
+                                child_options,
+                            ));
+                        }
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -325,15 +334,6 @@ async fn provider_owns_any(provider: &dyn FetchProvider, sources: &ExternalSourc
         }
     }
     false
-}
-
-fn entry_type_of(data: &EntrySpecificData) -> EntryType {
-    match data {
-        EntrySpecificData::Track { .. } => EntryType::Track,
-        EntrySpecificData::Release { .. } => EntryType::Release,
-        EntrySpecificData::ReleaseGroup { .. } => EntryType::ReleaseGroup,
-        EntrySpecificData::Artist => EntryType::Artist,
-    }
 }
 
 fn flatten_pairs(sources: &ExternalSources) -> Vec<Pair> {
@@ -520,5 +520,189 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].parent, pair("artist"));
         assert_eq!(edges[0].child, pair("track1"));
+    }
+
+    /// A small catalogue that filters its children through the fetch options
+    /// like a real backend: `artist` lists track `t1`; `t1` lists its album;
+    /// `album` lists `t1` and `t2`.
+    struct CatalogueProvider;
+
+    fn child(entry_type: EntryType, id: &str) -> ChildRef {
+        ChildRef {
+            entry_type,
+            name: Some(id.to_string()),
+            sources: [(Cow::Borrowed(SOURCE), HashSet::from([id.to_string()]))].into(),
+            ..Default::default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CanonicalizeProvider for CatalogueProvider {
+        async fn canonicalize(
+            &self,
+            _source_key: &str,
+            identifier: &str,
+        ) -> Option<CanonicalizeResult> {
+            let entry_type = match identifier {
+                "artist" => EntryType::Artist,
+                "album" => EntryType::Release,
+                "t1" | "t2" => EntryType::Track,
+                _ => return None,
+            };
+            Some(CanonicalizeResult {
+                canonical_source_key: Cow::Borrowed(SOURCE),
+                canonical_identifier: identifier.to_string(),
+                entry_type,
+                external_type: Cow::Borrowed(""),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FetchProvider for CatalogueProvider {
+        async fn fetch_entry(
+            self: Arc<Self>,
+            _source_key: &str,
+            identifier: &str,
+            pool: Arc<EntryFetchOptionsPool>,
+            root_id: OptionsId,
+        ) -> Result<EntityResult, Error> {
+            let track = EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: Default::default(),
+            };
+            let (specific_data, children) = match identifier {
+                "artist" => (
+                    EntrySpecificData::Artist,
+                    vec![child(EntryType::Track, "t1")],
+                ),
+                "t1" => (track, vec![child(EntryType::Release, "album")]),
+                "t2" => (track, vec![]),
+                _ => (
+                    EntrySpecificData::Release {
+                        release_type: None,
+                        num_discs: None,
+                        num_tracks: None,
+                    },
+                    vec![child(EntryType::Track, "t1"), child(EntryType::Track, "t2")],
+                ),
+            };
+            let parent_type = specific_data.entry_type();
+            let children = Arc::new(CachedChildSource::from_children(children));
+            let filtered = crate::providers::matcher::filter_children(
+                children,
+                pool,
+                root_id,
+                self,
+                parent_type,
+            )?;
+            Ok(EntityResult {
+                release_date: None,
+                sources: Default::default(),
+                extra: Default::default(),
+                specific_data,
+                children: vec![Arc::new(filtered)],
+                aliases: vec![],
+            })
+        }
+    }
+
+    fn type_rule(
+        entry_type: EntryType,
+        options_id: OptionsId,
+    ) -> crate::providers::types::ChildRule {
+        use crate::providers::types::{ChildMatcher, ChildMatcherExpr, EntryDataMatcher};
+        crate::providers::types::ChildRule {
+            matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                EntryDataMatcher::EntryType(entry_type),
+            )),
+            options_id: Some(options_id),
+        }
+    }
+
+    /// `main` (artist discography: tracks via `track`), `track` (album as a
+    /// leaf), `full` (an album's tracks as leaves).
+    fn catalogue_pool() -> (Arc<EntryFetchOptionsPool>, OptionsId, OptionsId) {
+        use crate::providers::types::EntryFetchOptions;
+        let leaf = EntryFetchOptionsPool::DEFAULT_ID;
+        let mut pool = EntryFetchOptionsPool::default();
+        let track = pool.insert(EntryFetchOptions {
+            child_rules: vec![type_rule(EntryType::Release, leaf)],
+        });
+        let main = pool.insert(EntryFetchOptions {
+            child_rules: vec![type_rule(EntryType::Track, track)],
+        });
+        let full = pool.insert(EntryFetchOptions {
+            child_rules: vec![type_rule(EntryType::Track, leaf)],
+        });
+        (Arc::new(pool), main, full)
+    }
+
+    async fn run_roots(
+        roots: &[(&str, OptionsId)],
+        pool: Arc<EntryFetchOptionsPool>,
+    ) -> Arc<State> {
+        let state = Arc::new(State::new());
+        let providers: Arc<Vec<Arc<dyn FetchProvider>>> =
+            Arc::new(vec![Arc::new(CatalogueProvider)]);
+        for (id, options) in roots {
+            import(
+                Arc::clone(&state),
+                Arc::clone(&providers),
+                Arc::clone(&pool),
+                (
+                    StandardProviderKeys::UNKNOWN_URL.to_string(),
+                    id.to_string(),
+                ),
+                *options,
+            )
+            .await;
+        }
+        state
+    }
+
+    fn snapshot(state: &State) -> (Vec<Pair>, Vec<(Pair, Pair)>) {
+        let mut fetched: Vec<Pair> = state.metadata.lock().unwrap().keys().cloned().collect();
+        fetched.sort();
+        let mut edges: Vec<(Pair, Pair)> = state
+            .has_rel
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.parent.clone(), e.child.clone()))
+            .collect();
+        edges.sort();
+        edges.dedup();
+        (fetched, edges)
+    }
+
+    /// An album reached as a leaf (from a track) still records its whole
+    /// tracklist, as stubs for the tracks it doesn't fetch.
+    #[tokio::test]
+    async fn leaf_album_records_tracklist_as_stubs() {
+        let (pool, main, _) = catalogue_pool();
+        let state = run_roots(&[("artist", main)], pool).await;
+        let (fetched, edges) = snapshot(&state);
+        assert_eq!(fetched, vec![pair("album"), pair("artist"), pair("t1")]);
+        assert!(edges.contains(&(pair("album"), pair("t2"))));
+        let stubs = state.stubs.lock().unwrap();
+        assert_eq!(stubs[&pair("t2")].name.as_deref(), Some("t2"));
+    }
+
+    /// The album is reached as a leaf through the artist's track, and as
+    /// `full` from its own root. Both orders fetch its other track: under
+    /// first-claimer-wins, the artist-first order never would.
+    #[tokio::test]
+    async fn overlapping_roots_give_same_result_in_either_order() {
+        let (pool, main, full) = catalogue_pool();
+        let artist_first = run_roots(&[("artist", main), ("album", full)], Arc::clone(&pool)).await;
+        let album_first = run_roots(&[("album", full), ("artist", main)], pool).await;
+
+        let a = snapshot(&artist_first);
+        assert_eq!(a, snapshot(&album_first));
+        assert!(
+            a.0.contains(&pair("t2")),
+            "the album's other track is fetched"
+        );
     }
 }

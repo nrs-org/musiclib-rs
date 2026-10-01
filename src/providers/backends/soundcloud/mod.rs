@@ -97,6 +97,7 @@ impl FetchProvider for Provider {
                         pool.clone(),
                         root_id,
                         self.clone(),
+                        result.specific_data.entry_type(),
                     )?))
                 })
                 .collect::<Result<Vec<_>, Error>>()?,

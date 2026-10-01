@@ -1,9 +1,18 @@
 # Fetch the full discography of a VTuber artist.
 #
+# Fetching an entity always records all of its structural children (a
+# playlist's videos, a track's credits and album); rules only decide which of
+# them are also fetched. Children that aren't fetched are stored as stubs. A
+# channel's (artist's) children are its discography, and are recorded only
+# when fetched.
+#
 # - YouTube videos are skipped at channel level; only playlists are traversed.
 # - Playlists are whitelisted/blacklisted by title (priority order, first match wins).
 # - Whitelisted playlists fetch all their tracks via `playlist_all`.
-# - Non-YouTube children (MusicBrainz releases, etc.) recurse normally via `main`.
+# - Non-YouTube releases (MusicBrainz, Spotify, …) are fetched with `main`.
+# - Every discography track fetches its album(s), credited artists and, for a
+#   cover, its original, each as a leaf (`track`). An album reached this way
+#   records its other tracks as stubs.
 # - Artist children are stored as leaves (no recursive discography fetch).
 
 main:
@@ -58,23 +67,33 @@ main:
     - match: { external_type: "youtube:playlist" }
       fetch: null
 
-    - match: { not: { entry_type: artist } }
-      fetch: main                               # non-YouTube children recurse
     - match: { entry_type: artist }
       fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
+    - match: { entry_type: track }
+      fetch: track
+    - match: always
+      fetch: main                               # non-YouTube releases: their tracklists
 
 playlist_all:
   child_rules:
     - match: { entry_type: artist }
       fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
 
-    # Drop full-length stream VODs that slip into whitelisted playlists —
-    # title matching alone can't tell a short song upload from a raw stream.
+    # Don't fetch full-length stream VODs that slip into whitelisted playlists
+    # (they stay in the playlist as stubs) — title matching alone can't tell a
+    # short song upload from a raw stream.
     - match:
         all:
           - { entry_type: track }
           - { duration_range: { min: 3600001 } }  # > 1h, in ms
       fetch: null
 
-    - match: { not: { entry_type: artist } }
-      fetch: playlist_all                       # fetch all tracks, no filtering
+    - match: { entry_type: track }
+      fetch: track                              # every other track in the playlist
+    - match: always
+      fetch: playlist_all
+
+track:
+  child_rules:
+    - match: always
+      fetch: ./no_fetch_discography.yaml::main  # album(s), credits, original: one hop

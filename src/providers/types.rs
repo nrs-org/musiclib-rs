@@ -80,6 +80,17 @@ pub enum EntrySpecificData {
     Artist,
 }
 
+impl EntrySpecificData {
+    pub fn entry_type(&self) -> EntryType {
+        match self {
+            EntrySpecificData::Track { .. } => EntryType::Track,
+            EntrySpecificData::Release { .. } => EntryType::Release,
+            EntrySpecificData::ReleaseGroup { .. } => EntryType::ReleaseGroup,
+            EntrySpecificData::Artist => EntryType::Artist,
+        }
+    }
+}
+
 // type of entry (artist, release group, release, track)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -462,19 +473,28 @@ impl EntryFetchOptionsPool {
 
 /// The per-child metadata yielded by a filtered `CachedChildSource`. Bundles the pool (shared)
 /// with the `OptionsId` that selects which `EntryFetchOptions` to use when fetching that child.
+///
+/// `id: None` means the child is listed but not fetched: the importer records
+/// the edge and stores the child as a stub. Only non-artist parents yield
+/// these (see `matcher::filter_children`).
 #[derive(Clone)]
 pub struct ChildFetchOptions {
     pub pool: Arc<EntryFetchOptionsPool>,
-    pub id: OptionsId,
+    pub id: Option<OptionsId>,
 }
 
 impl ChildFetchOptions {
     pub fn new(pool: Arc<EntryFetchOptionsPool>, id: OptionsId) -> Self {
-        Self { pool, id }
+        Self { pool, id: Some(id) }
     }
 
-    pub fn get(&self) -> &EntryFetchOptions {
-        self.pool.get(self.id)
+    /// Record the child without fetching it.
+    pub fn stub(pool: Arc<EntryFetchOptionsPool>) -> Self {
+        Self { pool, id: None }
+    }
+
+    pub fn get(&self) -> Option<&EntryFetchOptions> {
+        self.id.map(|id| self.pool.get(id))
     }
 }
 

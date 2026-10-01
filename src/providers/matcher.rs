@@ -19,9 +19,9 @@ use crate::providers::{
         CachedChildSource, ChildFetchOptions, ChildMatcher, ChildMatcherExpr, ChildRef,
         ChildSource, CompiledChildMatcher, CompiledEntryDataMatcher, CompiledMatcherExpr,
         CompiledMusicBrainzDataMatcher, CompiledYouTubeDataMatcher, EntityResult, EntryDataMatcher,
-        EntryFetchOptionsPool, EntrySpecificData, Error, MusicBrainzDataMatcher, OptionsId,
-        OwnedCachedChildCursor, QuantifierMode, RelationMatcher, Tribool, YouTubeDataMatcher,
-        child_next,
+        EntryFetchOptionsPool, EntrySpecificData, EntryType, Error, MusicBrainzDataMatcher,
+        OptionsId, OwnedCachedChildCursor, QuantifierMode, RelationMatcher, Tribool,
+        YouTubeDataMatcher, child_next,
     },
 };
 
@@ -160,6 +160,7 @@ fn filtering_stream(
     rules: Vec<CompiledChildRule>,
     pool: Arc<EntryFetchOptionsPool>,
     provider: Arc<dyn FetchProvider>,
+    exhaustive: bool,
 ) -> BoxStream<'static, Result<(ChildRef, ChildFetchOptions), Error>> {
     // Matcher eval may fetch the child's entity (duration_range, youtube/MB
     // data matchers). Serial eval = one fetch RTT per child, which collapses
@@ -173,14 +174,17 @@ fn filtering_stream(
 
     // Sequential cursor walk (fast — no matcher eval here). Tags each child
     // with its index so out-of-order eval below still gets a stable
-    // `child_index` for `IndexRange` matchers. Early-exits via
-    // `can_future_items_match` once no rule could ever match further items.
+    // `child_index` for `IndexRange` matchers. A non-exhaustive (artist)
+    // listing early-exits via `can_future_items_match` once no rule could
+    // ever match further items; an exhaustive one is always walked to the
+    // end, since every child is recorded.
     let child_stream = futures::stream::unfold((cursor, 0usize), move |(mut cursor, index)| {
         let rules = Arc::clone(&rules_pull);
         async move {
-            if !rules
-                .iter()
-                .any(|r| can_future_items_match(&r.matcher, index))
+            if !exhaustive
+                && !rules
+                    .iter()
+                    .any(|r| can_future_items_match(&r.matcher, index))
             {
                 return None;
             }
@@ -236,6 +240,8 @@ fn filtering_stream(
                 };
                 Ok::<_, Error>(match matched_id {
                     Some(Some(id)) => Some((child, ChildFetchOptions::new(pool, id))),
+                    // `fetch: null`, no rule matched, or the matcher failed.
+                    Some(None) | None if exhaustive => Some((child, ChildFetchOptions::stub(pool))),
                     Some(None) | None => None,
                 })
             }
@@ -266,11 +272,20 @@ impl ChildSource<ChildFetchOptions> for FilteringChildSource {}
 /// Filter a `CachedChildSource` through the `child_rules` stored in `pool` at `root_id`.
 /// Compiles all matchers (pre-compiling regexes, sorting All/Any by cost) upfront, then
 /// returns a lazy `CachedChildSource<ChildFetchOptions>` that evaluates rules on demand.
+///
+/// Rules decide which children are *fetched*. Which are *recorded* depends on
+/// the parent (`parent_type`):
+/// - a non-artist parent's listing (an album's tracks, a track's credits and
+///   album) is structural, so every child is yielded; children not to fetch
+///   come with `ChildFetchOptions::stub` and are stored as stubs.
+/// - an artist's listing is its discography, which is opt-in: only children
+///   to fetch are yielded, and paging stops once no rule can match further.
 pub fn filter_children(
     source: Arc<CachedChildSource>,
     pool: Arc<EntryFetchOptionsPool>,
     root_id: OptionsId,
     provider: Arc<dyn FetchProvider>,
+    parent_type: EntryType,
 ) -> Result<CachedChildSource<ChildFetchOptions>, Error> {
     let options = pool.get(root_id);
     let rules = options
@@ -285,7 +300,13 @@ pub fn filter_children(
         .collect::<Result<Vec<_>, Error>>()?;
 
     Ok(CachedChildSource::new(Box::new(FilteringChildSource {
-        stream: filtering_stream(source.owned_cursor(), rules, pool, provider),
+        stream: filtering_stream(
+            source.owned_cursor(),
+            rules,
+            pool,
+            provider,
+            parent_type != EntryType::Artist,
+        ),
     })))
 }
 
@@ -660,7 +681,14 @@ mod tests {
             child_rules: root_rules,
         });
         let pool = Arc::new(pool);
-        let filtered = filter_children(source, pool, root_id, Arc::new(PanicProvider)).unwrap();
+        let filtered = filter_children(
+            source,
+            pool,
+            root_id,
+            Arc::new(PanicProvider),
+            EntryType::Artist,
+        )
+        .unwrap();
         drain(filtered)
     }
 
@@ -735,7 +763,7 @@ mod tests {
         let result = run_filter(children, pool, vec![rule_a, rule_b]).await;
         assert_eq!(result.len(), 1);
         // Should match the first rule (opts_a, which has child_rules) not the second (empty)
-        assert_eq!(result[0].1.get().child_rules.len(), 1);
+        assert_eq!(result[0].1.get().unwrap().child_rules.len(), 1);
     }
 
     #[tokio::test]
@@ -901,7 +929,14 @@ mod tests {
             child_rules: vec![rule],
         });
         let pool = Arc::new(pool);
-        let filtered = filter_children(cached, pool, root_id, Arc::new(PanicProvider)).unwrap();
+        let filtered = filter_children(
+            cached,
+            pool,
+            root_id,
+            Arc::new(PanicProvider),
+            EntryType::Artist,
+        )
+        .unwrap();
         let result = drain(filtered).await;
 
         assert_eq!(result.len(), 100);
@@ -1059,7 +1094,8 @@ mod tests {
                 child_rules: vec![rule],
             });
             let pool = Arc::new(pool);
-            let filtered = filter_children(source, pool, root_id, provider).unwrap();
+            let filtered =
+                filter_children(source, pool, root_id, provider, EntryType::Artist).unwrap();
             drain(filtered).await
         };
 
@@ -1093,7 +1129,8 @@ mod tests {
                 child_rules: vec![rule],
             });
             let pool = Arc::new(pool);
-            let filtered = filter_children(source, pool, root_id, provider).unwrap();
+            let filtered =
+                filter_children(source, pool, root_id, provider, EntryType::Artist).unwrap();
             drain(filtered).await
         };
 
@@ -1171,7 +1208,7 @@ mod tests {
             child_rules: vec![rule],
         });
         let pool = Arc::new(pool);
-        let filtered = filter_children(source, pool, root_id, provider).unwrap();
+        let filtered = filter_children(source, pool, root_id, provider, EntryType::Artist).unwrap();
         let result = drain(filtered).await;
 
         // Source only yields tracks → ChildrenSatisfy(Album, min=1) can never be satisfied.
@@ -1205,7 +1242,7 @@ mod tests {
             child_rules: vec![rule],
         });
         let pool = Arc::new(pool);
-        let filtered = filter_children(source, pool, root_id, provider).unwrap();
+        let filtered = filter_children(source, pool, root_id, provider, EntryType::Artist).unwrap();
         let result = drain(filtered).await;
 
         // All 5 children are tracks → ChildrenSatisfy(Track, min=1) passes.
@@ -1278,8 +1315,14 @@ mod tests {
             }],
         });
         let source = Arc::new(CachedChildSource::from_children(children));
-        let filtered =
-            filter_children(source, Arc::new(pool), root_id, Arc::new(FlakyProvider)).unwrap();
+        let filtered = filter_children(
+            source,
+            Arc::new(pool),
+            root_id,
+            Arc::new(FlakyProvider),
+            EntryType::Artist,
+        )
+        .unwrap();
 
         let mut names: Vec<String> = drain(filtered)
             .await
@@ -1312,5 +1355,67 @@ mod tests {
         let result = run_filter(vec![short, vod], pool, vec![rule]).await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0.name.as_deref(), Some("short"));
+    }
+
+    /// A non-artist listing is structural: every child is yielded, and the
+    /// ones not to fetch (`fetch: null`, no rule matched, matcher failed) come
+    /// as stubs. Paging doesn't stop early.
+    #[tokio::test]
+    async fn non_artist_listing_yields_every_child() {
+        let children = vec![
+            make_child(EntryType::Track, "first", "youtube"),
+            make_child(EntryType::Artist, "unmatched", "youtube"),
+            make_child(EntryType::Track, "deleted", "youtube"),
+            make_child(EntryType::Track, "past_index_range", "youtube"),
+        ];
+        let mut pool = EntryFetchOptionsPool::default();
+        let options_id = Some(pool.insert(EntryFetchOptions::default()));
+        let root_id = pool.insert(EntryFetchOptions {
+            child_rules: vec![
+                // Fetch only the first track; everything else matches nothing.
+                ChildRule {
+                    matcher: ChildMatcherExpr::All(vec![
+                        ChildMatcherExpr::Matcher(ChildMatcher::Relation(
+                            RelationMatcher::IndexRange {
+                                min: None,
+                                max: Some(1),
+                            },
+                        )),
+                        ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                            EntryDataMatcher::DurationRange {
+                                min: None,
+                                max: Some(3_600_000),
+                            },
+                        )),
+                    ]),
+                    options_id,
+                },
+            ],
+        });
+        let source = Arc::new(CachedChildSource::from_children(children));
+        let filtered = filter_children(
+            source,
+            Arc::new(pool),
+            root_id,
+            Arc::new(FlakyProvider),
+            EntryType::Release,
+        )
+        .unwrap();
+
+        let mut got: Vec<(String, bool)> = drain(filtered)
+            .await
+            .into_iter()
+            .map(|(c, o)| (c.name.unwrap(), o.id.is_some()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("deleted".to_string(), false),
+                ("first".to_string(), true),
+                ("past_index_range".to_string(), false),
+                ("unmatched".to_string(), false),
+            ]
+        );
     }
 }
