@@ -3553,4 +3553,37 @@ mod tests {
         }
         std::fs::remove_dir_all(dir).ok();
     }
+
+    /// `config/csv.rhai` quotes exactly the fields that need it.
+    #[tokio::test]
+    async fn csv_module_quotes_fields() {
+        let dir = std::env::temp_dir().join(format!("csv-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/config/csv.rhai"),
+            dir.join("csv.rhai"),
+        )
+        .unwrap();
+        let path = dir.join("t.rhai");
+        std::fs::write(
+            &path,
+            r#"fn row(unused) {
+                import "csv" as csv;
+                csv::row(["plain", (), 1, 0.5, "a,b", "say \"hi\"", "two\nlines"])
+            }"#,
+        )
+        .unwrap();
+        let ctx = load_script(path.to_str().unwrap(), None, None, None)
+            .await
+            .unwrap();
+        let row: String = ctx
+            .engine
+            .call_fn(&mut ctx.base_scope.clone(), &ctx.ast, "row", ((),))
+            .unwrap();
+        assert_eq!(
+            row,
+            "plain,,1,0.5,\"a,b\",\"say \"\"hi\"\"\",\"two\nlines\""
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

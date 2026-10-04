@@ -1,8 +1,8 @@
 # Plan: CSV diagnostics move into the match script
 
-Status: implemented (2026-10-04). Deviation: the CSV helpers live in
-`match.learned.rhai` itself, not a `csv.rhai` module, so `decide` doesn't go
-through the module resolver on every pair.
+Status: implemented (2026-10-04). The `csv.rhai` import inside `decide` is a
+cached-module lookup (path build + uncontended read lock); `init` imports it
+first so the module is compiled before the scoring threads start.
 
 ## Why
 

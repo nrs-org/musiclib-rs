@@ -523,7 +523,8 @@ There is no host CSV output: a script that wants one writes it through a
 shared file handle (below). `config/match.learned.rhai` does, when
 `MUSICLIB_MATCH_CSV=<path>` is set: one row per scored pair with its final
 verdict and the model's outputs, written from `decide` for DISTINCT pairs and
-from `refine` for the rest.
+from `refine` for the rest. Quoting is the `config/csv.rhai` module
+(`csv::row(values)`); keep it next to `match.rhai`.
 
 `init()` returns an arbitrary **context object** (`ctx`). The host holds it for
 the whole run and passes it back as the first argument of every other hook. Use

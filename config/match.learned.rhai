@@ -65,8 +65,9 @@ fn init() {
     let csv_path = env_var("MUSICLIB_MATCH_CSV");
     if csv_path != "" {
         try {
+            import "csv" as csv;   // also caches the module before decide() runs
             ctx.csv = file_create(csv_path);
-            ctx.csv.write_line(csv_row(csv_header()));
+            ctx.csv.write_line(csv::row(csv_header()));
             print("match.learned.rhai: writing one CSV row per scored pair to " + csv_path);
         } catch (err) {
             print("match.learned.rhai: no CSV: " + err);
@@ -334,6 +335,7 @@ fn refine(ctx, items) {
 // pairs (in parallel) and from refine() for the rest, with the final verdict.
 // Rows follow the scoring threads, not pair order. Pairs the host skips before
 // scoring (already linked, marked different, dedup barrier) have no row.
+// Quoting is config/csv.rhai (keep it next to this script).
 
 fn csv_header() {
     [
@@ -345,8 +347,9 @@ fn csv_header() {
 }
 
 fn emit_row(ctx, a, b, v) {
+    import "csv" as csv;
     let d = if "diag" in v { v.diag } else { #{} };
-    ctx.csv.write_line(csv_row([
+    ctx.csv.write_line(csv::row([
         v.verdict, v.kind, v.confidence, v.reason,
         if "origin" in v { v.origin } else { "heuristic" }, v.model_version,
         if "metadata" in v { to_json(v.metadata) } else { () },
@@ -360,20 +363,6 @@ fn csv_sources(e) {
     let parts = [];
     for p in e.pairs { parts.push(p.source + ":" + p.identifier); }
     join(parts, " ")
-}
-
-// RFC 4180 fields: quoted when they hold a comma, quote or line break.
-fn csv_row(values) {
-    let parts = [];
-    for v in values {
-        let s = if type_of(v) == "()" { "" } else { v.to_string() };
-        if s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r") {
-            s.replace("\"", "\"\"");
-            s = "\"" + s + "\"";
-        }
-        parts.push(s);
-    }
-    join(parts, ",")
 }
 
 // Semantic blocking: the cache's model id. Vectors from any other id are
