@@ -862,6 +862,16 @@ fn build_soft_identity_projection(
             })
     });
 
+    // Cannot-link edges indexed by the DSU root of each endpoint, as
+    // `(other endpoint, edge)`, merged small-into-large on every union, so a
+    // same-edge only scans its smaller side's blockers instead of all of
+    // `different` (O(same × different) was minutes on a real library).
+    let mut blockers: HashMap<i64, Vec<(i64, (i64, i64))>> = HashMap::new();
+    for &(a, b) in &different {
+        blockers.entry(dsu.find(a)).or_default().push((b, (a, b)));
+        blockers.entry(dsu.find(b)).or_default().push((a, (a, b)));
+    }
+
     let mut conflicts = Vec::new();
     for relation in same {
         let edge = ordered_pair(relation.entry_a, relation.entry_b);
@@ -870,12 +880,21 @@ fn build_soft_identity_projection(
         if left_root == right_root {
             continue;
         }
-        let blocker = different.iter().copied().find(|(a, b)| {
-            let a_root = dsu.find(*a);
-            let b_root = dsu.find(*b);
-            (a_root == left_root && b_root == right_root)
-                || (a_root == right_root && b_root == left_root)
-        });
+        let side_len = |root| blockers.get(&root).map_or(0, Vec::len);
+        let (scan_root, target_root) = if side_len(left_root) <= side_len(right_root) {
+            (left_root, right_root)
+        } else {
+            (right_root, left_root)
+        };
+        // Every blocking edge appears on both sides, so `min` over either
+        // side is the first blocker in sorted `different` order.
+        let blocker = blockers
+            .get(&scan_root)
+            .into_iter()
+            .flatten()
+            .filter(|(other, _)| dsu.find(*other) == target_root)
+            .map(|&(_, different_edge)| different_edge)
+            .min();
         if let Some(different_edge) = blocker {
             conflicts.push(SoftIdentityConflict {
                 same_edge: edge,
@@ -883,6 +902,19 @@ fn build_soft_identity_projection(
             });
         } else {
             dsu.union(edge.0, edge.1);
+            let root = dsu.find(edge.0);
+            let child = if root == left_root {
+                right_root
+            } else {
+                left_root
+            };
+            if let Some(mut moved) = blockers.remove(&child) {
+                let kept = blockers.entry(root).or_default();
+                if kept.len() < moved.len() {
+                    std::mem::swap(kept, &mut moved);
+                }
+                kept.extend(moved);
+            }
         }
     }
 
