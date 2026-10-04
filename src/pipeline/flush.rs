@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::musicdb::MusicDb;
+use crate::musicdb::{MusicDb, PROVIDER_ORIGIN};
 use crate::providers::FetchProvider;
 use crate::providers::types::EntryType;
 use tracing::{debug, info, warn};
@@ -517,7 +517,7 @@ pub async fn flush(
             derived_id,
             kind,
             confidence_for_original_relation(kind),
-            "provider",
+            PROVIDER_ORIGIN,
             Some(&extra),
         )
         .await?;

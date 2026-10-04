@@ -315,6 +315,9 @@ pub struct MusicDb {
 }
 
 pub const SAME_IDENTITY: &str = "same_identity";
+/// `entry_relation.origin` of relations a provider asserted at import time
+/// (see `pipeline::flush`).
+pub const PROVIDER_ORIGIN: &str = "provider";
 pub const DIFFERENT_IDENTITY: &str = "different_identity";
 
 // Primitive relation predicates from the dedup-v2 ontology (see
@@ -824,6 +827,15 @@ fn origin_priority(origin: &str) -> u8 {
     }
 }
 
+/// Rows that keep two entries apart in the identity projection: an explicit
+/// `different_identity`, or a provider-asserted edition relation (cover /
+/// remix / arrangement from MusicBrainz) — a cover is by definition a
+/// different recording, so no soft `same_identity` may join its two sides.
+fn is_cannot_link(relation: &RelationRow) -> bool {
+    relation.kind == DIFFERENT_IDENTITY
+        || (relation.origin == PROVIDER_ORIGIN && EDITION_KINDS.contains(&relation.kind.as_str()))
+}
+
 fn build_soft_identity_projection(
     entry_ids: impl IntoIterator<Item = i64>,
     relations: impl IntoIterator<Item = RelationRow>,
@@ -835,7 +847,7 @@ fn build_soft_identity_projection(
     for relation in relations.into_iter().filter(|relation| relation.enabled) {
         if same_kinds.contains(&relation.kind.as_str()) {
             same.push(relation);
-        } else if relation.kind == DIFFERENT_IDENTITY {
+        } else if is_cannot_link(&relation) {
             different.push(ordered_pair(relation.entry_a, relation.entry_b));
         }
     }
@@ -2161,11 +2173,23 @@ impl MusicDb {
     }
 
     /// Project enabled soft-identity assertions into deterministic virtual
-    /// components. Cannot-link assertions win; conflicting same-identity edges
-    /// are reported rather than silently joining the components.
+    /// components. Cannot-link assertions (`different_identity` and provider
+    /// edition relations, see `is_cannot_link`) win; conflicting same-identity
+    /// edges are reported rather than silently joining the components.
     pub async fn soft_identity_projection(&self) -> Result<SoftIdentityProjection, Error> {
         self.soft_identity_projection_with_kinds(&[SAME_IDENTITY])
             .await
+    }
+
+    /// Every `EDITION_KINDS` relation row, enabled or tombstoned.
+    pub async fn edition_relations(&self) -> Result<Vec<RelationRow>, Error> {
+        Ok(entry_relation::Entity::find()
+            .filter(entry_relation::Column::Kind.is_in(EDITION_KINDS.iter().copied()))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect())
     }
 
     /// Like `soft_identity_projection`, but also treats softmatch's own
@@ -2193,8 +2217,13 @@ impl MusicDb {
         same_kinds: &[&str],
     ) -> Result<SoftIdentityProjection, Error> {
         let entries = entry::Entity::find().all(&self.db).await?;
-        let mut kind_filter =
-            Condition::any().add(entry_relation::Column::Kind.eq(DIFFERENT_IDENTITY));
+        let mut kind_filter = Condition::any()
+            .add(entry_relation::Column::Kind.eq(DIFFERENT_IDENTITY))
+            .add(
+                Condition::all()
+                    .add(entry_relation::Column::Origin.eq(PROVIDER_ORIGIN))
+                    .add(entry_relation::Column::Kind.is_in(EDITION_KINDS.iter().copied())),
+            );
         for kind in same_kinds {
             kind_filter = kind_filter.add(entry_relation::Column::Kind.eq(*kind));
         }
@@ -3288,6 +3317,33 @@ mod tests {
         assert_eq!(projection.conflicts.len(), 1);
         assert_eq!(projection.conflicts[0].same_edge, (2, 3));
         assert_eq!(projection.conflicts[0].different_edge, (1, 3));
+    }
+
+    #[tokio::test]
+    async fn provider_edition_relation_is_cannot_link() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2, 3] {
+            insert_entry(&mdb.db, id).await;
+        }
+        mdb.upsert_relation(1, 2, "cover", 1.0, PROVIDER_ORIGIN, None)
+            .await
+            .unwrap();
+        // A heuristic edition relation is a candidate, not a cannot-link.
+        mdb.upsert_relation(2, 3, DERIVED_FROM, 0.9, "heuristic", None)
+            .await
+            .unwrap();
+        // Joining the cover's two sides through 3 must lose to the cover.
+        mdb.upsert_relation(1, 3, SAME_IDENTITY, 0.9, "model", None)
+            .await
+            .unwrap();
+        mdb.upsert_relation(2, 3, SAME_IDENTITY, 0.9, "model", None)
+            .await
+            .unwrap();
+        let projection = mdb.soft_identity_projection().await.unwrap();
+        assert!(projection.are_different(1, 2));
+        assert!(!projection.are_same(1, 2));
+        assert_eq!(projection.conflicts.len(), 1);
+        assert_eq!(projection.conflicts[0].different_edge, (1, 2));
     }
 
     #[tokio::test]

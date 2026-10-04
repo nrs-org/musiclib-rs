@@ -19,7 +19,8 @@ use crate::pipeline::embedding::{
 
 use crate::http::{HeaderName, HeaderValue, HttpClient, Method, Request as HttpRequest};
 use crate::musicdb::{
-    AliasRow, ChildRow, ContribRow, IdentityJudgment, MusicDb, NewDedupFeedback, SourceRow,
+    AliasRow, ChildRow, ContribRow, IdentityJudgment, MusicDb, NewDedupFeedback, PROVIDER_ORIGIN,
+    RelationRow, SoftIdentityProjection, SourceRow,
 };
 use crate::pipeline::dedup::DedupConfig;
 use crate::providers::FetchProvider;
@@ -327,6 +328,7 @@ fn build_rhai_engine(
     embed_cache: Option<Arc<EmbeddingCache>>,
     http_client: Option<Arc<dyn HttpClient>>,
     facts: Option<Arc<PairFactsSource>>,
+    known: Option<Arc<KnownRelations>>,
 ) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(0, 0); // no limit on expression or function-body nesting depth
@@ -531,6 +533,16 @@ fn build_rhai_engine(
     } else {
         engine.register_fn("semantic_sim", |_a: i64, _b: i64| -> f64 { 0.0 });
     }
+
+    // relation_facts(a_entry_id, b_entry_id) → map of what the provider graph
+    // already implies about the pair (see `KnownRelations::facts`). Empty
+    // lists when this run has no relation snapshot.
+    engine.register_fn("relation_facts", move |a: i64, b: i64| -> RhaiMap {
+        match &known {
+            Some(k) => k.facts(a, b),
+            None => KnownRelations::default().facts(a, b),
+        }
+    });
 
     // ── Regex primitives ──────────────────────────────────────────────────────
     // `compile_re(pattern)` — compile once, store in a variable, reuse in decide().
@@ -2404,6 +2416,7 @@ async fn load_script(
     embed_cache: Option<Arc<EmbeddingCache>>,
     http_client: Option<Arc<dyn HttpClient>>,
     facts: Option<Arc<PairFactsSource>>,
+    known: Option<Arc<KnownRelations>>,
 ) -> anyhow::Result<ScriptCtx<'static>> {
     let script = tokio::fs::read_to_string(path)
         .await
@@ -2413,7 +2426,14 @@ async fn load_script(
         .unwrap_or_else(|| Path::new("."))
         .to_owned();
     let regex_cache: RegexCache = Arc::new(Mutex::new(HashMap::new()));
-    let engine = build_rhai_engine(&script_dir, regex_cache, embed_cache, http_client, facts);
+    let engine = build_rhai_engine(
+        &script_dir,
+        regex_cache,
+        embed_cache,
+        http_client,
+        facts,
+        known,
+    );
     let ast = engine
         .compile(&script)
         .map_err(|e| anyhow::anyhow!("Rhai compile error in {path}: {e}"))?;
@@ -2448,6 +2468,116 @@ async fn pair_facts_source(db: &MusicDb) -> Option<Arc<PairFactsSource>> {
     }
 }
 
+/// What the library already says about entry pairs, read once per run so
+/// softmatch neither re-proposes nor contradicts it: the soft identity
+/// projection, which pairs an edition relation already links, and the
+/// provider-asserted original → derived graph (MusicBrainz covers, remixes,
+/// arrangements) that scripts read through `relation_facts(a, b)`.
+#[derive(Default)]
+pub(crate) struct KnownRelations {
+    identity: SoftIdentityProjection,
+    /// Identity-component pairs joined by an enabled edition relation.
+    related: HashSet<(i64, i64)>,
+    /// Exact entry pairs with a tombstoned edition relation. Rescoring them
+    /// would re-enable a rejected row (`upsert_relation` sets `enabled`).
+    rejected: HashSet<(i64, i64)>,
+    /// Provider graph over identity components: derived → its originals.
+    originals: HashMap<i64, BTreeSet<i64>>,
+    /// The inverse: original → its derivatives.
+    derivatives: HashMap<i64, BTreeSet<i64>>,
+}
+
+impl KnownRelations {
+    async fn load(db: &MusicDb) -> anyhow::Result<Self> {
+        let identity = db.soft_identity_projection().await?;
+        if !identity.conflicts.is_empty() {
+            warn!(
+                conflicts = identity.conflicts.len(),
+                "soft identity graph contains conflicting assertions; cannot-link edges won"
+            );
+        }
+        let rows = db.edition_relations().await?;
+        Ok(Self::build(identity, rows))
+    }
+
+    fn build(identity: SoftIdentityProjection, rows: Vec<RelationRow>) -> Self {
+        let mut known = Self {
+            identity,
+            ..Self::default()
+        };
+        for row in rows {
+            if !row.enabled {
+                known
+                    .rejected
+                    .insert(candidate_pair(row.entry_a, row.entry_b));
+                continue;
+            }
+            let (a, b) = (known.canon(row.entry_a), known.canon(row.entry_b));
+            if a == b {
+                continue;
+            }
+            known.related.insert(candidate_pair(a, b));
+            if row.origin != PROVIDER_ORIGIN {
+                continue;
+            }
+            let extra: Option<serde_json::Value> = row
+                .extra
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok());
+            let id = |key: &str| extra.as_ref()?.get(key)?.as_i64();
+            let (Some(derived), Some(original)) = (id("derived_entry"), id("source_entry")) else {
+                continue;
+            };
+            let (derived, original) = (known.canon(derived), known.canon(original));
+            if derived == original {
+                continue;
+            }
+            known.originals.entry(derived).or_default().insert(original);
+            known
+                .derivatives
+                .entry(original)
+                .or_default()
+                .insert(derived);
+        }
+        known
+    }
+
+    fn canon(&self, entry_id: i64) -> i64 {
+        self.identity.component_of(entry_id).unwrap_or(entry_id)
+    }
+
+    /// An edition relation already links the pair's identities, or the user
+    /// tombstoned one on this exact pair: nothing for softmatch to add.
+    fn already_related(&self, a: i64, b: i64) -> bool {
+        self.related
+            .contains(&candidate_pair(self.canon(a), self.canon(b)))
+            || self.rejected.contains(&candidate_pair(a, b))
+    }
+
+    /// Provider-graph facts for a pair, as identity-component ids:
+    /// `a_originals`/`b_originals` (what each side is a cover/remix/… of),
+    /// `a_derivatives`/`b_derivatives` (the reverse), `shared_originals`
+    /// (both derive from it: the pair are siblings) and
+    /// `shared_derivatives` (both are sources of it, e.g. a medley).
+    fn facts(&self, a: i64, b: i64) -> RhaiMap {
+        let empty = BTreeSet::new();
+        let (a, b) = (self.canon(a), self.canon(b));
+        let get = |m: &HashMap<i64, BTreeSet<i64>>, id: i64| m.get(&id).unwrap_or(&empty).clone();
+        let list = |set: &BTreeSet<i64>| ids(&set.iter().copied().collect::<Vec<_>>());
+        let (a_orig, b_orig) = (get(&self.originals, a), get(&self.originals, b));
+        let (a_der, b_der) = (get(&self.derivatives, a), get(&self.derivatives, b));
+        let shared = |x: &BTreeSet<i64>, y: &BTreeSet<i64>| x.intersection(y).copied().collect();
+        let mut out = RhaiMap::new();
+        out.insert("a_originals".into(), list(&a_orig));
+        out.insert("b_originals".into(), list(&b_orig));
+        out.insert("a_derivatives".into(), list(&a_der));
+        out.insert("b_derivatives".into(), list(&b_der));
+        out.insert("shared_originals".into(), list(&shared(&a_orig, &b_orig)));
+        out.insert("shared_derivatives".into(), list(&shared(&a_der, &b_der)));
+        out
+    }
+}
+
 /// Score candidate pairs with cascade: after each merge, update the winner's
 /// `EntryInfo` in memory, re-embed it if its title changed, and seed new KNN
 /// candidates for it into the work queue. This converges to a fixed point within
@@ -2468,18 +2598,13 @@ async fn score_candidates(
     entries: HashMap<i64, EntryInfo>,
     focus: Option<&HashSet<i64>>,
     ctx: &ScriptCtx<'_>,
+    known: &KnownRelations,
     barrier: &HashMap<Pair, crate::pipeline::dedup::AnchorId>,
     config: &SoftMatchConfig,
     embed_cache: Option<&EmbeddingCache>,
     precomputed: Option<CandidateChannels>,
 ) -> anyhow::Result<HashMap<String, [usize; 4]>> {
-    let soft_identity = db.soft_identity_projection().await?;
-    if !soft_identity.conflicts.is_empty() {
-        warn!(
-            conflicts = soft_identity.conflicts.len(),
-            "soft identity graph contains conflicting assertions; cannot-link edges won"
-        );
-    }
+    let soft_identity = &known.identity;
     let mut stats: HashMap<String, [usize; 4]> = HashMap::new();
 
     // `queued` tracks every pair ever added to `work_queue` or already decided,
@@ -2562,7 +2687,7 @@ async fn score_candidates(
         Some(e)
     };
     let mut to_score: Vec<(Arc<EntryInfo>, Arc<EntryInfo>, Option<ChannelMask>)> = Vec::new();
-    let (mut soft_same, mut soft_different, mut barred) = (0usize, 0usize, 0usize);
+    let (mut soft_same, mut related, mut soft_different, mut barred) = (0usize, 0, 0, 0);
     while let Some((id_a, id_b)) = work_queue.pop_front() {
         let (ea, eb) = match (share(id_a), share(id_b)) {
             (Some(a), Some(b)) => (a, b),
@@ -2571,6 +2696,10 @@ async fn score_candidates(
 
         if soft_identity.are_same(id_a, id_b) {
             soft_same += 1;
+            continue;
+        }
+        if known.already_related(id_a, id_b) {
+            related += 1;
             continue;
         }
         if soft_identity.are_different(id_a, id_b) {
@@ -2587,8 +2716,9 @@ async fn score_candidates(
     }
     info!(
         "Skipped {} candidate pair(s) before scoring: {soft_same} already linked, \
-         {soft_different} marked different, {barred} behind a dedup barrier",
-        soft_same + soft_different + barred
+         {related} already related, {soft_different} marked different, \
+         {barred} behind a dedup barrier",
+        soft_same + related + soft_different + barred
     );
 
     let total_scored = to_score.len();
@@ -2796,11 +2926,13 @@ pub async fn match_db(
     info!("Embedding phase in {t_embed:.2?}");
 
     let t3 = Instant::now();
+    let known = Arc::new(KnownRelations::load(db).await?);
     let ctx = load_script(
         &config.script_path,
         embed_cache.clone(),
         config.http_client.clone(),
         facts,
+        Some(Arc::clone(&known)),
     )
     .await?;
     let t_script = t3.elapsed();
@@ -2812,6 +2944,7 @@ pub async fn match_db(
         entries,
         None,
         &ctx,
+        &known,
         &barrier,
         config,
         embed_cache.as_deref(),
@@ -2873,11 +3006,13 @@ pub async fn match_new_entries(
     let facts = pair_facts_source(db).await;
     let embed_cache: Option<Arc<EmbeddingCache>> =
         open_embed_cache(config, &entries_slice, facts.clone(), false).await;
+    let known = Arc::new(KnownRelations::load(db).await?);
     let ctx = load_script(
         &config.script_path,
         embed_cache.clone(),
         config.http_client.clone(),
         facts,
+        Some(Arc::clone(&known)),
     )
     .await?;
     let (candidate_channels, entries) = generate_focused_candidates(
@@ -2896,6 +3031,7 @@ pub async fn match_new_entries(
         entries,
         Some(new_entry_ids),
         &ctx,
+        &known,
         &barrier,
         config,
         embed_cache.as_deref(),
@@ -3001,6 +3137,7 @@ async fn open_embed_cache(
         None,
         None,
         facts,
+        None,
     );
     let tmp_ast = match tmp_engine.compile(&embed_script) {
         Ok(a) => a,
@@ -3165,6 +3302,71 @@ mod tests {
         assert!(!channels.contains_key(&(unrelated_id.min(new_id), unrelated_id.max(new_id))));
     }
 
+    /// Known relations: provider covers and tombstoned rows are never
+    /// rescored (at identity-component level), and two covers of one original
+    /// come out of `relation_facts` as siblings.
+    #[tokio::test]
+    async fn known_relations_skip_related_pairs_and_expose_siblings() {
+        use crate::musicdb::{DERIVED_FROM, PROVIDER_ORIGIN, SAME_IDENTITY};
+
+        let db = MusicDb::new("sqlite::memory:").await.unwrap();
+        let original = insert_track(&db, "musicbrainz", "o", "Song", 200_000).await;
+        let cover_1 = insert_track(&db, "musicbrainz", "c1", "Song", 210_000).await;
+        let cover_1_video = insert_track(&db, "youtube", "c1v", "Song (Cover)", 211_000).await;
+        let cover_2 = insert_track(&db, "musicbrainz", "c2", "Song", 190_000).await;
+        let other = insert_track(&db, "youtube", "x", "Song", 150_000).await;
+        for cover in [cover_1, cover_2] {
+            let extra = format!(r#"{{"derived_entry":{cover},"source_entry":{original}}}"#);
+            db.upsert_relation(original, cover, "cover", 1.0, PROVIDER_ORIGIN, Some(&extra))
+                .await
+                .unwrap();
+        }
+        db.upsert_relation(cover_1, cover_1_video, SAME_IDENTITY, 0.9, "model", None)
+            .await
+            .unwrap();
+        db.upsert_relation(other, original, DERIVED_FROM, 0.7, "heuristic", None)
+            .await
+            .unwrap();
+        db.set_relation_enabled(other, original, DERIVED_FROM, false)
+            .await
+            .unwrap();
+
+        let known = Arc::new(KnownRelations::load(&db).await.unwrap());
+        assert!(known.already_related(original, cover_1));
+        assert!(
+            known.already_related(original, cover_1_video),
+            "through identity"
+        );
+        assert!(
+            known.already_related(other, original),
+            "tombstoned stays rejected"
+        );
+        assert!(!known.already_related(cover_1, cover_2));
+        assert!(known.identity.are_different(original, cover_2));
+
+        let engine = build_rhai_engine(
+            Path::new("."),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            None,
+            None,
+            Some(known),
+        );
+        let shared: rhai::Array = engine
+            .eval(&format!(
+                "relation_facts({cover_1_video}, {cover_2}).shared_originals"
+            ))
+            .unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].as_int().unwrap(), original);
+        let none: rhai::Array = engine
+            .eval(&format!(
+                "relation_facts({cover_1}, {other}).shared_originals"
+            ))
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
     /// A library that predates the block-key index (or one where the index
     /// somehow drifted) must be recoverable by `backfill_block_key_index`
     /// without the caller doing anything else.
@@ -3242,7 +3444,14 @@ mod tests {
         let script = std::fs::read_to_string(path).expect("read example script");
         let dir = Path::new(path).parent().unwrap();
 
-        let engine = build_rhai_engine(dir, Arc::new(Mutex::new(HashMap::new())), None, None, None);
+        let engine = build_rhai_engine(
+            dir,
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            None,
+            None,
+            None,
+        );
         let ast = engine.compile(&script).expect("example script compiles");
 
         let mut scope = Scope::new();
@@ -3276,6 +3485,7 @@ mod tests {
         let engine = build_rhai_engine(
             Path::new("."),
             Arc::new(Mutex::new(HashMap::new())),
+            None,
             None,
             None,
             None,
@@ -3327,6 +3537,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             None,
             None, // no HttpClient configured
+            None,
             None,
         );
         let script = r#"
@@ -3380,7 +3591,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let ctx = load_script(path.to_str().unwrap(), None, None, None)
+        let ctx = load_script(path.to_str().unwrap(), None, None, None, None)
             .await
             .unwrap();
         let pair = |t: &str| {
@@ -3439,7 +3650,8 @@ mod tests {
             fn handle(id) { import "jev" as jev; jev::extract_handle(id) }
             fn verdict(args) {
                 import "jev" as jev;
-                let answers = #{ identity: #{ "type": "choice", choice: args[0], confidence: 0.92 } };
+                let conf = if args.len() > 3 { parse_float(args[3]) } else { 0.97 };
+                let answers = #{ identity: #{ "type": "choice", choice: args[0], confidence: conf } };
                 if args.len() > 1 {
                     answers.kind = #{ "type": "choice", choice: args[1] };
                     answers.direction = #{ "type": "choice", choice: args[2] };
@@ -3454,7 +3666,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let ctx = load_script(path.to_str().unwrap(), None, None, None)
+        let ctx = load_script(path.to_str().unwrap(), None, None, None, None)
             .await
             .unwrap();
         let call = |f: &str, arg: Dynamic| -> Dynamic {
@@ -3496,7 +3708,7 @@ mod tests {
         let merge = verdict(&["same_identity", "not_applicable", "neither"]);
         assert!(
             matches!(&merge.verdict, Verdict::Merge { confidence, reason }
-            if *confidence == 0.92
+            if *confidence == 0.97
                 && reason == "jev-latest v2.1: same_identity (kind=not_applicable, direction=neither)")
         );
         assert_eq!(merge.origin, "jev");
@@ -3507,6 +3719,16 @@ mod tests {
             if kind == "derived_from"
                 && *m == serde_json::json!({"transformation": "cover", "derived_side": "b"}))
         );
+        // Below jev.rhai's min_confidence(), neither answer is acted on.
+        for low in [
+            ["same_identity", "not_applicable", "neither", "0.6"],
+            ["derived", "cover", "a_is_original", "0.6"],
+        ] {
+            assert!(
+                matches!(verdict(&low).verdict, Verdict::Defer { .. }),
+                "{low:?}"
+            );
+        }
         let alt = verdict(&["derived", "alt_version", "neither"]);
         assert!(
             matches!(&alt.verdict, Verdict::Relate { metadata: Some(m), .. }
@@ -3572,7 +3794,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let ctx = load_script(path.to_str().unwrap(), None, None, None)
+        let ctx = load_script(path.to_str().unwrap(), None, None, None, None)
             .await
             .unwrap();
         let row: String = ctx
