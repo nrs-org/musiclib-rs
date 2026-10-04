@@ -54,7 +54,7 @@ struct Args {
     #[arg(long)]
     no_embed: bool,
     /// Embedding vector dimension. Must match the model used in embed().
-    /// [default: 256; use 384 with `inference --features minilm`]
+    /// Both shipped scripts are 256-d.
     #[arg(long, default_value_t = 256)]
     embed_dim: usize,
     /// Number of KNN neighbours per entry for semantic blocking. [default: 20]

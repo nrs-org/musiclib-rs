@@ -10,22 +10,8 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Baseline build is LangID + romaji detection only: no embedding backend, so
-# `embed`/`embed_batch` fail and the host script falls back to its own path.
-default = []
-
-# MiniLM transformer embeddings via candle (CPU). Heavyweight: pulls candle
-# (core/nn/transformers), tokenizers and hf-hub. The only backend behind
-# `embed`/`embed_batch`.
-minilm = [
-    "dep:candle-core",
-    "dep:candle-nn",
-    "dep:candle-transformers",
-    "dep:tokenizers",
-    "dep:hf-hub",
-    "dep:anyhow",
-    "dep:serde_json",
-]
+# The two parts the soft-dedup scripts bind (config/match.learned.rhai).
+default = ["matcher", "typesafe"]
 
 # Learned pair matcher (v17 + rel-v8; docs/plan-v15-runtime.md): LightGBM
 # evaluator, pair-facts features and the jp-music-title-encoder (a
@@ -33,6 +19,7 @@ minilm = [
 # the safetensors). Loads its models from a bundle directory at runtime.
 matcher = [
     "dep:candle-core",
+    "dep:fancy-regex",
     "dep:gemm",
     "dep:rayon",
     "dep:libm",
@@ -63,37 +50,14 @@ typesafe = [
 # provides nixpkgs' `llama-cpp-vulkan`) through a small C shim (build.rs).
 vulkan = ["matcher", "dep:cc", "dep:pkg-config"]
 
-# CPU BLAS backends for candle's float GEMMs (MiniLM) — CPU-only, no CUDA. `mkl`
-# links Intel MKL (Linux/Windows), `accelerate` links Apple's Accelerate (macOS).
-# Both imply `minilm` (they only accelerate the MiniLM matmuls).
-mkl = ["minilm", "candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
-accelerate = [
-    "minilm",
-    "candle-core/accelerate",
-    "candle-nn/accelerate",
-    "candle-transformers/accelerate",
-]
-# Route the LangID int8 FullyConnected layers through MKL's int8 GEMM
-# (cblas_gemm_s8u8s32) instead of the pure-Rust loop. Bit-exact with the Rust
-# path, ~2.5x faster on the batched workload. NOTE: MKL is currently linked via
-# candle's `intel-mkl-src`, so this implies `mkl` (and thus `minilm`/candle).
-# Decoupling it would mean a direct intel-mkl-src dep; not done yet.
-mkl-langid = ["mkl"]
-
 [dependencies]
-fancy-regex = "0.13"
-
-# MiniLM embeddings — CPU-only candle (feature `minilm`; BLAS via `mkl`/`accelerate`).
+# Learned matcher (feature `matcher`): safetensors loading, encoder kernels
+# (same versions candle uses), facts JSON and Python-compatible text handling.
 candle-core = { version = "0.9", optional = true }
-candle-nn = { version = "0.9", optional = true }
-candle-transformers = { version = "0.9", optional = true }
+fancy-regex = { version = "0.13", optional = true }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"], optional = true }
-hf-hub = { version = "0.4", default-features = false, features = ["ureq"], optional = true }
 anyhow = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
-
-# Learned matcher (feature `matcher`): encoder kernels (same versions candle
-# uses), facts JSON and Python-compatible text handling.
 gemm = { version = "0.19", optional = true }
 rayon = { version = "1", optional = true }
 libm = { version = "0.2", optional = true }

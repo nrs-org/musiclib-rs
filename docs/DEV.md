@@ -220,7 +220,7 @@ MUSICLIB_MATCH_CSV=out.csv cargo run --features ffi --release --bin softmatch  #
 | `--apply` | false | Persist RELATE and soft MERGE (`same_identity`) decisions to the DB |
 | `--embed-db` | `<data_dir>/embeddings.db` | SQLite embedding cache (sqlite-vec) |
 | `--no-embed` | false | Disable semantic blocking even if `embed_batch` is defined |
-| `--embed-dim` | `256` | Embedding dimension; must match the model (`384` for MiniLM) |
+| `--embed-dim` | `256` | Embedding dimension; must match the model (both shipped scripts are 256-d) |
 | `--embed-k` | `20` | KNN neighbours per entry |
 | `--embed-threshold` | `0.45` | Min cosine similarity to surface a KNN pair as a candidate |
 | `--embed-max-pages` | `1` | Max KNN pages per entry type; larger values are recall experiments |
@@ -232,8 +232,8 @@ MUSICLIB_MATCH_CSV=out.csv cargo run --features ffi --release --bin softmatch  #
 | `--http-config` | `<config_dir>/http.yaml` | HTTP client config |
 
 The `--features ffi` flag is optional but required to load the native inference
-cdylib (`config/inference/`). Without it the script falls back to the
-dependency-free naive token-hash embedder. See [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
+cdylib (`config/inference/`) that `config/match.learned.rhai` binds. The example
+script needs neither: it uses a dependency-free naive token-hash embedder. See [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
 for the `match.rhai` format.
 
 Candidate retrieval is a union of bounded exact-name, token, character-ngram,

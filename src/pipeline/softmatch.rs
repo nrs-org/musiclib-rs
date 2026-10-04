@@ -117,8 +117,8 @@ pub struct SoftMatchConfig {
     /// `None` disables semantic blocking entirely.
     pub embed_db_path: Option<String>,
     /// Embedding vector dimension — must match the model used in the Rhai `embed()`
-    /// function. Default script's naive fallback is 256; use 384 when the
-    /// inference cdylib is built with `--features minilm`.
+    /// function. The example's naive embedding and the learned matcher's title
+    /// encoder are both 256-d.
     pub embed_dim: usize,
     /// Number of semantic KNN neighbours per entry and type. Default: 20.
     pub embed_k: usize,
@@ -3235,7 +3235,7 @@ mod tests {
     }
 
     /// The shipped example script must compile under the real engine and run its
-    /// dependency-free naive embedding (no `ffi` feature, no inference plugin).
+    /// dependency-free naive embedding.
     #[test]
     fn example_script_compiles_and_embeds() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config/match.example.rhai");
@@ -3246,11 +3246,8 @@ mod tests {
         let ast = engine.compile(&script).expect("example script compiles");
 
         let mut scope = Scope::new();
-        // init() returns the context threaded into embed_batch; with no ffi here
-        // it's the unit context, exercising the naive fallback path.
-        let user_ctx: Dynamic = engine
-            .call_fn(&mut scope, &ast, "init", ())
-            .unwrap_or(Dynamic::UNIT);
+        // The example defines no init(), so its context is unit.
+        let user_ctx = Dynamic::UNIT;
         let texts: rhai::Array = vec![Dynamic::from("hello world"), Dynamic::from("hello world")];
         let rows: rhai::Array = engine
             .call_fn(&mut scope, &ast, "embed_batch", (user_ctx, texts))

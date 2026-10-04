@@ -713,15 +713,16 @@ file**, not the process working directory.
 #### `config/inference/` cdylib
 
 The workspace member `config/inference` (package name `inference`) builds a
-`libinference.so` cdylib providing romaji detection and LangID; real semantic
-embeddings (MiniLM, 384-d) need `--features minilm`:
+`libinference.so` cdylib with the learned pair matcher (`matcher` feature) and
+the TypeSafe client (`typesafe` feature), both on by default. `vulkan` adds the
+GPU title encoder:
 
 ```bash
 cargo build -p inference --release --lib
 # artifact: target/release/libinference.so
 ```
 
-`config/match.example.rhai`'s `open_inference()` function tries three locations
+`config/match.learned.rhai`'s `open_matcher()` tries three locations
 in order: a `libinference.so` symlink next to the script (e.g.
 `~/.config/musiclib-rs/libinference.so → <repo>/target/release/libinference.so`),
 the repo build tree (`../target/release/libinference.so`), then the system loader
@@ -754,10 +755,10 @@ with their key order kept (Rhai maps would sort it, so `jev.rhai` builds
 requests as JSON text). `config/jev.rhai` (a Rhai module) holds the evidence
 view and the answer mapping. Keep `jev.rhai` and `jev/` next to `match.rhai`.
 Transport, retry, concurrency and the response cache are the inference
-cdylib's `inference_typesafe_*` API, so build it with the `typesafe` feature:
+cdylib's `inference_typesafe_*` API (the `typesafe` feature, on by default):
 
 ```bash
-cargo build -p inference --release --lib --features matcher,typesafe
+cargo build -p inference --release --lib
 ```
 
 | Env var | Default | Notes |

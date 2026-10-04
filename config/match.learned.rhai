@@ -6,7 +6,7 @@
 // heads become relate() metadata. Edit the policy here, not in Rust.
 //
 // Setup:
-//   cargo build -p inference --release --lib --features matcher   # or `vulkan`: GPU blocking vectors
+//   cargo build -p inference --release --lib   # `--features vulkan`: GPU blocking vectors
 //   (cd train/learned-matcher && uv run python bundle.py)   # → data/learned-matcher/bundle/v17
 //   cargo build --release --features ffi
 //   MUSICLIB_MATCHER_BUNDLE=$PWD/data/learned-matcher/bundle/v17 \
@@ -27,7 +27,7 @@
 //   DISTINCT unrelated, or siblings (two versions of one song: no direct edge)
 //
 // Jev (config/jev.rhai, keep it next to this script): with TYPESAFE_API_KEY set
-// and libinference.so built with `--features matcher,typesafe`, refine() sends
+// and libinference.so built with the `typesafe` feature (on by default), refine() sends
 // every DEFER pair to TypeSafe's Jev and uses its answer instead. Answers are
 // cached in <cache_dir>/typesafe.db; init() logs whether Jev is on and why not.
 //

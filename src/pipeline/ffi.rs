@@ -8,8 +8,8 @@
 //! ```rhai
 //! let lib = ffi::open("../target/release/libinference.so");
 //! // bind a symbol: ffi::open → lib.func(name, ret_type, [arg_types])
-//! let detect = lib.func("inference_detect_language", "str", ["str"]);
-//! let lang   = detect.invoke(["にちか"]);     // strings in and out, nothing to free
+//! let error = lib.func("inference_matcher_last_error", "str", []);
+//! let msg   = error.invoke([]);     // strings come back as Rhai strings
 //! ```
 //!
 //! ## Memory
@@ -1190,16 +1190,20 @@ mod tests {
 
         let engine = engine();
 
-        // detect_language: str -> str (static return, no free).
+        // Opening a missing bundle returns NULL and leaves a message in
+        // last_error: str -> ptr, then () -> str (static return, no free).
         let script = format!(
             r#"
             let l = ffi::open("{lib}");
-            let f = l.func("inference_detect_language", "str", ["str"]);
-            f.invoke(["これは日本語のテストです"])
+            let open = l.func("inference_matcher_open", "ptr", ["str"]);
+            let last_error = l.func("inference_matcher_last_error", "str", []);
+            let h = open.invoke(["/nonexistent/matcher-bundle"]);
+            if !h.is_null() {{ throw "opened a missing bundle"; }}
+            last_error.invoke([])
             "#
         );
-        let lang: String = engine.eval(&script).expect("detect_language via ffi");
-        assert!(!lang.is_empty() && lang != "und", "got language {lang:?}");
+        let msg: String = engine.eval(&script).expect("matcher_open via ffi");
+        assert!(!msg.is_empty(), "no error message for a missing bundle");
     }
 
     #[test]

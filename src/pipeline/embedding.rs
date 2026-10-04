@@ -774,7 +774,7 @@ fn report_embed_health(dim: usize, max_nonzero: usize) {
     if dim == 0 {
         return;
     }
-    // Real embedders (MiniLM / LaBSE) are essentially fully dense;
+    // Real embedders (the title encoder, LaBSE) are essentially fully dense;
     // the naive histogram lights up only as many dims as a title has distinct
     // token buckets. Anything under 25% density across the *whole* batch means
     // no real model ran.
@@ -783,8 +783,8 @@ fn report_embed_health(dim: usize, max_nonzero: usize) {
             "Embedding backend produced only sparse, near-orthogonal vectors \
              (at most {max_nonzero}/{dim} non-zero dims) — this is the naive \
              token-hash fallback, NOT a real model, so semantic blocking is \
-             effectively disabled. Build the inference cdylib and enable the \
-             `ffi` feature (and make libinference.so loadable) so a real \
+             effectively disabled. Run config/match.learned.rhai (needs the \
+             `ffi` feature and a loadable libinference.so) so a real \
              embedder runs."
         );
     } else {

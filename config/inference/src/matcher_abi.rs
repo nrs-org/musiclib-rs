@@ -365,8 +365,9 @@ pub unsafe extern "C" fn inference_matcher_entry_text(
     }
 }
 
-/// Encoder vectors (256-d, L2-normalised) for semantic blocking. Same memory
-/// contract as `inference_embed_batch`.
+/// Encoder vectors (256-d, L2-normalised) for semantic blocking. On success
+/// `*out_flat` holds `n_texts × *out_dim` row-major `f32`s; free with
+/// `inference_free_float_array(ptr, n_texts * dim)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_matcher_embed_batch(
     h: *const Handle,
