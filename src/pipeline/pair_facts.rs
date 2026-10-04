@@ -191,17 +191,25 @@ fn build(c: &Connection, s: &str, i: &str) -> anyhow::Result<Value> {
         })
         .collect::<rusqlite::Result<_>>()?;
 
+    type ParentRow = (
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    );
     let parents: Vec<Value> = c
-        .prepare_cached(
-            "SELECT es.entry_id, e.entry_type, ch.disc_no, ch.track_no FROM entry_child ch \
+        .prepare_cached(&format!(
+            "SELECT es.entry_id, e.entry_type, ch.disc_no, ch.track_no, {} FROM entry_child ch \
              LEFT JOIN entry_source es ON es.source = ch.parent_source AND es.identifier = ch.parent_identifier \
              LEFT JOIN entry e ON e.id = es.entry_id \
              WHERE ch.child_source = ?1 AND ch.child_identifier = ?2",
-        )?
+            first_name_sql("ch.parent_source", "ch.parent_identifier"),
+        ))?
         .query_map(params![s, i], |r| {
-            let (e, t, disc, track): (Option<i64>, Option<String>, Option<i64>, Option<i64>) =
-                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-            Ok(json!({"entry_id": e, "entry_type": t, "disc": disc, "track": track}))
+            let (e, t, disc, track, name): ParentRow =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+            Ok(json!({"entry_id": e, "entry_type": t, "disc": disc, "track": track, "name": name}))
         })?
         .collect::<rusqlite::Result<_>>()?;
 
@@ -219,14 +227,16 @@ fn build(c: &Connection, s: &str, i: &str) -> anyhow::Result<Value> {
         })?
         .collect::<rusqlite::Result<_>>()?;
 
-    let credited: Vec<Option<i64>> = c
-        .prepare_cached(
-            "SELECT es.entry_id FROM contribution c \
+    let credited: Vec<(Option<i64>, Option<String>)> = c
+        .prepare_cached(&format!(
+            "SELECT es.entry_id, {} FROM contribution c \
              LEFT JOIN entry_source es ON es.source = c.source AND es.identifier = c.identifier \
              WHERE c.artist_source = ?1 AND c.artist_identifier = ?2 ORDER BY c.id LIMIT ?3",
-        )?
-        .query_map(params![s, i, CREDITED_CAP], |r| r.get(0))?
+            first_name_sql("c.source", "c.identifier"),
+        ))?
+        .query_map(params![s, i, CREDITED_CAP], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    let (credited, credited_names): (Vec<_>, Vec<_>) = credited.into_iter().unzip();
 
     let names: Vec<Value> = names(c, s, i)?
         .into_iter()
@@ -246,6 +256,7 @@ fn build(c: &Connection, s: &str, i: &str) -> anyhow::Result<Value> {
         "parents": parents,
         "children": children,
         "credited": credited,
+        "credited_names": credited_names,
     }))
 }
 
@@ -279,9 +290,14 @@ mod tests {
                     want["identifier"].as_str().unwrap(),
                 )
                 .unwrap();
-            // Parents and children are unordered in the contract.
+            // Parents and children are unordered in the contract. Parent
+            // names and `credited_names` are additions the reference predates.
             let mut g = got.clone();
             let mut w = want.clone();
+            g.as_object_mut().unwrap().remove("credited_names");
+            for p in g["parents"].as_array_mut().unwrap() {
+                p.as_object_mut().unwrap().remove("name");
+            }
             for k in ["parents", "children"] {
                 for v in [&mut g, &mut w] {
                     v[k].as_array_mut().unwrap().sort_by_key(|x| x.to_string());
