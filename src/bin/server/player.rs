@@ -143,13 +143,26 @@ pub async fn route(
     }
 }
 
+/// Debug builds re-read `frontend/index.html` from the source tree on every
+/// request, so a frontend edit only needs a browser refresh, not a rebuild.
+/// Release builds (and a debug binary moved away from its checkout) serve the
+/// copy embedded at compile time.
 fn frontend() -> HyperResponse {
+    let body = if cfg!(debug_assertions) {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bin/server/frontend/index.html"
+        ))
+        .map(Bytes::from)
+        .unwrap_or_else(|_| Bytes::from_static(FRONTEND_INDEX.as_bytes()))
+    } else {
+        Bytes::from_static(FRONTEND_INDEX.as_bytes())
+    };
     hyper::Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/html; charset=utf-8")
-        .body(http_body_util::Full::new(bytes::Bytes::from_static(
-            FRONTEND_INDEX.as_bytes(),
-        )))
+        .header("Cache-Control", "no-cache")
+        .body(http_body_util::Full::new(body))
         .expect("response builder")
 }
 
