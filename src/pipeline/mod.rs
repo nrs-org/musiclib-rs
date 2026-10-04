@@ -3,7 +3,6 @@
 //! `import` and `dedup` binaries.
 
 pub mod dedup;
-pub mod dedup_model;
 pub mod embedding;
 #[cfg(feature = "ffi")]
 pub(crate) mod ffi;

@@ -211,21 +211,15 @@ import-time/dedup-barrier operation.
 cargo run --features ffi --release --bin softmatch
 cargo run --features ffi --release --bin softmatch -- --apply   # write RELATE + soft MERGE decisions to DB
 cargo run --features ffi --release --bin softmatch -- --csv out.csv  # dump all pairs for review
-cargo run --features ffi --release --bin softmatch -- \
-  --model data/dedup-entry-combined-v4/poc-semantic/runtime-model.json \
-  --csv learned.csv
 ```
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--db` | `<data_dir>/musiclib.db` | SQLite music library |
 | `--script` | `<config_dir>/match.rhai` | Rhai match script |
-| `--model <path>` | `<config_dir>/dedup-model.json` if present | Versioned learned identity scorer; replaces only Rhai verdict scoring |
-| `--persist-suggestions` | false | Store learned DEFER rows for the interactive review queue |
 | `--apply` | false | Persist RELATE and soft MERGE (`same_identity`) decisions to the DB |
 | `--csv <path>` | absent | Write all scored pairs (MERGE / RELATE / DISTINCT / BARRIER) to a CSV |
 | `--embed-db` | `<data_dir>/embeddings.db` | SQLite embedding cache (sqlite-vec) |
-| `--embedding-model-id` | absent | Identity of the local `embed()` model; must match a learned artifact |
 | `--no-embed` | false | Disable semantic blocking even if `embed_batch` is defined |
 | `--embed-dim` | `256` | Embedding dimension; must match the model (`384` for MiniLM) |
 | `--embed-k` | `20` | KNN neighbours per entry |

@@ -20,11 +20,9 @@ use crate::pipeline::embedding::{
 
 use crate::http::{HeaderName, HeaderValue, HttpClient, Method, Request as HttpRequest};
 use crate::musicdb::{
-    AliasRow, ChildRow, ContribRow, IdentityJudgment, MusicDb, NewDedupFeedback,
-    NewDedupSuggestion, SourceRow,
+    AliasRow, ChildRow, ContribRow, IdentityJudgment, MusicDb, NewDedupFeedback, SourceRow,
 };
 use crate::pipeline::dedup::DedupConfig;
-use crate::pipeline::dedup_model::{DedupModel, ModelDecision};
 use crate::providers::FetchProvider;
 
 type Pair = (String, String);
@@ -87,10 +85,6 @@ pub enum Verdict {
         confidence: f64,
         reason: String,
     },
-    Separate {
-        confidence: f64,
-        reason: String,
-    },
     Distinct,
 }
 
@@ -119,18 +113,13 @@ impl From<Verdict> for Scored {
 #[derive(Clone)]
 pub struct SoftMatchConfig {
     pub script_path: String,
-    /// Optional versioned logistic model. When set, it replaces Rhai verdict
-    /// scoring; Rhai remains available for embedding and CSV diagnostics.
-    pub model_path: Option<String>,
-    /// Persist learned MERGE/DEFER candidates for an interactive review queue.
-    pub persist_suggestions: bool,
     /// Write RELATE and MERGE decisions to the DB. Both are soft/reversible:
     /// RELATE writes an `entry_relation` row, MERGE writes a `same_identity`
     /// soft-identity assertion via `MusicDb::record_identity_feedback` — the
     /// same reversible path the player's manual "link" button uses. No
-    /// softmatch verdict, from any backend (Rhai or the learned model),
-    /// ever calls `MusicDb::merge_entries` (destructive, no undo path); that
-    /// stays exclusively an import-time/dedup-barrier operation.
+    /// softmatch verdict ever calls `MusicDb::merge_entries` (destructive, no
+    /// undo path); that stays exclusively an import-time/dedup-barrier
+    /// operation.
     pub apply_relates: bool,
     /// If set, write a CSV row for every candidate pair (including DISTINCT)
     /// to this path for manual quality review.
@@ -138,9 +127,6 @@ pub struct SoftMatchConfig {
     /// Path to the SQLite file used as the embedding cache.
     /// `None` disables semantic blocking entirely.
     pub embed_db_path: Option<String>,
-    /// Stable identity of the model behind the local `embed()` hook. Learned
-    /// artifacts use this to reject a mismatched embedding vector space.
-    pub embed_model_id: Option<String>,
     /// Embedding vector dimension — must match the model used in the Rhai `embed()`
     /// function. Default script's naive fallback is 256; use 384 when the
     /// inference cdylib is built with `--features minilm`.
@@ -184,18 +170,11 @@ pub fn default_soft_match_config() -> Option<SoftMatchConfig> {
         return None;
     }
     let embed_db = crate::app_dirs::data_dir().join("embeddings.db");
-    let model_path = config_dir.join("dedup-model.json");
-    let persist_suggestions = model_path.exists();
     Some(SoftMatchConfig {
         script_path: script_path.display().to_string(),
-        model_path: model_path
-            .exists()
-            .then(|| model_path.display().to_string()),
-        persist_suggestions,
         apply_relates: true,
         csv_path: None,
         embed_db_path: Some(embed_db.display().to_string()),
-        embed_model_id: None,
         embed_dim: 256,
         embed_k: 20,
         embed_sim_threshold: 0.45,
@@ -350,359 +329,6 @@ fn jaccard_i64(a: &[i64], b: &[i64]) -> f64 {
     } else {
         inter as f64 / union as f64
     }
-}
-
-const VERSION_MARKERS: &[&str] = &[
-    "acoustic",
-    "arrange",
-    "arranged",
-    "bootleg",
-    "cover",
-    "demo",
-    "edit",
-    "instrumental",
-    "karaoke",
-    "live",
-    "mix",
-    "remaster",
-    "remastered",
-    "remix",
-    "reprise",
-    "spedup",
-    "version",
-    "ver",
-    "radio",
-    "unplugged",
-    "アコースティック",
-    "アレンジ",
-    "インスト",
-    "カバー",
-    "ライブ",
-    "リミックス",
-];
-
-const RUNTIME_FEATURE_NAMES: &[&str] = &[
-    "name_exact",
-    "name_similarity",
-    "token_jaccard",
-    "ngram_jaccard",
-    "identifier_overlap",
-    "artist_jaccard",
-    "tracklist_jaccard",
-    "tracklist_length_similarity",
-    "date_exact",
-    "duration_similarity",
-    "version_conflict",
-    "base_title_exact",
-    "qualifier_jaccard",
-    "qualifier_conflict",
-    "primary_type_match",
-    "primary_type_conflict",
-    "track_position_match",
-    "internal_mixedness",
-    "empty_side",
-    "semantic_similarity",
-];
-
-fn set_jaccard<T: Eq + std::hash::Hash>(a: &HashSet<T>, b: &HashSet<T>) -> f64 {
-    let union = a.union(b).count();
-    if union == 0 {
-        0.0
-    } else {
-        a.intersection(b).count() as f64 / union as f64
-    }
-}
-
-fn title_tokens(names: &[String]) -> HashSet<String> {
-    names
-        .iter()
-        .flat_map(|name| {
-            normalize(name)
-                .split_whitespace()
-                .filter(|token| token.chars().count() > 1)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn title_grams(names: &[String]) -> HashSet<String> {
-    names.iter().flat_map(|name| char_trigrams(name)).collect()
-}
-
-// difflib.SequenceMatcher without junk handling. Title strings are far below
-// Python's 200-item autojunk cutoff, so this reproduces the PoC ratio.
-fn sequence_match_ratio(a: &str, b: &str) -> f64 {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    fn matching(a: &[char], b: &[char]) -> usize {
-        let mut best = (0, 0, 0);
-        let mut previous = vec![0usize; b.len() + 1];
-        for i in 0..a.len() {
-            let mut current = vec![0usize; b.len() + 1];
-            for j in 0..b.len() {
-                if a[i] == b[j] {
-                    let size = previous[j] + 1;
-                    current[j + 1] = size;
-                    let start = (i + 1 - size, j + 1 - size);
-                    if size > best.2 || (size == best.2 && (start.0, start.1) < (best.0, best.1)) {
-                        best = (start.0, start.1, size);
-                    }
-                }
-            }
-            previous = current;
-        }
-        if best.2 == 0 {
-            0
-        } else {
-            matching(&a[..best.0], &b[..best.1])
-                + best.2
-                + matching(&a[best.0 + best.2..], &b[best.1 + best.2..])
-        }
-    }
-    2.0 * matching(&a, &b) as f64 / (a.len() + b.len()) as f64
-}
-
-fn normalized_names(entry: &EntryInfo) -> Vec<String> {
-    entry
-        .aliases
-        .iter()
-        .map(|name| normalize(name))
-        .filter(|name| !name.is_empty())
-        .collect()
-}
-
-fn best_name_similarity(a: &[String], b: &[String]) -> f64 {
-    a.iter()
-        .flat_map(|left| b.iter().map(move |right| sequence_match_ratio(left, right)))
-        .fold(0.0, f64::max)
-}
-
-fn base_title(value: &str) -> String {
-    let mut depth = 0usize;
-    let mut out = String::new();
-    for ch in value.chars() {
-        if matches!(ch, '(' | '[' | '【' | '（') {
-            depth += 1;
-            out.push(' ');
-        } else if matches!(ch, ')' | ']' | '】' | '）') && depth > 0 {
-            depth -= 1;
-            out.push(' ');
-        } else if depth == 0 {
-            out.push(ch);
-        }
-    }
-    normalize(&out)
-}
-
-fn qualifiers(value: &str) -> HashSet<String> {
-    let mut depth = 0usize;
-    let mut grouped = String::new();
-    for ch in value.chars() {
-        if matches!(ch, '(' | '[' | '【' | '（') {
-            depth += 1;
-        } else if matches!(ch, ')' | ']' | '】' | '）') {
-            depth = depth.saturating_sub(1);
-        } else if depth > 0 {
-            grouped.push(ch);
-        } else {
-            grouped.push(' ');
-        }
-    }
-    let markers: HashSet<&str> = VERSION_MARKERS.iter().copied().collect();
-    let mut result: HashSet<String> = normalize(&grouped)
-        .split_whitespace()
-        .filter(|token| token.chars().count() > 1)
-        .map(str::to_owned)
-        .collect();
-    result.extend(
-        normalize(value)
-            .split_whitespace()
-            .filter(|token| markers.contains(token))
-            .map(str::to_owned),
-    );
-    result.remove("ver");
-    result.remove("version");
-    result
-}
-
-fn is_external_identifier(source: &str, value: &str) -> bool {
-    let source = source.to_lowercase();
-    if matches!(source.as_str(), "barcode" | "upc" | "isrc") {
-        return true;
-    }
-    let chars: Vec<char> = value.chars().collect();
-    (chars.len() == 12
-        && chars[..2].iter().all(|c| c.is_ascii_alphabetic())
-        && chars[2..5].iter().all(|c| c.is_ascii_alphanumeric())
-        && chars[5..].iter().all(|c| c.is_ascii_digit()))
-        || ((12..=14).contains(&chars.len()) && chars.iter().all(|c| c.is_ascii_digit()))
-}
-
-fn learned_features(
-    a: &EntryInfo,
-    b: &EntryInfo,
-    embeddings: Option<&EmbeddingCache>,
-) -> HashMap<String, f64> {
-    let an = normalized_names(a);
-    let bn = normalized_names(b);
-    let ac: HashSet<String> = an.iter().map(|name| name.replace(' ', "")).collect();
-    let bc: HashSet<String> = bn.iter().map(|name| name.replace(' ', "")).collect();
-    let at = title_tokens(&a.aliases);
-    let bt = title_tokens(&b.aliases);
-    let ag = title_grams(&a.aliases);
-    let bg = title_grams(&b.aliases);
-    let ai: HashSet<String> = a
-        .pairs
-        .iter()
-        .filter(|(s, i)| is_external_identifier(s, i))
-        .map(|(_, i)| normalize(i))
-        .collect();
-    let bi: HashSet<String> = b
-        .pairs
-        .iter()
-        .filter(|(s, i)| is_external_identifier(s, i))
-        .map(|(_, i)| normalize(i))
-        .collect();
-    let abase: HashSet<String> = a
-        .aliases
-        .iter()
-        .map(|name| base_title(name))
-        .filter(|x| !x.is_empty())
-        .collect();
-    let bbase: HashSet<String> = b
-        .aliases
-        .iter()
-        .map(|name| base_title(name))
-        .filter(|x| !x.is_empty())
-        .collect();
-    let aq: HashSet<String> = a.aliases.iter().flat_map(|name| qualifiers(name)).collect();
-    let bq: HashSet<String> = b.aliases.iter().flat_map(|name| qualifiers(name)).collect();
-    let am: HashSet<String> = at
-        .iter()
-        .filter(|x| VERSION_MARKERS.contains(&x.as_str()))
-        .cloned()
-        .collect();
-    let bm: HashSet<String> = bt
-        .iter()
-        .filter(|x| VERSION_MARKERS.contains(&x.as_str()))
-        .cloned()
-        .collect();
-    let ap: HashSet<String> = a.primary_types.iter().map(|x| normalize(x)).collect();
-    let bp: HashSet<String> = b.primary_types.iter().map(|x| normalize(x)).collect();
-    let apos: HashSet<(Option<i32>, Option<i32>)> =
-        a.track_positions.iter().map(|(_, d, t)| (*d, *t)).collect();
-    let bpos: HashSet<(Option<i32>, Option<i32>)> =
-        b.track_positions.iter().map(|(_, d, t)| (*d, *t)).collect();
-    let duration_similarity = if a.durations.is_empty() || b.durations.is_empty() {
-        0.0
-    } else {
-        let delta = a
-            .durations
-            .iter()
-            .flat_map(|x| b.durations.iter().map(move |y| x.abs_diff(*y)))
-            .min()
-            .unwrap();
-        (1.0 - delta as f64 / 30_000.0).max(0.0)
-    };
-    let tracklist_length_similarity =
-        if a.child_entry_ids.is_empty() || b.child_entry_ids.is_empty() {
-            0.0
-        } else {
-            a.child_entry_ids.len().min(b.child_entry_ids.len()) as f64
-                / a.child_entry_ids.len().max(b.child_entry_ids.len()) as f64
-        };
-    let mixedness = |entry: &EntryInfo| {
-        let primary: Vec<String> = entry
-            .sourced_aliases
-            .iter()
-            .filter(|(_, _, p)| *p)
-            .map(|(_, name, _)| normalize(name))
-            .filter(|x| !x.is_empty())
-            .collect();
-        if primary.len() < 2 {
-            0.0
-        } else {
-            let minimum = primary
-                .iter()
-                .enumerate()
-                .flat_map(|(i, x)| {
-                    primary[i + 1..]
-                        .iter()
-                        .map(move |y| sequence_match_ratio(x, y))
-                })
-                .fold(1.0, f64::min);
-            1.0 - minimum
-        }
-    };
-    let base_exact = !abase.is_disjoint(&bbase);
-    HashMap::from([
-        ("name_exact".into(), (!ac.is_disjoint(&bc)) as u8 as f64),
-        ("name_similarity".into(), best_name_similarity(&an, &bn)),
-        ("token_jaccard".into(), set_jaccard(&at, &bt)),
-        ("ngram_jaccard".into(), set_jaccard(&ag, &bg)),
-        (
-            "identifier_overlap".into(),
-            (!ai.is_disjoint(&bi)) as u8 as f64,
-        ),
-        (
-            "artist_jaccard".into(),
-            jaccard_i64(&a.peer_entry_ids, &b.peer_entry_ids),
-        ),
-        (
-            "tracklist_jaccard".into(),
-            jaccard_i64(&a.child_entry_ids, &b.child_entry_ids),
-        ),
-        (
-            "tracklist_length_similarity".into(),
-            tracklist_length_similarity,
-        ),
-        (
-            "date_exact".into(),
-            a.release_dates.iter().any(|x| {
-                b.release_dates
-                    .iter()
-                    .any(|y| x.split_whitespace().next() == y.split_whitespace().next())
-            }) as u8 as f64,
-        ),
-        ("duration_similarity".into(), duration_similarity),
-        (
-            "version_conflict".into(),
-            (am != bm && (!am.is_empty() || !bm.is_empty())) as u8 as f64,
-        ),
-        ("base_title_exact".into(), base_exact as u8 as f64),
-        ("qualifier_jaccard".into(), set_jaccard(&aq, &bq)),
-        (
-            "qualifier_conflict".into(),
-            (base_exact && aq != bq && (!aq.is_empty() || !bq.is_empty())) as u8 as f64,
-        ),
-        (
-            "primary_type_match".into(),
-            (!ap.is_disjoint(&bp)) as u8 as f64,
-        ),
-        (
-            "primary_type_conflict".into(),
-            (!ap.is_empty() && !bp.is_empty() && ap.is_disjoint(&bp)) as u8 as f64,
-        ),
-        (
-            "track_position_match".into(),
-            (!apos.is_disjoint(&bpos)) as u8 as f64,
-        ),
-        ("internal_mixedness".into(), mixedness(a).max(mixedness(b))),
-        (
-            "empty_side".into(),
-            (an.is_empty() || bn.is_empty()) as u8 as f64,
-        ),
-        (
-            "semantic_similarity".into(),
-            embeddings
-                .and_then(|cache| cache.cosine_similarity(a.entry_id, b.entry_id))
-                .unwrap_or(0.0),
-        ),
-    ])
 }
 
 // ── Lazy features (internal — used only for CSV diagnostic output) ────────────
@@ -1680,11 +1306,6 @@ fn scored_to_map(s: &Scored) -> RhaiMap {
             put("confidence", (*confidence).into());
             put("reason", reason.clone().into());
         }
-        Verdict::Separate { confidence, reason } => {
-            put("verdict", "separate".into());
-            put("confidence", (*confidence).into());
-            put("reason", reason.clone().into());
-        }
         Verdict::Distinct => put("verdict", "distinct".into()),
     }
     put("origin", s.origin.clone().into());
@@ -1802,7 +1423,6 @@ fn verdict_name(v: &Verdict) -> &'static str {
         Verdict::Merge { .. } => "MERGE",
         Verdict::Relate { .. } => "RELATE",
         Verdict::Defer { .. } => "DEFER",
-        Verdict::Separate { .. } => "SEPARATE",
         Verdict::Distinct => "DISTINCT",
     }
 }
@@ -3022,40 +2642,6 @@ async fn score_candidates(
         None
     };
 
-    let learned_model = config
-        .model_path
-        .as_deref()
-        .map(Path::new)
-        .map(DedupModel::load)
-        .transpose()?;
-    if let Some(model) = &learned_model {
-        let supported: HashSet<&str> = RUNTIME_FEATURE_NAMES.iter().copied().collect();
-        let unsupported: Vec<&str> = model
-            .feature_names()
-            .filter(|name| !supported.contains(name))
-            .collect();
-        if !unsupported.is_empty() {
-            anyhow::bail!(
-                "dedup model requires unsupported runtime features: {}",
-                unsupported.join(", ")
-            );
-        }
-        if let Some(required) = model.required_embedding_model() {
-            if embed_cache.is_none() {
-                anyhow::bail!(
-                    "dedup model requires local embeddings from {required:?}, but embeddings are disabled"
-                );
-            }
-            if config.embed_model_id.as_deref() != Some(required) {
-                anyhow::bail!(
-                    "dedup model requires embedding model {required:?}; pass --embedding-model-id {required:?} only when the configured local embed() hook uses it"
-                );
-            }
-        }
-    }
-    if let Some(path) = &config.model_path {
-        info!("Loaded learned dedup scorer from {path}");
-    }
     let soft_identity = db.soft_identity_projection().await?;
     if !soft_identity.conflicts.is_empty() {
         warn!(
@@ -3182,28 +2768,12 @@ async fn score_candidates(
     let scored_entries: Vec<&Arc<EntryInfo>> =
         to_score.iter().flat_map(|(a, b, _)| [a, b]).collect();
     prepare_entries(ctx, &scored_entries);
-    // Every path but the legacy learned model starts from the script's
-    // verdict, then its optional `refine` pass.
-    let precomputed: Vec<Option<anyhow::Result<Scored>>> = if learned_model.is_none() {
-        let mut verdicts = script_verdicts(ctx, &to_score);
-        refine_verdicts(ctx, &to_score, &mut verdicts);
-        verdicts.into_iter().map(Some).collect()
-    } else {
-        to_score.iter().map(|_| None).collect()
-    };
+    // The script's verdicts, then its optional `refine` pass.
+    let mut verdicts = script_verdicts(ctx, &to_score);
+    refine_verdicts(ctx, &to_score, &mut verdicts);
 
-    for ((ea, eb, channels), script_verdict) in to_score.iter().zip(precomputed) {
-        let verdict = apply_candidate(
-            db,
-            ea,
-            eb,
-            channels.as_ref(),
-            script_verdict,
-            learned_model.as_ref(),
-            embed_cache,
-            config,
-        )
-        .await?;
+    for ((ea, eb, channels), scored) in to_score.iter().zip(verdicts) {
+        let verdict = apply_candidate(db, ea, eb, channels.as_ref(), scored?, config).await?;
 
         if let Some(w) = &mut csv {
             let (vname, kind, conf, reason) = match &verdict {
@@ -3219,9 +2789,6 @@ async fn score_candidates(
                 Verdict::Defer { confidence, reason } => {
                     ("DEFER", "", *confidence, reason.as_str())
                 }
-                Verdict::Separate { confidence, reason } => {
-                    ("SEPARATE", "", *confidence, reason.as_str())
-                }
                 Verdict::Distinct => ("DISTINCT", "", 0.0, ""),
             };
             write_csv_row(w, vname, kind, conf, reason, channels.as_ref(), ea, eb, ctx)?;
@@ -3229,7 +2796,7 @@ async fn score_candidates(
 
         let counters = stats.entry(ea.entry_type.clone()).or_insert([0; 4]);
         match &verdict {
-            Verdict::Distinct | Verdict::Separate { .. } => counters[2] += 1,
+            Verdict::Distinct => counters[2] += 1,
             Verdict::Defer { .. } => counters[3] += 1,
             Verdict::Merge { .. } => counters[0] += 1,
             Verdict::Relate { .. } => counters[1] += 1,
@@ -3262,85 +2829,25 @@ fn resolve_derived_side(extra: &mut serde_json::Value, ea_id: i64, eb_id: i64) {
     obj.insert("source_entry".to_string(), serde_json::json!(source));
 }
 
-/// Take one candidate pair's verdict (the script's, or the legacy learned
-/// model's), emit its console log, and apply the DB write when
-/// `apply_relates` is set. Returns the verdict so the caller can write its CSV
-/// row and bump per-type stats.
-#[allow(clippy::too_many_arguments)]
+/// Emit one candidate pair's console log and apply its verdict's DB write
+/// when `apply_relates` is set. Returns the verdict so the caller can write
+/// its CSV row and bump per-type stats.
 async fn apply_candidate(
     db: &MusicDb,
     ea: &Arc<EntryInfo>,
     eb: &Arc<EntryInfo>,
     channels: Option<&ChannelMask>,
-    // The script's verdict, after `refine`; `None` on the learned-model path.
-    script_verdict: Option<anyhow::Result<Scored>>,
-    learned_model: Option<&DedupModel>,
-    embed_cache: Option<&EmbeddingCache>,
+    scored: Scored,
     config: &SoftMatchConfig,
 ) -> anyhow::Result<Verdict> {
     let Scored {
         verdict,
         origin,
         model_version,
-    } = if let Some(scored) = script_verdict {
-        scored?
-    } else if let Some(model) = learned_model {
-        let features = learned_features(ea, eb, embed_cache);
-        let probability = model.probability(&ea.entry_type, &features)?;
-        let decision = model.decide(probability);
-        if config.persist_suggestions && decision != ModelDecision::Separate {
-            let sorted_features: BTreeMap<&str, f64> = features
-                .iter()
-                .map(|(name, value)| (name.as_str(), *value))
-                .collect();
-            db.upsert_dedup_suggestion(NewDedupSuggestion {
-                entry_a: ea.entry_id,
-                entry_b: eb.entry_id,
-                model_version: model.version().to_owned(),
-                probability,
-                decision: match decision {
-                    ModelDecision::Merge => "merge",
-                    ModelDecision::Defer => "defer",
-                    ModelDecision::Separate => unreachable!(),
-                }
-                .to_owned(),
-                candidate_channels: channels.copied().map(ChannelMask::csv).unwrap_or_default(),
-                features: serde_json::to_string(&sorted_features)?,
-                evidence: serde_json::to_string(&serde_json::json!({
-                    "left": ea,
-                    "right": eb,
-                }))?,
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("persisting dedup suggestion: {error}"))?;
-        }
-        let reason = "learned musiclib-entry-info/1 scorer".to_owned();
-        let verdict = match decision {
-            ModelDecision::Merge => Verdict::Merge {
-                confidence: probability,
-                reason,
-            },
-            ModelDecision::Separate => Verdict::Separate {
-                confidence: probability,
-                reason,
-            },
-            ModelDecision::Defer => Verdict::Defer {
-                confidence: probability,
-                reason,
-            },
-        };
-        Scored {
-            verdict,
-            origin: "heuristic".to_owned(),
-            model_version: Some(model.version().to_owned()),
-        }
-    } else {
-        anyhow::bail!("no verdict for pair ({}, {})", ea.entry_id, eb.entry_id);
-    };
+    } = scored;
 
     match &verdict {
-        Verdict::Distinct | Verdict::Separate { .. } => {}
-        Verdict::Defer { .. } => {}
+        Verdict::Distinct | Verdict::Defer { .. } => {}
         Verdict::Merge { confidence, reason } => {
             if config.verbose_decisions {
                 println!("[MERGE] conf={:.2}  type={}", confidence, ea.entry_type);
@@ -3943,52 +3450,6 @@ mod tests {
 
         // Idempotent: nothing left to do on a second run.
         assert_eq!(backfill_block_key_index(&db).await.unwrap(), 0);
-    }
-
-    #[test]
-    fn learned_features_cover_runtime_model_contract() {
-        let mut a = titled_entry(1, "Song (Live)", "isrc", vec![180_000]);
-        let mut b = titled_entry(2, "Song [Live]", "spotify", vec![181_000]);
-        a.entry_type = "track".into();
-        b.entry_type = "track".into();
-        a.pairs = vec![("isrc".into(), "JPABC1234567".into())];
-        b.pairs = vec![("spotify".into(), "JPABC1234567".into())];
-        a.peer_entry_ids = vec![7];
-        b.peer_entry_ids = vec![7];
-        let row = learned_features(&a, &b, None);
-        let expected: HashSet<&str> = [
-            "name_exact",
-            "name_similarity",
-            "token_jaccard",
-            "ngram_jaccard",
-            "identifier_overlap",
-            "artist_jaccard",
-            "tracklist_jaccard",
-            "tracklist_length_similarity",
-            "date_exact",
-            "duration_similarity",
-            "version_conflict",
-            "base_title_exact",
-            "qualifier_jaccard",
-            "qualifier_conflict",
-            "primary_type_match",
-            "primary_type_conflict",
-            "track_position_match",
-            "internal_mixedness",
-            "empty_side",
-            "semantic_similarity",
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(
-            row.keys().map(String::as_str).collect::<HashSet<_>>(),
-            expected
-        );
-        assert_eq!(row["identifier_overlap"], 1.0);
-        assert_eq!(row["artist_jaccard"], 1.0);
-        assert_eq!(row["base_title_exact"], 1.0);
-        assert_eq!(row["qualifier_jaccard"], 1.0);
-        assert!((row["duration_similarity"] - (29.0 / 30.0)).abs() < 1e-12);
     }
 
     #[test]

@@ -234,35 +234,6 @@ mod entry_relation {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-/// Current model suggestion queue. Re-running the same model refreshes its
-/// evidence without resetting review state; a new model version gets its own
-/// row so comparisons and rollback remain possible.
-mod dedup_suggestion {
-    use sea_orm::entity::prelude::*;
-
-    #[sea_orm::model]
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "dedup_suggestion")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub entry_a: i64,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub entry_b: i64,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub model_version: String,
-        pub probability: f64,
-        pub decision: String,
-        pub candidate_channels: String,
-        pub features: String,
-        pub evidence: String,
-        pub status: String,
-        pub created_at: i64,
-        pub updated_at: i64,
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 /// Immutable human/model judgments used to reconstruct corrections and export
 /// training data. A correction appends a row pointing at `supersedes_id`.
 mod dedup_feedback {
@@ -417,32 +388,6 @@ pub struct NewDedupFeedback {
     pub evidence: Option<String>,
     pub note: Option<String>,
     pub supersedes_id: Option<i64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NewDedupSuggestion {
-    pub entry_a: i64,
-    pub entry_b: i64,
-    pub model_version: String,
-    pub probability: f64,
-    pub decision: String,
-    pub candidate_channels: String,
-    pub features: String,
-    pub evidence: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct DedupSuggestionRow {
-    pub entry_a: i64,
-    pub entry_b: i64,
-    pub model_version: String,
-    pub probability: f64,
-    pub decision: String,
-    pub candidate_channels: String,
-    pub features: String,
-    pub evidence: String,
-    pub status: String,
-    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1303,6 +1248,14 @@ impl MusicDb {
             )
             .await?;
         }
+        if user_version < 6 {
+            // The legacy logistic dedup model's review queue; nothing reads it.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "DROP TABLE IF EXISTS dedup_suggestion; PRAGMA user_version = 6;",
+            )
+            .await?;
+        }
         Ok(Self {
             db,
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -1502,22 +1455,6 @@ impl MusicDb {
         // to be deleted, so re-point every relation that referenced it onto the
         // winner, drop the resulting self-relations, and collapse duplicates.
         remap_relations(&txn, loser, winner).await?;
-
-        // Suggestions are ephemeral review work, not historical evidence.
-        // Retire rows involving the disappearing endpoint; dedup_feedback keeps
-        // the immutable history with the original ids.
-        dedup_suggestion::Entity::update_many()
-            .col_expr(
-                dedup_suggestion::Column::Status,
-                sea_query::Expr::value("superseded_by_hard_merge"),
-            )
-            .filter(
-                Condition::any()
-                    .add(dedup_suggestion::Column::EntryA.eq(loser))
-                    .add(dedup_suggestion::Column::EntryB.eq(loser)),
-            )
-            .exec(&txn)
-            .await?;
 
         entry::Entity::delete_by_id(loser).exec(&txn).await?;
 
@@ -2414,19 +2351,6 @@ impl MusicDb {
                 set_relation_enabled_on(&txn, entry_a, entry_b, "variant", false).await?;
             }
         }
-        dedup_suggestion::Entity::update_many()
-            .col_expr(
-                dedup_suggestion::Column::Status,
-                sea_query::Expr::value("resolved"),
-            )
-            .col_expr(
-                dedup_suggestion::Column::UpdatedAt,
-                sea_query::Expr::value(now),
-            )
-            .filter(dedup_suggestion::Column::EntryA.eq(entry_a))
-            .filter(dedup_suggestion::Column::EntryB.eq(entry_b))
-            .exec(&txn)
-            .await?;
         txn.commit().await?;
         Ok(inserted.last_insert_id)
     }
@@ -2441,112 +2365,6 @@ impl MusicDb {
             .into_iter()
             .map(DedupFeedbackRow::from)
             .collect())
-    }
-
-    /// Insert or refresh a model suggestion without reopening an already
-    /// reviewed row for the same model version.
-    pub async fn upsert_dedup_suggestion(
-        &self,
-        suggestion: NewDedupSuggestion,
-    ) -> Result<(), Error> {
-        // See `write_lock` and `retry_on_busy`: serialize against every other
-        // write through this `MusicDb`, with a retry as a defensive fallback.
-        let _guard = self.write_lock.lock().await;
-        retry_on_busy(|| self.upsert_dedup_suggestion_once(suggestion.clone())).await
-    }
-
-    async fn upsert_dedup_suggestion_once(
-        &self,
-        suggestion: NewDedupSuggestion,
-    ) -> Result<(), Error> {
-        if suggestion.entry_a == suggestion.entry_b
-            || !suggestion.probability.is_finite()
-            || !(0.0..=1.0).contains(&suggestion.probability)
-        {
-            return Err(Error::InvalidInput("invalid dedup suggestion".into()));
-        }
-        let (entry_a, entry_b) = ordered_pair(suggestion.entry_a, suggestion.entry_b);
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        dedup_suggestion::Entity::insert(dedup_suggestion::ActiveModel {
-            entry_a: Set(entry_a),
-            entry_b: Set(entry_b),
-            model_version: Set(suggestion.model_version),
-            probability: Set(suggestion.probability),
-            decision: Set(suggestion.decision),
-            candidate_channels: Set(suggestion.candidate_channels),
-            features: Set(suggestion.features),
-            evidence: Set(suggestion.evidence),
-            status: Set("pending".into()),
-            created_at: Set(now),
-            updated_at: Set(now),
-        })
-        .on_conflict(
-            sea_query::OnConflict::columns([
-                dedup_suggestion::Column::EntryA,
-                dedup_suggestion::Column::EntryB,
-                dedup_suggestion::Column::ModelVersion,
-            ])
-            .update_columns([
-                dedup_suggestion::Column::Probability,
-                dedup_suggestion::Column::Decision,
-                dedup_suggestion::Column::CandidateChannels,
-                dedup_suggestion::Column::Features,
-                dedup_suggestion::Column::Evidence,
-                dedup_suggestion::Column::UpdatedAt,
-            ])
-            .to_owned(),
-        )
-        .exec(&self.db)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn pending_dedup_suggestions(
-        &self,
-        limit: u64,
-    ) -> Result<Vec<DedupSuggestionRow>, Error> {
-        Ok(dedup_suggestion::Entity::find()
-            .filter(dedup_suggestion::Column::Status.eq("pending"))
-            .order_by_desc(dedup_suggestion::Column::Probability)
-            .order_by_asc(dedup_suggestion::Column::EntryA)
-            .order_by_asc(dedup_suggestion::Column::EntryB)
-            .limit(limit)
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(DedupSuggestionRow::from)
-            .collect())
-    }
-
-    pub async fn set_dedup_suggestion_status(
-        &self,
-        entry_a: i64,
-        entry_b: i64,
-        model_version: &str,
-        status: &str,
-    ) -> Result<bool, Error> {
-        if !matches!(status, "pending" | "snoozed" | "resolved" | "dismissed") {
-            return Err(Error::InvalidInput(format!(
-                "unsupported dedup suggestion status {status:?}"
-            )));
-        }
-        let (entry_a, entry_b) = ordered_pair(entry_a, entry_b);
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        let result = dedup_suggestion::Entity::update_many()
-            .col_expr(
-                dedup_suggestion::Column::Status,
-                sea_query::Expr::value(status),
-            )
-            .col_expr(
-                dedup_suggestion::Column::UpdatedAt,
-                sea_query::Expr::value(now),
-            )
-            .filter(dedup_suggestion::Column::EntryA.eq(entry_a))
-            .filter(dedup_suggestion::Column::EntryB.eq(entry_b))
-            .filter(dedup_suggestion::Column::ModelVersion.eq(model_version))
-            .exec(&self.db)
-            .await?;
-        Ok(result.rows_affected > 0)
     }
 
     /// Every entry_child row. Used by soft-match to compute release-position features.
@@ -2941,23 +2759,6 @@ impl From<entry_relation::Model> for RelationRow {
             origin: value.origin,
             enabled: value.enabled,
             extra: value.extra,
-        }
-    }
-}
-
-impl From<dedup_suggestion::Model> for DedupSuggestionRow {
-    fn from(value: dedup_suggestion::Model) -> Self {
-        Self {
-            entry_a: value.entry_a,
-            entry_b: value.entry_b,
-            model_version: value.model_version,
-            probability: value.probability,
-            decision: value.decision,
-            candidate_channels: value.candidate_channels,
-            features: value.features,
-            evidence: value.evidence,
-            status: value.status,
-            updated_at: value.updated_at,
         }
     }
 }
@@ -3495,20 +3296,6 @@ mod tests {
         for id in [1i64, 2] {
             insert_entry(&mdb.db, id).await;
         }
-        mdb.upsert_dedup_suggestion(NewDedupSuggestion {
-            entry_a: 2,
-            entry_b: 1,
-            model_version: "model-1".into(),
-            probability: 0.9,
-            decision: "merge".into(),
-            candidate_channels: "exact_name".into(),
-            features: "{\"name_exact\":1.0}".into(),
-            evidence: "{\"left\":{},\"right\":{}}".into(),
-        })
-        .await
-        .unwrap();
-        assert_eq!(mdb.pending_dedup_suggestions(10).await.unwrap().len(), 1);
-
         let same_id = mdb
             .record_identity_feedback(NewDedupFeedback {
                 entry_a: 2,
@@ -3526,7 +3313,6 @@ mod tests {
             .await
             .unwrap();
         assert!(mdb.soft_identity_projection().await.unwrap().are_same(1, 2));
-        assert!(mdb.pending_dedup_suggestions(10).await.unwrap().is_empty());
 
         let different_id = mdb
             .record_identity_feedback(NewDedupFeedback {
@@ -3568,39 +3354,6 @@ mod tests {
         assert!(!projection.are_different(1, 2));
         let feedback = dedup_feedback::Entity::find().all(&mdb.db).await.unwrap();
         assert_eq!(feedback.len(), 3, "corrections append instead of overwrite");
-    }
-
-    #[tokio::test]
-    async fn suggestion_refresh_preserves_review_status() {
-        let mdb = mem_db().await;
-        for id in [1i64, 2] {
-            insert_entry(&mdb.db, id).await;
-        }
-        let suggestion = |probability| NewDedupSuggestion {
-            entry_a: 1,
-            entry_b: 2,
-            model_version: "model-1".into(),
-            probability,
-            decision: "defer".into(),
-            candidate_channels: "char_ngram".into(),
-            features: "{}".into(),
-            evidence: "{\"left\":{},\"right\":{}}".into(),
-        };
-        mdb.upsert_dedup_suggestion(suggestion(0.6)).await.unwrap();
-        assert!(
-            mdb.set_dedup_suggestion_status(2, 1, "model-1", "snoozed")
-                .await
-                .unwrap()
-        );
-        mdb.upsert_dedup_suggestion(suggestion(0.7)).await.unwrap();
-        assert!(mdb.pending_dedup_suggestions(10).await.unwrap().is_empty());
-        let row = dedup_suggestion::Entity::find()
-            .one(&mdb.db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.status, "snoozed");
-        assert_eq!(row.probability, 0.7);
     }
 
     fn alias(name: &str) -> crate::providers::types::Alias {

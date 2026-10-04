@@ -492,25 +492,14 @@ The `softmatch` binary evaluates candidate entry pairs using a
 [Rhai](https://rhai.rs/) script. Copy `config/match.example.rhai` to
 `<config_dir>/match.rhai` and tune thresholds as needed.
 
-Passing `--model <runtime-model.json>` replaces `decide()` with the native,
-versioned logistic scorer. Candidate generation and the local `embed()` hook
-still come from the same pipeline; there are no scoring API calls. Scores in
-the learned defer band are emitted as `DEFER`, while low scores are `SEPARATE`.
-The richer research `model.json` is intentionally rejected because Rust cannot
-reproduce all of its enrichment features. If the runtime artifact names an
-embedding model, `--embedding-model-id` must name that exact local model.
-The batch and import paths also discover `<config_dir>/dedup-model.json`
-automatically. A learned MERGE decision is always soft (a `same_identity`
-assertion, not a destructive merge — see below); installing the model does
-not change that. Imports persist learned DEFER candidates for review; batch
-runs opt into this with `--persist-suggestions`.
+Every verdict is soft: a MERGE asserts `same_identity`, never a destructive
+merge (see below). `config/match.learned.rhai` runs the learned pair matcher
+from the inference cdylib.
 
 Soft identity uses enabled `entry_relation` rows with kinds `same_identity` and
 `different_identity`. The former creates virtual connected components; the
 latter is a cannot-link barrier and wins over a conflicting same-identity path.
-Corrections tombstone relation state and append to `dedup_feedback`; model
-candidates live in `dedup_suggestion` with their model, feature, and evidence
-snapshots.
+Corrections tombstone relation state and append to `dedup_feedback`.
 
 ### Lifecycle
 

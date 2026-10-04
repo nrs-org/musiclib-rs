@@ -43,13 +43,6 @@ struct Args {
     /// Rhai match script. Defaults to <config_dir>/match.rhai.
     #[arg(long)]
     script: Option<String>,
-    /// Versioned learned scorer JSON. When present, replaces Rhai verdict
-    /// scoring while retaining the script's local embedding hook.
-    #[arg(long)]
-    model: Option<String>,
-    /// Persist learned DEFER candidates in the database for review.
-    #[arg(long)]
-    persist_suggestions: bool,
     /// Persist RELATE and soft MERGE (same_identity) decisions to the database.
     #[arg(long)]
     apply: bool,
@@ -61,10 +54,6 @@ struct Args {
     /// Requires the Rhai script to define embed(text) -> array.
     #[arg(long)]
     embed_db: Option<String>,
-    /// Stable identity of the model behind the local Rhai embed() hook. Must
-    /// match the learned scorer artifact's embedding contract.
-    #[arg(long)]
-    embedding_model_id: Option<String>,
     /// Disable semantic (embedding-based) blocking even if embed() is defined.
     #[arg(long)]
     no_embed: bool,
@@ -163,11 +152,6 @@ async fn main() -> anyhow::Result<()> {
             script_path.display()
         );
     }
-    let model_path = args.model.map(PathBuf::from).or_else(|| {
-        let default = config_dir.join("dedup-model.json");
-        default.exists().then_some(default)
-    });
-
     let mut http_config: HttpClientConfig =
         load_config(args.http_config.as_deref(), &config_dir.join("http.yaml")).await?;
     http_config.coalescer_rules = musiclib_rs::providers::registry::coalesce_rules();
@@ -202,12 +186,9 @@ async fn main() -> anyhow::Result<()> {
 
     let soft_cfg = SoftMatchConfig {
         script_path: script_path.display().to_string(),
-        model_path: model_path.map(|path| path.display().to_string()),
-        persist_suggestions: args.persist_suggestions,
         apply_relates: args.apply,
         csv_path: args.csv,
         embed_db_path,
-        embed_model_id: args.embedding_model_id,
         embed_dim: args.embed_dim,
         embed_k: args.embed_k,
         embed_sim_threshold: args.embed_threshold,
