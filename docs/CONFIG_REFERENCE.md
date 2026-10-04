@@ -686,9 +686,26 @@ let rc  = f.invoke([some_ptr, 42]);
 ```
 
 Supported types: `"void"`, `"i32"`, `"u32"`, `"i64"`, `"u64"`, `"f32"`, `"f64"`,
-`"ptr"`. Memory helpers: `ffi::malloc(n)`, `ffi::free(p)`, `ffi::cstr(s)`,
+`"ptr"`, `"str"`.
+
+Most calls need no `malloc`/`free`:
+
+```rhai
+let free_str = lib.func("inference_free_string", "void", ["ptr"]);
+let text = lib.func("make_text", "str", ["ptr", "str"]).freed_by(free_str);
+let s = text.invoke([h, "input"]);   // string args live for the call; () on NULL
+let out = ffi::buf(8 * n);           // zeroed; freed when `out` leaves scope (or on throw)
+lib.func("fill", "i32", ["ptr"]).invoke([out]);
+let xs = ffi::read_i64(out, n);      // bounds-checked against the buf
+let argv = ffi::cstr_array(texts);   // NULL-terminated char*[] in one buf
+```
+
+A `str` return is copied into a Rhai string; `.freed_by(free_fn)` releases a
+caller-owned one after the copy. Read/write helpers take a `ptr` or a `buf`:
 `ffi::read_cstr(p)`, `ffi::read_i64(p, n)`, `ffi::read_f32(p, n)`,
-`ffi::read_ptr(p, i)`, `ffi::write_ptr(p, i, v)`.
+`ffi::read_f64(p, n)`, `ffi::read_ptr(p, i)`, `ffi::write_ptr(p, i, v)`, and
+`ffi::write_*`. Manual `ffi::malloc(n)`, `ffi::cstr(s)` and `ffi::free(p)`
+remain for memory a C API takes ownership of.
 
 Relative paths (containing a `/` or `\`) are resolved relative to the **script
 file**, not the process working directory.

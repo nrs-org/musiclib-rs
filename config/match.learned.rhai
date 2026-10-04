@@ -90,44 +90,42 @@ fn open_matcher() {
     }
     if !opened { throw "libinference.so not found (script dir, ../target/release, system path)"; }
 
+    let free_str = lib.func("inference_free_string", "void", ["ptr"]);
     let m = #{
         lib: lib,
-        open:        lib.func("inference_matcher_open", "ptr", ["ptr"]),
-        last_error:  lib.func("inference_matcher_last_error", "ptr", []),
+        open:        lib.func("inference_matcher_open", "ptr", ["str"]),
+        last_error:  lib.func("inference_matcher_last_error", "str", []),
         n_outputs:   lib.func("inference_matcher_n_outputs", "i64", ["ptr"]),
-        output_name: lib.func("inference_matcher_output_name", "ptr", ["ptr", "i64"]),
-        put_facts:   lib.func("inference_matcher_put_facts", "i32", ["ptr", "ptr"]),
-        missing:     lib.func("inference_matcher_missing", "ptr", ["ptr", "ptr"]),
-        score:       lib.func("inference_matcher_score", "i32", ["ptr", "ptr", "ptr", "ptr", "ptr"]),
-        prepare:     lib.func("inference_matcher_prepare", "i32", ["ptr", "ptr", "ptr"]),
+        output_name: lib.func("inference_matcher_output_name", "str", ["ptr", "i64"]),
+        put_facts:   lib.func("inference_matcher_put_facts", "i32", ["ptr", "str"]),
+        missing:     lib.func("inference_matcher_missing", "str", ["ptr", "str"]).freed_by(free_str),
+        score:       lib.func("inference_matcher_score", "i32", ["ptr", "str", "str", "str", "ptr"]),
+        prepare:     lib.func("inference_matcher_prepare", "i32", ["ptr", "str", "ptr"]),
         score_views: lib.func("inference_matcher_score_views", "i32", ["ptr", "i64", "i64", "i64", "ptr"]),
         embed_batch: lib.func("inference_matcher_embed_batch", "i32", ["ptr", "ptr", "u64", "ptr", "ptr"]),
-        encoder_id:  lib.func("inference_matcher_encoder_id", "ptr", ["ptr"]),
-        entry_text:  lib.func("inference_matcher_entry_text", "ptr", ["ptr", "ptr", "ptr", "ptr"]),
-        free_str:    lib.func("inference_free_string", "void", ["ptr"]),
+        encoder_id:  lib.func("inference_matcher_encoder_id", "str", ["ptr"]).freed_by(free_str),
+        entry_text:  lib.func("inference_matcher_entry_text", "str", ["ptr", "str", "str", "str"]).freed_by(free_str),
         free_floats: lib.func("inference_free_float_array", "void", ["ptr", "u64"]),
     };
 
     let bundle = env_var("MUSICLIB_MATCHER_BUNDLE");
     if bundle == "" { bundle = "data/learned-matcher/bundle/v17"; }   // relative to the CWD
-    let cs = ffi::cstr(bundle);
-    let h = m.open.invoke([cs]);
-    ffi::free(cs);
+    let h = m.open.invoke([bundle]);
     if h.is_null() {
-        throw "inference_matcher_open(" + bundle + "): " + ffi::read_cstr(m.last_error.invoke([]));
+        throw "inference_matcher_open(" + bundle + "): " + m.last_error.invoke();
     }
     m.h = h;
 
     // Output columns by name, so a bundle with another layout fails loudly.
     let n = m.n_outputs.invoke([h]);
     let col = #{};
-    for i in 0..n { col[ffi::read_cstr(m.output_name.invoke([h, i]))] = i; }
+    for i in 0..n { col[m.output_name.invoke([h, i])] = i; }
     for need in ["p_same", "p_related", "p_sibling", "p_unrelated", "guard", "p_sibling_structure", "p_a_derived"] {
         if !(need in col) { throw "matcher bundle has no output " + need; }
     }
     let kinds = [];
     for i in 0..n {
-        let name = ffi::read_cstr(m.output_name.invoke([h, i]));
+        let name = m.output_name.invoke([h, i]);
         if name.starts_with("p_kind_") { kinds.push([name.sub_string(7), i]); }
     }
     m.n = n;
@@ -149,19 +147,15 @@ fn destroy(ctx) {
 
 // Send the facts of any pair the matcher hasn't seen (once per library pair).
 fn feed_missing(ctx, pairs_json) {
-    let cs = ffi::cstr(pairs_json);
-    let p = ctx.missing.invoke([ctx.h, cs]);
-    ffi::free(cs);
-    if p.is_null() { throw "inference_matcher_missing: " + ffi::read_cstr(ctx.last_error.invoke([])); }
-    let missing = parse_json(ffi::read_cstr(p));
-    ctx.free_str.invoke([p]);
+    let s = ctx.missing.invoke([ctx.h, pairs_json]);
+    if s == () { throw "inference_matcher_missing: " + ctx.last_error.invoke(); }
+    let missing = parse_json(s);
     if missing.len() == 0 { return; }
     let facts = pair_facts_json(missing);
     if type_of(facts) != "string" { throw "pair_facts_json unavailable (in-memory DB?)"; }
-    let cf = ffi::cstr(facts);
-    let rc = ctx.put_facts.invoke([ctx.h, cf]);
-    ffi::free(cf);
-    if rc != 0 { throw "inference_matcher_put_facts: " + ffi::read_cstr(ctx.last_error.invoke([])); }
+    if ctx.put_facts.invoke([ctx.h, facts]) != 0 {
+        throw "inference_matcher_put_facts: " + ctx.last_error.invoke();
+    }
 }
 
 // Host hook, called in batches before scoring: build every entry's view in
@@ -177,17 +171,11 @@ fn prepare(ctx, entries) {
     }
     feed_missing(ctx, to_json(pairs));
     let n = entries.len();
-    let cs = ffi::cstr(to_json(items));
-    let out = ffi::malloc(8 * n);
-    let rc = ctx.prepare.invoke([ctx.h, cs, out]);
-    ffi::free(cs);
-    if rc != 0 {
-        ffi::free(out);
-        throw "inference_matcher_prepare: " + ffi::read_cstr(ctx.last_error.invoke([]));
+    let out = ffi::buf(8 * n);
+    if ctx.prepare.invoke([ctx.h, to_json(items), out]) != 0 {
+        throw "inference_matcher_prepare: " + ctx.last_error.invoke();
     }
-    let handles = ffi::read_i64(out, n);
-    ffi::free(out);
-    handles
+    ffi::read_i64(out, n)
 }
 
 // Output-row heads (inference_matcher_score_views): the main classifier with
@@ -201,35 +189,23 @@ fn head_relation() { 2 }
 // The host may call decide() from several threads at once, so each call
 // gets its own output buffer.
 fn score(ctx, a, b, heads) {
-    let out = ffi::malloc(8 * ctx.n);
-    let rc = 0;
+    let out = ffi::buf(8 * ctx.n);
     if type_of(a.prepared) == "i64" && type_of(b.prepared) == "i64" {
-        rc = ctx.score_views.invoke([ctx.h, a.prepared, b.prepared, heads, out]);
-        if rc != 0 {
-            ffi::free(out);
-            throw "inference_matcher_score_views: " + ffi::read_cstr(ctx.last_error.invoke([]));
+        if ctx.score_views.invoke([ctx.h, a.prepared, b.prepared, heads, out]) != 0 {
+            throw "inference_matcher_score_views: " + ctx.last_error.invoke();
         }
     } else {
         let ja = to_json(a.pairs);
         let jb = to_json(b.pairs);
-        let ct = ffi::cstr(a.entry_type);
-        let ca = ffi::cstr(ja);
-        let cb = ffi::cstr(jb);
-        rc = ctx.score.invoke([ctx.h, ct, ca, cb, out]);
+        let rc = ctx.score.invoke([ctx.h, a.entry_type, ja, jb, out]);
         if rc == 2 {
             feed_missing(ctx, ja);
             feed_missing(ctx, jb);
-            rc = ctx.score.invoke([ctx.h, ct, ca, cb, out]);
+            rc = ctx.score.invoke([ctx.h, a.entry_type, ja, jb, out]);
         }
-        ffi::free(ct); ffi::free(ca); ffi::free(cb);
-        if rc != 0 {
-            ffi::free(out);
-            throw "inference_matcher_score: " + ffi::read_cstr(ctx.last_error.invoke([]));
-        }
+        if rc != 0 { throw "inference_matcher_score: " + ctx.last_error.invoke(); }
     }
-    let row = ffi::read_f64(out, ctx.n);
-    ffi::free(out);
-    row
+    ffi::read_f64(out, ctx.n)
 }
 
 fn decide(ctx, a, b) {
@@ -369,10 +345,8 @@ fn csv_sources(e) {
 // dropped and re-embedded.
 fn embedding_model_id(ctx) {
     if !has_matcher(ctx) { throw "matcher unavailable: no embeddings"; }
-    let p = ctx.encoder_id.invoke([ctx.h]);
-    if p.is_null() { throw "inference_matcher_encoder_id: " + ffi::read_cstr(ctx.last_error.invoke([])); }
-    let id = ffi::read_cstr(p);
-    ctx.free_str.invoke([p]);
+    let id = ctx.encoder_id.invoke([ctx.h]);
+    if id == () { throw "inference_matcher_encoder_id: " + ctx.last_error.invoke(); }
     if id == "" { throw "matcher bundle has no manifest.json encoder id"; }
     "learned-matcher:" + id
 }
@@ -383,14 +357,8 @@ fn embed_text(ctx, entry) {
     if !has_matcher(ctx) || entry.entry_type != "track" { return entry.title; }
     let pj = to_json(entry.pairs);
     feed_missing(ctx, pj);
-    let ct = ffi::cstr(entry.entry_type);
-    let cti = ffi::cstr(entry.title);
-    let cp = ffi::cstr(pj);
-    let p = ctx.entry_text.invoke([ctx.h, ct, cti, cp]);
-    ffi::free(ct); ffi::free(cti); ffi::free(cp);
-    if p.is_null() { throw "inference_matcher_entry_text: " + ffi::read_cstr(ctx.last_error.invoke([])); }
-    let text = ffi::read_cstr(p);
-    ctx.free_str.invoke([p]);
+    let text = ctx.entry_text.invoke([ctx.h, entry.entry_type, entry.title, pj]);
+    if text == () { throw "inference_matcher_entry_text: " + ctx.last_error.invoke(); }
     text
 }
 
@@ -399,27 +367,16 @@ fn embed_batch(ctx, texts) {
     if !has_matcher(ctx) { throw "matcher unavailable: no embeddings"; }
     let n = texts.len();
     if n == 0 { return []; }
-    let argv = ffi::malloc(8 * n);
-    let cstrs = [];
-    for i in 0..n {
-        let cs = ffi::cstr(texts[i]);
-        cstrs.push(cs);
-        ffi::write_ptr(argv, i, cs);
-    }
-    let out_flat = ffi::malloc(8);
-    let out_dim = ffi::malloc(8);
-    let rc = ctx.embed_batch.invoke([ctx.h, argv, n, out_flat, out_dim]);
+    let out_flat = ffi::buf(8);
+    let out_dim = ffi::buf(8);
+    let rc = ctx.embed_batch.invoke([ctx.h, ffi::cstr_array(texts), n, out_flat, out_dim]);
+    if rc != 0 { throw "inference_matcher_embed_batch: " + ctx.last_error.invoke(); }
+    let dim = ffi::read_i64(out_dim, 1)[0];
+    let flat = ffi::read_ptr(out_flat, 0);
+    let all = ffi::read_f32(flat, n * dim);
+    ctx.free_floats.invoke([flat, n * dim]);
     let rows = [];
-    if rc == 0 {
-        let dim = ffi::read_i64(out_dim, 1)[0];
-        let flat = ffi::read_ptr(out_flat, 0);
-        let all = ffi::read_f32(flat, n * dim);
-        for i in 0..n { rows.push(all.extract(i * dim, dim)); }
-        ctx.free_floats.invoke([flat, n * dim]);
-    }
-    for cs in cstrs { ffi::free(cs); }
-    ffi::free(argv); ffi::free(out_flat); ffi::free(out_dim);
-    if rc != 0 { throw "inference_matcher_embed_batch: " + ffi::read_cstr(ctx.last_error.invoke([])); }
+    for i in 0..n { rows.push(all.extract(i * dim, dim)); }
     rows
 }
 

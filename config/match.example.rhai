@@ -215,7 +215,7 @@ fn open_inference() {
         throw "libinference.so not found (tried script dir, ../target/release, system path)";
     }
     #{
-        detect_romaji: lib.func("inference_detect_romaji", "ptr", ["ptr", "ptr"]),
+        detect_romaji: lib.func("inference_detect_romaji", "ptr", ["str", "ptr"]),
         free_strs:     lib.func("inference_free_string_array", "void", ["ptr", "u64"]),
         embed_batch:   lib.func("inference_embed_batch", "i32", ["ptr", "u64", "ptr", "ptr"]),
         free_floats:   lib.func("inference_free_float_array", "void", ["ptr", "u64"]),
@@ -225,17 +225,14 @@ fn open_inference() {
 
 // Romanised-JP tokens of `text` (marshals the char** + out-length contract).
 fn inf_detect_romaji(inf, text) {
-    let cs = ffi::cstr(text);
-    let out_len = ffi::malloc(8);
-    let arr = inf.detect_romaji.invoke([cs, out_len]);
+    let out_len = ffi::buf(8);
+    let arr = inf.detect_romaji.invoke([text, out_len]);
     let toks = [];
     if !arr.is_null() {
         let n = ffi::read_i64(out_len, 1)[0];
         for i in 0..n { toks.push(ffi::read_cstr(ffi::read_ptr(arr, i))); }
         inf.free_strs.invoke([arr, n]);
     }
-    ffi::free(cs);
-    ffi::free(out_len);
     toks
 }
 
@@ -243,16 +240,9 @@ fn inf_detect_romaji(inf, text) {
 fn inf_embed_batch(inf, texts) {
     let n = texts.len();
     if n == 0 { return []; }
-    let argv = ffi::malloc(8 * n);
-    let cstrs = [];
-    for i in 0..n {
-        let cs = ffi::cstr(texts[i]);
-        cstrs.push(cs);
-        ffi::write_ptr(argv, i, cs);
-    }
-    let out_flat = ffi::malloc(8);
-    let out_dim = ffi::malloc(8);
-    let rc = inf.embed_batch.invoke([argv, n, out_flat, out_dim]);
+    let out_flat = ffi::buf(8);
+    let out_dim = ffi::buf(8);
+    let rc = inf.embed_batch.invoke([ffi::cstr_array(texts), n, out_flat, out_dim]);
     let rows = [];
     if rc == 0 {
         let dim = ffi::read_i64(out_dim, 1)[0];
@@ -267,10 +257,6 @@ fn inf_embed_batch(inf, texts) {
             inf.free_floats.invoke([flat, n * dim]);
         }
     }
-    for cs in cstrs { ffi::free(cs); }
-    ffi::free(argv);
-    ffi::free(out_flat);
-    ffi::free(out_dim);
     rows
 }
 

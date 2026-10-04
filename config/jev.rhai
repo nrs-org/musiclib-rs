@@ -39,13 +39,13 @@ fn open(lib) {
     }
     try {
         if type_of(lib) == "()" { lib = open_library(); }
+        let free_str = lib.func("inference_free_string", "void", ["ptr"]);
         let j = #{
             lib: lib,
-            open:       lib.func("inference_typesafe_open", "ptr", ["ptr"]),
+            open:       lib.func("inference_typesafe_open", "ptr", ["str"]),
             close:      lib.func("inference_typesafe_close", "void", ["ptr"]),
-            ask_batch:  lib.func("inference_typesafe_ask_batch", "ptr", ["ptr", "ptr"]),
-            last_error: lib.func("inference_typesafe_last_error", "ptr", []),
-            free_str:   lib.func("inference_free_string", "void", ["ptr"]),
+            ask_batch:  lib.func("inference_typesafe_ask_batch", "str", ["ptr", "str"]).freed_by(free_str),
+            last_error: lib.func("inference_typesafe_last_error", "str", []),
         };
         let concurrency = default_concurrency();
         let env = env_var("MUSICLIB_JEV_CONCURRENCY");
@@ -55,10 +55,8 @@ fn open(lib) {
         let config = #{ api_key: key, cache_path: cache_path, concurrency: concurrency };
         let base_url = env_var("TYPESAFE_BASE_URL");   // e.g. a local mock
         if base_url != "" { config.base_url = base_url; }
-        let cs = ffi::cstr(to_json(config));
-        let h = j.open.invoke([cs]);
-        ffi::free(cs);
-        if h.is_null() { throw "inference_typesafe_open: " + ffi::read_cstr(j.last_error.invoke([])); }
+        let h = j.open.invoke([to_json(config)]);
+        if h.is_null() { throw "inference_typesafe_open: " + j.last_error.invoke(); }
         j.h = h;
         print("jev: enabled (" + model() + ", " + concurrency + " concurrent, cache " + cache_path + ")");
         return j;
@@ -99,12 +97,9 @@ fn refine_pairs(j, items) {
     }
     if requests.is_empty() { return out; }
 
-    let cs = ffi::cstr("[" + join(requests, ",") + "]");
-    let p = j.ask_batch.invoke([j.h, cs]);
-    ffi::free(cs);
-    if p.is_null() { throw "inference_typesafe_ask_batch: " + ffi::read_cstr(j.last_error.invoke([])); }
-    let results = parse_json(ffi::read_cstr(p));
-    j.free_str.invoke([p]);
+    let out_json = j.ask_batch.invoke([j.h, "[" + join(requests, ",") + "]"]);
+    if out_json == () { throw "inference_typesafe_ask_batch: " + j.last_error.invoke(); }
+    let results = parse_json(out_json);
 
     let counts = #{ cached: 0, asked: 0, failed: 0, merge: 0, relate: 0, distinct: 0, defer: 0 };
     let first_error = "";

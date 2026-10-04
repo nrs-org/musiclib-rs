@@ -8,21 +8,37 @@
 //! ```rhai
 //! let lib = ffi::open("../target/release/libinference.so");
 //! // bind a symbol: ffi::open → lib.func(name, ret_type, [arg_types])
-//! let detect = lib.func("inference_detect_language", "ptr", ["ptr"]);
-//! let in_ptr = ffi::cstr("にちか");           // malloc'd NUL-terminated copy
-//! let out    = detect.invoke([in_ptr]);        // returns a `ptr`
-//! let lang   = ffi::read_cstr(out);
-//! ffi::free(in_ptr);
-//! ffi::free(out);                              // if the C API hands back owned memory
+//! let detect = lib.func("inference_detect_language", "str", ["str"]);
+//! let lang   = detect.invoke(["にちか"]);     // strings in and out, nothing to free
 //! ```
+//!
+//! ## Memory
+//!
+//! Most calls need no manual memory management:
+//!
+//! - A Rhai string passed where a `ptr`/`str` is expected becomes a C string
+//!   that lives for that call only, like a C stack temporary.
+//! - A `str` return is copied into a Rhai string (`()` for NULL). When the
+//!   caller owns it, bind the function with `.freed_by(free_fn)` and the
+//!   pointer is released right after the copy:
+//!   `lib.func("make_json", "str", ["str"]).freed_by(lib.func("free_string", "void", ["ptr"]))`.
+//! - `ffi::buf(n)` (zeroed) and `ffi::cstr_array([..])` (a NULL-terminated
+//!   `char*[]` and its strings, in one block) return a `Buf`: memory the host
+//!   frees when the last variable holding it goes out of scope, or a `throw`
+//!   unwinds past it. Use them for out-params and arrays; they pass wherever a
+//!   `ptr` goes, and the read/write helpers bounds-check them.
+//!
+//! `ffi::malloc`/`ffi::cstr`/`ffi::free` remain for memory a C API takes
+//! ownership of, or that must outlive the variable that holds it.
 //!
 //! ## Types
 //!
 //! A type descriptor is either a scalar tag (string, case-insensitive) or a
 //! struct handle from [`ffi::struct_type`]. Scalar tags:
 //! `void`, `i8`/`u8`, `i16`/`u16`, `i32`/`u32`, `i64`/`u64`, `f32`, `f64`,
-//! `ptr`. Integers cross as Rhai `INT` (i64), floats as `FLOAT` (f64), `ptr`
-//! as an opaque `Ptr`, `void` as `()`. A by-value struct crosses as a Rhai
+//! `ptr`, `str`. Integers cross as Rhai `INT` (i64), floats as `FLOAT` (f64),
+//! `ptr` as an opaque `Ptr` (a `Buf`, callback or string is accepted as an
+//! argument), `str` as a Rhai string (see Memory), `void` as `()`. A by-value struct crosses as a Rhai
 //! array of its field values (in declaration order), e.g.
 //!
 //! ```rhai
@@ -57,8 +73,9 @@
 //!   return path has only been exercised for small two-word structs.
 //! - **Non-default calling conventions** (e.g. Windows `stdcall`) — always the
 //!   platform default ABI.
-//! - **Automatic memory management** — every `malloc`/`cstr` and every buffer a
-//!   C API hands back is the script's to `free`.
+//! - **Automatic management of memory a C API hands back**, beyond `str`
+//!   returns bound with `freed_by` — e.g. `float*` results stay the script's
+//!   to release. `malloc`/`cstr` memory is the script's to `free`.
 //!
 //! # Safety
 //!
@@ -106,6 +123,10 @@ enum Tag {
     F32,
     F64,
     Ptr,
+    /// A NUL-terminated `char*` that crosses as a Rhai string: an argument is
+    /// copied into a temporary C string for the call, a return value is
+    /// copied out (`()` for NULL).
+    Str,
 }
 
 impl Tag {
@@ -122,7 +143,8 @@ impl Tag {
             "u64" | "ulong" | "usize" | "size_t" => Tag::U64,
             "f32" | "float" => Tag::F32,
             "f64" | "double" => Tag::F64,
-            "ptr" | "pointer" | "void*" | "char*" => Tag::Ptr,
+            "ptr" | "pointer" | "void*" => Tag::Ptr,
+            "str" | "string" | "cstr" | "char*" => Tag::Str,
             other => return Err(err(format!("ffi: unknown type tag {other:?}"))),
         })
     }
@@ -140,7 +162,7 @@ impl Tag {
             Tag::U64 => Type::u64(),
             Tag::F32 => Type::f32(),
             Tag::F64 => Type::f64(),
-            Tag::Ptr => Type::pointer(),
+            Tag::Ptr | Tag::Str => Type::pointer(),
         }
     }
 
@@ -152,7 +174,7 @@ impl Tag {
             Tag::I16 | Tag::U16 => 2,
             Tag::I32 | Tag::U32 | Tag::F32 => 4,
             Tag::I64 | Tag::U64 | Tag::F64 => 8,
-            Tag::Ptr => std::mem::size_of::<usize>(),
+            Tag::Ptr | Tag::Str => std::mem::size_of::<usize>(),
         }
     }
 
@@ -178,6 +200,16 @@ impl Tag {
             Tag::F32 => Dynamic::from(n!(f32) as FLOAT),
             Tag::F64 => Dynamic::from(n!(f64)),
             Tag::Ptr => Dynamic::from(Ptr(n!(usize) as *mut c_void)),
+            Tag::Str => {
+                let p = n!(usize) as *const c_char;
+                if p.is_null() {
+                    Dynamic::UNIT
+                } else {
+                    // SAFETY: a non-null `str` is a NUL-terminated C string,
+                    // as the script declared.
+                    Dynamic::from(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+                }
+            }
         }
     }
 
@@ -209,12 +241,11 @@ impl Tag {
             Tag::F32 => put!((f()? as f32)),
             Tag::F64 => put!((f()?)),
             Tag::Ptr => {
-                let p = d
-                    .clone()
-                    .try_cast::<Ptr>()
-                    .ok_or_else(|| err("ffi: expected a `ptr`"))?;
-                put!((p.0 as usize));
+                let p = ptr_value(d).ok_or_else(|| err("ffi: expected a `ptr`"))?;
+                put!((p as usize));
             }
+            // The C string would dangle once the write returns.
+            Tag::Str => return Err(err("ffi: a `str` can't be stored in C memory; use `ptr`")),
         }
         Ok(())
     }
@@ -361,6 +392,87 @@ struct Ptr(*mut c_void);
 unsafe impl Send for Ptr {}
 unsafe impl Sync for Ptr {}
 
+/// Memory the host owns (from `ffi::buf` / `ffi::cstr_array`), zeroed and
+/// freed when the last Rhai value holding it drops — at the end of its block,
+/// or when a `throw` unwinds past it. Clones share the allocation.
+#[derive(Clone)]
+struct Buf(Arc<BufInner>);
+
+struct BufInner {
+    ptr: *mut c_void,
+    len: usize,
+}
+
+// SAFETY: as for `Ptr`; the allocation is only reached through the unsafe
+// read/write helpers and C calls.
+unsafe impl Send for BufInner {}
+unsafe impl Sync for BufInner {}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_BUFS: Cell<usize> = const { Cell::new(0) };
+}
+
+impl Buf {
+    fn new(len: usize) -> Result<Buf, Box<EvalAltResult>> {
+        // SAFETY: standard libc calloc; at least one byte so NULL means failure.
+        let ptr = unsafe { libc::calloc(len.max(1), 1) };
+        if ptr.is_null() {
+            return Err(err("ffi: buf allocation failed"));
+        }
+        #[cfg(test)]
+        LIVE_BUFS.with(|n| n.set(n.get() + 1));
+        Ok(Buf(Arc::new(BufInner { ptr, len })))
+    }
+}
+
+impl Drop for BufInner {
+    fn drop(&mut self) {
+        // SAFETY: allocated by `Buf::new`, freed exactly once.
+        unsafe { libc::free(self.ptr) };
+        #[cfg(test)]
+        LIVE_BUFS.with(|n| n.set(n.get() - 1));
+    }
+}
+
+/// The address behind anything that can stand for a pointer: a `Ptr`, a
+/// `Buf`, or a callback.
+fn ptr_value(d: &Dynamic) -> Option<*mut c_void> {
+    if let Some(p) = d.read_lock::<Ptr>() {
+        return Some(p.0);
+    }
+    if let Some(b) = d.read_lock::<Buf>() {
+        return Some(b.0.ptr);
+    }
+    d.read_lock::<CallbackHandle>().map(|cb| cb.0.code.0)
+}
+
+/// A memory-helper target: its address, and its length when the host knows it
+/// (a `Buf`), so accesses can be bounds-checked.
+fn mem_arg(d: &Dynamic) -> Result<(*mut c_void, Option<usize>), Box<EvalAltResult>> {
+    if let Some(b) = d.read_lock::<Buf>() {
+        return Ok((b.0.ptr, Some(b.0.len)));
+    }
+    match d.read_lock::<Ptr>() {
+        Some(p) if p.0.is_null() => Err(err("ffi: access through a null pointer")),
+        Some(p) => Ok((p.0, None)),
+        None => Err(err(format!(
+            "ffi: expected a `ptr` or `buf`, got {}",
+            d.type_name()
+        ))),
+    }
+}
+
+/// Bounds check for `bytes` bytes at byte offset `at` of a `Buf` of `len`.
+fn check_bounds(len: Option<usize>, at: usize, bytes: usize) -> Result<(), Box<EvalAltResult>> {
+    match len {
+        Some(len) if at.checked_add(bytes).is_none_or(|end| end > len) => Err(err(format!(
+            "ffi: access of {bytes} bytes at offset {at} overruns a {len}-byte buf"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// A reusable by-value struct type descriptor (from `ffi::struct_type`).
 #[derive(Clone)]
 struct StructType(Arc<StructDef>);
@@ -371,12 +483,16 @@ struct StructType(Arc<StructDef>);
 #[derive(Clone)]
 struct Func(Arc<FuncInner>);
 
+#[derive(Clone)]
 struct FuncInner {
     _lib: Lib, // keep the library mapped
     code: CodePtr,
     cif: Cif,
     args: Vec<CType>,
     ret: CType,
+    /// For a `str` return the caller owns (`f.freed_by(free_fn)`): called on
+    /// the pointer once the string is copied out.
+    free: Option<Func>,
 }
 
 // SAFETY: a `Func` is a code address plus an immutable CIF describing its
@@ -400,6 +516,11 @@ enum Slot {
     F32(f32),
     F64(f64),
     Ptr(*mut c_void),
+    /// A Rhai string passed as `char*`: the C copy lives until the call returns.
+    Str {
+        _owned: CString,
+        ptr: *mut c_void,
+    },
     /// A by-value struct (or any composite), pre-laid-out in a byte buffer.
     Bytes(Vec<u8>),
 }
@@ -417,7 +538,7 @@ impl Slot {
             Slot::U64(v) => Arg::new(v),
             Slot::F32(v) => Arg::new(v),
             Slot::F64(v) => Arg::new(v),
-            Slot::Ptr(v) => Arg::new(v),
+            Slot::Ptr(v) | Slot::Str { ptr: v, .. } => Arg::new(v),
             // Point libffi at the struct's bytes (the Arg stores the address).
             Slot::Bytes(v) => Arg::new(unsafe { &*v.as_ptr() }),
         }
@@ -460,12 +581,20 @@ fn slot_for(ty: &CType, d: &Dynamic) -> Result<Slot, Box<EvalAltResult>> {
             d.as_float()
                 .map_err(|_| err("ffi: expected float argument"))?,
         ),
-        Tag::Ptr => Slot::Ptr(
-            d.clone()
-                .try_cast::<Ptr>()
-                .ok_or_else(|| err("ffi: expected a `ptr` argument"))?
-                .0,
-        ),
+        Tag::Ptr | Tag::Str => {
+            if let Some(s) = d.read_lock::<rhai::ImmutableString>() {
+                let c = CString::new(s.as_str())
+                    .map_err(|_| err("ffi: string argument contains interior NUL"))?;
+                let ptr = c.as_ptr() as *mut c_void;
+                return Ok(Slot::Str { _owned: c, ptr });
+            }
+            Slot::Ptr(ptr_value(d).ok_or_else(|| {
+                err(format!(
+                    "ffi: expected a `ptr`, `buf` or string argument, got {}",
+                    d.type_name()
+                ))
+            })?)
+        }
     })
 }
 
@@ -508,7 +637,14 @@ fn do_call(func: &Func, raw_args: rhai::Array) -> RhaiResult {
             args.as_ptr() as *mut *mut c_void,
         );
     }
-    Ok(func.ret.read(&rbuf))
+    let out = func.ret.read(&rbuf);
+    if let Some(free) = &func.free {
+        let p = Tag::Ptr.read(&rbuf);
+        if !p.read_lock::<Ptr>().is_some_and(|p| p.0.is_null()) {
+            let _ = do_call(free, vec![p])?;
+        }
+    }
+    Ok(out)
 }
 
 // ── Callbacks (Rhai fn → C function pointer) ────────────────────────────────
@@ -675,9 +811,26 @@ pub fn module(base_dir: PathBuf) -> Module {
                     cif,
                     args,
                     ret,
+                    free: None,
                 }))))
             },
         );
+
+    // f.freed_by(free_fn) -> Func   (for a `str` return the caller owns: the
+    // string is copied out, then `free_fn(ptr)` releases it; NULL stays `()`)
+    FuncRegistration::new("freed_by")
+        .with_namespace(FnNamespace::Global)
+        .set_into_module(&mut m, |f: &mut Func, free: Func| -> RhaiResult {
+            if !matches!(f.0.ret, CType::Scalar(Tag::Str)) {
+                return Err(err("ffi: freed_by needs a function returning `str`"));
+            }
+            if !matches!(free.0.args[..], [CType::Scalar(Tag::Ptr)]) {
+                return Err(err("ffi: freed_by needs a free function taking one `ptr`"));
+            }
+            let mut inner = (*f.0).clone();
+            inner.free = Some(free);
+            Ok(Dynamic::from(Func(Arc::new(inner))))
+        });
 
     // f.invoke([args]) -> result   (not `call`: that name is reserved by Rhai
     // for `FnPtr` invocation and would shadow this method). Takes the call
@@ -743,6 +896,71 @@ fn register_memory(m: &mut Module) {
         Ok(Dynamic::from(Ptr(p)))
     });
 
+    // ffi::buf(n) -> Buf   (zeroed; freed when the last value holding it drops)
+    m.set_native_fn("buf", |n: INT| -> RhaiResult {
+        let n = usize::try_from(n).map_err(|_| err("ffi: buf size must be >= 0"))?;
+        Ok(Dynamic::from(Buf::new(n)?))
+    });
+
+    // ffi::cstr_array([strings]) -> Buf   (a NULL-terminated `char*[]` and
+    // the strings it points at, in one allocation freed like any `buf`)
+    m.set_native_fn("cstr_array", |strings: rhai::Array| -> RhaiResult {
+        let strings: Vec<CString> = strings
+            .iter()
+            .map(|d| {
+                let s = d.read_lock::<rhai::ImmutableString>().ok_or_else(|| {
+                    err(format!(
+                        "ffi: cstr_array expects strings, got {}",
+                        d.type_name()
+                    ))
+                })?;
+                CString::new(s.as_str()).map_err(|_| err("ffi: string contains interior NUL"))
+            })
+            .collect::<Result<_, _>>()?;
+        let word = std::mem::size_of::<*mut c_char>();
+        let table = (strings.len() + 1) * word;
+        let total = table
+            + strings
+                .iter()
+                .map(|s| s.as_bytes_with_nul().len())
+                .sum::<usize>();
+        let buf = Buf::new(total)?;
+        let base = buf.0.ptr as *mut u8;
+        let mut at = table;
+        for (i, s) in strings.iter().enumerate() {
+            let bytes = s.as_bytes_with_nul();
+            // SAFETY: the table and every string fit in `total` bytes; the
+            // terminating table slot stays zero (NULL) from calloc.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(at), bytes.len());
+                (base as *mut *mut u8).add(i).write_unaligned(base.add(at));
+            }
+            at += bytes.len();
+        }
+        Ok(Dynamic::from(buf))
+    });
+
+    // buf.ptr() -> Ptr, buf.len() -> INT
+    FuncRegistration::new("ptr")
+        .with_namespace(FnNamespace::Global)
+        .set_into_module(m, |b: &mut Buf| -> Ptr { Ptr(b.0.ptr) });
+    FuncRegistration::new("len")
+        .with_namespace(FnNamespace::Global)
+        .set_into_module(m, |b: &mut Buf| -> INT { b.0.len as INT });
+    for name in ["to_string", "to_debug"] {
+        FuncRegistration::new(name)
+            .with_namespace(FnNamespace::Global)
+            .set_into_module(m, |b: &mut Buf| -> String {
+                format!("buf(0x{:x}, {} bytes)", b.0.ptr as usize, b.0.len)
+            });
+    }
+
+    // ffi::free(buf) is a mistake (it frees itself); say so instead of
+    // "function not found".
+    m.set_native_fn("free", |_: Buf| -> RhaiResult {
+        Err(err("ffi: a `buf` frees itself; don't pass it to ffi::free"))
+    });
+
     // ffi::free(ptr)
     m.set_native_fn("free", |p: Ptr| {
         // SAFETY: pointer must come from ffi::malloc / ffi::cstr or a C API that
@@ -767,32 +985,30 @@ fn register_memory(m: &mut Module) {
     });
 
     // ffi::read_cstr(ptr) -> String
-    m.set_native_fn("read_cstr", |p: Ptr| -> RhaiResult {
-        if p.0.is_null() {
-            return Err(err("ffi: read_cstr on null pointer"));
-        }
-        // SAFETY: assumes a valid NUL-terminated C string at `p`.
-        let s = unsafe { CStr::from_ptr(p.0 as *const c_char) }
-            .to_string_lossy()
-            .into_owned();
-        Ok(Dynamic::from(s))
+    m.set_native_fn("read_cstr", |p: Dynamic| -> RhaiResult {
+        let (p, len) = mem_arg(&p)?;
+        let s = match len {
+            Some(len) => {
+                // SAFETY: a `Buf` owns `len` readable bytes.
+                let bytes = unsafe { std::slice::from_raw_parts(p as *const u8, len) };
+                CStr::from_bytes_until_nul(bytes)
+                    .map_err(|_| err("ffi: read_cstr found no NUL in the buf"))?
+            }
+            // SAFETY: assumes a valid NUL-terminated C string at `p`.
+            None => unsafe { CStr::from_ptr(p as *const c_char) },
+        };
+        Ok(Dynamic::from(s.to_string_lossy().into_owned()))
     });
 
     // ffi::read_ptr(ptr, index) -> Ptr   (read a pointer-sized cell, e.g. an
     // out-param `*mut T*` or an element of a `T*[]` array)
-    m.set_native_fn("read_ptr", |p: Ptr, index: INT| -> RhaiResult {
-        if p.0.is_null() {
-            return Err(err("ffi: read_ptr on null pointer"));
-        }
-        if index < 0 {
-            return Err(err("ffi: read_ptr index must be >= 0"));
-        }
+    m.set_native_fn("read_ptr", |p: Dynamic, index: INT| -> RhaiResult {
+        let (p, len) = mem_arg(&p)?;
+        let index = usize::try_from(index).map_err(|_| err("ffi: read_ptr index must be >= 0"))?;
+        let word = std::mem::size_of::<*mut c_void>();
+        check_bounds(len, index * word, word)?;
         // SAFETY: trusts the script that a pointer is readable at this slot.
-        let v = unsafe {
-            (p.0 as *const *mut c_void)
-                .add(index as usize)
-                .read_unaligned()
-        };
+        let v = unsafe { (p as *const *mut c_void).add(index).read_unaligned() };
         Ok(Dynamic::from(Ptr(v)))
     });
 
@@ -800,19 +1016,16 @@ fn register_memory(m: &mut Module) {
     // `char*[]` argument vector)
     m.set_native_fn(
         "write_ptr",
-        |p: Ptr, index: INT, value: Ptr| -> RhaiResult {
-            if p.0.is_null() {
-                return Err(err("ffi: write_ptr to null pointer"));
-            }
-            if index < 0 {
-                return Err(err("ffi: write_ptr index must be >= 0"));
-            }
+        |p: Dynamic, index: INT, value: Dynamic| -> RhaiResult {
+            let (p, len) = mem_arg(&p)?;
+            let index =
+                usize::try_from(index).map_err(|_| err("ffi: write_ptr index must be >= 0"))?;
+            let value = ptr_value(&value)
+                .ok_or_else(|| err("ffi: write_ptr stores a `ptr`, `buf` or callback"))?;
+            let word = std::mem::size_of::<*mut c_void>();
+            check_bounds(len, index * word, word)?;
             // SAFETY: trusts the script that this slot is writable.
-            unsafe {
-                (p.0 as *mut *mut c_void)
-                    .add(index as usize)
-                    .write_unaligned(value.0)
-            };
+            unsafe { (p as *mut *mut c_void).add(index).write_unaligned(value) };
             Ok(Dynamic::UNIT)
         },
     );
@@ -872,8 +1085,8 @@ fn read_array_fn<T>(m: &mut Module, name: &str)
 where
     T: Copy + Into<f64> + 'static,
 {
-    m.set_native_fn(name, |p: Ptr, count: INT| -> RhaiResult {
-        read_array_impl::<T>(p, count, |v| Dynamic::from(v.into() as FLOAT))
+    m.set_native_fn(name, |p: Dynamic, count: INT| -> RhaiResult {
+        read_array_impl::<T>(&p, count, |v| Dynamic::from(v.into() as FLOAT))
     });
 }
 
@@ -882,25 +1095,22 @@ fn read_int_array_fn<T>(m: &mut Module, name: &str)
 where
     T: Copy + Into<i64> + 'static,
 {
-    m.set_native_fn(name, |p: Ptr, count: INT| -> RhaiResult {
-        read_array_impl::<T>(p, count, |v| Dynamic::from(v.into() as INT))
+    m.set_native_fn(name, |p: Dynamic, count: INT| -> RhaiResult {
+        read_array_impl::<T>(&p, count, |v| Dynamic::from(v.into() as INT))
     });
 }
 
 fn read_array_impl<T: Copy + 'static>(
-    p: Ptr,
+    p: &Dynamic,
     count: INT,
     conv: impl Fn(T) -> Dynamic,
 ) -> RhaiResult {
-    if p.0.is_null() {
-        return Err(err("ffi: read on null pointer"));
-    }
-    if count < 0 {
-        return Err(err("ffi: read count must be >= 0"));
-    }
-    let base = p.0 as *const T;
-    let mut out = rhai::Array::with_capacity(count as usize);
-    for i in 0..count as usize {
+    let (p, len) = mem_arg(p)?;
+    let count = usize::try_from(count).map_err(|_| err("ffi: read count must be >= 0"))?;
+    check_bounds(len, 0, count.saturating_mul(std::mem::size_of::<T>()))?;
+    let base = p as *const T;
+    let mut out = rhai::Array::with_capacity(count);
+    for i in 0..count {
         // SAFETY: trusts the script's claim that `count` elements of T are
         // readable at `p`. Out-of-bounds is UB, per module docs.
         let v = unsafe { base.add(i).read_unaligned() };
@@ -915,8 +1125,8 @@ where
     T: Copy + 'static,
     f64: AsCast<T>,
 {
-    m.set_native_fn(name, |p: Ptr, index: INT, value: FLOAT| -> RhaiResult {
-        write_impl::<T>(p, index, <f64 as AsCast<T>>::cast(value))
+    m.set_native_fn(name, |p: Dynamic, index: INT, value: FLOAT| -> RhaiResult {
+        write_impl::<T>(&p, index, <f64 as AsCast<T>>::cast(value))
     });
 }
 
@@ -926,20 +1136,18 @@ where
     T: Copy + 'static,
     i64: AsCast<T>,
 {
-    m.set_native_fn(name, |p: Ptr, index: INT, value: INT| -> RhaiResult {
-        write_impl::<T>(p, index, <i64 as AsCast<T>>::cast(value))
+    m.set_native_fn(name, |p: Dynamic, index: INT, value: INT| -> RhaiResult {
+        write_impl::<T>(&p, index, <i64 as AsCast<T>>::cast(value))
     });
 }
 
-fn write_impl<T: Copy + 'static>(p: Ptr, index: INT, value: T) -> RhaiResult {
-    if p.0.is_null() {
-        return Err(err("ffi: write to null pointer"));
-    }
-    if index < 0 {
-        return Err(err("ffi: write index must be >= 0"));
-    }
+fn write_impl<T: Copy + 'static>(p: &Dynamic, index: INT, value: T) -> RhaiResult {
+    let (p, len) = mem_arg(p)?;
+    let index = usize::try_from(index).map_err(|_| err("ffi: write index must be >= 0"))?;
+    let size = std::mem::size_of::<T>();
+    check_bounds(len, index.saturating_mul(size), size)?;
     // SAFETY: trusts the script that element `index` of T is writable at `p`.
-    unsafe { (p.0 as *mut T).add(index as usize).write_unaligned(value) };
+    unsafe { (p as *mut T).add(index).write_unaligned(value) };
     Ok(Dynamic::UNIT)
 }
 
@@ -957,6 +1165,7 @@ impl_as_cast!(i64 => i32, i64, u8);
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use rhai::Engine;
 
     fn engine() -> Engine {
@@ -981,15 +1190,12 @@ mod tests {
 
         let engine = engine();
 
-        // detect_language: ptr -> ptr (static return, no free).
+        // detect_language: str -> str (static return, no free).
         let script = format!(
             r#"
             let l = ffi::open("{lib}");
-            let f = l.func("inference_detect_language", "ptr", ["ptr"]);
-            let s = ffi::cstr("これは日本語のテストです");
-            let lang = ffi::read_cstr(f.invoke([s]));
-            ffi::free(s);
-            lang
+            let f = l.func("inference_detect_language", "str", ["str"]);
+            f.invoke(["これは日本語のテストです"])
             "#
         );
         let lang: String = engine.eval(&script).expect("detect_language via ffi");
@@ -1060,5 +1266,77 @@ mod tests {
             .expect("qsort via ffi");
         let got: Vec<i64> = sorted.iter().map(|d| d.as_int().unwrap()).collect();
         assert_eq!(got, vec![1, 2, 3, 5, 9]);
+    }
+
+    /// Strings go straight in and come back out; an owned `str` return is
+    /// copied, then released by its `freed_by` function; NULL is `()`.
+    #[test]
+    fn str_args_and_returns() {
+        let out: rhai::Array = engine()
+            .eval(
+                r#"
+                let libc = ffi::open("libc.so.6");
+                let strlen = libc.func("strlen", "u64", ["ptr"]);
+                let free = libc.func("free", "void", ["ptr"]);
+                let strdup = libc.func("strdup", "str", ["str"]).freed_by(free);
+                let getenv = libc.func("getenv", "str", ["str"]);
+                [strlen.invoke(["héllo"]), strdup.invoke(["copy me"]),
+                 getenv.invoke(["MUSICLIB_FFI_TEST_SURELY_UNSET"])]
+                "#,
+            )
+            .expect("str marshalling");
+        assert_eq!(out[0].as_int().unwrap(), 6);
+        assert_eq!(out[1].clone().into_string().unwrap(), "copy me");
+        assert!(out[2].is_unit());
+    }
+
+    /// A `buf` frees itself when its variable goes out of scope, including
+    /// when a `throw` unwinds past it, and is bounds-checked.
+    #[test]
+    fn buf_is_scoped_and_bounds_checked() {
+        let e = engine();
+        let live = || LIVE_BUFS.with(Cell::get);
+        let sum: f64 = e
+            .eval(
+                r#"
+                let s = 0.0;
+                for i in 0..3 {
+                    let b = ffi::buf(16);
+                    ffi::write_f64(b, 1, 2.5);
+                    s += ffi::read_f64(b, 2)[1];
+                }
+                try { let b = ffi::buf(8); throw "boom"; } catch {}
+                s
+                "#,
+            )
+            .expect("buf");
+        assert_eq!(sum, 7.5);
+        assert_eq!(live(), 0);
+
+        let e2 = e.eval::<()>("let b = ffi::buf(8); ffi::write_i64(b, 1, 0);");
+        assert!(e2.unwrap_err().to_string().contains("overruns"));
+        let e3 = e.eval::<()>("let b = ffi::buf(8); ffi::free(b);");
+        assert!(e3.unwrap_err().to_string().contains("frees itself"));
+        assert_eq!(live(), 0);
+    }
+
+    /// `cstr_array` builds a NULL-terminated `char*[]` in one allocation.
+    #[test]
+    fn cstr_array_layout() {
+        let out: rhai::Array = engine()
+            .eval(
+                r#"
+                let a = ffi::cstr_array(["ab", "", "にちか"]);
+                [ffi::read_cstr(ffi::read_ptr(a, 0)), ffi::read_cstr(ffi::read_ptr(a, 1)),
+                 ffi::read_cstr(ffi::read_ptr(a, 2)), ffi::read_ptr(a, 3).is_null()]
+                "#,
+            )
+            .expect("cstr_array");
+        let s = |i: usize| out[i].clone().into_string().unwrap();
+        assert_eq!(
+            (s(0), s(1), s(2)),
+            ("ab".into(), "".into(), "にちか".into())
+        );
+        assert!(out[3].as_bool().unwrap());
     }
 }
