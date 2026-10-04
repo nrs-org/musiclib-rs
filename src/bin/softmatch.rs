@@ -46,10 +46,6 @@ struct Args {
     /// Persist RELATE and soft MERGE (same_identity) decisions to the database.
     #[arg(long)]
     apply: bool,
-    /// Write all candidate pairs (including DISTINCT and BARRIER) to a CSV
-    /// file for manual quality review.
-    #[arg(long)]
-    csv: Option<String>,
     /// SQLite file for the embedding cache. Defaults to <data_dir>/embeddings.db.
     /// Requires the Rhai script to define embed(text) -> array.
     #[arg(long)]
@@ -187,7 +183,6 @@ async fn main() -> anyhow::Result<()> {
     let soft_cfg = SoftMatchConfig {
         script_path: script_path.display().to_string(),
         apply_relates: args.apply,
-        csv_path: args.csv,
         embed_db_path,
         embed_dim: args.embed_dim,
         embed_k: args.embed_k,

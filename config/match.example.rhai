@@ -12,7 +12,7 @@
 //
 // Context object (`ctx`): whatever init() returns, the host holds for the whole
 // run and passes back as the first argument of decide / embed_batch / embed /
-// main_title_sim / markers_conflict. Use it to carry state that must outlive a
+// prepare / refine. Use it to carry state that must outlive a
 // single call and cross Rhai's isolated function scopes — e.g. an ffi-opened
 // library handle (this script stores the inference handle there). It's () when
 // init() is absent or returns ().
@@ -55,7 +55,7 @@
 // Verdict constructors:
 //   merge(conf, reason)             → verdict
 //   relate(kind, conf, reason)      → verdict
-//   defer(conf, reason)             → verdict   undecided (CSV DEFER; refine() can settle it)
+//   defer(conf, reason)             → verdict   undecided (refine() can settle it)
 //   distinct()                      → verdict
 //
 // Pair facts: pair_facts_json(source, identifier) or pair_facts_json([[s, i], …])
@@ -140,7 +140,7 @@
 //
 // The host calls init() once and threads whatever it returns back as the first
 // argument (`ctx`) of every other entry point — embed_batch, embed, decide,
-// main_title_sim, markers_conflict. It's an arbitrary context object owned by
+// prepare, refine. It's an arbitrary context object owned by
 // this script; the host keeps it alive for the whole run and never inspects it.
 //
 // We use it to open the inference library exactly once: the returned handle (a
@@ -625,8 +625,7 @@ fn is_mv_entry(entry) {
 
 // ── Pair-level feature helpers ────────────────────────────────────────────────
 
-// `ctx` is the host context object (unused here); present so the host can call
-// this entry point with the uniform (ctx, a, b) convention.
+// `ctx` is unused; kept for the (ctx, a, b) shape of the other pair helpers.
 fn main_title_sim(ctx, a, b) {
     let ta = normalize(pick_main_title(a));
     let tb = normalize(pick_main_title(b));
@@ -635,7 +634,7 @@ fn main_title_sim(ctx, a, b) {
     str_sim(ta, tb)
 }
 
-// `ctx` unused (uniform host calling convention — see main_title_sim).
+// `ctx` unused (see main_title_sim).
 fn markers_conflict(ctx, a, b) {
     let am = pick_markers(a);
     let bm = pick_markers(b);

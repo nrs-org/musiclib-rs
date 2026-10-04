@@ -11,5 +11,6 @@ pub mod importer;
 pub mod ingest;
 pub mod pair_facts;
 pub mod progress;
+pub(crate) mod script_file;
 pub mod softmatch;
 pub mod state;

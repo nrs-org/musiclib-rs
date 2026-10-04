@@ -210,7 +210,7 @@ import-time/dedup-barrier operation.
 ```bash
 cargo run --features ffi --release --bin softmatch
 cargo run --features ffi --release --bin softmatch -- --apply   # write RELATE + soft MERGE decisions to DB
-cargo run --features ffi --release --bin softmatch -- --csv out.csv  # dump all pairs for review
+MUSICLIB_MATCH_CSV=out.csv cargo run --features ffi --release --bin softmatch  # one CSV row per scored pair (written by match.learned.rhai)
 ```
 
 | Flag | Default | Notes |
@@ -218,7 +218,6 @@ cargo run --features ffi --release --bin softmatch -- --csv out.csv  # dump all 
 | `--db` | `<data_dir>/musiclib.db` | SQLite music library |
 | `--script` | `<config_dir>/match.rhai` | Rhai match script |
 | `--apply` | false | Persist RELATE and soft MERGE (`same_identity`) decisions to the DB |
-| `--csv <path>` | absent | Write all scored pairs (MERGE / RELATE / DISTINCT / BARRIER) to a CSV |
 | `--embed-db` | `<data_dir>/embeddings.db` | SQLite embedding cache (sqlite-vec) |
 | `--no-embed` | false | Disable semantic blocking even if `embed_batch` is defined |
 | `--embed-dim` | `256` | Embedding dimension; must match the model (`384` for MiniLM) |
@@ -238,8 +237,7 @@ dependency-free naive token-hash embedder. See [CONFIG_REFERENCE.md](CONFIG_REFE
 for the `match.rhai` format.
 
 Candidate retrieval is a union of bounded exact-name, token, character-ngram,
-duration/credit, release-tracklist, and optional semantic-ANN channels. Their
-provenance is written in the CSV's `candidate_channels` column. Import-time
+duration/credit, release-tracklist, and optional semantic-ANN channels. Import-time
 soft-match is suggestion-only: it may warm embeddings and score focused pairs,
 but does not write relationships or merge entries.
 

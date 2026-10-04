@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -98,16 +97,9 @@ struct Scored {
     verdict: Verdict,
     origin: String,
     model_version: Option<String>,
-}
-
-impl From<Verdict> for Scored {
-    fn from(verdict: Verdict) -> Self {
-        Self {
-            verdict,
-            origin: "heuristic".to_owned(),
-            model_version: None,
-        }
-    }
+    /// The script's own verdict map, extra keys included (e.g. a `diag` map
+    /// `decide` attached), handed back to `refine` as `item.verdict`.
+    map: RhaiMap,
 }
 
 #[derive(Clone)]
@@ -121,9 +113,6 @@ pub struct SoftMatchConfig {
     /// undo path); that stays exclusively an import-time/dedup-barrier
     /// operation.
     pub apply_relates: bool,
-    /// If set, write a CSV row for every candidate pair (including DISTINCT)
-    /// to this path for manual quality review.
-    pub csv_path: Option<String>,
     /// Path to the SQLite file used as the embedding cache.
     /// `None` disables semantic blocking entirely.
     pub embed_db_path: Option<String>,
@@ -173,7 +162,6 @@ pub fn default_soft_match_config() -> Option<SoftMatchConfig> {
     Some(SoftMatchConfig {
         script_path: script_path.display().to_string(),
         apply_relates: true,
-        csv_path: None,
         embed_db_path: Some(embed_db.display().to_string()),
         embed_dim: 256,
         embed_k: 20,
@@ -316,98 +304,6 @@ fn token_jaccard(a: &str, b: &str) -> f64 {
     }
 }
 
-fn jaccard_i64(a: &[i64], b: &[i64]) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 0.0;
-    }
-    let a_set: HashSet<i64> = a.iter().copied().collect();
-    let b_set: HashSet<i64> = b.iter().copied().collect();
-    let inter = a_set.intersection(&b_set).count();
-    let union = a_set.union(&b_set).count();
-    if union == 0 {
-        0.0
-    } else {
-        inter as f64 / union as f64
-    }
-}
-
-// ── Lazy features (internal — used only for CSV diagnostic output) ────────────
-
-#[derive(Clone)]
-struct LazyFeatures {
-    a_durations: Vec<i64>,
-    b_durations: Vec<i64>,
-    a_peers: Vec<i64>,
-    b_peers: Vec<i64>,
-    a_positions: Vec<(i64, Option<i32>, Option<i32>)>,
-    b_positions: Vec<(i64, Option<i32>, Option<i32>)>,
-    c_dur_known: Option<bool>,
-    c_dur_delta_ms: Option<i64>,
-    c_artist_overlap: Option<f64>,
-    c_same_release: Option<bool>,
-    c_same_release_position: Option<bool>,
-}
-
-impl LazyFeatures {
-    fn new(a: &EntryInfo, b: &EntryInfo) -> Self {
-        Self {
-            a_durations: a.durations.clone(),
-            b_durations: b.durations.clone(),
-            a_peers: a.peer_entry_ids.clone(),
-            b_peers: b.peer_entry_ids.clone(),
-            a_positions: a.track_positions.clone(),
-            b_positions: b.track_positions.clone(),
-            c_dur_known: None,
-            c_dur_delta_ms: None,
-            c_artist_overlap: None,
-            c_same_release: None,
-            c_same_release_position: None,
-        }
-    }
-
-    fn dur_known(&mut self) -> bool {
-        let known = !self.a_durations.is_empty() && !self.b_durations.is_empty();
-        *self.c_dur_known.get_or_insert(known)
-    }
-    fn dur_delta_ms(&mut self) -> i64 {
-        let a = &self.a_durations;
-        let b = &self.b_durations;
-        *self.c_dur_delta_ms.get_or_insert_with(|| {
-            a.iter()
-                .flat_map(|da| b.iter().map(move |db| (da - db).abs()))
-                .min()
-                .unwrap_or(0)
-        })
-    }
-    fn artist_overlap(&mut self) -> f64 {
-        *self
-            .c_artist_overlap
-            .get_or_insert_with(|| jaccard_i64(&self.a_peers, &self.b_peers))
-    }
-    fn same_release(&mut self) -> bool {
-        *self.c_same_release.get_or_insert_with(|| {
-            let a_releases: HashSet<i64> = self.a_positions.iter().map(|(r, _, _)| *r).collect();
-            self.b_positions
-                .iter()
-                .any(|(r, _, _)| a_releases.contains(r))
-        })
-    }
-    fn same_release_position(&mut self) -> bool {
-        *self.c_same_release_position.get_or_insert_with(|| {
-            let a_set: HashSet<(i64, Option<i32>, Option<i32>)> = self
-                .a_positions
-                .iter()
-                .filter(|(_, _, t)| t.is_some())
-                .copied()
-                .collect();
-            self.b_positions
-                .iter()
-                .filter(|(_, _, t)| t.is_some())
-                .any(|pos| a_set.contains(pos))
-        })
-    }
-}
-
 // ── Rhai engine ───────────────────────────────────────────────────────────────
 
 type RegexCache = Arc<Mutex<HashMap<String, regex::Regex>>>;
@@ -518,6 +414,7 @@ fn build_rhai_engine(
     });
 
     register_entry_type(&mut engine);
+    crate::pipeline::script_file::register(&mut engine);
 
     // Lazy per-pair facts (`musiclib-pair-facts/1`, see `pipeline::pair_facts`):
     // `pair_facts_json(source, identifier)` → one JSON object, or
@@ -1236,7 +1133,12 @@ fn call_script(ctx: &ScriptCtx, a: &Arc<EntryInfo>, b: &Arc<EntryInfo>) -> anyho
 /// `model_version` fields) as a `Scored`. Anything that isn't one is DISTINCT.
 fn scored_from_dynamic(result: Dynamic) -> Scored {
     let Some(map) = result.try_cast::<RhaiMap>() else {
-        return Verdict::Distinct.into();
+        return Scored {
+            verdict: Verdict::Distinct,
+            origin: "heuristic".to_owned(),
+            model_version: None,
+            map: RhaiMap::new(),
+        };
     };
 
     let rhai_str = |key: &str| -> Option<String> {
@@ -1271,48 +1173,8 @@ fn scored_from_dynamic(result: Dynamic) -> Scored {
         verdict,
         origin: rhai_str("origin").unwrap_or_else(|| "heuristic".to_owned()),
         model_version: rhai_str("model_version"),
+        map,
     }
-}
-
-/// The inverse of `scored_from_dynamic`, for handing a verdict back to the
-/// script (`refine`'s `item.verdict`).
-fn scored_to_map(s: &Scored) -> RhaiMap {
-    let mut m = RhaiMap::new();
-    let mut put = |k: &str, v: Dynamic| {
-        m.insert(k.into(), v);
-    };
-    match &s.verdict {
-        Verdict::Merge { confidence, reason } => {
-            put("verdict", "merge".into());
-            put("confidence", (*confidence).into());
-            put("reason", reason.clone().into());
-        }
-        Verdict::Relate {
-            kind,
-            confidence,
-            reason,
-            metadata,
-        } => {
-            put("verdict", "relate".into());
-            put("kind", kind.clone().into());
-            put("confidence", (*confidence).into());
-            put("reason", reason.clone().into());
-            if let Some(meta) = metadata {
-                put("metadata", serde_to_dynamic(meta));
-            }
-        }
-        Verdict::Defer { confidence, reason } => {
-            put("verdict", "defer".into());
-            put("confidence", (*confidence).into());
-            put("reason", reason.clone().into());
-        }
-        Verdict::Distinct => put("verdict", "distinct".into()),
-    }
-    put("origin", s.origin.clone().into());
-    if let Some(v) = &s.model_version {
-        put("model_version", v.clone().into());
-    }
-    m
 }
 
 /// Pairs per `refine(ctx, items)` call. One call is one blocking script run,
@@ -1356,7 +1218,7 @@ fn refine_verdicts<T>(
                 let mut item = RhaiMap::new();
                 item.insert("a".into(), script_entry(ctx, a));
                 item.insert("b".into(), script_entry(ctx, b));
-                item.insert("verdict".into(), Dynamic::from_map(scored_to_map(scored)));
+                item.insert("verdict".into(), Dynamic::from_map(scored.map.clone()));
                 Dynamic::from_map(item)
             })
             .collect();
@@ -2511,19 +2373,6 @@ fn fmt_pairs(pairs: &[Pair]) -> String {
         .join(", ")
 }
 
-/// Wrap a string value in CSV double-quotes, escaping any internal quotes.
-fn csv_field(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
-}
-
-fn fmt_pairs_csv(pairs: &[Pair]) -> String {
-    pairs
-        .iter()
-        .map(|(s, id)| format!("{s}:{id}"))
-        .collect::<Vec<_>>()
-        .join(" | ")
-}
-
 // ── Shared scoring loop ───────────────────────────────────────────────────────
 
 struct ScriptCtx<'a> {
@@ -2624,24 +2473,6 @@ async fn score_candidates(
     embed_cache: Option<&EmbeddingCache>,
     precomputed: Option<CandidateChannels>,
 ) -> anyhow::Result<HashMap<String, [usize; 4]>> {
-    // Optional CSV output for manual quality review.
-    let mut csv: Option<std::io::BufWriter<std::fs::File>> = if let Some(path) = &config.csv_path {
-        let f = std::fs::File::create(path).with_context(|| format!("creating CSV file {path}"))?;
-        let mut w = std::io::BufWriter::new(f);
-        writeln!(
-            w,
-            "verdict,kind,confidence,reason,candidate_channels,type,\
-             entry_a,title_a,sources_a,\
-             entry_b,title_b,sources_b,\
-             main_title_sim,markers_conflict,\
-             dur_known,dur_delta_ms,\
-             same_release,same_release_position,artist_overlap"
-        )?;
-        Some(w)
-    } else {
-        None
-    };
-
     let soft_identity = db.soft_identity_projection().await?;
     if !soft_identity.conflicts.is_empty() {
         warn!(
@@ -2731,6 +2562,7 @@ async fn score_candidates(
         Some(e)
     };
     let mut to_score: Vec<(Arc<EntryInfo>, Arc<EntryInfo>, Option<ChannelMask>)> = Vec::new();
+    let (mut soft_same, mut soft_different, mut barred) = (0usize, 0usize, 0usize);
     while let Some((id_a, id_b)) = work_queue.pop_front() {
         let (ea, eb) = match (share(id_a), share(id_b)) {
             (Some(a), Some(b)) => (a, b),
@@ -2738,31 +2570,26 @@ async fn score_candidates(
         };
 
         if soft_identity.are_same(id_a, id_b) {
-            if let Some(w) = &mut csv {
-                let channels = candidate_channels.get(&(id_a, id_b));
-                write_csv_row(w, "SOFT_SAME", "", 1.0, "", channels, &ea, &eb, ctx)?;
-            }
+            soft_same += 1;
             continue;
         }
         if soft_identity.are_different(id_a, id_b) {
-            if let Some(w) = &mut csv {
-                let channels = candidate_channels.get(&(id_a, id_b));
-                write_csv_row(w, "SOFT_BARRIER", "", 0.0, "", channels, &ea, &eb, ctx)?;
-            }
+            soft_different += 1;
             continue;
         }
-
         if barrier_blocks(&ea.pairs, &eb.pairs, barrier) {
-            if let Some(w) = &mut csv {
-                let channels = candidate_channels.get(&(id_a, id_b));
-                write_csv_row(w, "BARRIER", "", 0.0, "", channels, &ea, &eb, ctx)?;
-            }
+            barred += 1;
             continue;
         }
 
         let channels = candidate_channels.get(&(id_a, id_b)).copied();
         to_score.push((ea, eb, channels));
     }
+    info!(
+        "Skipped {} candidate pair(s) before scoring: {soft_same} already linked, \
+         {soft_different} marked different, {barred} behind a dedup barrier",
+        soft_same + soft_different + barred
+    );
 
     let total_scored = to_score.len();
     let scored_entries: Vec<&Arc<EntryInfo>> =
@@ -2774,25 +2601,6 @@ async fn score_candidates(
 
     for ((ea, eb, channels), scored) in to_score.iter().zip(verdicts) {
         let verdict = apply_candidate(db, ea, eb, channels.as_ref(), scored?, config).await?;
-
-        if let Some(w) = &mut csv {
-            let (vname, kind, conf, reason) = match &verdict {
-                Verdict::Merge { confidence, reason } => {
-                    ("MERGE", "", *confidence, reason.as_str())
-                }
-                Verdict::Relate {
-                    kind,
-                    confidence,
-                    reason,
-                    ..
-                } => ("RELATE", kind.as_str(), *confidence, reason.as_str()),
-                Verdict::Defer { confidence, reason } => {
-                    ("DEFER", "", *confidence, reason.as_str())
-                }
-                Verdict::Distinct => ("DISTINCT", "", 0.0, ""),
-            };
-            write_csv_row(w, vname, kind, conf, reason, channels.as_ref(), ea, eb, ctx)?;
-        }
 
         let counters = stats.entry(ea.entry_type.clone()).or_insert([0; 4]);
         match &verdict {
@@ -2844,6 +2652,7 @@ async fn apply_candidate(
         verdict,
         origin,
         model_version,
+        ..
     } = scored;
 
     match &verdict {
@@ -2954,74 +2763,6 @@ async fn apply_candidate(
     }
 
     Ok(verdict)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_csv_row(
-    w: &mut impl std::io::Write,
-    verdict: &str,
-    kind: &str,
-    confidence: f64,
-    reason: &str,
-    channels: Option<&ChannelMask>,
-    ea: &Arc<EntryInfo>,
-    eb: &Arc<EntryInfo>,
-    ctx: &ScriptCtx,
-) -> anyhow::Result<()> {
-    let mut f = LazyFeatures::new(ea, eb);
-    let dur_known = f.dur_known();
-    let dur_delta = f.dur_delta_ms();
-    let same_rel = f.same_release();
-    let same_pos = f.same_release_position();
-    let art_ov = f.artist_overlap();
-
-    // Policy-level diagnostics delegate to the script so no logic is duplicated.
-    let a_dyn = script_entry(ctx, ea);
-    let b_dyn = script_entry(ctx, eb);
-    let uc = ctx.user_ctx.clone();
-    let main_sim: f64 = ctx
-        .engine
-        .call_fn::<f64>(
-            &mut ctx.base_scope.clone(),
-            &ctx.ast,
-            "main_title_sim",
-            (uc.clone(), a_dyn.clone(), b_dyn.clone()),
-        )
-        .unwrap_or(0.0);
-    let markers_conf: bool = ctx
-        .engine
-        .call_fn::<bool>(
-            &mut ctx.base_scope.clone(),
-            &ctx.ast,
-            "markers_conflict",
-            (uc, a_dyn, b_dyn),
-        )
-        .unwrap_or(false);
-
-    writeln!(
-        w,
-        "{},{},{:.4},{},{},{},{},{},{},{},{},{},{:.4},{},{},{},{},{},{:.4}",
-        verdict,
-        kind,
-        confidence,
-        csv_field(reason),
-        csv_field(&channels.copied().map(ChannelMask::csv).unwrap_or_default(),),
-        ea.entry_type,
-        ea.entry_id,
-        csv_field(ea.best_title.as_deref().unwrap_or("")),
-        csv_field(&fmt_pairs_csv(&ea.pairs)),
-        eb.entry_id,
-        csv_field(eb.best_title.as_deref().unwrap_or("")),
-        csv_field(&fmt_pairs_csv(&eb.pairs)),
-        main_sim,
-        markers_conf,
-        dur_known,
-        dur_delta,
-        same_rel,
-        same_pos,
-        art_ov,
-    )?;
-    Ok(())
 }
 
 // ── Public entry points ───────────────────────────────────────────────────────

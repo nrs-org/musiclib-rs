@@ -30,6 +30,9 @@
 // and libinference.so built with `--features matcher,typesafe`, refine() sends
 // every DEFER pair to TypeSafe's Jev and uses its answer instead. Answers are
 // cached in <cache_dir>/typesafe.db; init() logs whether Jev is on and why not.
+//
+// CSV: with MUSICLIB_MATCH_CSV=<path>, every scored pair gets a row with its
+// final verdict and the model's outputs (see csv_header()), for analysis.
 
 // Per-type merge thresholds on p_same: chosen on dev at 98% merge precision
 // (99% for artists) by train.py, models/v17/thresholds.json. Policy, not
@@ -59,6 +62,16 @@ fn init() {
     }
     import "jev" as jev;
     ctx.jev = jev::open(if "lib" in ctx { ctx.lib } else { () });
+    let csv_path = env_var("MUSICLIB_MATCH_CSV");
+    if csv_path != "" {
+        try {
+            ctx.csv = file_create(csv_path);
+            ctx.csv.write_line(csv_row(csv_header()));
+            print("match.learned.rhai: writing one CSV row per scored pair to " + csv_path);
+        } catch (err) {
+            print("match.learned.rhai: no CSV: " + err);
+        }
+    }
     ctx
 }
 
@@ -219,6 +232,14 @@ fn score(ctx, a, b, heads) {
 }
 
 fn decide(ctx, a, b) {
+    let v = judge(ctx, a, b);
+    // DISTINCT pairs never reach refine(), so their CSV rows are written here.
+    if "csv" in ctx && v.verdict == "distinct" { emit_row(ctx, a, b, v); }
+    v
+}
+
+// The verdict. With a CSV open, it carries the model's outputs as `diag`.
+fn judge(ctx, a, b) {
     // Cross-type candidates never reach the model (it was not trained on them).
     if a.entry_type != b.entry_type { return distinct(); }
     if !has_matcher(ctx) { return distinct(); }
@@ -226,32 +247,49 @@ fn decide(ctx, a, b) {
     let c = ctx.col;
     let p_same = o[c.p_same];
     let threshold = if a.entry_type in ctx.thresholds { ctx.thresholds[a.entry_type] } else { 1.0 };
+    let diag = if "csv" in ctx {
+        #{
+            p_same: p_same, p_related: o[c.p_related], p_sibling: o[c.p_sibling],
+            p_unrelated: o[c.p_unrelated], guard: o[c.guard],
+        }
+    } else { () };
 
     if p_same >= threshold {
-        if o[c.guard] > 0.0 { return defer(p_same, "learned: generic or placeholder name"); }
-        return merge(p_same, "learned v17");
+        if o[c.guard] > 0.0 { return with_diag(defer(p_same, "learned: generic or placeholder name"), diag); }
+        return with_diag(merge(p_same, "learned v17"), diag);
     }
     let best = "related";
     let best_p = o[c.p_related];
     if o[c.p_sibling] > best_p { best = "sibling"; best_p = o[c.p_sibling]; }
     if o[c.p_unrelated] > best_p { best = "unrelated"; best_p = o[c.p_unrelated]; }
-    if p_same > best_p { return defer(p_same, "learned: same leads below the merge threshold"); }
-    if best != "related" { return distinct(); }
+    if p_same > best_p { return with_diag(defer(p_same, "learned: same leads below the merge threshold"), diag); }
+    if best != "related" { return with_diag(distinct(), diag); }
 
     o = score(ctx, a, b, head_relation());
-    // Structure head: neither side derives from the other → siblings, no edge.
-    let p_struct = o[c.p_sibling_structure];
-    if a.entry_type == "track" && p_struct > 0.5 { return distinct(); }
-
-    let meta = #{};
     let kind = "";
     let kind_p = -1.0;
     for k in ctx.kinds { if o[k[1]] > kind_p { kind = k[0]; kind_p = o[k[1]]; } }
-    if kind != "other" { meta.transformation = kind; }
+    let p_struct = o[c.p_sibling_structure];
     let p_a = o[c.p_a_derived];
+    if type_of(diag) == "map" {
+        diag.p_sibling_structure = p_struct;
+        diag.p_a_derived = p_a;
+        diag.kind = kind;
+        diag.p_kind = kind_p;
+    }
+    // Structure head: neither side derives from the other → siblings, no edge.
+    if a.entry_type == "track" && p_struct > 0.5 { return with_diag(distinct(), diag); }
+
+    let meta = #{};
+    if kind != "other" { meta.transformation = kind; }
     if p_a - 0.5 > direction_margin() { meta.derived_side = "a"; }
     if 0.5 - p_a > direction_margin() { meta.derived_side = "b"; }
-    relate("derived_from", best_p, "learned v17 (" + kind + ")", meta)
+    with_diag(relate("derived_from", best_p, "learned v17 (" + kind + ")", meta), diag)
+}
+
+fn with_diag(v, diag) {
+    if type_of(diag) == "map" { v.diag = diag; }
+    v
 }
 
 // Host hook, after decide(): items are `#{a, b, verdict}` for every pair that
@@ -260,20 +298,82 @@ fn decide(ctx, a, b) {
 // MERGE or RELATE stands.
 fn refine(ctx, items) {
     let out = items.map(|it| ());
-    if type_of(ctx) != "map" || type_of(ctx.jev) != "map" { return out; }
     let idx = [];
     let ask = [];
-    for i in 0..items.len() {
-        if items[i].verdict.verdict == "defer" {
-            idx.push(i);
-            ask.push(items[i]);
+    if type_of(ctx.jev) == "map" {
+        for i in 0..items.len() {
+            if items[i].verdict.verdict == "defer" {
+                idx.push(i);
+                ask.push(items[i]);
+            }
         }
     }
-    if ask.is_empty() { return out; }
-    import "jev" as jev;
-    let answers = jev::refine_pairs(ctx.jev, ask);
-    for k in 0..idx.len() { out[idx[k]] = answers[k]; }
+    if !ask.is_empty() {
+        import "jev" as jev;
+        try {
+            let answers = jev::refine_pairs(ctx.jev, ask);
+            for k in 0..idx.len() { out[idx[k]] = answers[k]; }
+        } catch (err) {
+            print("jev: batch of " + ask.len() + " failed, keeping the model's verdicts: " + err);
+        }
+    }
+    if "csv" in ctx {
+        for i in 0..items.len() {
+            let it = items[i];
+            let v = if type_of(out[i]) == "()" { it.verdict } else { out[i] };
+            if !("diag" in v) && "diag" in it.verdict { v.diag = it.verdict.diag; }
+            emit_row(ctx, it.a, it.b, v);
+        }
+    }
     out
+}
+
+// ── CSV (MUSICLIB_MATCH_CSV) ─────────────────────────────────────────────────
+//
+// One row per scored pair, for analysis: written from decide() for DISTINCT
+// pairs (in parallel) and from refine() for the rest, with the final verdict.
+// Rows follow the scoring threads, not pair order. Pairs the host skips before
+// scoring (already linked, marked different, dedup barrier) have no row.
+
+fn csv_header() {
+    [
+        "verdict", "kind", "confidence", "reason", "origin", "model_version", "metadata",
+        "type", "entry_a", "title_a", "sources_a", "entry_b", "title_b", "sources_b",
+        "p_same", "p_related", "p_sibling", "p_unrelated", "guard",
+        "p_sibling_structure", "p_a_derived", "rel_kind", "p_rel_kind",
+    ]
+}
+
+fn emit_row(ctx, a, b, v) {
+    let d = if "diag" in v { v.diag } else { #{} };
+    ctx.csv.write_line(csv_row([
+        v.verdict, v.kind, v.confidence, v.reason,
+        if "origin" in v { v.origin } else { "heuristic" }, v.model_version,
+        if "metadata" in v { to_json(v.metadata) } else { () },
+        a.entry_type, a.entry_id, a.title, csv_sources(a), b.entry_id, b.title, csv_sources(b),
+        d.p_same, d.p_related, d.p_sibling, d.p_unrelated, d.guard,
+        d.p_sibling_structure, d.p_a_derived, d.kind, d.p_kind,
+    ]));
+}
+
+fn csv_sources(e) {
+    let parts = [];
+    for p in e.pairs { parts.push(p.source + ":" + p.identifier); }
+    join(parts, " ")
+}
+
+// RFC 4180 fields: quoted when they hold a comma, quote or line break.
+fn csv_row(values) {
+    let parts = [];
+    for v in values {
+        let s = if type_of(v) == "()" { "" } else { v.to_string() };
+        if s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r") {
+            s.replace("\"", "\"\"");
+            s = "\"" + s + "\"";
+        }
+        parts.push(s);
+    }
+    join(parts, ",")
 }
 
 // Semantic blocking: the cache's model id. Vectors from any other id are
@@ -338,8 +438,3 @@ fn embed(ctx, text) {
     let r = embed_batch(ctx, [text]);
     if r.is_empty() { [] } else { r[0] }
 }
-
-// CSV diagnostics hooks (softmatch --csv). The learned model has no single
-// title-similarity number; report neutral values.
-fn main_title_sim(ctx, a, b) { 0.0 }
-fn markers_conflict(ctx, a, b) { false }

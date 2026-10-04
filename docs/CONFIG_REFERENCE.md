@@ -515,8 +515,15 @@ The host calls these entry points in order; all but `decide` are optional:
 
 `refine` is where slow work belongs (network calls): `decide` runs in parallel
 and must stay CPU-bound. Each item is `#{a, b, verdict}` (`verdict` is
-`decide`'s map); return one verdict per item, `item.verdict` or `()` to keep
-it. A chunk that errors keeps its verdicts.
+`decide`'s map, with any extra keys `decide` attached); return one verdict per
+item, `item.verdict` or `()` to keep it. A chunk that errors keeps its
+verdicts.
+
+There is no host CSV output: a script that wants one writes it through a
+shared file handle (below). `config/match.learned.rhai` does, when
+`MUSICLIB_MATCH_CSV=<path>` is set: one row per scored pair with its final
+verdict and the model's outputs, written from `decide` for DISTINCT pairs and
+from `refine` for the rest.
 
 `init()` returns an arbitrary **context object** (`ctx`). The host holds it for
 the whole run and passes it back as the first argument of every other hook. Use
@@ -577,7 +584,7 @@ Both `re_*` functions accept either a pre-compiled `Regex` or a pattern `String`
 merge(conf, reason)             // conf: f64 confidence in [0,1] -- soft: asserts same_identity, never destructively merges
 relate(kind, conf, reason)      // kind: see below
 relate(kind, conf, reason, metadata)  // + dedup-v2 metadata, e.g. #{transformation, derived_side: "a"|"b"}
-defer(conf, reason)             // undecided: counted and written to the CSV as DEFER; refine() can settle it
+defer(conf, reason)             // undecided: counted as DEFER; refine() can settle it
 distinct()
 ```
 
@@ -613,6 +620,18 @@ url_decode(s)     // → percent-decoded string (input unchanged if not valid UT
 read_text(path)   // → contents of a text file, path relative to the script's directory
 to_json(v) / parse_json(s)
 ```
+
+#### Files
+
+```rhai
+let f = file_create(path);   // truncate; or file_append(path). Paths relative to the CWD
+f.write(s);                  // f.write_line(s) adds "\n"
+f.flush();                   // also flushed when the run ends
+```
+
+A `File` is shared, not copied: keep it in `ctx` (opened once in `init`) and
+write from any hook, including `decide` on every scoring thread at once. Each
+call writes its whole string under one lock, so lines never interleave.
 
 `print(...)` and `debug(...)` go to the log (`info` / `debug` level), not stdout.
 
