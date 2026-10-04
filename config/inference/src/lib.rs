@@ -14,9 +14,15 @@
 //!   * `inference_detect_language(text)` -> top BCP-47 language code (LangID).
 //!   * `inference_embed_batch(texts)`    -> sentence embeddings (MiniLM 384-d,
 //!     `minilm` feature only; without it every call fails).
+//!   * `inference_matcher_*`             -> learned pair matcher (`matcher`
+//!     feature; see `matcher_abi.rs`).
 
 #[cfg(feature = "minilm")]
 mod embed;
+#[cfg(feature = "matcher")]
+pub mod matcher;
+#[cfg(feature = "matcher")]
+mod matcher_abi;
 mod model;
 mod romaji;
 mod tables;

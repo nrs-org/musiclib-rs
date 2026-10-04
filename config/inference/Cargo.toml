@@ -27,6 +27,30 @@ minilm = [
     "dep:serde_json",
 ]
 
+# Learned pair matcher (v17 + rel-v8; docs/plan-v15-runtime.md): LightGBM
+# evaluator, pair-facts features and the jp-music-title-encoder (a
+# hand-written BERT forward on candle's gemm kernels; candle-core only loads
+# the safetensors). Loads its models from a bundle directory at runtime.
+matcher = [
+    "dep:candle-core",
+    "dep:gemm",
+    "dep:rayon",
+    "dep:libm",
+    "dep:tokenizers",
+    "dep:anyhow",
+    "dep:serde_json",
+    "dep:serde",
+    "dep:unicode-normalization",
+    "dep:caseless",
+    "dep:unicode-general-category",
+]
+
+# Run the matcher's title encoder on a Vulkan GPU via llama.cpp (the bundle's
+# encoder/model-f16.gguf), falling back to the CPU encoder when there is no
+# discrete GPU. Links the system llama.cpp found by pkg-config (the dev shell
+# provides nixpkgs' `llama-cpp-vulkan`) through a small C shim (build.rs).
+vulkan = ["matcher", "dep:cc", "dep:pkg-config"]
+
 # CPU BLAS backends for candle's float GEMMs (MiniLM) — CPU-only, no CUDA. `mkl`
 # links Intel MKL (Linux/Windows), `accelerate` links Apple's Accelerate (macOS).
 # Both imply `minilm` (they only accelerate the MiniLM matmuls).
@@ -55,6 +79,21 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 hf-hub = { version = "0.4", default-features = false, features = ["ureq"], optional = true }
 anyhow = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
+
+# Learned matcher (feature `matcher`): encoder kernels (same versions candle
+# uses), facts JSON and Python-compatible text handling.
+gemm = { version = "0.19", optional = true }
+rayon = { version = "1", optional = true }
+libm = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+unicode-normalization = { version = "0.1", optional = true }
+caseless = { version = "0.2", optional = true }
+unicode-general-category = { version = "1", optional = true }
+
+[build-dependencies]
+# Feature `vulkan`: compile src/matcher/llama_shim.c against llama.cpp.
+cc = { version = "1", optional = true }
+pkg-config = { version = "0.3", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
