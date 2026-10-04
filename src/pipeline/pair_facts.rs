@@ -1,5 +1,5 @@
 //! Per-pair facts for match scripts: the `musiclib-pair-facts/1` contract
-//! (docs/plan-v15-runtime.md §2b).
+//! (learned-matcher's docs/plan-v15-runtime.md §2b).
 //!
 //! Scripts read these lazily through the `pair_facts_json(...)` Rhai host
 //! function instead of `EntryInfo` growing a field per consumer. Facts are keyed
@@ -265,7 +265,7 @@ mod tests {
     use super::*;
 
     /// Golden check against the Python reference facts
-    /// (`train/learned-matcher/export_parity.py`), when the gitignored
+    /// (learned-matcher's `train/export_parity.py`), when the gitignored
     /// snapshot and fixture are present.
     #[test]
     fn matches_reference_facts() {

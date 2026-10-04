@@ -1175,18 +1175,20 @@ mod tests {
     }
 
     /// End-to-end: bind and call the real `inference` cdylib's C ABI through the
-    /// generic FFI surface. Skipped unless `target/release/libinference.so`
-    /// has been built (`cargo build -p inference --release --lib`).
+    /// generic FFI surface. Skipped unless learned-matcher's
+    /// `target/release/libinference.so` has been built
+    /// (`cargo build -p inference --release --lib` there).
     #[test]
     fn calls_inference_cdylib() {
-        let lib = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/target/release/libinference.so"
-        );
-        if !std::path::Path::new(lib).exists() {
-            eprintln!("skipping: {lib} not built");
+        let Some(dir) = crate::test_utils::learned_matcher_dir() else {
+            return;
+        };
+        let lib = dir.join("target/release/libinference.so");
+        if !lib.exists() {
+            eprintln!("skipping: {} not built", lib.display());
             return;
         }
+        let lib = lib.display();
 
         let engine = engine();
 

@@ -231,8 +231,9 @@ MUSICLIB_MATCH_CSV=out.csv cargo run --features ffi --release --bin softmatch  #
 | `--registry-config` | `<config_dir>/providers.yaml` | Provider credentials |
 | `--http-config` | `<config_dir>/http.yaml` | HTTP client config |
 
-The `--features ffi` flag is optional but required to load the native inference
-cdylib (`config/inference/`) that `config/match.learned.rhai` binds. The example
+The `--features ffi` flag is optional but required to load native cdylibs, such
+as the learned matcher's `libinference.so` that `match.learned.rhai` binds (both
+live in the [learned-matcher](https://github.com/nrs-org/learned-matcher) repo). The example
 script needs neither: it uses a dependency-free naive token-hash embedder. See [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
 for the `match.rhai` format.
 

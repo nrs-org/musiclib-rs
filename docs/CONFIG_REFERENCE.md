@@ -493,8 +493,8 @@ The `softmatch` binary evaluates candidate entry pairs using a
 `<config_dir>/match.rhai` and tune thresholds as needed.
 
 Every verdict is soft: a MERGE asserts `same_identity`, never a destructive
-merge (see below). `config/match.learned.rhai` runs the learned pair matcher
-from the inference cdylib.
+merge (see below). The learned pair matcher's script, `rhai/match.learned.rhai`,
+lives in the [learned-matcher](https://github.com/nrs-org/learned-matcher) repo with its cdylib.
 
 Soft identity uses enabled `entry_relation` rows with kinds `same_identity` and
 `different_identity`. The former creates virtual connected components; the
@@ -520,11 +520,10 @@ item, `item.verdict` or `()` to keep it. A chunk that errors keeps its
 verdicts.
 
 There is no host CSV output: a script that wants one writes it through a
-shared file handle (below). `config/match.learned.rhai` does, when
+shared file handle (below). learned-matcher's `match.learned.rhai` does, when
 `MUSICLIB_MATCH_CSV=<path>` is set: one row per scored pair with its final
 verdict and the model's outputs, written from `decide` for DISTINCT pairs and
-from `refine` for the rest. Quoting is the `config/csv.rhai` module
-(`csv::row(values)`); keep it next to `match.rhai`.
+from `refine` for the rest, quoted by its `csv.rhai` module.
 
 `init()` returns an arbitrary **context object** (`ctx`). The host holds it for
 the whole run and passes it back as the first argument of every other hook. Use
@@ -608,9 +607,10 @@ contributions (with artist entry id and best name), parent and child links
 (with names), credited items (`credited` ids, `credited_names` alongside).
 Keyed by `(source, identifier)`, so facts stay valid when entries merge.
 Returns `()` when the run has no file-backed DB. Field list and ordering:
-`docs/plan-v15-runtime.md` §2b (`parents[].name` and `credited_names` are later
-additions). `config/match.learned.rhai` uses it to feed the learned matcher,
-and `config/jev.rhai` to build Jev's evidence view.
+learned-matcher's `docs/plan-v15-runtime.md` §2b (`parents[].name` and
+`credited_names` are later additions). learned-matcher's `match.learned.rhai`
+uses it to feed the learned matcher, and its `jev.rhai` to build Jev's
+evidence view.
 
 #### Misc
 
@@ -710,70 +710,14 @@ remain for memory a C API takes ownership of.
 Relative paths (containing a `/` or `\`) are resolved relative to the **script
 file**, not the process working directory.
 
-#### `config/inference/` cdylib
+#### The learned matcher (`libinference.so`)
 
-The workspace member `config/inference` (package name `inference`) builds a
-`libinference.so` cdylib with the learned pair matcher (`matcher` feature) and
-the TypeSafe client (`typesafe` feature), both on by default. `vulkan` adds the
-GPU title encoder:
-
-```bash
-cargo build -p inference --release --lib
-# artifact: target/release/libinference.so
-```
-
-`config/match.learned.rhai`'s `open_matcher()` tries three locations
-in order: a `libinference.so` symlink next to the script (e.g.
-`~/.config/musiclib-rs/libinference.so → <repo>/target/release/libinference.so`),
-the repo build tree (`../target/release/libinference.so`), then the system loader
-search path. The recommended setup:
-
-```bash
-ln -s /path/to/repo/target/release/libinference.so ~/.config/musiclib-rs/libinference.so
-```
-
-### Jev refinement (`config/jev.rhai`)
-
-`config/match.learned.rhai` sends every pair the learned model DEFERs to
-TypeSafe's Jev from its `refine` hook and uses the answer instead. The
-questions are prompt v2.1 (`train/learned-matcher/jev_client.py`), aligned
-with the learned matcher's ontology:
-
-| Jev answer | Verdict |
-|---|---|
-| `same_identity` (incl. a full MV of the recording) | MERGE (soft `same_identity`) |
-| `derived` (tracks: cut/TV size, other MV version, live, remix, instrumental, cover, arrangement) | RELATE `derived_from`; `kind` → `transformation`, `direction` → `derived_side` |
-| `sibling` (two versions of one song, neither made from the other) | DISTINCT (no direct edge) |
-| `unrelated` / `different_identity` | DISTINCT |
-| `unsure` | stays DEFER |
-
-Rows written from these verdicts carry `origin = "jev"`,
-`model_version = "typesafe-jev/v2.1"`.
-
-The questions live in `config/jev/<entry type>.json` and are sent verbatim,
-with their key order kept (Rhai maps would sort it, so `jev.rhai` builds
-requests as JSON text). `config/jev.rhai` (a Rhai module) holds the evidence
-view and the answer mapping. Keep `jev.rhai` and `jev/` next to `match.rhai`.
-Transport, retry, concurrency and the response cache are the inference
-cdylib's `inference_typesafe_*` API (the `typesafe` feature, on by default):
-
-```bash
-cargo build -p inference --release --lib
-```
-
-| Env var | Default | Notes |
-|---|---|---|
-| `TYPESAFE_API_KEY` | unset | Turns Jev on; without it DEFER verdicts stay deferred |
-| `MUSICLIB_JEV_CONCURRENCY` | `12` | Concurrent API calls per batch |
-| `MUSICLIB_JEV_CACHE` | `<cache_dir>/typesafe.db` | Response cache (SQLite), keyed by the SHA-256 of the request |
-| `TYPESAFE_BASE_URL` | the TypeSafe API | Override, e.g. a local mock |
-
-Because the cache key is the request itself, unchanged evidence is never paid
-for twice and any edit to the questions or the view is a fresh request. Jev
-bills per input token: about 1.9k for a track request and 1.1k for the other
-types, i.e. roughly $0.08 / $0.05 per thousand pairs at $0.042 per million. Each
-`refine` chunk logs one line (`jev: N pair(s): C cached, A asked, F failed ->
-…`), and `init()` logs whether Jev is on and, if not, why.
+The learned pair matcher, its `inference` cdylib (matcher, TypeSafe client,
+optional Vulkan title encoder), `match.learned.rhai` and the Jev refine step
+(`jev.rhai`, `jev/*.json`; on when `TYPESAFE_API_KEY` is set) live in the
+[learned-matcher](https://github.com/nrs-org/learned-matcher) repo; its README covers building and installing them into
+`<config_dir>`. musiclib-rs provides the host side: this `ffi` module,
+`pair_facts_json`, the lazy `Entry` type and the `decide`/`refine` hooks.
 
 The library handle is opened once in `init()` and held for the whole run via the
 context object, so the model loads only once regardless of how many embedding

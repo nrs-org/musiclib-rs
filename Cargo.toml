@@ -1,7 +1,3 @@
-[workspace]
-members = ["config/inference"]
-resolver = "3"
-
 [package]
 name = "musiclib-rs"
 version = "0.1.0"
@@ -56,7 +52,7 @@ path = "src/bin/migrate_http_cache.rs"
 default = ["store_protocol", "player"]
 # Generic C-ABI FFI rhai module (`pipeline::ffi`): bind/call any cdylib from a
 # match script. Off by default — enabling it pulls libffi (built from source via
-# autotools). See config/match.learned.rhai for the inference-cdylib binding.
+# autotools). See learned-matcher's rhai/match.learned.rhai for a cdylib binding.
 ffi = ["dep:libffi", "dep:libc"]
 # `server` binary route groups (see src/bin/server/). No extra dependencies —
 # both are gated purely to let a deployment build one without the other, e.g.

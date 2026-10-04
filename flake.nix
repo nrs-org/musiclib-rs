@@ -51,10 +51,6 @@
               automake
               libtool
             ];
-            # llama.cpp with its Vulkan backend: only needed to build the
-            # inference cdylib with `--features vulkan` (GPU title encoder),
-            # found through its llama.pc.
-            buildInputs = with pkgs; [ llama-cpp-vulkan ];
             packages =
               enabledPackages
               ++ (with pkgs; [

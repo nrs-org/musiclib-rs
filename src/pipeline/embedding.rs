@@ -783,7 +783,7 @@ fn report_embed_health(dim: usize, max_nonzero: usize) {
             "Embedding backend produced only sparse, near-orthogonal vectors \
              (at most {max_nonzero}/{dim} non-zero dims) — this is the naive \
              token-hash fallback, NOT a real model, so semantic blocking is \
-             effectively disabled. Run config/match.learned.rhai (needs the \
+             effectively disabled. Run learned-matcher's match.learned.rhai (needs the \
              `ffi` feature and a loadable libinference.so) so a real \
              embedder runs."
         );

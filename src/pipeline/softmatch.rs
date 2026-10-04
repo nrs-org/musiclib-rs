@@ -3417,12 +3417,15 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// `config/jev.rhai`'s pure helpers: handle extraction, the answer →
-    /// verdict mapping, ordered JSON, and the question files.
+    /// learned-matcher's `jev.rhai` pure helpers: handle extraction, the
+    /// answer → verdict mapping, ordered JSON, and the question files.
     #[tokio::test]
     async fn jev_module_helpers() {
+        let Some(lm) = crate::test_utils::learned_matcher_dir() else {
+            return;
+        };
         let dir = std::env::temp_dir().join(format!("jev-test-{}", std::process::id()));
-        let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
+        let config = lm.join("rhai");
         std::fs::create_dir_all(dir.join("jev")).unwrap();
         std::fs::copy(config.join("jev.rhai"), dir.join("jev.rhai")).unwrap();
         for t in ["track", "artist", "release", "release_group"] {
@@ -3551,16 +3554,15 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// `config/csv.rhai` quotes exactly the fields that need it.
+    /// learned-matcher's `csv.rhai` quotes exactly the fields that need it.
     #[tokio::test]
     async fn csv_module_quotes_fields() {
+        let Some(lm) = crate::test_utils::learned_matcher_dir() else {
+            return;
+        };
         let dir = std::env::temp_dir().join(format!("csv-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/config/csv.rhai"),
-            dir.join("csv.rhai"),
-        )
-        .unwrap();
+        std::fs::copy(lm.join("rhai/csv.rhai"), dir.join("csv.rhai")).unwrap();
         let path = dir.join("t.rhai");
         std::fs::write(
             &path,
