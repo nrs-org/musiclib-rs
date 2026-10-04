@@ -214,7 +214,7 @@ fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
 /// Sources whose titles are noisy (artist prefix, "Music Video" suffix, etc.).
 /// Clean sources (spotify, musicbrainz, discogs, …) use standard music title
 /// formatting: "Main Title (Marker1) [Marker2]".
-const VIDEO_SOURCES: &[&str] = &["youtube", "nicovideo", "soundcloud"];
+const VIDEO_SOURCES: &[&str] = &["youtube", "nicovideo", "soundcloud", "bilibili"];
 
 fn is_video_source(src: &str) -> bool {
     VIDEO_SOURCES.contains(&src)
