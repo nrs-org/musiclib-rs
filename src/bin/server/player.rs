@@ -14,7 +14,10 @@
 //! which tracks are playable at all (the `playable` flag on
 //! `/releases/:id/tracks`).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use hyper::{Method, StatusCode};
@@ -28,7 +31,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    entries::{component_members, dedupe_by_edition, entry_summaries},
+    entries::{component_members, dedupe_by_edition, entry_summaries, entry_summaries_with},
     fetch_options,
     respond::{self, HyperResponse},
     state::AppState,
@@ -286,52 +289,91 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
 }
 
 /// `GET /api/library/shuffle?limit=N` (default/cap: 100/500) — a uniformly
-/// random, playable sample of the library's tracks. There's no playlist
-/// concept yet, so this is the closest equivalent to "shuffle play" over
-/// everything you've catalogued. Oversamples from the DB, since not every
-/// track entry has an embeddable source, then trims to `limit` once
-/// playability is known (same soft-identity + `embed_for` check
-/// `release_tracks` uses) — so a library with plenty of unplayable tracks
-/// still comes back with a full batch instead of a thin one.
+/// random, playable sample of the library's rows (one per edition group,
+/// as search and the library list show them). There's no playlist concept
+/// yet, so this is the closest equivalent to "shuffle play" over everything
+/// you've catalogued.
+///
+/// Rejection sampling, so nothing here scales with the library: draw random
+/// track ids, resolve just their edition groups (`display_projections_around`),
+/// and keep a draw with probability `1 / group size` — otherwise a group
+/// with many editions/soft duplicates would be picked proportionally more
+/// often. Unplayable groups (same soft-identity + `embed_for` check
+/// `release_tracks` uses) are rejected too, and rounds repeat until `limit`
+/// rows are found or `MAX_ROUNDS` runs out on a mostly-unplayable library.
 async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>) -> HyperResponse {
+    const MAX_ROUNDS: usize = 8;
     let limit = query
         .get("limit")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(1, 500);
-    let oversample = (limit * 4).min(4000);
 
-    let raw_ids = match state.db.random_track_entry_ids(oversample).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            return respond::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &e.to_string(),
-            );
+    // Every round pays for the edition groups its draws land in (one huge
+    // group gets hit almost every round), so size each round from the
+    // yield (kept rows per draw) seen so far, padded, to finish in ~1 round.
+    const INITIAL_YIELD: f64 = 0.08;
+    const MAX_DRAWS: usize = 10_000;
+
+    let mut seen_groups = HashSet::new();
+    let mut tracks = Vec::with_capacity(limit);
+    let (mut drawn, mut kept) = (0usize, 0usize);
+    for _ in 0..MAX_ROUNDS {
+        if tracks.len() >= limit {
+            break;
         }
-    };
-    let ids = match dedupe_by_edition(&state.db, &raw_ids).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            return respond::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &e.to_string(),
-            );
+        let rate = if drawn == 0 {
+            INITIAL_YIELD
+        } else {
+            (kept as f64 / drawn as f64).max(0.01)
+        };
+        let draws = (((limit - tracks.len()) as f64 / rate * 1.5) as usize).clamp(32, MAX_DRAWS);
+        match shuffle_round(state, draws, &mut seen_groups).await {
+            Ok(round) => {
+                drawn += draws;
+                kept += round.len();
+                tracks.extend(round);
+            }
+            Err(e) => {
+                return respond::error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    &e.to_string(),
+                );
+            }
         }
-    };
-    let summaries = match entry_summaries(&state.db, &ids).await {
-        Ok(s) => s,
-        Err(e) => {
-            return respond::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &e.to_string(),
-            );
+    }
+    tracks.truncate(limit);
+    respond::json(StatusCode::OK, json!({ "tracks": tracks }))
+}
+
+/// One `shuffle_library` round over `draws` random ids: the accepted,
+/// playable rows, in draw order. `seen_groups` (edition-group roots) carries
+/// across rounds so a group is never returned twice.
+async fn shuffle_round(
+    state: &Arc<AppState>,
+    draws: usize,
+    seen_groups: &mut HashSet<i64>,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let candidates = state.db.sample_track_entry_ids(draws).await?;
+    let (identity, editions) = state.db.display_projections_around(&candidates).await?;
+    let mut accepted = Vec::new();
+    for id in candidates {
+        let canonical = identity.component_of(id).unwrap_or(id);
+        let group_size: usize = editions
+            .members_of(canonical)
+            .iter()
+            .map(|c| identity.members_by_component.get(c).map_or(1, Vec::len))
+            .sum();
+        if fastrand::usize(..group_size) != 0 {
+            continue;
         }
-    };
-    let tracks: Vec<_> = ids
+        if seen_groups.insert(editions.group_of(canonical)) {
+            accepted.push(editions.default_member_of(canonical));
+        }
+    }
+    let summaries = entry_summaries_with(&state.db, &accepted, &identity, &editions).await?;
+    Ok(accepted
         .iter()
         .filter_map(|id| {
             let summary = summaries.get(id)?;
@@ -341,9 +383,7 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
                 .any(|s| embed_for(&s.source, &s.identifier).is_some());
             playable.then(|| json!({ "entry_id": id, "title": summary.title }))
         })
-        .take(limit)
-        .collect();
-    respond::json(StatusCode::OK, json!({ "tracks": tracks }))
+        .collect())
 }
 
 /// `GET /api/fetch-options/files` — the import form's file picker: every

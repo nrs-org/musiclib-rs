@@ -2067,6 +2067,7 @@ dependencies = [
  "dotenv",
  "erased-serde",
  "fancy-regex",
+ "fastrand",
  "flate2",
  "futures",
  "http",

@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use musiclib_rs::musicdb::MusicDb;
+use musiclib_rs::musicdb::{EditionProjection, MusicDb, SoftIdentityProjection};
 use serde::Serialize;
 
 #[derive(Clone, Serialize)]
@@ -109,7 +109,7 @@ fn edition_sort_rank(ed: &EditionRef) -> u8 {
 /// Every member of `entry_id`'s soft-identity component, `entry_id` included
 /// — a solo (no soft links) entry is a one-member component of itself.
 pub async fn component_members(db: &MusicDb, entry_id: i64) -> anyhow::Result<Vec<i64>> {
-    let projection = db.soft_identity_projection_for_display().await?;
+    let (projection, _) = db.display_projections_around(&[entry_id]).await?;
     let canonical = projection.component_of(entry_id).unwrap_or(entry_id);
     Ok(projection
         .members_by_component
@@ -129,8 +129,7 @@ pub async fn dedupe_by_edition(db: &MusicDb, ids: &[i64]) -> anyhow::Result<Vec<
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let identity = db.soft_identity_projection_for_display().await?;
-    let editions = db.edition_projection_for_display().await?;
+    let (identity, editions) = db.display_projections_around(ids).await?;
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(ids.len());
     for &id in ids {
@@ -186,12 +185,21 @@ pub async fn entry_summaries(
     db: &MusicDb,
     ids: &[i64],
 ) -> anyhow::Result<HashMap<i64, EntrySummary>> {
+    let (projection, editions) = db.display_projections_around(ids).await?;
+    entry_summaries_with(db, ids, &projection, &editions).await
+}
+
+/// `entry_summaries` over projections the caller already has — they must
+/// cover `ids` (e.g. `display_projections_around` some superset of them).
+pub async fn entry_summaries_with(
+    db: &MusicDb,
+    ids: &[i64],
+    projection: &SoftIdentityProjection,
+    editions: &EditionProjection,
+) -> anyhow::Result<HashMap<i64, EntrySummary>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-
-    let projection = db.soft_identity_projection_for_display().await?;
-    let editions = db.edition_projection_for_display().await?;
 
     // Resolve every requested id to its full soft-identity component (a
     // solo entry is its own one-member component), keyed by canonical id so

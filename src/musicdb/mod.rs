@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, Condition, ConnectOptions, ConnectionTrait, Database,
@@ -836,6 +836,9 @@ fn is_cannot_link(relation: &RelationRow) -> bool {
         || (relation.origin == PROVIDER_ORIGIN && EDITION_KINDS.contains(&relation.kind.as_str()))
 }
 
+/// An `ordered_pair` relation edge.
+type Edge = (i64, i64);
+
 fn build_soft_identity_projection(
     entry_ids: impl IntoIterator<Item = i64>,
     relations: impl IntoIterator<Item = RelationRow>,
@@ -866,7 +869,7 @@ fn build_soft_identity_projection(
     // `(other endpoint, edge)`, merged small-into-large on every union, so a
     // same-edge only scans its smaller side's blockers instead of all of
     // `different` (O(same × different) was minutes on a real library).
-    let mut blockers: HashMap<i64, Vec<(i64, (i64, i64))>> = HashMap::new();
+    let mut blockers: HashMap<i64, Vec<(i64, Edge)>> = HashMap::new();
     for &(a, b) in &different {
         blockers.entry(dsu.find(a)).or_default().push((b, (a, b)));
         blockers.entry(dsu.find(b)).or_default().push((a, (a, b)));
@@ -1227,7 +1230,8 @@ impl MusicDb {
              CREATE INDEX IF NOT EXISTS idx_entry_alias_run_id ON entry_alias(run_id);
              CREATE INDEX IF NOT EXISTS idx_entry_child_run_id ON entry_child(run_id);
              CREATE INDEX IF NOT EXISTS idx_contribution_run_id ON contribution(run_id);
-             CREATE INDEX IF NOT EXISTS idx_import_run_status ON import_run(status);",
+             CREATE INDEX IF NOT EXISTS idx_import_run_status ON import_run(status);
+             CREATE INDEX IF NOT EXISTS idx_entry_relation_entry_b ON entry_relation(entry_b);",
         )
         .await?;
         // Full-text index over alias names backing the player's library
@@ -1433,23 +1437,43 @@ impl MusicDb {
             .collect()
     }
 
-    /// Up to `limit` track entry ids chosen uniformly at random — the
-    /// backing query for the player's "shuffle the whole library" entry
-    /// point. No playability filter here: that needs each entry's (and its
-    /// soft-linked siblings') sources, a separate batched lookup the caller
-    /// already does via `entry_summaries` — over-fetch and filter there.
-    pub async fn random_track_entry_ids(&self, limit: usize) -> Result<Vec<i64>, Error> {
-        let stmt = Statement::from_sql_and_values(
-            self.db.get_database_backend(),
-            "SELECT id FROM entry WHERE entry_type = 'track' ORDER BY RANDOM() LIMIT ?",
-            [(limit as i64).into()],
-        );
-        self.db
-            .query_all_raw(stmt)
+    /// `draws` ids drawn uniformly from `[min(entry.id), max(entry.id)]`,
+    /// keeping the ones that are tracks, in draw order. Gaps and non-track
+    /// ids are simply rejected, so this returns fewer than `draws` (possibly
+    /// with repeats) but never scans the `entry` table — the player's
+    /// "shuffle the whole library" sampler. No playability filter here:
+    /// that needs each entry's (and its soft-linked siblings') sources, a
+    /// separate batched lookup the caller already does via `entry_summaries`.
+    pub async fn sample_track_entry_ids(&self, draws: usize) -> Result<Vec<i64>, Error> {
+        let backend = self.db.get_database_backend();
+        let bounds = self
+            .db
+            .query_one_raw(Statement::from_string(
+                backend,
+                "SELECT min(id) AS lo, max(id) AS hi FROM entry",
+            ))
+            .await?;
+        let (Some(lo), Some(hi)) = bounds.map_or((None, None), |row| {
+            (
+                row.try_get::<Option<i64>>("", "lo").ok().flatten(),
+                row.try_get::<Option<i64>>("", "hi").ok().flatten(),
+            )
+        }) else {
+            return Ok(Vec::new());
+        };
+        let drawn: Vec<i64> = (0..draws).map(|_| fastrand::i64(lo..=hi)).collect();
+        let tracks: HashSet<i64> = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                backend,
+                "SELECT id FROM entry WHERE entry_type = 'track' AND id IN (SELECT value FROM json_each(?))",
+                [serde_json::to_string(&drawn).expect("ids serialize").into()],
+            ))
             .await?
             .iter()
-            .map(|row| row.try_get::<i64>("", "id").map_err(Error::from))
-            .collect()
+            .map(|row| row.try_get::<i64>("", "id"))
+            .collect::<Result<_, _>>()?;
+        Ok(drawn.into_iter().filter(|id| tracks.contains(id)).collect())
     }
 
     /// Allocate a fresh `entry` row and return its auto-assigned id.
@@ -2295,6 +2319,66 @@ impl MusicDb {
         Ok(build_edition_projection(&identity, relations))
     }
 
+    /// `soft_identity_projection_for_display` + `edition_projection_for_display`
+    /// restricted to the relation region reachable from `seeds` — exact for
+    /// every entry in that region, since components never interact across
+    /// it: the region is closed under every kind either projection reads,
+    /// so it holds each seed's whole identity component, edition group and
+    /// any cannot-link that could block a union inside them. One recursive
+    /// query instead of loading every entry and relation, which is what
+    /// made per-request display lookups (entry page, search, shuffle) scale
+    /// with the library.
+    pub async fn display_projections_around(
+        &self,
+        seeds: &[i64],
+    ) -> Result<(SoftIdentityProjection, EditionProjection), Error> {
+        const SAME_KINDS: &[&str] = &[SAME_IDENTITY, "variant"];
+        if seeds.is_empty() {
+            return Ok(Default::default());
+        }
+        // Compile-time constants, so safe to inline as SQL literals.
+        let kinds = SAME_KINDS
+            .iter()
+            .chain(EDITION_KINDS)
+            .chain([&DIFFERENT_IDENTITY])
+            .map(|kind| format!("'{kind}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            format!(
+                "WITH RECURSIVE region(id) AS (
+                   SELECT value FROM json_each(?)
+                   UNION
+                   SELECT r.entry_b FROM entry_relation r JOIN region ON r.entry_a = region.id
+                   WHERE r.enabled AND r.kind IN ({kinds})
+                   UNION
+                   SELECT r.entry_a FROM entry_relation r JOIN region ON r.entry_b = region.id
+                   WHERE r.enabled AND r.kind IN ({kinds})
+                 )
+                 SELECT r.* FROM entry_relation r
+                 WHERE r.enabled AND r.kind IN ({kinds}) AND r.entry_a IN region"
+            ),
+            [serde_json::to_string(seeds).expect("ids serialize").into()],
+        );
+        let relations: Vec<RelationRow> = entry_relation::Entity::find()
+            .from_raw_sql(stmt)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect();
+        let region: BTreeSet<i64> = seeds
+            .iter()
+            .copied()
+            .chain(relations.iter().flat_map(|r| [r.entry_a, r.entry_b]))
+            .collect();
+        let identity =
+            build_soft_identity_projection(region, relations.iter().cloned(), SAME_KINDS);
+        let editions = build_edition_projection(&identity, relations);
+        Ok((identity, editions))
+    }
+
     /// Append a user/model judgment and atomically update the active soft
     /// identity relation. `Unsure` acts as a retraction and disables both
     /// identity assertions while retaining all feedback rows.
@@ -2703,7 +2787,7 @@ impl MusicDb {
     /// endpoints are live members" keeps that endpoint's edge (and the node
     /// itself) visible so it stays undoable.
     pub async fn relations_around(&self, entry_id: i64) -> Result<Vec<RelationRow>, Error> {
-        let projection = self.soft_identity_projection_for_display().await?;
+        let (projection, _) = self.display_projections_around(&[entry_id]).await?;
         let mut anchors: HashSet<i64> = match projection.component_of(entry_id) {
             Some(component) => projection
                 .members_by_component
@@ -2796,6 +2880,7 @@ pub struct ChildRow {
     pub track_no: Option<i32>,
 }
 
+#[derive(Clone)]
 pub struct RelationRow {
     pub entry_a: i64,
     pub entry_b: i64,
@@ -3957,6 +4042,72 @@ mod tests {
                 .unwrap();
             assert_eq!(contribution_count(&mdb).await, 1);
             assert_eq!(alias_count(&mdb).await, 2);
+        }
+    }
+
+    /// `display_projections_around` must agree with the global display
+    /// projections on every entry it covers — including a same-edge the
+    /// global pass rejects because a provider cover cannot-links its sides.
+    #[tokio::test]
+    async fn local_display_projections_match_global() {
+        let mdb = mem_db().await;
+        for id in 1..=9i64 {
+            insert_entry(&mdb.db, id).await;
+        }
+        let rels: &[(i64, i64, &str, &str, Option<&str>)] = &[
+            (1, 2, SAME_IDENTITY, "user", None),
+            (2, 3, "variant", "heuristic", None),
+            (
+                3,
+                4,
+                DERIVED_FROM,
+                "heuristic",
+                Some(r#"{"derived_entry":4,"transformation":"instrumental"}"#),
+            ),
+            (
+                5,
+                6,
+                "cover",
+                PROVIDER_ORIGIN,
+                Some(r#"{"derived_entry":6}"#),
+            ),
+            (5, 7, SAME_IDENTITY, "heuristic", None),
+            (6, 7, SAME_IDENTITY, "heuristic", None),
+            (8, 9, SAME_IDENTITY, "heuristic", None),
+        ];
+        for &(a, b, kind, origin, extra) in rels {
+            mdb.upsert_relation(a, b, kind, 0.9, origin, extra)
+                .await
+                .unwrap();
+        }
+        let global_identity = mdb.soft_identity_projection_for_display().await.unwrap();
+        let global_editions = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(global_identity.conflicts.len(), 1, "5-6 cover blocks 5-7-6");
+
+        for seed in 1..=9i64 {
+            let (identity, editions) = mdb.display_projections_around(&[seed]).await.unwrap();
+            for id in 1..=9i64 {
+                let Some(canonical) = identity.component_of(id) else {
+                    continue;
+                };
+                assert_eq!(
+                    Some(canonical),
+                    global_identity.component_of(id),
+                    "seed {seed} id {id}"
+                );
+                assert_eq!(
+                    identity.members_by_component.get(&canonical),
+                    global_identity.members_by_component.get(&canonical),
+                );
+                assert_eq!(
+                    editions.members_of(canonical),
+                    global_editions.members_of(canonical)
+                );
+                assert_eq!(
+                    editions.default_member_of(canonical),
+                    global_editions.default_member_of(canonical),
+                );
+            }
         }
     }
 }
