@@ -1,0 +1,55 @@
+{
+  "identity": {
+    "type": "choice",
+    "instructions": {
+      "task": "`a` and `b` are two track records for a music library, each aggregated from providers (YouTube, Spotify, MusicBrainz, Discogs, ...). Decide how the two recordings relate.",
+      "same_identity_means": [
+        "the same recording catalogued twice: same performers, same performance, same song length (encoding, rounding and a few seconds of silence don't matter)",
+        "a FULL music video of the song and its audio release: an official MV can stand in for the audio track, so it counts as the same even when the video runs 10-60 s longer for an intro/outro",
+        "titles that differ only by language, romanization, punctuation, or upload decoration (【MV】, 'Official Video', '/ artist', '(Cover)' credit tags, hashtags)"
+      ],
+      "not_same": [
+        "a shortened version of the song: short ver., TV size, game size, cut, one chorus, #shorts, preview/teaser/crossfade",
+        "an alternate MV version (dance shot ver., close-up ver., other named video versions) — it can't be guaranteed to replace the audio",
+        "a live performance vs the studio recording, a remix, an instrumental / off vocal / karaoke / a cappella version, an arrangement, a re-recording, a named lineup or event version",
+        "the same song recorded by a different performer (a cover)",
+        "two different named versions of one song, e.g. '(2022 3期生 ver.)' vs '(2022 ゲーマーズ ver.)' — they are siblings, not the same",
+        "stems / multitrack parts of a song ('(Strings_Stem)', '(Drum_Stem)'): each part is derived from the song, and two different parts are siblings",
+        "a recording from a specific concert or show ('<昼公演>', 'day 2', 'live at ...') vs the studio song is live, i.e. derived"
+      ],
+      "unrelated_means": "different songs, even by the same artist, from the same channel, or wrapped in the same title template (compare the song name itself, not the shared '(Instrumental)' / '/ artist' / 【MV】 wrapping); generic recurring labels (MC1 vs MC2, Intro, Outro, numbered drum/talk segments) with different numbers or no corroboration",
+      "placeholders": "a title like 'Private video' or 'Deleted video' carries no information about the song; with nothing else linking the two, answer unsure",
+      "evidence": "durations_sec are lists of reported lengths; a gap of more than ~15 s between the closest pair, without an MV intro/outro explanation, argues against same_identity. credited_names may be incomplete on either side."
+    },
+    "criteria": {
+      "same_identity": "the same recording, or a full MV of it — merge",
+      "derived": "one is a version made from the other: a short/cut/TV-size version, an alternate MV version, live, remix, instrumental/off vocal/karaoke, a cappella, arrangement, or a cover of the other",
+      "sibling": "both are different versions of the same song but neither is made from the other (e.g. two different performers' covers, or an acoustic ver. and a lineup ver.)",
+      "unrelated": "different songs, or no real connection",
+      "unsure": "the evidence is genuinely insufficient to decide either way."
+    }
+  },
+  "kind": {
+    "type": "choice",
+    "instructions": "Premise: assume `a` and `b` are two versions of the same song (if they aren't, answer not_applicable). What distinguishes them?",
+    "criteria": {
+      "edit": "one is a shortened version: short ver., TV size, game size, cut, #shorts, preview, or an alternate MV cut",
+      "live": "a live performance",
+      "remix": "a remix",
+      "instrumental": "instrumental, off vocal, karaoke or a cappella",
+      "cover": "a different performer's recording of the song",
+      "arrangement": "a re-arrangement (acoustic, orchestral, piano, named arrange)",
+      "alt_version": "another named version: lineup/unit version, language version, re-recording, anniversary ver.",
+      "not_applicable": "they aren't versions of the same song, or they are the same recording"
+    }
+  },
+  "direction": {
+    "type": "choice",
+    "instructions": "Premise: assume `a` and `b` are two versions of the same song. Is one of them the original that the other was made from (the full studio/original release vs. its cut, live, remix, instrumental, cover, ...)?",
+    "criteria": {
+      "a_is_original": "`b` was made from `a`",
+      "b_is_original": "`a` was made from `b`",
+      "neither": "neither is the source of the other, or they are the same recording, or they aren't versions of one song"
+    }
+  }
+}

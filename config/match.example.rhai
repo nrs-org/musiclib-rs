@@ -5,6 +5,9 @@
 //                                its return value is `ctx` — an arbitrary context
 //                                object threaded into every hook below
 //             decide(ctx, a, b)  called for each candidate pair
+//             refine(ctx, items) called after decide() with the non-DISTINCT
+//                                pairs, for slow work like API calls (optional;
+//                                see match.learned.rhai + jev.rhai)
 //             destroy(ctx)       called when the engine shuts down (optional)
 //
 // Context object (`ctx`): whatever init() returns, the host holds for the whole
@@ -52,7 +55,7 @@
 // Verdict constructors:
 //   merge(conf, reason)             → verdict
 //   relate(kind, conf, reason)      → verdict
-//   defer(conf, reason)             → verdict   undecided (CSV DEFER; Jev with --jev-types)
+//   defer(conf, reason)             → verdict   undecided (CSV DEFER; refine() can settle it)
 //   distinct()                      → verdict
 //
 // Pair facts: pair_facts_json(source, identifier) or pair_facts_json([[s, i], …])

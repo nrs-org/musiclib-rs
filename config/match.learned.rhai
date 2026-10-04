@@ -21,10 +21,15 @@
 // Verdicts:
 //   MERGE    p_same ≥ the type's threshold (soft, reversible same_identity)
 //   DEFER    generic/placeholder name above the threshold, or p_same leading
-//            below it (counted, CSV, Jev with --jev-types)
+//            below it; refine() asks Jev about these (see below)
 //   RELATE   derived_from with the kind head's transformation and, when the
 //            direction head is confident, derived_side
 //   DISTINCT unrelated, or siblings (two versions of one song: no direct edge)
+//
+// Jev (config/jev.rhai, keep it next to this script): with TYPESAFE_API_KEY set
+// and libinference.so built with `--features matcher,typesafe`, refine() sends
+// every DEFER pair to TypeSafe's Jev and uses its answer instead. Answers are
+// cached in <cache_dir>/typesafe.db; init() logs whether Jev is on and why not.
 
 // Per-type merge thresholds on p_same: chosen on dev at 98% merge precision
 // (99% for artists) by train.py, models/v17/thresholds.json. Policy, not
@@ -42,16 +47,22 @@ fn thresholds() {
 // The direction head is ~96.5% right when |p - 0.5| > 0.3 (dev), ~90% overall.
 fn direction_margin() { 0.3 }
 
-// The host treats an init() error as "no context" (every pair would come out
-// DISTINCT), so report it loudly first.
+// The matcher and Jev open independently: either can be missing without
+// taking the other down. Without the matcher every pair comes out DISTINCT,
+// so report that loudly.
 fn init() {
+    let ctx = #{};
     try {
-        return open_matcher();
+        ctx = open_matcher();
     } catch (err) {
         print("match.learned.rhai: matcher unavailable, every pair will be DISTINCT: " + err);
     }
-    ()
+    import "jev" as jev;
+    ctx.jev = jev::open(if "lib" in ctx { ctx.lib } else { () });
+    ctx
 }
+
+fn has_matcher(ctx) { type_of(ctx) == "map" && "h" in ctx }
 
 fn open_matcher() {
     if !ffi_available() {
@@ -113,8 +124,12 @@ fn open_matcher() {
 }
 
 fn destroy(ctx) {
-    if type_of(ctx) == "map" {
+    if has_matcher(ctx) {
         ctx.lib.func("inference_matcher_close", "void", ["ptr"]).invoke([ctx.h]);
+    }
+    if type_of(ctx) == "map" && "jev" in ctx {
+        import "jev" as jev;
+        jev::close(ctx.jev);
     }
 }
 
@@ -139,7 +154,7 @@ fn feed_missing(ctx, pairs_json) {
 // the matcher (facts fed for the whole batch at once, all new texts encoded
 // in one pass) and return its handle, which decide() reads as `a.prepared`.
 fn prepare(ctx, entries) {
-    if type_of(ctx) != "map" { return entries.map(|e| ()); }
+    if !has_matcher(ctx) { return entries.map(|e| ()); }
     let pairs = [];
     let items = [];
     for e in entries {
@@ -206,7 +221,7 @@ fn score(ctx, a, b, heads) {
 fn decide(ctx, a, b) {
     // Cross-type candidates never reach the model (it was not trained on them).
     if a.entry_type != b.entry_type { return distinct(); }
-    if type_of(ctx) != "map" { return distinct(); }
+    if !has_matcher(ctx) { return distinct(); }
     let o = score(ctx, a, b, head_main());
     let c = ctx.col;
     let p_same = o[c.p_same];
@@ -239,10 +254,32 @@ fn decide(ctx, a, b) {
     relate("derived_from", best_p, "learned v17 (" + kind + ")", meta)
 }
 
+// Host hook, after decide(): items are `#{a, b, verdict}` for every pair that
+// didn't come out DISTINCT; return one verdict per item, () to keep it.
+// Policy: only the model's undecided pairs (DEFER) go to Jev; a confident
+// MERGE or RELATE stands.
+fn refine(ctx, items) {
+    let out = items.map(|it| ());
+    if type_of(ctx) != "map" || type_of(ctx.jev) != "map" { return out; }
+    let idx = [];
+    let ask = [];
+    for i in 0..items.len() {
+        if items[i].verdict.verdict == "defer" {
+            idx.push(i);
+            ask.push(items[i]);
+        }
+    }
+    if ask.is_empty() { return out; }
+    import "jev" as jev;
+    let answers = jev::refine_pairs(ctx.jev, ask);
+    for k in 0..idx.len() { out[idx[k]] = answers[k]; }
+    out
+}
+
 // Semantic blocking: the cache's model id. Vectors from any other id are
 // dropped and re-embedded.
 fn embedding_model_id(ctx) {
-    if type_of(ctx) != "map" { throw "matcher unavailable: no embeddings"; }
+    if !has_matcher(ctx) { throw "matcher unavailable: no embeddings"; }
     let p = ctx.encoder_id.invoke([ctx.h]);
     if p.is_null() { throw "inference_matcher_encoder_id: " + ffi::read_cstr(ctx.last_error.invoke([])); }
     let id = ffi::read_cstr(p);
@@ -254,7 +291,7 @@ fn embedding_model_id(ctx) {
 // Semantic blocking: the text an entry is embedded from. Tracks get
 // `title [A] primary artist` (from the pair facts); other types their title.
 fn embed_text(ctx, entry) {
-    if type_of(ctx) != "map" || entry.entry_type != "track" { return entry.title; }
+    if !has_matcher(ctx) || entry.entry_type != "track" { return entry.title; }
     let pj = to_json(entry.pairs);
     feed_missing(ctx, pj);
     let ct = ffi::cstr(entry.entry_type);
@@ -270,7 +307,7 @@ fn embed_text(ctx, entry) {
 
 // Semantic blocking: title-encoder vectors (256-d, L2-normalised).
 fn embed_batch(ctx, texts) {
-    if type_of(ctx) != "map" { throw "matcher unavailable: no embeddings"; }
+    if !has_matcher(ctx) { throw "matcher unavailable: no embeddings"; }
     let n = texts.len();
     if n == 0 { return []; }
     let argv = ffi::malloc(8 * n);

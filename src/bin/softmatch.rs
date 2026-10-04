@@ -18,8 +18,8 @@ use musiclib_rs::{
     providers::registry::{RegistryConfig, build_providers},
 };
 
-/// Heuristic soft-dedup: score candidate entry pairs with a Rhai script (or,
-/// per --jev-types, TypeSafe's Jev model) and report or apply the results.
+/// Heuristic soft-dedup: score candidate entry pairs with a Rhai script and
+/// report or apply the results.
 /// Dry-run by default; pass --apply to persist RELATE and soft MERGE
 /// (same_identity) decisions to the database. No verdict from any backend
 /// ever destructively collapses two entries — that stays an import-time
@@ -53,17 +53,6 @@ struct Args {
     /// Persist RELATE and soft MERGE (same_identity) decisions to the database.
     #[arg(long)]
     apply: bool,
-    /// Entry types scored with TypeSafe's Jev model instead of the Rhai
-    /// script/learned model, e.g. "track" or "track,release". Requires
-    /// TYPESAFE_API_KEY. Empty by default (every type uses the existing
-    /// heuristic).
-    #[arg(long, value_delimiter = ',')]
-    jev_types: Vec<String>,
-    /// Max concurrent Jev API calls. Rhai/learned-model scoring stays
-    /// sequential (cheap, in-process); this only bounds the network-bound
-    /// Jev refine step.
-    #[arg(long, default_value_t = 12)]
-    jev_concurrency: usize,
     /// Write all candidate pairs (including DISTINCT and BARRIER) to a CSV
     /// file for manual quality review.
     #[arg(long)]
@@ -211,21 +200,11 @@ async fn main() -> anyhow::Result<()> {
         }))
     };
 
-    let jev_entry_types: std::collections::HashSet<String> = args.jev_types.into_iter().collect();
-    if !jev_entry_types.is_empty() && std::env::var("TYPESAFE_API_KEY").is_err() {
-        anyhow::bail!(
-            "--jev-types {:?} was passed but TYPESAFE_API_KEY is not set",
-            jev_entry_types
-        );
-    }
-
     let soft_cfg = SoftMatchConfig {
         script_path: script_path.display().to_string(),
         model_path: model_path.map(|path| path.display().to_string()),
         persist_suggestions: args.persist_suggestions,
         apply_relates: args.apply,
-        jev_entry_types,
-        jev_concurrency: args.jev_concurrency,
         csv_path: args.csv,
         embed_db_path,
         embed_model_id: args.embedding_model_id,

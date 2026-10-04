@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Context as _;
-use futures::stream::{self, StreamExt as _};
 use rhai::{AST, Dynamic, Engine, ImmutableString, Map as RhaiMap, Scope};
 
 use crate::pipeline::pair_facts::PairFactsSource;
@@ -95,6 +94,28 @@ pub enum Verdict {
     Distinct,
 }
 
+/// A verdict plus who decided it, as recorded on the DB rows it writes
+/// (`dedup_feedback.origin`/`model_version`, `entry_relation.origin`). A
+/// script sets these with `origin`/`model_version` fields on the verdict map,
+/// e.g. when its `refine` hook asked an external model; otherwise the verdict
+/// is the script's own (`"heuristic"`, no version).
+#[derive(Debug, Clone)]
+struct Scored {
+    verdict: Verdict,
+    origin: String,
+    model_version: Option<String>,
+}
+
+impl From<Verdict> for Scored {
+    fn from(verdict: Verdict) -> Self {
+        Self {
+            verdict,
+            origin: "heuristic".to_owned(),
+            model_version: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SoftMatchConfig {
     pub script_path: String,
@@ -107,22 +128,10 @@ pub struct SoftMatchConfig {
     /// RELATE writes an `entry_relation` row, MERGE writes a `same_identity`
     /// soft-identity assertion via `MusicDb::record_identity_feedback` — the
     /// same reversible path the player's manual "link" button uses. No
-    /// softmatch verdict, from any backend (Rhai, learned model, or Jev),
+    /// softmatch verdict, from any backend (Rhai or the learned model),
     /// ever calls `MusicDb::merge_entries` (destructive, no undo path); that
     /// stays exclusively an import-time/dedup-barrier operation.
     pub apply_relates: bool,
-    /// Entry types scored by TypeSafe's Jev model instead of the Rhai script
-    /// or learned model (`pipeline::jev`). Empty by default. Per-type, not
-    /// global, to allow a hybrid rollout (e.g. `{"track"}` while `release`
-    /// stays on the existing heuristic).
-    pub jev_entry_types: HashSet<String>,
-    /// Max in-flight Jev calls (`pipeline::jev::score_pair`) at once. Rhai/
-    /// learned-model scoring is cheap, in-process, and stays sequential
-    /// regardless of this value -- it only bounds concurrency for the
-    /// network-bound Jev refine step, which is where real wall-clock time
-    /// goes (measured: ~87% of a scored pair's latency is the TypeSafe
-    /// round-trip). Matches `typesafe_poc.rs`'s validated default of 12.
-    pub jev_concurrency: usize,
     /// If set, write a CSV row for every candidate pair (including DISTINCT)
     /// to this path for manual quality review.
     pub csv_path: Option<String>,
@@ -163,9 +172,8 @@ pub struct SoftMatchConfig {
 /// RELATE and soft MERGE (`same_identity`) decisions are both written
 /// reversibly (tombstoned via `enabled`, never repoints `entry_source`) —
 /// no softmatch verdict destructively merges entries; that stays an
-/// import-time/dedup-barrier operation (docs/dedup-v2.md). No entry types
-/// are routed to Jev by default; `http_client` is unset, so `http_call` is
-/// disabled until a caller wires one in.
+/// import-time/dedup-barrier operation (docs/dedup-v2.md). `http_client` is
+/// unset, so `http_call` is disabled until a caller wires one in.
 ///
 /// Returns `None` if `<config_dir>/match.rhai` doesn't exist, meaning
 /// soft-dedup isn't configured and should be skipped entirely.
@@ -185,8 +193,6 @@ pub fn default_soft_match_config() -> Option<SoftMatchConfig> {
             .then(|| model_path.display().to_string()),
         persist_suggestions,
         apply_relates: true,
-        jev_entry_types: Default::default(),
-        jev_concurrency: 12,
         csv_path: None,
         embed_db_path: Some(embed_db.display().to_string()),
         embed_model_id: None,
@@ -875,8 +881,8 @@ fn build_rhai_engine(
         m
     });
     // Undecided: neither merge nor relate is safe. Counted and written to the
-    // CSV as DEFER; with `--jev-types` the pair goes to Jev like any other
-    // non-distinct verdict.
+    // CSV as DEFER; a script's `refine` hook can settle it (e.g. by asking an
+    // external model).
     engine.register_fn("defer", |conf: f64, reason: String| -> RhaiMap {
         let mut m = RhaiMap::new();
         m.insert("verdict".into(), Dynamic::from("defer".to_string()));
@@ -1122,6 +1128,31 @@ fn build_rhai_engine(
     engine.register_fn("env_var", |name: String| -> String {
         std::env::var(&name).unwrap_or_default()
     });
+    // A text file next to the script (path relative to the script's
+    // directory), e.g. prompt files a script sends verbatim.
+    {
+        let dir = script_dir.to_path_buf();
+        engine.register_fn(
+            "read_text",
+            move |path: &str| -> Result<String, Box<rhai::EvalAltResult>> {
+                let full = dir.join(path);
+                std::fs::read_to_string(&full)
+                    .map_err(|e| format!("read_text({}): {e}", full.display()).into())
+            },
+        );
+    }
+    // `<cache_dir>` (`app_dirs::cache_dir`), for script-owned caches.
+    engine.register_fn("cache_dir", || -> String {
+        crate::app_dirs::cache_dir().display().to_string()
+    });
+    // Percent-decoding; invalid UTF-8 leaves the input unchanged.
+    engine.register_fn("url_decode", |s: &str| -> String {
+        urlencoding::decode(s).map_or_else(|_| s.to_owned(), |d| d.into_owned())
+    });
+    // Script `print`/`debug` go to the log (and so through the progress
+    // bars) instead of raw stdout.
+    engine.on_print(|s| info!("{s}"));
+    engine.on_debug(|s, _, pos| tracing::debug!("{s} ({pos})"));
     engine.register_fn("to_json", |value: Dynamic| -> String {
         serde_json::to_string(&dynamic_to_serde(&value)).unwrap_or_default()
     });
@@ -1461,19 +1492,18 @@ const SCORE_CHUNK: usize = 256;
 
 /// The script's `decide` verdict for every pair, computed on all cores (Rhai
 /// is built with `sync`: one engine and AST shared, a scope per call). The
-/// verdict is pure CPU work; Jev refinement, DB writes and CSV rows stay in
-/// the sequential loop that consumes these.
+/// verdict is pure CPU work; refinement, DB writes and CSV rows happen after.
 fn script_verdicts<T>(
     ctx: &ScriptCtx,
     pairs: &[(Arc<EntryInfo>, Arc<EntryInfo>, T)],
-) -> Vec<anyhow::Result<Verdict>>
+) -> Vec<anyhow::Result<Scored>>
 where
     T: Sync,
 {
     let started = Instant::now();
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let next = AtomicUsize::new(0);
-    let mut chunks: Vec<(usize, Vec<anyhow::Result<Verdict>>)> = run_blocking(|| {
+    let mut chunks: Vec<(usize, Vec<anyhow::Result<Scored>>)> = run_blocking(|| {
         std::thread::scope(|scope| {
             let workers: Vec<_> = (0..threads)
                 .map(|_| {
@@ -1556,7 +1586,7 @@ fn rhai_dynamic_to_json(d: &Dynamic) -> serde_json::Value {
     serde_json::Value::Null
 }
 
-fn call_script(ctx: &ScriptCtx, a: &Arc<EntryInfo>, b: &Arc<EntryInfo>) -> anyhow::Result<Verdict> {
+fn call_script(ctx: &ScriptCtx, a: &Arc<EntryInfo>, b: &Arc<EntryInfo>) -> anyhow::Result<Scored> {
     let mut scope = ctx.base_scope.clone();
     let a_dyn = script_entry(ctx, a);
     let b_dyn = script_entry(ctx, b);
@@ -1573,10 +1603,14 @@ fn call_script(ctx: &ScriptCtx, a: &Arc<EntryInfo>, b: &Arc<EntryInfo>) -> anyho
             warn!("Rhai decide() error: {e}");
             Dynamic::from_map(RhaiMap::new())
         });
+    Ok(scored_from_dynamic(result))
+}
 
-    let map = match result.try_cast::<RhaiMap>() {
-        Some(m) => m,
-        None => return Ok(Verdict::Distinct),
+/// A verdict map (`merge(...)`, `relate(...)`, …, optionally with `origin` /
+/// `model_version` fields) as a `Scored`. Anything that isn't one is DISTINCT.
+fn scored_from_dynamic(result: Dynamic) -> Scored {
+    let Some(map) = result.try_cast::<RhaiMap>() else {
+        return Verdict::Distinct.into();
     };
 
     let rhai_str = |key: &str| -> Option<String> {
@@ -1590,7 +1624,7 @@ fn call_script(ctx: &ScriptCtx, a: &Arc<EntryInfo>, b: &Arc<EntryInfo>) -> anyho
             .unwrap_or(0.0)
     };
 
-    Ok(match rhai_str("verdict").as_deref() {
+    let verdict = match rhai_str("verdict").as_deref() {
         Some("merge") => Verdict::Merge {
             confidence: rhai_f64("confidence"),
             reason: rhai_str("reason").unwrap_or_default(),
@@ -1606,7 +1640,171 @@ fn call_script(ctx: &ScriptCtx, a: &Arc<EntryInfo>, b: &Arc<EntryInfo>) -> anyho
             reason: rhai_str("reason").unwrap_or_default(),
         },
         _ => Verdict::Distinct,
-    })
+    };
+    Scored {
+        verdict,
+        origin: rhai_str("origin").unwrap_or_else(|| "heuristic".to_owned()),
+        model_version: rhai_str("model_version"),
+    }
+}
+
+/// The inverse of `scored_from_dynamic`, for handing a verdict back to the
+/// script (`refine`'s `item.verdict`).
+fn scored_to_map(s: &Scored) -> RhaiMap {
+    let mut m = RhaiMap::new();
+    let mut put = |k: &str, v: Dynamic| {
+        m.insert(k.into(), v);
+    };
+    match &s.verdict {
+        Verdict::Merge { confidence, reason } => {
+            put("verdict", "merge".into());
+            put("confidence", (*confidence).into());
+            put("reason", reason.clone().into());
+        }
+        Verdict::Relate {
+            kind,
+            confidence,
+            reason,
+            metadata,
+        } => {
+            put("verdict", "relate".into());
+            put("kind", kind.clone().into());
+            put("confidence", (*confidence).into());
+            put("reason", reason.clone().into());
+            if let Some(meta) = metadata {
+                put("metadata", serde_to_dynamic(meta));
+            }
+        }
+        Verdict::Defer { confidence, reason } => {
+            put("verdict", "defer".into());
+            put("confidence", (*confidence).into());
+            put("reason", reason.clone().into());
+        }
+        Verdict::Separate { confidence, reason } => {
+            put("verdict", "separate".into());
+            put("confidence", (*confidence).into());
+            put("reason", reason.clone().into());
+        }
+        Verdict::Distinct => put("verdict", "distinct".into()),
+    }
+    put("origin", s.origin.clone().into());
+    if let Some(v) = &s.model_version {
+        put("model_version", v.clone().into());
+    }
+    m
+}
+
+/// Pairs per `refine(ctx, items)` call. One call is one blocking script run,
+/// so a script that fans work out (e.g. concurrent API calls) gets a whole
+/// chunk at once.
+const REFINE_CHUNK: usize = 256;
+
+/// Run the script's optional `refine(ctx, items) -> array` hook over every
+/// non-DISTINCT verdict, in chunks. Each item is `#{a, b, verdict}`; the
+/// script returns one verdict map per item (`item.verdict`, or `()`, keeps
+/// it). This is where slow work belongs (network calls), since `decide` runs
+/// on every core at once. A chunk that errors or returns the wrong number of
+/// values keeps its verdicts.
+fn refine_verdicts<T>(
+    ctx: &ScriptCtx,
+    pairs: &[(Arc<EntryInfo>, Arc<EntryInfo>, T)],
+    verdicts: &mut [anyhow::Result<Scored>],
+) {
+    if !ctx.ast.iter_functions().any(|f| f.name == "refine") {
+        return;
+    }
+    let todo: Vec<usize> = verdicts
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| matches!(v, Ok(s) if !matches!(s.verdict, Verdict::Distinct)))
+        .map(|(i, _)| i)
+        .collect();
+    if todo.is_empty() {
+        return;
+    }
+    let started = Instant::now();
+    let mut changed: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+    for chunk in todo.chunks(REFINE_CHUNK) {
+        let items: rhai::Array = chunk
+            .iter()
+            .map(|&i| {
+                let (a, b, _) = &pairs[i];
+                let Ok(scored) = &verdicts[i] else {
+                    unreachable!("only Ok verdicts are refined")
+                };
+                let mut item = RhaiMap::new();
+                item.insert("a".into(), script_entry(ctx, a));
+                item.insert("b".into(), script_entry(ctx, b));
+                item.insert("verdict".into(), Dynamic::from_map(scored_to_map(scored)));
+                Dynamic::from_map(item)
+            })
+            .collect();
+        let result = run_blocking(|| {
+            ctx.engine.call_fn_with_options::<Dynamic>(
+                rhai::CallFnOptions::new().eval_ast(false),
+                &mut ctx.base_scope.clone(),
+                &ctx.ast,
+                "refine",
+                (ctx.user_ctx.clone(), items),
+            )
+        });
+        let values = match result.map(|v| v.try_cast::<rhai::Array>()) {
+            Ok(Some(values)) if values.len() == chunk.len() => values,
+            Ok(_) => {
+                warn!(
+                    "refine() must return one verdict per item ({} given); keeping them",
+                    chunk.len()
+                );
+                continue;
+            }
+            Err(e) => {
+                warn!(
+                    "refine() error for {} pair(s), keeping them: {e}",
+                    chunk.len()
+                );
+                continue;
+            }
+        };
+        for (&i, value) in chunk.iter().zip(values) {
+            if value.is_unit() {
+                continue;
+            }
+            let refined = scored_from_dynamic(value);
+            let Ok(before) = &verdicts[i] else { continue };
+            if verdict_name(&refined.verdict) != verdict_name(&before.verdict)
+                || refined.origin != before.origin
+            {
+                *changed
+                    .entry((refined.origin.clone(), verdict_name(&refined.verdict)))
+                    .or_default() += 1;
+            }
+            verdicts[i] = Ok(refined);
+        }
+    }
+    let summary: Vec<String> = changed
+        .iter()
+        .map(|((origin, verdict), n)| format!("{n} {verdict} [{origin}]"))
+        .collect();
+    info!(
+        "Refined {} pair(s) in {:.2?}; changed: {}",
+        todo.len(),
+        started.elapsed(),
+        if summary.is_empty() {
+            "none".to_owned()
+        } else {
+            summary.join(", ")
+        }
+    );
+}
+
+fn verdict_name(v: &Verdict) -> &'static str {
+    match v {
+        Verdict::Merge { .. } => "MERGE",
+        Verdict::Relate { .. } => "RELATE",
+        Verdict::Defer { .. } => "DEFER",
+        Verdict::Separate { .. } => "SEPARATE",
+        Verdict::Distinct => "DISTINCT",
+    }
 }
 
 // ── Candidate blocking ────────────────────────────────────────────────────────
@@ -2984,49 +3182,28 @@ async fn score_candidates(
     let scored_entries: Vec<&Arc<EntryInfo>> =
         to_score.iter().flat_map(|(a, b, _)| [a, b]).collect();
     prepare_entries(ctx, &scored_entries);
-    // Every path but the legacy learned model starts from the script's verdict.
-    let precomputed: Vec<Option<anyhow::Result<Verdict>>> = if learned_model.is_none() {
-        script_verdicts(ctx, &to_score)
-            .into_iter()
-            .map(Some)
-            .collect()
+    // Every path but the legacy learned model starts from the script's
+    // verdict, then its optional `refine` pass.
+    let precomputed: Vec<Option<anyhow::Result<Scored>>> = if learned_model.is_none() {
+        let mut verdicts = script_verdicts(ctx, &to_score);
+        refine_verdicts(ctx, &to_score, &mut verdicts);
+        verdicts.into_iter().map(Some).collect()
     } else {
         to_score.iter().map(|_| None).collect()
     };
 
-    // Concurrent phase. Rhai/learned-model scoring is cheap, in-process, and
-    // effectively free either way; the Jev refine call is the one that's
-    // ~87% network/inference wait (measured), so it's what concurrency here
-    // actually buys. `buffer_unordered` interleaves these on the single task
-    // driving this function rather than spreading them across OS threads, so
-    // it needs no `Send` bound -- the non-`Sync` Rhai engine behind `ctx` can
-    // still be shared by shared reference across every in-flight pair.
-    // `csv`/`stats` are caller-owned `&mut` state that can't be captured by
-    // several simultaneously-live futures, so `apply_candidate` no longer
-    // touches them; this loop applies both, one completed result at a time,
-    // as `buffer_unordered` yields them (order doesn't matter for either).
-    let concurrency = config.jev_concurrency.max(1);
-    let learned_model_ref = learned_model.as_ref();
-    let mut results = stream::iter(to_score.iter().zip(precomputed))
-        .map(|((ea, eb, channels), script_verdict)| async move {
-            let result = apply_candidate(
-                db,
-                ea,
-                eb,
-                channels.as_ref(),
-                ctx,
-                script_verdict,
-                learned_model_ref,
-                embed_cache,
-                config,
-            )
-            .await;
-            (result, ea, eb, channels)
-        })
-        .buffer_unordered(concurrency);
-
-    while let Some((result, ea, eb, channels)) = results.next().await {
-        let verdict = result?;
+    for ((ea, eb, channels), script_verdict) in to_score.iter().zip(precomputed) {
+        let verdict = apply_candidate(
+            db,
+            ea,
+            eb,
+            channels.as_ref(),
+            script_verdict,
+            learned_model.as_ref(),
+            embed_cache,
+            config,
+        )
+        .await?;
 
         if let Some(w) = &mut csv {
             let (vname, kind, conf, reason) = match &verdict {
@@ -3085,103 +3262,81 @@ fn resolve_derived_side(extra: &mut serde_json::Value, ea_id: i64, eb_id: i64) {
     obj.insert("source_entry".to_string(), serde_json::json!(source));
 }
 
-/// Score one candidate pair with the Rhai script, emit its console log, and
-/// apply the DB write when `apply_relates` is set. Returns the verdict so the
-/// caller can write its CSV row and bump per-type stats -- those touch
-/// caller-owned `&mut` state that can't be captured by multiple in-flight
-/// futures at once (see the `buffer_unordered` scoring loop in
-/// `score_candidates`), so they're deliberately not this function's job.
+/// Take one candidate pair's verdict (the script's, or the legacy learned
+/// model's), emit its console log, and apply the DB write when
+/// `apply_relates` is set. Returns the verdict so the caller can write its CSV
+/// row and bump per-type stats.
 #[allow(clippy::too_many_arguments)]
 async fn apply_candidate(
     db: &MusicDb,
     ea: &Arc<EntryInfo>,
     eb: &Arc<EntryInfo>,
     channels: Option<&ChannelMask>,
-    ctx: &ScriptCtx<'_>,
-    // The script's verdict when `script_verdicts` already computed it.
-    script_verdict: Option<anyhow::Result<Verdict>>,
+    // The script's verdict, after `refine`; `None` on the learned-model path.
+    script_verdict: Option<anyhow::Result<Scored>>,
     learned_model: Option<&DedupModel>,
     embed_cache: Option<&EmbeddingCache>,
     config: &SoftMatchConfig,
 ) -> anyhow::Result<Verdict> {
-    let (verdict, origin, model_version): (Verdict, &'static str, Option<String>) =
-        if config.jev_entry_types.contains(&ea.entry_type) {
-            // Rhai filters first (free, instant); only the non-DISTINCT
-            // subset (its own MERGE/RELATE candidates) gets refined by Jev.
-            // Matches the validated PoC pattern ("Full-DB auto-relation
-            // combine" in project memory) of pointing Jev at the heuristic's
-            // own positive output to corroborate or correct it, rather than
-            // re-deciding the entire (mostly blocking-noise) candidate pool
-            // -- both cheaper and the integration mode that's actually been
-            // shown to catch real heuristic errors (e.g. member-vs-group
-            // merges) without the ~25x cost/latency of scoring every pair.
-            let base_verdict = match script_verdict {
-                Some(v) => v?,
-                None => call_script(ctx, ea, eb)?,
-            };
-            if matches!(base_verdict, Verdict::Distinct) {
-                (base_verdict, "heuristic", None)
-            } else {
-                let verdict = crate::pipeline::jev::score_pair(db, ea, eb, config).await?;
-                (
-                    verdict,
-                    "jev",
-                    Some(crate::pipeline::jev::MODEL_VERSION.to_string()),
-                )
-            }
-        } else if let Some(model) = learned_model {
-            let features = learned_features(ea, eb, embed_cache);
-            let probability = model.probability(&ea.entry_type, &features)?;
-            let decision = model.decide(probability);
-            if config.persist_suggestions && decision != ModelDecision::Separate {
-                let sorted_features: BTreeMap<&str, f64> = features
-                    .iter()
-                    .map(|(name, value)| (name.as_str(), *value))
-                    .collect();
-                db.upsert_dedup_suggestion(NewDedupSuggestion {
-                    entry_a: ea.entry_id,
-                    entry_b: eb.entry_id,
-                    model_version: model.version().to_owned(),
-                    probability,
-                    decision: match decision {
-                        ModelDecision::Merge => "merge",
-                        ModelDecision::Defer => "defer",
-                        ModelDecision::Separate => unreachable!(),
-                    }
-                    .to_owned(),
-                    candidate_channels: channels.copied().map(ChannelMask::csv).unwrap_or_default(),
-                    features: serde_json::to_string(&sorted_features)?,
-                    evidence: serde_json::to_string(&serde_json::json!({
-                        "left": ea,
-                        "right": eb,
-                    }))?,
-                })
-                .await
-                .map_err(|error| anyhow::anyhow!("persisting dedup suggestion: {error}"))?;
-            }
-            let reason = "learned musiclib-entry-info/1 scorer".to_owned();
-            let verdict = match decision {
-                ModelDecision::Merge => Verdict::Merge {
-                    confidence: probability,
-                    reason,
-                },
-                ModelDecision::Separate => Verdict::Separate {
-                    confidence: probability,
-                    reason,
-                },
-                ModelDecision::Defer => Verdict::Defer {
-                    confidence: probability,
-                    reason,
-                },
-            };
-            (verdict, "heuristic", Some(model.version().to_owned()))
-        } else {
-            let verdict = match script_verdict {
-                Some(v) => v?,
-                None => call_script(ctx, ea, eb)?,
-            };
-            (verdict, "heuristic", None)
+    let Scored {
+        verdict,
+        origin,
+        model_version,
+    } = if let Some(scored) = script_verdict {
+        scored?
+    } else if let Some(model) = learned_model {
+        let features = learned_features(ea, eb, embed_cache);
+        let probability = model.probability(&ea.entry_type, &features)?;
+        let decision = model.decide(probability);
+        if config.persist_suggestions && decision != ModelDecision::Separate {
+            let sorted_features: BTreeMap<&str, f64> = features
+                .iter()
+                .map(|(name, value)| (name.as_str(), *value))
+                .collect();
+            db.upsert_dedup_suggestion(NewDedupSuggestion {
+                entry_a: ea.entry_id,
+                entry_b: eb.entry_id,
+                model_version: model.version().to_owned(),
+                probability,
+                decision: match decision {
+                    ModelDecision::Merge => "merge",
+                    ModelDecision::Defer => "defer",
+                    ModelDecision::Separate => unreachable!(),
+                }
+                .to_owned(),
+                candidate_channels: channels.copied().map(ChannelMask::csv).unwrap_or_default(),
+                features: serde_json::to_string(&sorted_features)?,
+                evidence: serde_json::to_string(&serde_json::json!({
+                    "left": ea,
+                    "right": eb,
+                }))?,
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("persisting dedup suggestion: {error}"))?;
+        }
+        let reason = "learned musiclib-entry-info/1 scorer".to_owned();
+        let verdict = match decision {
+            ModelDecision::Merge => Verdict::Merge {
+                confidence: probability,
+                reason,
+            },
+            ModelDecision::Separate => Verdict::Separate {
+                confidence: probability,
+                reason,
+            },
+            ModelDecision::Defer => Verdict::Defer {
+                confidence: probability,
+                reason,
+            },
         };
+        Scored {
+            verdict,
+            origin: "heuristic".to_owned(),
+            model_version: Some(model.version().to_owned()),
+        }
+    } else {
+        anyhow::bail!("no verdict for pair ({}, {})", ea.entry_id, eb.entry_id);
+    };
 
     match &verdict {
         Verdict::Distinct | Verdict::Separate { .. } => {}
@@ -3215,7 +3370,7 @@ async fn apply_candidate(
                     entry_a: ea.entry_id,
                     entry_b: eb.entry_id,
                     judgment: IdentityJudgment::Same,
-                    origin: origin.to_string(),
+                    origin: origin.clone(),
                     model_version: model_version.clone(),
                     probability: Some(*confidence),
                     candidate_channels: channels.copied().map(ChannelMask::csv),
@@ -3282,7 +3437,7 @@ async fn apply_candidate(
                     eb.entry_id,
                     kind,
                     *confidence,
-                    origin,
+                    &origin,
                     Some(&extra_json),
                 )
                 .await
@@ -3992,5 +4147,208 @@ mod tests {
             "expected an error field, got {result:?}"
         );
         assert!(!result.contains_key("status"));
+    }
+
+    /// `refine` sees every non-DISTINCT verdict with its entries, can replace
+    /// it (carrying `origin`/`model_version` through to the DB writes), keep
+    /// it (`item.verdict` or `()`), and never sees DISTINCT pairs.
+    #[tokio::test]
+    async fn refine_replaces_keeps_and_skips_distinct() {
+        let dir = std::env::temp_dir().join(format!("refine-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("match.rhai");
+        std::fs::write(
+            &path,
+            r#"
+            fn decide(ctx, a, b) {
+                if a.title == "x" { return distinct(); }
+                if a.title == "m" { return merge(0.9, "script"); }
+                defer(0.4, "unsure")
+            }
+            fn refine(ctx, items) {
+                items.map(|it| {
+                    if it.verdict.verdict == "distinct" { throw "refine saw a distinct pair"; }
+                    if it.a.title == "d1" {
+                        let v = merge(0.8, "asked");
+                        v.origin = "jev";
+                        v.model_version = "typesafe-jev/2";
+                        return v;
+                    }
+                    if it.a.title == "d2" { return (); }
+                    it.verdict
+                })
+            }
+            "#,
+        )
+        .unwrap();
+        let ctx = load_script(path.to_str().unwrap(), None, None, None)
+            .await
+            .unwrap();
+        let pair = |t: &str| {
+            (
+                Arc::new(titled_entry(1, t, "youtube", vec![])),
+                Arc::new(titled_entry(2, t, "spotify", vec![])),
+                (),
+            )
+        };
+        let pairs = vec![pair("x"), pair("m"), pair("d1"), pair("d2")];
+        let mut verdicts = script_verdicts(&ctx, &pairs);
+        refine_verdicts(&ctx, &pairs, &mut verdicts);
+        let got: Vec<(&str, String, Option<String>)> = verdicts
+            .iter()
+            .map(|v| {
+                let v = v.as_ref().unwrap();
+                (
+                    verdict_name(&v.verdict),
+                    v.origin.clone(),
+                    v.model_version.clone(),
+                )
+            })
+            .collect();
+        let heuristic = || "heuristic".to_owned();
+        assert_eq!(
+            got,
+            vec![
+                ("DISTINCT", heuristic(), None),
+                ("MERGE", heuristic(), None),
+                ("MERGE", "jev".to_owned(), Some("typesafe-jev/2".to_owned())),
+                ("DEFER", heuristic(), None),
+            ]
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// `config/jev.rhai`'s pure helpers: handle extraction, the answer →
+    /// verdict mapping, ordered JSON, and the question files.
+    #[tokio::test]
+    async fn jev_module_helpers() {
+        let dir = std::env::temp_dir().join(format!("jev-test-{}", std::process::id()));
+        let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
+        std::fs::create_dir_all(dir.join("jev")).unwrap();
+        std::fs::copy(config.join("jev.rhai"), dir.join("jev.rhai")).unwrap();
+        for t in ["track", "artist", "release", "release_group"] {
+            let file = format!("jev/{t}.json");
+            std::fs::copy(config.join(&file), dir.join(&file)).unwrap();
+        }
+        let path = dir.join("t.rhai");
+        std::fs::write(
+            &path,
+            r#"
+            fn handle(id) { import "jev" as jev; jev::extract_handle(id) }
+            fn verdict(args) {
+                import "jev" as jev;
+                let answers = #{ identity: #{ "type": "choice", choice: args[0], confidence: 0.92 } };
+                if args.len() > 1 {
+                    answers.kind = #{ "type": "choice", choice: args[1] };
+                    answers.direction = #{ "type": "choice", choice: args[2] };
+                }
+                jev::to_verdict(#{ answers: answers }, if args.len() > 1 { "track" } else { "artist" })
+            }
+            fn ordered(unused) {
+                import "jev" as jev;
+                jev::obj([["z", 1], ["a", jev::raw(jev::arr(["x", jev::raw("{\"k\":2}")]))]])
+            }
+            fn questions(unused) { import "jev" as jev; jev::questions() }
+            "#,
+        )
+        .unwrap();
+        let ctx = load_script(path.to_str().unwrap(), None, None, None)
+            .await
+            .unwrap();
+        let call = |f: &str, arg: Dynamic| -> Dynamic {
+            ctx.engine
+                .call_fn(&mut ctx.base_scope.clone(), &ctx.ast, f, (arg,))
+                .unwrap()
+        };
+
+        let handle = |id: &str| call("handle", id.into()).try_cast::<String>();
+        assert_eq!(
+            handle("https://www.youtube.com/@SomeArtist").as_deref(),
+            Some("SomeArtist")
+        );
+        assert_eq!(
+            handle("https://www.youtube.com/user/10feetVEVOxx").as_deref(),
+            Some("10feetVEVOxx")
+        );
+        assert_eq!(
+            handle("https://www.youtube.com/%E3%81%A0%E3%81%84").as_deref(),
+            Some("だい")
+        );
+        for opaque in [
+            "https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx",
+            "https://www.discogs.com/artist/123456",
+            "https://youtu.be/cl_Qikl7YaE",
+            "https://www.youtube.com/watch?v=cl_Qikl7YaE",
+            "https://www.youtube.com/shorts/cl_Qikl7YaE",
+            "https://musicbrainz.org/artist/5b11f4ce-a62d-471e-81fc-a69a8278c7da",
+            "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+            "https://www.wikidata.org/wiki/Q12345",
+        ] {
+            assert_eq!(handle(opaque), None, "{opaque}");
+        }
+
+        let verdict = |args: &[&str]| {
+            let args: rhai::Array = args.iter().map(|a| Dynamic::from(a.to_string())).collect();
+            scored_from_dynamic(call("verdict", args.into()))
+        };
+        let merge = verdict(&["same_identity", "not_applicable", "neither"]);
+        assert!(
+            matches!(&merge.verdict, Verdict::Merge { confidence, reason }
+            if *confidence == 0.92
+                && reason == "jev-latest v2.1: same_identity (kind=not_applicable, direction=neither)")
+        );
+        assert_eq!(merge.origin, "jev");
+        assert_eq!(merge.model_version.as_deref(), Some("typesafe-jev/v2.1"));
+        let derived = verdict(&["derived", "cover", "a_is_original"]);
+        assert!(
+            matches!(&derived.verdict, Verdict::Relate { kind, metadata: Some(m), .. }
+            if kind == "derived_from"
+                && *m == serde_json::json!({"transformation": "cover", "derived_side": "b"}))
+        );
+        let alt = verdict(&["derived", "alt_version", "neither"]);
+        assert!(
+            matches!(&alt.verdict, Verdict::Relate { metadata: Some(m), .. }
+            if *m == serde_json::json!({}))
+        );
+        assert!(matches!(
+            verdict(&["sibling", "cover", "neither"]).verdict,
+            Verdict::Distinct
+        ));
+        assert!(matches!(
+            verdict(&["unrelated", "not_applicable", "neither"]).verdict,
+            Verdict::Distinct
+        ));
+        assert!(matches!(
+            verdict(&["different_identity"]).verdict,
+            Verdict::Distinct
+        ));
+        assert!(matches!(
+            verdict(&["unsure"]).verdict,
+            Verdict::Defer { .. }
+        ));
+
+        assert_eq!(
+            call("ordered", Dynamic::UNIT).cast::<String>(),
+            r#"{"z":1,"a":["x",{"k":2}]}"#
+        );
+
+        let qs = call("questions", Dynamic::UNIT).cast::<RhaiMap>();
+        let q = |t: &str| -> serde_json::Value {
+            serde_json::from_str(&qs[t].clone().cast::<String>()).unwrap()
+        };
+        let track = q("track");
+        let criteria = &track["identity"]["criteria"];
+        for c in ["same_identity", "derived", "sibling", "unrelated", "unsure"] {
+            assert!(criteria[c].is_string(), "track criterion {c}");
+        }
+        assert!(track["kind"]["criteria"]["cover"].is_string());
+        assert!(track["direction"]["criteria"]["a_is_original"].is_string());
+        for t in ["artist", "release", "release_group"] {
+            let criteria = &q(t)["identity"]["criteria"];
+            for c in ["same_identity", "different_identity", "unsure"] {
+                assert!(criteria[c].is_string(), "{t} criterion {c}");
+            }
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 }

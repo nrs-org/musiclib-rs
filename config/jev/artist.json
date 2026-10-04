@@ -1,0 +1,11 @@
+{
+  "identity": {
+    "type": "choice",
+    "instructions": "`a`/`b` are music-artist records aggregated from multiple databases (YouTube, Spotify, MusicBrainz, Discogs, etc.). Are they the SAME real-world person, group, or act? Language, romanization, capitalization, or channel-naming differences (e.g. a YouTube auto \"<name> - Topic\" channel) are NOT evidence of difference. A shared handle/username/official-link between the two records IS strong evidence for same_identity even when display names differ. Use different_identity when one is an individual member and the other the group/duo/unit they belong to (never merge a member with their group, even if closely associated), or when the shared name is generic/common with no other corroborating overlap (handle, associated work, official link).",
+    "criteria": {
+      "same_identity": "same real-world person/group/act (different script/romanization/capitalization/channel-naming counts as this) -- merge.",
+      "different_identity": "different entities -- e.g. a group vs. one of its members, or unrelated people/acts that merely share a name.",
+      "unsure": "the evidence is genuinely insufficient to decide either way."
+    }
+  }
+}

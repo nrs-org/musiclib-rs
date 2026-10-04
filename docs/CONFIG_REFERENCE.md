@@ -514,13 +514,20 @@ snapshots.
 
 ### Lifecycle
 
-The host calls three optional entry points in order:
+The host calls these entry points in order; all but `decide` are optional:
 
 | Function | Signature | Called when |
 |---|---|---|
 | `init` | `fn init() -> Dynamic` | Once after the script is loaded |
-| `decide` | `fn decide(ctx, a, b) -> verdict` | For each candidate pair |
+| `prepare` | `fn prepare(ctx, entries) -> array` | In batches of 512 entries before scoring; each returned value is that entry's `a.prepared` |
+| `decide` | `fn decide(ctx, a, b) -> verdict` | For each candidate pair, on every core at once |
+| `refine` | `fn refine(ctx, items) -> array` | After `decide`, in chunks of 256 non-DISTINCT pairs |
 | `destroy` | `fn destroy(ctx)` | Once when the engine shuts down |
+
+`refine` is where slow work belongs (network calls): `decide` runs in parallel
+and must stay CPU-bound. Each item is `#{a, b, verdict}` (`verdict` is
+`decide`'s map); return one verdict per item, `item.verdict` or `()` to keep
+it. A chunk that errors keeps its verdicts.
 
 `init()` returns an arbitrary **context object** (`ctx`). The host holds it for
 the whole run and passes it back as the first argument of every other hook. Use
@@ -581,9 +588,13 @@ Both `re_*` functions accept either a pre-compiled `Regex` or a pattern `String`
 merge(conf, reason)             // conf: f64 confidence in [0,1] -- soft: asserts same_identity, never destructively merges
 relate(kind, conf, reason)      // kind: see below
 relate(kind, conf, reason, metadata)  // + dedup-v2 metadata, e.g. #{transformation, derived_side: "a"|"b"}
-defer(conf, reason)             // undecided: counted and written to the CSV as DEFER; refined by Jev with --jev-types
+defer(conf, reason)             // undecided: counted and written to the CSV as DEFER; refine() can settle it
 distinct()
 ```
+
+A verdict map may also carry `origin` (default `"heuristic"`) and
+`model_version`, recorded on the `dedup_feedback` / `entry_relation` rows it
+writes — e.g. `v.origin = "jev"` for a verdict an external model made.
 
 Valid `relate` kinds: `alt_version`, `live`, `remix`, `instrumental`, `cover`,
 `medley`, `release_variant`, `in_release_group`, `same_artist`.
@@ -596,11 +607,25 @@ pair_facts_json([[source, identifier], …]) // → JSON string: array of them (
 ```
 
 Per-pair data read lazily from the DB: names, durations, release date/types,
-contributions (with artist entry id and best name), parent and child links,
-credited items. Keyed by `(source, identifier)`, so facts stay valid when
-entries merge. Returns `()` when the run has no file-backed DB. Field list and
-ordering: `docs/plan-v15-runtime.md` §2b. `config/match.learned.rhai` uses it
-to feed the learned matcher.
+contributions (with artist entry id and best name), parent and child links
+(with names), credited items (`credited` ids, `credited_names` alongside).
+Keyed by `(source, identifier)`, so facts stay valid when entries merge.
+Returns `()` when the run has no file-backed DB. Field list and ordering:
+`docs/plan-v15-runtime.md` §2b (`parents[].name` and `credited_names` are later
+additions). `config/match.learned.rhai` uses it to feed the learned matcher,
+and `config/jev.rhai` to build Jev's evidence view.
+
+#### Misc
+
+```rhai
+env_var(name)     // → string ("" when unset)
+cache_dir()       // → <cache_dir> (app_dirs::cache_dir), for script-owned caches
+url_decode(s)     // → percent-decoded string (input unchanged if not valid UTF-8)
+read_text(path)   // → contents of a text file, path relative to the script's directory
+to_json(v) / parse_json(s)
+```
+
+`print(...)` and `debug(...)` go to the log (`info` / `debug` level), not stdout.
 
 #### Semantic similarity
 
@@ -679,6 +704,49 @@ search path. The recommended setup:
 ```bash
 ln -s /path/to/repo/target/release/libinference.so ~/.config/musiclib-rs/libinference.so
 ```
+
+### Jev refinement (`config/jev.rhai`)
+
+`config/match.learned.rhai` sends every pair the learned model DEFERs to
+TypeSafe's Jev from its `refine` hook and uses the answer instead. The
+questions are prompt v2.1 (`train/learned-matcher/jev_client.py`), aligned
+with the learned matcher's ontology:
+
+| Jev answer | Verdict |
+|---|---|
+| `same_identity` (incl. a full MV of the recording) | MERGE (soft `same_identity`) |
+| `derived` (tracks: cut/TV size, other MV version, live, remix, instrumental, cover, arrangement) | RELATE `derived_from`; `kind` → `transformation`, `direction` → `derived_side` |
+| `sibling` (two versions of one song, neither made from the other) | DISTINCT (no direct edge) |
+| `unrelated` / `different_identity` | DISTINCT |
+| `unsure` | stays DEFER |
+
+Rows written from these verdicts carry `origin = "jev"`,
+`model_version = "typesafe-jev/v2.1"`.
+
+The questions live in `config/jev/<entry type>.json` and are sent verbatim,
+with their key order kept (Rhai maps would sort it, so `jev.rhai` builds
+requests as JSON text). `config/jev.rhai` (a Rhai module) holds the evidence
+view and the answer mapping. Keep `jev.rhai` and `jev/` next to `match.rhai`.
+Transport, retry, concurrency and the response cache are the inference
+cdylib's `inference_typesafe_*` API, so build it with the `typesafe` feature:
+
+```bash
+cargo build -p inference --release --lib --features matcher,typesafe
+```
+
+| Env var | Default | Notes |
+|---|---|---|
+| `TYPESAFE_API_KEY` | unset | Turns Jev on; without it DEFER verdicts stay deferred |
+| `MUSICLIB_JEV_CONCURRENCY` | `12` | Concurrent API calls per batch |
+| `MUSICLIB_JEV_CACHE` | `<cache_dir>/typesafe.db` | Response cache (SQLite), keyed by the SHA-256 of the request |
+| `TYPESAFE_BASE_URL` | the TypeSafe API | Override, e.g. a local mock |
+
+Because the cache key is the request itself, unchanged evidence is never paid
+for twice and any edit to the questions or the view is a fresh request. Jev
+bills per input token: about 1.9k for a track request and 1.1k for the other
+types, i.e. roughly $0.08 / $0.05 per thousand pairs at $0.042 per million. Each
+`refine` chunk logs one line (`jev: N pair(s): C cached, A asked, F failed ->
+…`), and `init()` logs whether Jev is on and, if not, why.
 
 The library handle is opened once in `init()` and held for the whole run via the
 context object, so the model loads only once regardless of how many embedding

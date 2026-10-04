@@ -199,8 +199,9 @@ tests start failing on deserialization.
 
 ### `softmatch` — heuristic soft-dedup
 
-Score candidate entry pairs with a Rhai script (or, per `--jev-types`,
-TypeSafe's Jev model) and optionally persist the results. Dry-run by
+Score candidate entry pairs with a Rhai script and optionally persist the
+results (the learned script also asks TypeSafe's Jev about the pairs it
+DEFERs when `TYPESAFE_API_KEY` is set; see CONFIG_REFERENCE.md). Dry-run by
 default. Every verdict, from any backend, is soft/reversible — MERGE writes
 a `same_identity` assertion via the same path the player's manual "link"
 button uses, never a destructive `merge_entries`; that stays exclusively an
@@ -213,7 +214,6 @@ cargo run --features ffi --release --bin softmatch -- --csv out.csv  # dump all 
 cargo run --features ffi --release --bin softmatch -- \
   --model data/dedup-entry-combined-v4/poc-semantic/runtime-model.json \
   --csv learned.csv
-cargo run --features ffi --release --bin softmatch -- --jev-types track --apply  # track uses Jev, everything else the Rhai script
 ```
 
 | Flag | Default | Notes |
@@ -221,7 +221,6 @@ cargo run --features ffi --release --bin softmatch -- --jev-types track --apply 
 | `--db` | `<data_dir>/musiclib.db` | SQLite music library |
 | `--script` | `<config_dir>/match.rhai` | Rhai match script |
 | `--model <path>` | `<config_dir>/dedup-model.json` if present | Versioned learned identity scorer; replaces only Rhai verdict scoring |
-| `--jev-types <list>` | empty | Comma-separated entry types scored by TypeSafe's Jev model instead (`pipeline::jev`); requires `TYPESAFE_API_KEY` |
 | `--persist-suggestions` | false | Store learned DEFER rows for the interactive review queue |
 | `--apply` | false | Persist RELATE and soft MERGE (`same_identity`) decisions to the DB |
 | `--csv <path>` | absent | Write all scored pairs (MERGE / RELATE / DISTINCT / BARRIER) to a CSV |
