@@ -412,10 +412,3 @@ pub unsafe extern "C" fn inference_matcher_embed_batch(
         }
     }
 }
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_free_string(p: *mut c_char) {
-    if !p.is_null() {
-        drop(unsafe { CString::from_raw(p) });
-    }
-}

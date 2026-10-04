@@ -2197,11 +2197,14 @@ dependencies = [
  "libm",
  "pkg-config",
  "rayon",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tokenizers",
  "unicode-general-category",
  "unicode-normalization",
+ "ureq 3.3.0",
 ]
 
 [[package]]

@@ -16,6 +16,8 @@
 //!     `minilm` feature only; without it every call fails).
 //!   * `inference_matcher_*`             -> learned pair matcher (`matcher`
 //!     feature; see `matcher_abi.rs`).
+//!   * `inference_typesafe_*`            -> TypeSafe System One client
+//!     (`typesafe` feature; see `typesafe.rs`).
 
 #[cfg(feature = "minilm")]
 mod embed;
@@ -27,6 +29,8 @@ mod model;
 mod romaji;
 mod tables;
 mod tflite;
+#[cfg(feature = "typesafe")]
+pub mod typesafe;
 mod utf;
 
 use std::sync::OnceLock;
@@ -265,5 +269,14 @@ pub unsafe extern "C" fn inference_free_float_array(ptr: *mut f32, len: usize) {
         if !ptr.is_null() && len > 0 {
             drop(Vec::from_raw_parts(ptr, len, len));
         }
+    }
+}
+
+/// Frees a string returned by any `inference_*` call that hands back an owned
+/// `char*` (matcher, TypeSafe client).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_free_string(p: *mut c_char) {
+    if !p.is_null() {
+        drop(unsafe { CString::from_raw(p) });
     }
 }

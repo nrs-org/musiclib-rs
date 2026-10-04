@@ -45,6 +45,18 @@ matcher = [
     "dep:unicode-general-category",
 ]
 
+# TypeSafe System One client (src/typesafe.rs): HTTP transport, retry,
+# concurrency and a SQLite response cache. Scripts build the requests.
+typesafe = [
+    "dep:ureq",
+    "dep:rusqlite",
+    "dep:sha2",
+    "dep:anyhow",
+    "dep:serde_json",
+    "serde_json/raw_value",
+    "dep:serde",
+]
+
 # Run the matcher's title encoder on a Vulkan GPU via llama.cpp (the bundle's
 # encoder/model-f16.gguf), falling back to the CPU encoder when there is no
 # discrete GPU. Links the system llama.cpp found by pkg-config (the dev shell
@@ -89,6 +101,11 @@ serde = { version = "1", features = ["derive"], optional = true }
 unicode-normalization = { version = "0.1", optional = true }
 caseless = { version = "0.2", optional = true }
 unicode-general-category = { version = "1", optional = true }
+
+# TypeSafe client (feature `typesafe`), same versions as the host.
+ureq = { version = "3.3.0", features = ["json"], optional = true }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [build-dependencies]
 # Feature `vulkan`: compile src/matcher/llama_shim.c against llama.cpp.
