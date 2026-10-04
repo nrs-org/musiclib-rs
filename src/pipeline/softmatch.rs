@@ -1,18 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::Write as _;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Context as _;
 use futures::stream::{self, StreamExt as _};
 use rhai::{AST, Dynamic, Engine, ImmutableString, Map as RhaiMap, Scope};
+
+use crate::pipeline::pair_facts::PairFactsSource;
 use serde::Serialize;
 use std::time::Instant;
 use tracing::{info, warn};
 use unicode_normalization::UnicodeNormalization as _;
 
 use crate::pipeline::embedding::{
-    EmbeddingAnn, EmbeddingCache, dynamic_to_serde, embed_stale_entries, register_http_fns,
+    EmbeddingCache, EmbeddingKnn, dynamic_to_serde, embed_stale_entries, register_http_fns,
     serde_to_dynamic,
 };
 
@@ -795,9 +798,14 @@ fn build_rhai_engine(
     regex_cache: RegexCache,
     embed_cache: Option<Arc<EmbeddingCache>>,
     http_client: Option<Arc<dyn HttpClient>>,
+    facts: Option<Arc<PairFactsSource>>,
 ) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(0, 0); // no limit on expression or function-body nesting depth
+    // No string interning: with Rhai's `sync` feature the interner is one
+    // global lock taken on every property read, and a contended lock sleeps
+    // 10 ms per retry, which left the parallel `decide` threads ~80% asleep.
+    engine.set_max_strings_interned(0);
 
     // Generic FFI (feature `ffi`): the script binds any cdylib's C symbols
     // itself via `ffi::open(...)` / `.func(...)` / `.invoke(...)` (see
@@ -866,6 +874,81 @@ fn build_rhai_engine(
         m.insert("verdict".into(), Dynamic::from("distinct".to_string()));
         m
     });
+    // Undecided: neither merge nor relate is safe. Counted and written to the
+    // CSV as DEFER; with `--jev-types` the pair goes to Jev like any other
+    // non-distinct verdict.
+    engine.register_fn("defer", |conf: f64, reason: String| -> RhaiMap {
+        let mut m = RhaiMap::new();
+        m.insert("verdict".into(), Dynamic::from("defer".to_string()));
+        m.insert("confidence".into(), Dynamic::from(conf));
+        m.insert("reason".into(), Dynamic::from(reason));
+        m
+    });
+
+    register_entry_type(&mut engine);
+
+    // Lazy per-pair facts (`musiclib-pair-facts/1`, see `pipeline::pair_facts`):
+    // `pair_facts_json(source, identifier)` → one JSON object, or
+    // `pair_facts_json([[source, identifier] | #{source, identifier}, …])` → a
+    // JSON array. `()` when this run has no facts source (e.g. in-memory DB).
+    {
+        let facts = facts.clone();
+        engine.register_fn(
+            "pair_facts_json",
+            move |source: &str, identifier: &str| -> Dynamic {
+                let Some(f) = &facts else {
+                    return Dynamic::UNIT;
+                };
+                match f.facts(source, identifier) {
+                    Ok(v) => Dynamic::from(v.to_string()),
+                    Err(e) => {
+                        warn!("pair_facts_json({source}, {identifier}): {e:#}");
+                        Dynamic::UNIT
+                    }
+                }
+            },
+        );
+    }
+    {
+        let facts = facts.clone();
+        engine.register_fn("pair_facts_json", move |pairs: rhai::Array| -> Dynamic {
+            let Some(f) = &facts else {
+                return Dynamic::UNIT;
+            };
+            let mut out = Vec::with_capacity(pairs.len());
+            for p in pairs {
+                let key = if let Some(m) = p.clone().try_cast::<RhaiMap>() {
+                    let get = |k: &str| {
+                        m.get(k)
+                            .and_then(|v| v.clone().try_cast::<ImmutableString>())
+                    };
+                    get("source").zip(get("identifier"))
+                } else if let Some(a) = p.try_cast::<rhai::Array>() {
+                    let get = |i: usize| {
+                        a.get(i)
+                            .and_then(|v| v.clone().try_cast::<ImmutableString>())
+                    };
+                    get(0).zip(get(1))
+                } else {
+                    None
+                };
+                let Some((s, i)) = key else {
+                    warn!(
+                        "pair_facts_json: expected [source, identifier] or #{{source, identifier}}"
+                    );
+                    return Dynamic::UNIT;
+                };
+                match f.facts(&s, &i) {
+                    Ok(v) => out.push(v),
+                    Err(e) => {
+                        warn!("pair_facts_json({s}, {i}): {e:#}");
+                        return Dynamic::UNIT;
+                    }
+                }
+            }
+            Dynamic::from(serde_json::Value::Array(out).to_string())
+        });
+    }
 
     // ── Low-level string primitives ───────────────────────────────────────────
     engine.register_fn("normalize", |s: String| -> String { normalize(&s) });
@@ -1179,83 +1262,262 @@ fn http_call_impl(client: Option<&Arc<dyn HttpClient>>, request: RhaiMap) -> Rha
     out
 }
 
-fn entry_to_rhai(e: &EntryInfo) -> RhaiMap {
-    let mut m = RhaiMap::new();
-    m.insert("entry_type".into(), Dynamic::from(e.entry_type.clone()));
-    // `title` is a deterministic convenience for logging/diagnostics; verdict
-    // logic should compare the full alias set instead (see pick_main_title).
-    m.insert(
-        "title".into(),
-        Dynamic::from(e.best_title.clone().unwrap_or_default()),
+/// A script's view of an [`EntryInfo`]: a Rhai custom type (`type_of` is
+/// `"Entry"`) whose fields are converted to Rhai values only when a script reads
+/// them (`a.durations`, or `a["durations"]` like the map it replaced). Sharing
+/// the `Arc` makes passing entries to `decide` free; data a script needs beyond
+/// these fields comes from `pair_facts_json(...)`, not from new fields here.
+/// The second field is what the script's `prepare` hook returned for this
+/// entry (`a.prepared`), `()` without one.
+#[derive(Clone)]
+pub struct ScriptEntry(pub Arc<EntryInfo>, pub Dynamic);
+
+/// Field names readable on a script entry.
+const ENTRY_FIELDS: [&str; 13] = [
+    "entry_id",
+    "entry_type",
+    "title",
+    "durations",
+    "release_dates",
+    "release_types",
+    "primary_types",
+    "sourced_aliases",
+    "pairs",
+    "aliases",
+    "peer_ids",
+    "track_positions",
+    "child_ids",
+];
+
+fn strings(v: &[String]) -> Dynamic {
+    Dynamic::from(v.iter().cloned().map(Dynamic::from).collect::<Vec<_>>())
+}
+
+fn ids(v: &[i64]) -> Dynamic {
+    Dynamic::from(v.iter().copied().map(Dynamic::from).collect::<Vec<_>>())
+}
+
+/// One entry field as the Rhai value scripts see. `None` for unknown names.
+fn entry_field(e: &EntryInfo, name: &str) -> Option<Dynamic> {
+    let map = |pairs: Vec<(&str, Dynamic)>| -> Dynamic {
+        let mut m = RhaiMap::new();
+        for (k, v) in pairs {
+            m.insert(k.into(), v);
+        }
+        Dynamic::from_map(m)
+    };
+    Some(match name {
+        "entry_id" => Dynamic::from(e.entry_id),
+        "entry_type" => Dynamic::from(e.entry_type.clone()),
+        // A deterministic convenience for logging/diagnostics; verdict logic
+        // should compare the full alias set instead (see pick_main_title).
+        "title" => Dynamic::from(e.best_title.clone().unwrap_or_default()),
+        // Multi-valued per-source attributes: an entry can carry several
+        // legitimate values (e.g. MV-cut vs audio-cut durations).
+        "durations" => ids(&e.durations),
+        "release_dates" => strings(&e.release_dates),
+        "release_types" => strings(&e.release_types),
+        "primary_types" => strings(&e.primary_types),
+        // [#{source, name}, …], clean sources first.
+        "sourced_aliases" => Dynamic::from(
+            e.sourced_aliases
+                .iter()
+                .map(|(src, name, _)| {
+                    map(vec![
+                        ("source", Dynamic::from(src.clone())),
+                        ("name", Dynamic::from(name.clone())),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+        ),
+        // [#{source, identifier}, …]: raw canonical DB pairs.
+        "pairs" => Dynamic::from(
+            e.pairs
+                .iter()
+                .map(|(src, id)| {
+                    map(vec![
+                        ("source", Dynamic::from(src.clone())),
+                        ("identifier", Dynamic::from(id.clone())),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+        ),
+        "aliases" => strings(&e.aliases),
+        // Credited-artist entry ids for tracks/releases; credited-item entry
+        // ids for artists. Opaque integers, for set-overlap checks.
+        "peer_ids" => ids(&e.peer_entry_ids),
+        // [#{release_id, disc_no, track_no}, …]; disc_no/track_no () when unknown.
+        "track_positions" => Dynamic::from(
+            e.track_positions
+                .iter()
+                .map(|(r, d, t)| {
+                    map(vec![
+                        ("release_id", Dynamic::from(*r)),
+                        (
+                            "disc_no",
+                            d.map_or(Dynamic::UNIT, |x| Dynamic::from(x as i64)),
+                        ),
+                        (
+                            "track_no",
+                            t.map_or(Dynamic::UNIT, |x| Dynamic::from(x as i64)),
+                        ),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+        ),
+        "child_ids" => ids(&e.child_entry_ids),
+        _ => return None,
+    })
+}
+
+fn register_entry_type(engine: &mut Engine) {
+    engine.register_type_with_name::<ScriptEntry>("Entry");
+    for name in ENTRY_FIELDS {
+        engine.register_get(name, move |e: &mut ScriptEntry| -> Dynamic {
+            entry_field(&e.0, name).unwrap_or(Dynamic::UNIT)
+        });
+    }
+    engine.register_get("prepared", |e: &mut ScriptEntry| -> Dynamic { e.1.clone() });
+    engine.register_indexer_get(|e: &mut ScriptEntry, key: ImmutableString| -> Dynamic {
+        if key == "prepared" {
+            return e.1.clone();
+        }
+        entry_field(&e.0, &key).unwrap_or(Dynamic::UNIT)
+    });
+}
+
+fn script_entry(ctx: &ScriptCtx, e: &Arc<EntryInfo>) -> Dynamic {
+    let prepared = ctx
+        .prepared
+        .read()
+        .unwrap()
+        .get(&e.entry_id)
+        .cloned()
+        .unwrap_or(Dynamic::UNIT);
+    Dynamic::from(ScriptEntry(Arc::clone(e), prepared))
+}
+
+/// Entries per `prepare(ctx, entries)` call: large, so a script that batches
+/// model work (the learned matcher encodes all new texts at once) gets big batches.
+const PREPARE_BATCH: usize = 512;
+
+/// Run the script's optional `prepare(ctx, entries) -> array` hook over every
+/// entry not yet prepared, in batches, and keep each entry's value for
+/// `a.prepared` in later `decide` calls. Entries are immutable for the run,
+/// so the values never go stale. A missing hook is a no-op; a failing batch
+/// leaves its entries unprepared (scripts fall back to their unprepared path).
+fn prepare_entries(ctx: &ScriptCtx, entries: &[&Arc<EntryInfo>]) {
+    let todo: Vec<&Arc<EntryInfo>> = {
+        let done = ctx.prepared.read().unwrap();
+        let mut seen = HashSet::new();
+        entries
+            .iter()
+            .copied()
+            .filter(|e| !done.contains_key(&e.entry_id) && seen.insert(e.entry_id))
+            .collect()
+    };
+    if todo.is_empty() {
+        return;
+    }
+    let started = Instant::now();
+    let mut prepared = 0usize;
+    for chunk in todo.chunks(PREPARE_BATCH) {
+        let batch: rhai::Array = chunk
+            .iter()
+            .map(|e| Dynamic::from(ScriptEntry(Arc::clone(e), Dynamic::UNIT)))
+            .collect();
+        let result = run_blocking(|| {
+            ctx.engine.call_fn_with_options::<Dynamic>(
+                rhai::CallFnOptions::new().eval_ast(false),
+                &mut ctx.base_scope.clone(),
+                &ctx.ast,
+                "prepare",
+                (ctx.user_ctx.clone(), batch),
+            )
+        });
+        match result {
+            Err(e) if matches!(*e, rhai::EvalAltResult::ErrorFunctionNotFound(..)) => return,
+            Err(e) => warn!("prepare() error for {} entries: {e}", chunk.len()),
+            Ok(v) => match v.try_cast::<rhai::Array>() {
+                Some(values) if values.len() == chunk.len() => {
+                    let mut done = ctx.prepared.write().unwrap();
+                    for (e, v) in chunk.iter().zip(values) {
+                        done.insert(e.entry_id, v);
+                    }
+                    prepared += chunk.len();
+                }
+                _ => warn!(
+                    "prepare() must return one value per entry ({} given)",
+                    chunk.len()
+                ),
+            },
+        }
+    }
+    info!("Prepared {prepared} entries in {:.2?}", started.elapsed());
+}
+
+/// Pairs per unit of work handed to a scoring thread.
+const SCORE_CHUNK: usize = 256;
+
+/// The script's `decide` verdict for every pair, computed on all cores (Rhai
+/// is built with `sync`: one engine and AST shared, a scope per call). The
+/// verdict is pure CPU work; Jev refinement, DB writes and CSV rows stay in
+/// the sequential loop that consumes these.
+fn script_verdicts<T>(
+    ctx: &ScriptCtx,
+    pairs: &[(Arc<EntryInfo>, Arc<EntryInfo>, T)],
+) -> Vec<anyhow::Result<Verdict>>
+where
+    T: Sync,
+{
+    let started = Instant::now();
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let next = AtomicUsize::new(0);
+    let mut chunks: Vec<(usize, Vec<anyhow::Result<Verdict>>)> = run_blocking(|| {
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    let next = &next;
+                    std::thread::Builder::new()
+                        .name("softmatch-score".into())
+                        .spawn_scoped(scope, move || {
+                            let mut done = Vec::new();
+                            loop {
+                                let start = next.fetch_add(SCORE_CHUNK, Ordering::Relaxed);
+                                let Some(chunk) =
+                                    pairs.get(start..(start + SCORE_CHUNK).min(pairs.len()))
+                                else {
+                                    break;
+                                };
+                                if chunk.is_empty() {
+                                    break;
+                                }
+                                done.push((
+                                    start,
+                                    chunk
+                                        .iter()
+                                        .map(|(a, b, _)| call_script(ctx, a, b))
+                                        .collect(),
+                                ));
+                            }
+                            done
+                        })
+                        .expect("spawning a scoring thread")
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().expect("scoring thread panicked"))
+                .collect()
+        })
+    });
+    chunks.sort_by_key(|(start, _)| *start);
+    info!(
+        "Scripted {} pair(s) on {threads} thread(s) in {:.2?}",
+        pairs.len(),
+        started.elapsed()
     );
-    // Multi-valued per-source attributes, exposed as arrays — an entry can carry
-    // several legitimate values (e.g. MV-cut vs audio-cut durations).
-    let durations: Vec<Dynamic> = e.durations.iter().copied().map(Dynamic::from).collect();
-    m.insert("durations".into(), Dynamic::from(durations));
-    let release_dates: Vec<Dynamic> = e.release_dates.iter().cloned().map(Dynamic::from).collect();
-    m.insert("release_dates".into(), Dynamic::from(release_dates));
-    let release_types: Vec<Dynamic> = e.release_types.iter().cloned().map(Dynamic::from).collect();
-    m.insert("release_types".into(), Dynamic::from(release_types));
-    let primary_types: Vec<Dynamic> = e.primary_types.iter().cloned().map(Dynamic::from).collect();
-    m.insert("primary_types".into(), Dynamic::from(primary_types));
-    // sourced_aliases: array of #{source, name} maps, clean sources first.
-    let sa: Vec<Dynamic> = e
-        .sourced_aliases
-        .iter()
-        .map(|(src, name, _primary)| {
-            let mut mm = RhaiMap::new();
-            mm.insert("source".into(), Dynamic::from(src.clone()));
-            mm.insert("name".into(), Dynamic::from(name.clone()));
-            Dynamic::from_map(mm)
-        })
-        .collect();
-    m.insert("sourced_aliases".into(), Dynamic::from(sa));
-    // pairs: [{source, identifier}, ...] — raw canonical DB pairs.
-    let pairs_dyn: Vec<Dynamic> = e
-        .pairs
-        .iter()
-        .map(|(src, id)| {
-            let mut pm = RhaiMap::new();
-            pm.insert("source".into(), Dynamic::from(src.clone()));
-            pm.insert("identifier".into(), Dynamic::from(id.clone()));
-            Dynamic::from_map(pm)
-        })
-        .collect();
-    m.insert("pairs".into(), Dynamic::from(pairs_dyn));
-    // aliases: flat deduplicated list of all known names.
-    let aliases_dyn: Vec<Dynamic> = e.aliases.iter().cloned().map(Dynamic::from).collect();
-    m.insert("aliases".into(), Dynamic::from(aliases_dyn));
-    // peer_ids: credited-artist entry IDs for tracks/releases; credited-track
-    // entry IDs for artists. Opaque integers — useful for set overlap checks.
-    let peer_ids_dyn: Vec<Dynamic> = e
-        .peer_entry_ids
-        .iter()
-        .copied()
-        .map(Dynamic::from)
-        .collect();
-    m.insert("peer_ids".into(), Dynamic::from(peer_ids_dyn));
-    // track_positions: [{release_id, disc_no, track_no}, …]. disc_no/track_no
-    // are () when unknown.
-    let pos_dyn: Vec<Dynamic> = e
-        .track_positions
-        .iter()
-        .map(|(r, d, t)| {
-            let mut pm = RhaiMap::new();
-            pm.insert("release_id".into(), Dynamic::from(*r));
-            pm.insert("disc_no".into(), d.map_or(Dynamic::UNIT, Dynamic::from));
-            pm.insert("track_no".into(), t.map_or(Dynamic::UNIT, Dynamic::from));
-            Dynamic::from_map(pm)
-        })
-        .collect();
-    m.insert("track_positions".into(), Dynamic::from(pos_dyn));
-    let child_ids: Vec<Dynamic> = e
-        .child_entry_ids
-        .iter()
-        .copied()
-        .map(Dynamic::from)
-        .collect();
-    m.insert("child_ids".into(), Dynamic::from(child_ids));
-    m
+    chunks.into_iter().flat_map(|(_, v)| v).collect()
 }
 
 /// Convert a Rhai `Dynamic` to a `serde_json::Value`, for turning a script's
@@ -1294,20 +1556,19 @@ fn rhai_dynamic_to_json(d: &Dynamic) -> serde_json::Value {
     serde_json::Value::Null
 }
 
-fn call_script(
-    engine: &Engine,
-    ast: &AST,
-    base_scope: &Scope,
-    user_ctx: &Dynamic,
-    a: &EntryInfo,
-    b: &EntryInfo,
-) -> anyhow::Result<Verdict> {
-    let mut scope = base_scope.clone();
-    let a_dyn = Dynamic::from_map(entry_to_rhai(a));
-    let b_dyn = Dynamic::from_map(entry_to_rhai(b));
+fn call_script(ctx: &ScriptCtx, a: &Arc<EntryInfo>, b: &Arc<EntryInfo>) -> anyhow::Result<Verdict> {
+    let mut scope = ctx.base_scope.clone();
+    let a_dyn = script_entry(ctx, a);
+    let b_dyn = script_entry(ctx, b);
 
-    let result: Dynamic = engine
-        .call_fn(&mut scope, ast, "decide", (user_ctx.clone(), a_dyn, b_dyn))
+    let result: Dynamic = ctx
+        .engine
+        .call_fn(
+            &mut scope,
+            &ctx.ast,
+            "decide",
+            (ctx.user_ctx.clone(), a_dyn, b_dyn),
+        )
         .unwrap_or_else(|e| {
             warn!("Rhai decide() error: {e}");
             Dynamic::from_map(RhaiMap::new())
@@ -1339,6 +1600,10 @@ fn call_script(
             confidence: rhai_f64("confidence"),
             reason: rhai_str("reason").unwrap_or_default(),
             metadata: map.get("metadata").map(rhai_dynamic_to_json),
+        },
+        Some("defer") => Verdict::Defer {
+            confidence: rhai_f64("confidence"),
+            reason: rhai_str("reason").unwrap_or_default(),
         },
         _ => Verdict::Distinct,
     })
@@ -1610,7 +1875,7 @@ impl SemanticKnn for EmbeddingCache {
     }
 }
 
-impl SemanticKnn for EmbeddingAnn {
+impl SemanticKnn for EmbeddingKnn {
     fn semantic_knn(
         &self,
         entry_id: i64,
@@ -2194,7 +2459,7 @@ async fn add_block_candidates(
 /// up each focus entry's own block keys against the persisted `dedup_block_key`
 /// index (reindexing the focus entries first so their keys are current), plus
 /// one semantic KNN query per focus entry when embeddings are configured.
-/// Never loads the full library into memory or builds the in-RAM HNSW index —
+/// Never loads the full library into memory or builds the in-RAM KNN table —
 /// cost is O(focus entries × candidates found), not O(library).
 #[allow(clippy::too_many_arguments)]
 async fn generate_focused_candidates(
@@ -2361,7 +2626,7 @@ async fn generate_focused_candidates(
         }
     }
 
-    // semantic_ann: direct indexed KNN per focus entry — no in-RAM HNSW build.
+    // semantic_ann: direct indexed KNN per focus entry — no in-RAM KNN table build.
     let mut semantic_pending: Vec<(i64, i64)> = Vec::new();
     if let Some(cache) = embed_cache {
         let l2_threshold = (2.0 * (1.0 - embed_sim_threshold)).sqrt();
@@ -2453,6 +2718,8 @@ struct ScriptCtx<'a> {
     /// inference library — and keeping it alive here keeps that state alive for
     /// the whole run. `()` when the script defines no `init()`.
     user_ctx: Dynamic,
+    /// What the script's `prepare` hook returned per entry id (`a.prepared`).
+    prepared: RwLock<HashMap<i64, Dynamic>>,
 }
 
 impl Drop for ScriptCtx<'_> {
@@ -2469,6 +2736,7 @@ async fn load_script(
     path: &str,
     embed_cache: Option<Arc<EmbeddingCache>>,
     http_client: Option<Arc<dyn HttpClient>>,
+    facts: Option<Arc<PairFactsSource>>,
 ) -> anyhow::Result<ScriptCtx<'static>> {
     let script = tokio::fs::read_to_string(path)
         .await
@@ -2478,7 +2746,7 @@ async fn load_script(
         .unwrap_or_else(|| Path::new("."))
         .to_owned();
     let regex_cache: RegexCache = Arc::new(Mutex::new(HashMap::new()));
-    let engine = build_rhai_engine(&script_dir, regex_cache, embed_cache, http_client);
+    let engine = build_rhai_engine(&script_dir, regex_cache, embed_cache, http_client, facts);
     let ast = engine
         .compile(&script)
         .map_err(|e| anyhow::anyhow!("Rhai compile error in {path}: {e}"))?;
@@ -2496,7 +2764,21 @@ async fn load_script(
         ast,
         base_scope,
         user_ctx,
+        prepared: RwLock::new(HashMap::new()),
     })
+}
+
+/// Read-only facts source over the same SQLite file as `db`; `None` (with a
+/// warning) for an in-memory DB or when it can't be opened.
+async fn pair_facts_source(db: &MusicDb) -> Option<Arc<PairFactsSource>> {
+    let path = db.sqlite_path().await?;
+    match PairFactsSource::open(&path) {
+        Ok(f) => Some(Arc::new(f)),
+        Err(e) => {
+            warn!("pair_facts_json disabled: {e:#}");
+            None
+        }
+    }
 }
 
 /// Score candidate pairs with cascade: after each merge, update the winner's
@@ -2509,7 +2791,7 @@ async fn load_script(
 ///
 /// `precomputed`, when set, is the candidate/channel map the caller already
 /// retrieved from the DB (see `generate_focused_candidates`) — skips the
-/// in-memory `generate_bounded_candidates` scan and `EmbeddingAnn` build
+/// in-memory `generate_bounded_candidates` scan and `EmbeddingKnn` build
 /// entirely, since both would otherwise materialize the full library that
 /// `entries` (deliberately just focus ∪ candidates for this path) doesn't have.
 /// Returns `[merge, relate, distinct, defer]` counts per entry type.
@@ -2616,15 +2898,18 @@ async fn score_candidates(
     // Seed the queue from the focused entries (or all entries for a full scan).
     // The precomputed path already ran semantic retrieval per focus entry via
     // direct indexed KNN queries (see `generate_focused_candidates`), so an
-    // in-RAM `EmbeddingAnn` — which rebuilds all four type-local HNSW graphs
-    // from every vector in the library — is only worth its build cost for a
-    // full scan that's going to touch most of the library anyway.
+    // in-RAM `EmbeddingKnn` — exact all-pairs neighbours over every vector in
+    // the library — is only worth its build cost for a full scan that's going
+    // to touch most of the library anyway.
     let seed_ids: Vec<i64> = match focus {
         Some(f) => f.iter().copied().collect(),
         None => entries.keys().copied().collect(),
     };
     if !used_precomputed {
-        let ann_index = embed_cache.map(EmbeddingAnn::build).transpose()?;
+        let knn_k = config.embed_k * config.embed_max_pages.max(1);
+        let ann_index = embed_cache
+            .map(|c| EmbeddingKnn::build(c, knn_k))
+            .transpose()?;
         if let Some(ann) = &ann_index {
             for id in seed_ids {
                 if let Some(entry) = entries.get(&id) {
@@ -2650,10 +2935,21 @@ async fn score_candidates(
     // Sequential pre-filter: soft-identity/barrier skips are cheap and local
     // (no network/DB round trip), and write their own CSV row immediately.
     // Only pairs that need real scoring proceed to the concurrent phase below.
-    let mut to_score: Vec<(EntryInfo, EntryInfo, Option<ChannelMask>)> = Vec::new();
+    // Entries are shared (`Arc`) between the pairs that reference them and the
+    // script, instead of cloned per pair.
+    let mut shared: HashMap<i64, Arc<EntryInfo>> = HashMap::new();
+    let mut share = |id: i64| -> Option<Arc<EntryInfo>> {
+        if let Some(e) = shared.get(&id) {
+            return Some(Arc::clone(e));
+        }
+        let e = Arc::new(entries.get(&id)?.clone());
+        shared.insert(id, Arc::clone(&e));
+        Some(e)
+    };
+    let mut to_score: Vec<(Arc<EntryInfo>, Arc<EntryInfo>, Option<ChannelMask>)> = Vec::new();
     while let Some((id_a, id_b)) = work_queue.pop_front() {
-        let (ea, eb) = match (entries.get(&id_a), entries.get(&id_b)) {
-            (Some(a), Some(b)) => (a.clone(), b.clone()),
+        let (ea, eb) = match (share(id_a), share(id_b)) {
+            (Some(a), Some(b)) => (a, b),
             _ => continue,
         };
 
@@ -2685,6 +2981,18 @@ async fn score_candidates(
     }
 
     let total_scored = to_score.len();
+    let scored_entries: Vec<&Arc<EntryInfo>> =
+        to_score.iter().flat_map(|(a, b, _)| [a, b]).collect();
+    prepare_entries(ctx, &scored_entries);
+    // Every path but the legacy learned model starts from the script's verdict.
+    let precomputed: Vec<Option<anyhow::Result<Verdict>>> = if learned_model.is_none() {
+        script_verdicts(ctx, &to_score)
+            .into_iter()
+            .map(Some)
+            .collect()
+    } else {
+        to_score.iter().map(|_| None).collect()
+    };
 
     // Concurrent phase. Rhai/learned-model scoring is cheap, in-process, and
     // effectively free either way; the Jev refine call is the one that's
@@ -2699,14 +3007,15 @@ async fn score_candidates(
     // as `buffer_unordered` yields them (order doesn't matter for either).
     let concurrency = config.jev_concurrency.max(1);
     let learned_model_ref = learned_model.as_ref();
-    let mut results = stream::iter(to_score.iter())
-        .map(|(ea, eb, channels)| async move {
+    let mut results = stream::iter(to_score.iter().zip(precomputed))
+        .map(|((ea, eb, channels), script_verdict)| async move {
             let result = apply_candidate(
                 db,
                 ea,
                 eb,
                 channels.as_ref(),
                 ctx,
+                script_verdict,
                 learned_model_ref,
                 embed_cache,
                 config,
@@ -2785,10 +3094,12 @@ fn resolve_derived_side(extra: &mut serde_json::Value, ea_id: i64, eb_id: i64) {
 #[allow(clippy::too_many_arguments)]
 async fn apply_candidate(
     db: &MusicDb,
-    ea: &EntryInfo,
-    eb: &EntryInfo,
+    ea: &Arc<EntryInfo>,
+    eb: &Arc<EntryInfo>,
     channels: Option<&ChannelMask>,
     ctx: &ScriptCtx<'_>,
+    // The script's verdict when `script_verdicts` already computed it.
+    script_verdict: Option<anyhow::Result<Verdict>>,
     learned_model: Option<&DedupModel>,
     embed_cache: Option<&EmbeddingCache>,
     config: &SoftMatchConfig,
@@ -2804,14 +3115,10 @@ async fn apply_candidate(
             // -- both cheaper and the integration mode that's actually been
             // shown to catch real heuristic errors (e.g. member-vs-group
             // merges) without the ~25x cost/latency of scoring every pair.
-            let base_verdict = call_script(
-                &ctx.engine,
-                &ctx.ast,
-                &ctx.base_scope,
-                &ctx.user_ctx,
-                ea,
-                eb,
-            )?;
+            let base_verdict = match script_verdict {
+                Some(v) => v?,
+                None => call_script(ctx, ea, eb)?,
+            };
             if matches!(base_verdict, Verdict::Distinct) {
                 (base_verdict, "heuristic", None)
             } else {
@@ -2869,14 +3176,10 @@ async fn apply_candidate(
             };
             (verdict, "heuristic", Some(model.version().to_owned()))
         } else {
-            let verdict = call_script(
-                &ctx.engine,
-                &ctx.ast,
-                &ctx.base_scope,
-                &ctx.user_ctx,
-                ea,
-                eb,
-            )?;
+            let verdict = match script_verdict {
+                Some(v) => v?,
+                None => call_script(ctx, ea, eb)?,
+            };
             (verdict, "heuristic", None)
         };
 
@@ -2999,8 +3302,8 @@ fn write_csv_row(
     confidence: f64,
     reason: &str,
     channels: Option<&ChannelMask>,
-    ea: &EntryInfo,
-    eb: &EntryInfo,
+    ea: &Arc<EntryInfo>,
+    eb: &Arc<EntryInfo>,
     ctx: &ScriptCtx,
 ) -> anyhow::Result<()> {
     let mut f = LazyFeatures::new(ea, eb);
@@ -3011,8 +3314,8 @@ fn write_csv_row(
     let art_ov = f.artist_overlap();
 
     // Policy-level diagnostics delegate to the script so no logic is duplicated.
-    let a_dyn = Dynamic::from_map(entry_to_rhai(ea));
-    let b_dyn = Dynamic::from_map(entry_to_rhai(eb));
+    let a_dyn = script_entry(ctx, ea);
+    let b_dyn = script_entry(ctx, eb);
     let uc = ctx.user_ctx.clone();
     let main_sim: f64 = ctx
         .engine
@@ -3083,7 +3386,9 @@ pub async fn match_db(
 
     let t2 = Instant::now();
     let entries_slice: Vec<EntryInfo> = entries.values().cloned().collect();
-    let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries_slice).await;
+    let facts = pair_facts_source(db).await;
+    let embed_cache: Option<Arc<EmbeddingCache>> =
+        open_embed_cache(config, &entries_slice, facts.clone(), true).await;
     let t_embed = t2.elapsed();
     info!("Embedding phase in {t_embed:.2?}");
 
@@ -3092,6 +3397,7 @@ pub async fn match_db(
         &config.script_path,
         embed_cache.clone(),
         config.http_client.clone(),
+        facts,
     )
     .await?;
     let t_script = t3.elapsed();
@@ -3161,11 +3467,14 @@ pub async fn match_new_entries(
     let focus_entries = entry_infos_by_ids(db, &focus_ids).await?;
     let (barrier, _) = dedup.compile(providers).await;
     let entries_slice: Vec<EntryInfo> = focus_entries.values().cloned().collect();
-    let embed_cache: Option<Arc<EmbeddingCache>> = open_embed_cache(config, &entries_slice).await;
+    let facts = pair_facts_source(db).await;
+    let embed_cache: Option<Arc<EmbeddingCache>> =
+        open_embed_cache(config, &entries_slice, facts.clone(), false).await;
     let ctx = load_script(
         &config.script_path,
         embed_cache.clone(),
         config.http_client.clone(),
+        facts,
     )
     .await?;
     let (candidate_channels, entries) = generate_focused_candidates(
@@ -3251,9 +3560,14 @@ pub async fn match_new_entries_offloaded(
 /// Open the embedding cache (if configured), run `embed()` for stale entries,
 /// and return an `Arc<EmbeddingCache>` ready for KNN queries.
 /// Returns `None` if embedding is disabled or fails to open.
+/// Open the embedding cache and embed `entries` that are missing or stale.
+/// `full` means `entries` is the whole library, so a model change may rebuild
+/// the cache; otherwise a model change disables semantic blocking (`None`).
 async fn open_embed_cache(
     config: &SoftMatchConfig,
     entries: &[EntryInfo],
+    facts: Option<Arc<PairFactsSource>>,
+    full: bool,
 ) -> Option<Arc<EmbeddingCache>> {
     let path = config.embed_db_path.as_deref()?;
     let cache = match EmbeddingCache::open(path, config.embed_dim) {
@@ -3283,6 +3597,7 @@ async fn open_embed_cache(
         Arc::new(Mutex::new(HashMap::new())),
         None,
         None,
+        facts,
     );
     let tmp_ast = match tmp_engine.compile(&embed_script) {
         Ok(a) => a,
@@ -3304,7 +3619,7 @@ async fn open_embed_cache(
 
     let cache_clone = cache.clone();
     let entries_ref = entries;
-    run_blocking(|| {
+    let usable = run_blocking(|| {
         embed_stale_entries(
             entries_ref,
             &tmp_engine,
@@ -3312,10 +3627,11 @@ async fn open_embed_cache(
             &tmp_scope,
             &user_ctx,
             &cache_clone,
-        );
+            full,
+        )
     });
 
-    Some(cache)
+    usable.then_some(cache)
 }
 
 #[cfg(test)]
@@ -3569,7 +3885,7 @@ mod tests {
         let script = std::fs::read_to_string(path).expect("read example script");
         let dir = Path::new(path).parent().unwrap();
 
-        let engine = build_rhai_engine(dir, Arc::new(Mutex::new(HashMap::new())), None, None);
+        let engine = build_rhai_engine(dir, Arc::new(Mutex::new(HashMap::new())), None, None, None);
         let ast = engine.compile(&script).expect("example script compiles");
 
         let mut scope = Scope::new();
@@ -3606,6 +3922,7 @@ mod tests {
         let engine = build_rhai_engine(
             Path::new("."),
             Arc::new(Mutex::new(HashMap::new())),
+            None,
             None,
             None,
         );
@@ -3656,6 +3973,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             None,
             None, // no HttpClient configured
+            None,
         );
         let script = r#"
             http_call(#{

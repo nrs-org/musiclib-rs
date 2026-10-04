@@ -1354,6 +1354,23 @@ impl MusicDb {
         })
     }
 
+    /// Path of the main database file, or `None` for an in-memory database.
+    pub async fn sqlite_path(&self) -> Option<std::path::PathBuf> {
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_string(
+                self.db.get_database_backend(),
+                "PRAGMA database_list".to_string(),
+            ))
+            .await
+            .ok()?;
+        rows.iter()
+            .find(|r| r.try_get::<String>("", "name").is_ok_and(|n| n == "main"))
+            .and_then(|r| r.try_get::<String>("", "file").ok())
+            .filter(|f| !f.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+
     /// Look up the entry_id grouping a given (source, identifier) pair, if any.
     pub async fn find_entry_id_by_pair(
         &self,

@@ -11,6 +11,7 @@ pub mod flush;
 pub mod importer;
 pub mod ingest;
 pub mod jev;
+pub mod pair_facts;
 pub mod progress;
 pub mod softmatch;
 pub mod state;

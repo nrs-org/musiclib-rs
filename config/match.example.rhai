@@ -14,7 +14,8 @@
 // library handle (this script stores the inference handle there). It's () when
 // init() is absent or returns ().
 //
-// Entity fields (a, b):
+// Entity fields (a, b) — `Entry` values, read lazily as a.field or a["field"]:
+//   entry_id            opaque DB entry ID (for semantic_sim)
 //   entry_type          "track" | "release" | "release_group" | "artist"
 //   title               deterministic display name (for logging; verdict logic
 //                       should prefer the alias set via pick_main_title)
@@ -51,7 +52,11 @@
 // Verdict constructors:
 //   merge(conf, reason)             → verdict
 //   relate(kind, conf, reason)      → verdict
+//   defer(conf, reason)             → verdict   undecided (CSV DEFER; Jev with --jev-types)
 //   distinct()                      → verdict
+//
+// Pair facts: pair_facts_json(source, identifier) or pair_facts_json([[s, i], …])
+// → JSON string of per-pair DB facts (docs/CONFIG_REFERENCE.md).
 //
 // Valid relate kinds:
 //   variant  — same thing, different form (alt version, pressing, name alias, etc.)

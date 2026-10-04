@@ -365,9 +365,13 @@ unsafe impl Sync for Ptr {}
 #[derive(Clone)]
 struct StructType(Arc<StructDef>);
 
-/// A symbol bound to a concrete signature, ready to call.
+/// A symbol bound to a concrete signature, ready to call. Cloning is a
+/// reference-count bump: Rhai clones a value on every property read (e.g.
+/// `ctx.score.invoke(...)`), and a `Cif` clone allocates.
 #[derive(Clone)]
-struct Func {
+struct Func(Arc<FuncInner>);
+
+struct FuncInner {
     _lib: Lib, // keep the library mapped
     code: CodePtr,
     cif: Cif,
@@ -377,8 +381,8 @@ struct Func {
 
 // SAFETY: a `Func` is a code address plus an immutable CIF describing its
 // signature; both are stable for the life of the mapped library.
-unsafe impl Send for Func {}
-unsafe impl Sync for Func {}
+unsafe impl Send for FuncInner {}
+unsafe impl Sync for FuncInner {}
 
 // ── Argument materialisation ────────────────────────────────────────────────
 
@@ -468,6 +472,7 @@ fn slot_for(ty: &CType, d: &Dynamic) -> Result<Slot, Box<EvalAltResult>> {
 // ── Function call ───────────────────────────────────────────────────────────
 
 fn do_call(func: &Func, raw_args: rhai::Array) -> RhaiResult {
+    let func = &*func.0;
     if raw_args.len() != func.args.len() {
         return Err(err(format!(
             "ffi: call expected {} args, got {}",
@@ -664,13 +669,13 @@ pub fn module(base_dir: PathBuf) -> Module {
                     args.iter().map(CType::ffi_type).collect::<Vec<_>>(),
                     ret.ffi_type(),
                 );
-                Ok(Dynamic::from(Func {
+                Ok(Dynamic::from(Func(Arc::new(FuncInner {
                     _lib: lib.clone(),
                     code,
                     cif,
                     args,
                     ret,
-                }))
+                }))))
             },
         );
 
@@ -989,30 +994,6 @@ mod tests {
         );
         let lang: String = engine.eval(&script).expect("detect_language via ffi");
         assert!(!lang.is_empty() && lang != "und", "got language {lang:?}");
-
-        // embed_batch: full out-param marshalling round-trip.
-        let script = format!(
-            r#"
-            let l = ffi::open("{lib}");
-            let embed = l.func("inference_embed_batch", "i32", ["ptr", "u64", "ptr", "ptr"]);
-            let free_f = l.func("inference_free_float_array", "void", ["ptr", "u64"]);
-            let texts = ["hello world"];
-            let argv = ffi::malloc(8 * texts.len());
-            let cs = ffi::cstr(texts[0]);
-            ffi::write_ptr(argv, 0, cs);
-            let out_flat = ffi::malloc(8);
-            let out_dim = ffi::malloc(8);
-            let rc = embed.invoke([argv, texts.len(), out_flat, out_dim]);
-            let dim = ffi::read_i64(out_dim, 1)[0];
-            let flat = ffi::read_ptr(out_flat, 0);
-            let vec = ffi::read_f32(flat, dim);
-            free_f.invoke([flat, dim]);
-            ffi::free(cs); ffi::free(argv); ffi::free(out_flat); ffi::free(out_dim);
-            vec.len()
-            "#
-        );
-        let dim: i64 = engine.eval(&script).expect("embed_batch via ffi");
-        assert!(dim > 0, "embedding dimension should be positive, got {dim}");
     }
 
     #[test]

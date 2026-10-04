@@ -2,14 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Once};
 
 use anyhow::Context as _;
-use hnsw::{Hnsw, Params as HnswParams};
-use rand_pcg::Pcg64;
 use rhai::{Dynamic, Engine, Map as RhaiMap};
 use rusqlite::{Connection, params};
-use space::{KnnPoints, Metric, Neighbor};
 use tracing::{info, warn};
 
-use crate::pipeline::softmatch::EntryInfo;
+use crate::pipeline::softmatch::{EntryInfo, ScriptEntry};
 
 // ── sqlite-vec extension registration ────────────────────────────────────────
 
@@ -51,110 +48,160 @@ pub struct EmbeddingCache {
     pub dim: usize,
 }
 
-#[derive(Clone, Copy)]
-struct SquaredL2;
-
-impl Metric<Vec<f32>> for SquaredL2 {
-    type Unit = u32;
-
-    fn distance(&self, left: &Vec<f32>, right: &Vec<f32>) -> Self::Unit {
-        left.iter()
-            .zip(right)
-            .map(|(a, b)| {
-                let delta = a - b;
-                delta * delta
-            })
-            .sum::<f32>()
-            .to_bits()
-    }
+/// Exact same-type nearest neighbours of every cached vector, computed once
+/// per run (`build`) and then looked up (`knn`).
+///
+/// Brute force beats an approximate index at library scale: the per-type
+/// all-pairs dot products (26.5k entries, 256-d: ~50 GFLOP for tracks) run
+/// in about a second across all cores, versus ~75 s to build and query HNSW
+/// graphs over dense vectors single-threaded, and the results are exact. The
+/// work is tiled (a block of rows against a tile of columns that fits in L2)
+/// so it stays compute-bound instead of streaming every vector from memory
+/// once per row; memory is the vectors plus `k` neighbours per entry.
+pub struct EmbeddingKnn {
+    by_type: HashMap<String, TypeKnn>,
 }
 
-type TypeHnsw = Hnsw<SquaredL2, Vec<f32>, Pcg64, 24, 48>;
-
-struct TypeAnn {
-    index: TypeHnsw,
-    entry_ids: Vec<i64>,
+struct TypeKnn {
     index_by_entry: HashMap<i64, usize>,
+    /// Per vector: up to `k` nearest others as `(entry_id, L2 distance)`,
+    /// nearest first.
+    neighbors: Vec<Vec<(i64, f64)>>,
 }
 
-/// Run-local approximate-nearest-neighbour index built from the durable SQLite
-/// embedding cache. `vec0` remains the source of truth, while HNSW avoids an
-/// O(N²) full-library query pattern at 100k-entry scale.
-pub struct EmbeddingAnn {
-    by_type: HashMap<String, TypeAnn>,
+/// Rows per unit of work, and columns per cache tile.
+const KNN_ROWS: usize = 64;
+const KNN_COLS: usize = 256;
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    // Eight independent accumulators so the compiler can vectorise the sum.
+    let mut acc = [0f32; 8];
+    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let tail: f32 = ca
+        .remainder()
+        .iter()
+        .zip(cb.remainder())
+        .map(|(x, y)| x * y)
+        .sum();
+    for (x, y) in ca.zip(cb) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    acc.iter().sum::<f32>() + tail
 }
 
-impl EmbeddingAnn {
-    pub fn build(cache: &EmbeddingCache) -> anyhow::Result<Self> {
+/// A row's nearest others so far: `(squared distance, row)`, ascending.
+type Nearest = Vec<(f32, u32)>;
+
+/// Insert `(d2, j)` into `best` (at most `k` long).
+fn push_nearest(best: &mut Nearest, k: usize, d2: f32, j: u32) {
+    if best.len() == k && (d2, j) >= best[k - 1] {
+        return;
+    }
+    let at = best.partition_point(|&e| e < (d2, j));
+    best.insert(at, (d2, j));
+    best.truncate(k);
+}
+
+/// The `k` nearest other rows of every row of `flat` (`n` × `dim`).
+fn all_nearest(flat: &[f32], dim: usize, k: usize) -> Vec<Nearest> {
+    let n = flat.len() / dim;
+    let norms: Vec<f32> = flat.chunks_exact(dim).map(|v| dot(v, v)).collect();
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut blocks: Vec<(usize, Vec<Nearest>)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                let (next, norms) = (&next, &norms);
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let r0 = next.fetch_add(KNN_ROWS, std::sync::atomic::Ordering::Relaxed);
+                        if r0 >= n {
+                            break;
+                        }
+                        let r1 = (r0 + KNN_ROWS).min(n);
+                        let mut best = vec![Vec::with_capacity(k + 1); r1 - r0];
+                        for c0 in (0..n).step_by(KNN_COLS) {
+                            let c1 = (c0 + KNN_COLS).min(n);
+                            for i in r0..r1 {
+                                let a = &flat[i * dim..(i + 1) * dim];
+                                for j in c0..c1 {
+                                    if j == i {
+                                        continue;
+                                    }
+                                    let d2 = norms[i] + norms[j]
+                                        - 2.0 * dot(a, &flat[j * dim..(j + 1) * dim]);
+                                    push_nearest(&mut best[i - r0], k, d2.max(0.0), j as u32);
+                                }
+                            }
+                        }
+                        done.push((r0, best));
+                    }
+                    done
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("KNN worker panicked"))
+            .collect()
+    });
+    blocks.sort_by_key(|(r0, _)| *r0);
+    blocks.into_iter().flat_map(|(_, b)| b).collect()
+}
+
+impl EmbeddingKnn {
+    /// Compute the `k` nearest same-type neighbours of every cached vector.
+    pub fn build(cache: &EmbeddingCache, k: usize) -> anyhow::Result<Self> {
         let mut by_type = HashMap::new();
         for entry_type in KNOWN_TYPES {
             let rows = cache.all_vectors(entry_type)?;
-            if rows.is_empty() {
+            if rows.is_empty() || k == 0 {
                 continue;
             }
-            let mut index = TypeHnsw::new_params(SquaredL2, HnswParams::new().ef_construction(160));
-            let mut entry_ids = Vec::with_capacity(rows.len());
-            let mut index_by_entry = HashMap::with_capacity(rows.len());
-            let mut searcher = hnsw::Searcher::default();
-            for (entry_id, vector) in rows {
-                let position = index.insert(vector, &mut searcher);
-                if position != entry_ids.len() {
-                    anyhow::bail!("HNSW returned a non-contiguous insertion index");
-                }
-                entry_ids.push(entry_id);
-                index_by_entry.insert(entry_id, position);
-            }
+            let started = std::time::Instant::now();
+            let entry_ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
+            let flat: Vec<f32> = rows.into_iter().flat_map(|(_, v)| v).collect();
+            let neighbors = all_nearest(&flat, cache.dim, k)
+                .into_iter()
+                .map(|best| {
+                    best.into_iter()
+                        .map(|(d2, j)| (entry_ids[j as usize], (d2 as f64).sqrt()))
+                        .collect()
+                })
+                .collect();
             info!(
-                "Built {entry_type} HNSW index with {} vector(s)",
-                entry_ids.len()
+                "Exact {k}-NN over {} {entry_type} vector(s) in {:.2?}",
+                entry_ids.len(),
+                started.elapsed()
             );
             by_type.insert(
                 (*entry_type).to_string(),
-                TypeAnn {
-                    index,
-                    entry_ids,
-                    index_by_entry,
+                TypeKnn {
+                    index_by_entry: entry_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &id)| (id, i))
+                        .collect(),
+                    neighbors,
                 },
             );
         }
         Ok(Self { by_type })
     }
 
-    /// Return approximate same-type neighbors as `(entry_id, L2 distance)`.
+    /// Up to `k` same-type neighbours as `(entry_id, L2 distance)`, nearest
+    /// first (at most the `k` given to `build`).
     pub fn knn(&self, entry_id: i64, k: usize, entry_type: &str) -> Vec<(i64, f64)> {
-        let Some(type_index) = self.by_type.get(entry_type) else {
+        let Some(t) = self.by_type.get(entry_type) else {
             return vec![];
         };
-        let Some(&query_index) = type_index.index_by_entry.get(&entry_id) else {
+        let Some(&i) = t.index_by_entry.get(&entry_id) else {
             return vec![];
         };
-        let query = type_index.index.get_point(query_index);
-        let wanted = (k + 1).min(type_index.entry_ids.len());
-        let mut neighbors = vec![
-            Neighbor {
-                index: usize::MAX,
-                distance: u32::MAX,
-            };
-            wanted
-        ];
-        let mut searcher = hnsw::Searcher::default();
-        let found = type_index.index.nearest(
-            query,
-            50.max(k.saturating_mul(3)),
-            &mut searcher,
-            &mut neighbors,
-        );
-        found
-            .iter()
-            .filter(|neighbor| neighbor.index != query_index)
-            .take(k)
-            .map(|neighbor| {
-                (
-                    type_index.entry_ids[neighbor.index],
-                    f32::from_bits(neighbor.distance).sqrt() as f64,
-                )
-            })
-            .collect()
+        t.neighbors[i].iter().take(k).copied().collect()
     }
 }
 
@@ -173,10 +220,17 @@ impl EmbeddingCache {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
         // Create meta table first so migration can DELETE from it safely.
+        // `title` is the text the entry was embedded from (see `embed_text`).
+        // `embedding_cache_meta.model_id` names the model every vector came
+        // from; a cache written before it was recorded counts as model "".
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS entry_embedding_meta (\
                 entry_id INTEGER PRIMARY KEY, \
                 title    TEXT NOT NULL \
+             ); \
+             CREATE TABLE IF NOT EXISTS embedding_cache_meta (\
+                key   TEXT PRIMARY KEY, \
+                value TEXT NOT NULL \
              );",
         )?;
 
@@ -221,46 +275,86 @@ impl EmbeddingCache {
         })
     }
 
-    /// Returns `(entry_id, title, entry_type)` triples whose embedding is
-    /// missing or whose cached title no longer matches the entry's current
-    /// best_title. Entries with unknown or unrecognised types are skipped.
-    pub fn stale_entries(&self, entries: &[EntryInfo]) -> Vec<(i64, String, String)> {
+    /// The model id the cached vectors were made with ("" when none was recorded).
+    pub fn model_id(&self) -> anyhow::Result<String> {
         let conn = self.conn.lock().unwrap();
-        let mut stale = Vec::new();
-        for e in entries {
-            let Some(table) = table_for_type(&e.entry_type) else {
-                continue;
-            };
-            let Some(title) = &e.best_title else {
-                continue;
-            };
-            let cached: Option<String> = conn
-                .query_row(
-                    "SELECT title FROM entry_embedding_meta WHERE entry_id = ?",
-                    params![e.entry_id],
-                    |r| r.get(0),
-                )
-                .ok();
-            // Title mismatch (or no meta row) → stale.
-            // Title matches but embedding is absent from the correct type table
-            // (e.g. entry_type changed between runs) → also stale.
-            let in_correct_table = || {
-                conn.query_row(
-                    &format!("SELECT 1 FROM {table} WHERE entry_id = ?"),
-                    params![e.entry_id],
-                    |_| Ok(()),
-                )
-                .is_ok()
-            };
-            match cached {
-                Some(ct) if ct == *title && in_correct_table() => {}
-                _ => stale.push((e.entry_id, title.clone(), e.entry_type.clone())),
-            }
-        }
-        stale
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT value FROM embedding_cache_meta WHERE key = 'model_id'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(id.unwrap_or_default())
     }
 
-    /// Store an embedding vector (as a JSON array string) for an entry.
+    /// Drop every cached vector and record `model_id` as the source of the
+    /// vectors stored from now on.
+    pub fn reset_for_model(&self, model_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut batch = String::from("BEGIN; DELETE FROM entry_embedding_meta;");
+        for t in KNOWN_TYPES {
+            batch.push_str(&format!(" DELETE FROM vec_embeddings_{t};"));
+        }
+        batch.push_str(" COMMIT;");
+        conn.execute_batch(&batch)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO embedding_cache_meta (key, value) VALUES ('model_id', ?)",
+            params![model_id],
+        )?;
+        Ok(())
+    }
+
+    /// The `(entry_id, text, entry_type)` items whose embedding is missing or
+    /// was made from a different text. Unknown entry types are skipped.
+    pub fn stale_entries(&self, items: &[(i64, String, String)]) -> Vec<(i64, String, String)> {
+        let conn = self.conn.lock().unwrap();
+        // Two bulk reads instead of two lookups per entry.
+        // (entry id → embedded text, vector table → entry ids)
+        type Stored = (
+            HashMap<i64, String>,
+            HashMap<&'static str, std::collections::HashSet<i64>>,
+        );
+        let read = || -> rusqlite::Result<Stored> {
+            let texts = conn
+                .prepare("SELECT entry_id, title FROM entry_embedding_meta")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut stored = HashMap::new();
+            for t in KNOWN_TYPES {
+                let table = table_for_type(t).expect("known type");
+                let ids = conn
+                    .prepare(&format!("SELECT entry_id FROM {table}"))?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                stored.insert(table, ids);
+            }
+            Ok((texts, stored))
+        };
+        let (texts, stored) = match read() {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Reading the embedding cache failed: {e}; re-embedding everything");
+                Default::default()
+            }
+        };
+        items
+            .iter()
+            .filter(|(entry_id, text, entry_type)| {
+                let Some(table) = table_for_type(entry_type) else {
+                    return false;
+                };
+                // Text mismatch (or no meta row) → stale. Text matches but the
+                // vector is absent from the type's table (e.g. entry_type
+                // changed between runs) → also stale.
+                texts.get(entry_id) != Some(text)
+                    || !stored.get(table).is_some_and(|ids| ids.contains(entry_id))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Store an embedding vector for an entry.
     /// The vector should be unit-normalised so L2 ≡ cosine order.
     /// Entries with unrecognised types are silently skipped.
     pub fn upsert(
@@ -270,26 +364,32 @@ impl EmbeddingCache {
         entry_type: &str,
         vector: &[f64],
     ) -> anyhow::Result<()> {
-        let Some(table) = table_for_type(entry_type) else {
-            return Ok(());
-        };
-        let json = format!(
-            "[{}]",
-            vector
+        self.upsert_many(&[(entry_id, title, entry_type, vector)])
+    }
+
+    /// `upsert` for many entries in one transaction. Vectors go in as raw
+    /// little-endian f32 blobs (sqlite-vec's native format), not JSON text.
+    pub fn upsert_many(&self, rows: &[(i64, &str, &str, &[f64])]) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for &(entry_id, title, entry_type, vector) in rows {
+            let Some(table) = table_for_type(entry_type) else {
+                continue;
+            };
+            let blob: Vec<u8> = vector
                 .iter()
-                .map(|f| f.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO entry_embedding_meta (entry_id, title) VALUES (?, ?)",
-            params![entry_id, title],
-        )?;
-        conn.execute(
-            &format!("INSERT OR REPLACE INTO {table} (entry_id, embedding) VALUES (?, ?)"),
-            params![entry_id, json],
-        )?;
+                .flat_map(|&f| (f as f32).to_le_bytes())
+                .collect();
+            tx.prepare_cached(
+                "INSERT OR REPLACE INTO entry_embedding_meta (entry_id, title) VALUES (?, ?)",
+            )?
+            .execute(params![entry_id, title])?;
+            tx.prepare_cached(&format!(
+                "INSERT OR REPLACE INTO {table} (entry_id, embedding) VALUES (?, ?)"
+            ))?
+            .execute(params![entry_id, blob])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -468,7 +568,9 @@ pub fn register_http_fns(engine: &mut Engine) {
 
 // ── Embedding phase ───────────────────────────────────────────────────────────
 
-const EMBED_BATCH_SIZE: usize = 64;
+/// Texts per `embed_batch` call. Large, so a model that length-sorts its
+/// input (the title encoder does) pads little and runs few forward passes.
+const EMBED_BATCH_SIZE: usize = 512;
 
 /// Call the Rhai `embed_batch(texts)` (preferred) or `embed(text)` (fallback)
 /// for every stale entry and store results.
@@ -476,8 +578,15 @@ const EMBED_BATCH_SIZE: usize = 64;
 /// Must be called from inside `tokio::task::block_in_place` (or a thread without
 /// an active tokio context) because `http_post_json` uses blocking IO.
 ///
-/// Returns `false` if neither `embed_batch` nor `embed` is defined in the script
-/// (semantic blocking will be silently skipped).
+/// The script's optional `embedding_model_id(ctx)` names its model; when that
+/// differs from the cache's, every cached vector is dropped and re-embedded
+/// (`full`), or, for a run that only embeds some entries (`!full`), left alone
+/// and `false` returned so the caller skips semantic blocking rather than
+/// mixing two models' vectors. Optional `embed_text(ctx, entry)` picks the text
+/// each entry is embedded from (default: its best title).
+///
+/// Returns whether the cache holds this script's vectors and may be used for
+/// semantic blocking.
 pub fn embed_stale_entries(
     entries: &[EntryInfo],
     engine: &rhai::Engine,
@@ -485,8 +594,56 @@ pub fn embed_stale_entries(
     base_scope: &rhai::Scope<'_>,
     user_ctx: &Dynamic,
     cache: &EmbeddingCache,
+    full: bool,
 ) -> bool {
-    let stale = cache.stale_entries(entries);
+    // eval_ast=false: re-evaluating the AST would re-run the script's top-level
+    // statements (and any `import`); we only want to invoke the function. The
+    // context object from init() is threaded in as the first argument instead.
+    let no_eval = || rhai::CallFnOptions::new().eval_ast(false);
+
+    let model_id = match engine.call_fn_with_options::<Dynamic>(
+        no_eval(),
+        &mut base_scope.clone(),
+        ast,
+        "embedding_model_id",
+        (user_ctx.clone(),),
+    ) {
+        Ok(v) => v
+            .into_immutable_string()
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        Err(e) if is_fn_not_found(&e) => String::new(),
+        Err(e) => {
+            warn!("embedding_model_id() error: {e}; semantic blocking disabled");
+            return false;
+        }
+    };
+    let cached_model = match cache.model_id() {
+        Ok(id) => id,
+        Err(e) => {
+            warn!("Reading the embedding cache's model id failed: {e}; semantic blocking disabled");
+            return false;
+        }
+    };
+    if cached_model != model_id {
+        if !full {
+            warn!(
+                "Embedding cache holds {cached_model:?} vectors but the script embeds with \
+                 {model_id:?}; semantic blocking disabled until a full softmatch run re-embeds it"
+            );
+            return false;
+        }
+        info!(
+            "Embedding model changed ({cached_model:?} → {model_id:?}); re-embedding every entry"
+        );
+        if let Err(e) = cache.reset_for_model(&model_id) {
+            warn!("Resetting the embedding cache failed: {e}; semantic blocking disabled");
+            return false;
+        }
+    }
+
+    let items = entry_texts(entries, engine, ast, base_scope, user_ctx);
+    let stale = cache.stale_entries(&items);
     if stale.is_empty() {
         return true;
     }
@@ -494,12 +651,8 @@ pub fn embed_stale_entries(
 
     // Probe: call embed_batch(ctx, []) to check if the function exists without
     // doing real work (an empty batch returns immediately).
-    // eval_ast=false: re-evaluating the AST would re-run the script's top-level
-    // statements (and any `import`); we only want to invoke the function. The
-    // context object from init() is threaded in as the first argument instead.
-    let no_eval = rhai::CallFnOptions::new().eval_ast(false);
     let probe: Result<Dynamic, _> = engine.call_fn_with_options(
-        no_eval,
+        no_eval(),
         &mut base_scope.clone(),
         ast,
         "embed_batch",
@@ -510,7 +663,7 @@ pub fn embed_stale_entries(
     // Track the densest vector produced this pass; a low maximum is the
     // signature of the naive token-hash fallback (see `report_embed_health`).
     let mut max_nonzero = 0usize;
-    let ok = if has_batch {
+    let embedded = if has_batch {
         embed_via_batch(
             engine,
             ast,
@@ -531,8 +684,79 @@ pub fn embed_stale_entries(
             &mut max_nonzero,
         )
     };
-    report_embed_health(cache.dim, max_nonzero);
-    ok
+    if embedded {
+        report_embed_health(cache.dim, max_nonzero);
+    }
+    // A script without embed hooks leaves the cache as an earlier run stored it.
+    true
+}
+
+/// `(entry_id, text, entry_type)` for every embeddable entry: the text is the
+/// script's `embed_text(ctx, entry)` when defined (`()` skips the entry),
+/// otherwise the entry's best title.
+fn entry_texts(
+    entries: &[EntryInfo],
+    engine: &rhai::Engine,
+    ast: &rhai::AST,
+    base_scope: &rhai::Scope<'_>,
+    user_ctx: &Dynamic,
+) -> Vec<(i64, String, String)> {
+    let mut has_hook = true;
+    let mut failures = 0usize;
+    let mut out = Vec::with_capacity(entries.len());
+    for e in entries {
+        if table_for_type(&e.entry_type).is_none() {
+            continue;
+        }
+        let Some(title) = &e.best_title else {
+            continue;
+        };
+        if has_hook {
+            let result = engine.call_fn_with_options::<Dynamic>(
+                rhai::CallFnOptions::new().eval_ast(false),
+                &mut base_scope.clone(),
+                ast,
+                "embed_text",
+                (
+                    user_ctx.clone(),
+                    Dynamic::from(ScriptEntry(Arc::new(e.clone()), Dynamic::UNIT)),
+                ),
+            );
+            match result {
+                Ok(v) if v.is_unit() => continue,
+                Ok(v) => match v.into_immutable_string() {
+                    Ok(text) => {
+                        out.push((e.entry_id, text.to_string(), e.entry_type.clone()));
+                        continue;
+                    }
+                    Err(t) => {
+                        failures += 1;
+                        if failures <= 5 {
+                            warn!(
+                                "embed_text() returned {t} for entry {}; using its title",
+                                e.entry_id
+                            );
+                        }
+                    }
+                },
+                Err(err) if is_fn_not_found(&err) => has_hook = false,
+                Err(err) => {
+                    failures += 1;
+                    if failures <= 5 {
+                        warn!(
+                            "embed_text() error for entry {}: {err}; using its title",
+                            e.entry_id
+                        );
+                    }
+                }
+            }
+        }
+        out.push((e.entry_id, title.clone(), e.entry_type.clone()));
+    }
+    if failures > 5 {
+        warn!("embed_text() failed for {failures} entries in total");
+    }
+    out
 }
 
 /// Number of vector components above a small magnitude epsilon.
@@ -602,18 +826,31 @@ fn embed_via_batch(
                         continue;
                     }
                 };
-                for (i, vec_dyn) in vectors.into_iter().enumerate() {
-                    let Some((entry_id, title, entry_type)) = chunk.get(i) else {
-                        break;
-                    };
-                    let arr: Vec<f64> = vec_dyn
-                        .try_cast::<Vec<Dynamic>>()
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|d| d.as_float().ok())
-                        .collect();
-                    *max_nonzero = (*max_nonzero).max(nonzero_dims(&arr));
-                    store_vec(cache, *entry_id, title, entry_type, &arr);
+                let arrays: Vec<Vec<f64>> = vectors
+                    .into_iter()
+                    .map(|vec_dyn| {
+                        vec_dyn
+                            .try_cast::<Vec<Dynamic>>()
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|d| d.as_float().ok())
+                            .collect()
+                    })
+                    .collect();
+                let mut rows = Vec::with_capacity(arrays.len());
+                for ((entry_id, title, entry_type), arr) in chunk.iter().zip(&arrays) {
+                    *max_nonzero = (*max_nonzero).max(nonzero_dims(arr));
+                    if checked_dim(cache, title, arr) {
+                        rows.push((
+                            *entry_id,
+                            title.as_str(),
+                            entry_type.as_str(),
+                            arr.as_slice(),
+                        ));
+                    }
+                }
+                if let Err(e) = cache.upsert_many(&rows) {
+                    warn!("Failed to store {} embeddings: {e}", rows.len());
                 }
             }
         }
@@ -659,13 +896,21 @@ fn embed_via_single(
     true
 }
 
-fn store_vec(cache: &EmbeddingCache, entry_id: i64, title: &str, entry_type: &str, arr: &[f64]) {
+/// Whether `arr` has the cache's dimension (warning when it doesn't).
+fn checked_dim(cache: &EmbeddingCache, title: &str, arr: &[f64]) -> bool {
     if arr.len() != cache.dim {
         warn!(
             "embed({title:?}) returned {} values, expected {}; skipping",
             arr.len(),
             cache.dim
         );
+        return false;
+    }
+    true
+}
+
+fn store_vec(cache: &EmbeddingCache, entry_id: i64, title: &str, entry_type: &str, arr: &[f64]) {
+    if !checked_dim(cache, title, arr) {
         return;
     }
     if let Err(e) = cache.upsert(entry_id, title, entry_type, arr) {
@@ -682,7 +927,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hnsw_reads_cached_vectors_and_returns_nearest_entry() {
+    fn knn_reads_cached_vectors_and_returns_nearest_entry() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("embeddings.db");
         let cache = EmbeddingCache::open(path.to_str().unwrap(), 2).unwrap();
@@ -690,7 +935,7 @@ mod tests {
         cache.upsert(2, "two", "track", &[0.99, 0.01]).unwrap();
         cache.upsert(3, "three", "track", &[0.0, 1.0]).unwrap();
 
-        let index = EmbeddingAnn::build(&cache).unwrap();
+        let index = EmbeddingKnn::build(&cache, 2).unwrap();
         let neighbors = index.knn(1, 1, "track");
         assert_eq!(neighbors.len(), 1);
         assert_eq!(neighbors[0].0, 2);

@@ -533,12 +533,18 @@ to share state between calls.
 
 ### Entity fields (`a`, `b`)
 
+`a` and `b` are `Entry` values (`type_of(a) == "Entry"`): fields are converted
+to Rhai values only when the script reads them, as `a.durations` or
+`a["durations"]`. Data beyond these fields comes from `pair_facts_json` (below),
+not from new entry fields.
+
 | Field | Type | Notes |
 |---|---|---|
 | `entry_type` | string | `"track"` \| `"release"` \| `"release_group"` \| `"artist"` |
 | `entry_id` | int | Opaque DB entry ID; used with `semantic_sim` |
 | `title` | string | Best known name (raw, unprocessed) |
-| `duration_ms` | int \| `()` | Duration in milliseconds; `()` when unknown |
+| `durations` | array of int | Every distinct per-source duration (ms) |
+| `release_dates` / `release_types` / `primary_types` | array of strings | Distinct per-source values |
 | `pairs` | array of `#{source, identifier}` | Canonical DB pairs |
 | `aliases` | array of strings | All known names (case-deduplicated) |
 | `sourced_aliases` | array of `#{source, name}` | Authoritative sources first (non-video before video) |
@@ -574,11 +580,27 @@ Both `re_*` functions accept either a pre-compiled `Regex` or a pattern `String`
 ```rhai
 merge(conf, reason)             // conf: f64 confidence in [0,1] -- soft: asserts same_identity, never destructively merges
 relate(kind, conf, reason)      // kind: see below
+relate(kind, conf, reason, metadata)  // + dedup-v2 metadata, e.g. #{transformation, derived_side: "a"|"b"}
+defer(conf, reason)             // undecided: counted and written to the CSV as DEFER; refined by Jev with --jev-types
 distinct()
 ```
 
 Valid `relate` kinds: `alt_version`, `live`, `remix`, `instrumental`, `cover`,
 `medley`, `release_variant`, `in_release_group`, `same_artist`.
+
+#### Pair facts
+
+```rhai
+pair_facts_json(source, identifier)        // → JSON string: one musiclib-pair-facts/1 object
+pair_facts_json([[source, identifier], …]) // → JSON string: array of them (#{source, identifier} also accepted)
+```
+
+Per-pair data read lazily from the DB: names, durations, release date/types,
+contributions (with artist entry id and best name), parent and child links,
+credited items. Keyed by `(source, identifier)`, so facts stay valid when
+entries merge. Returns `()` when the run has no file-backed DB. Field list and
+ordering: `docs/plan-v15-runtime.md` §2b. `config/match.learned.rhai` uses it
+to feed the learned matcher.
 
 #### Semantic similarity
 
@@ -597,11 +619,24 @@ ffi_available()   // → bool: true when musiclib was built with --features ffi
 ### Semantic embedding hooks
 
 If the script defines `embed_batch(ctx, texts) -> array-of-arrays`, the host
-calls it in chunks of 64 at startup to embed every entry with a missing or stale
+calls it in chunks of 512 at startup to embed every entry with a missing or stale
 vector. Falls back to `embed(ctx, text) -> array` if `embed_batch` is not defined.
 Vectors are stored in the sqlite-vec embedding cache
-(`<data_dir>/embeddings.db`). A run-local HNSW index performs candidate KNN;
-SQLite remains the durable cache rather than becoming an O(N²) search loop.
+(`<data_dir>/embeddings.db`). A full run computes exact per-type top-k
+neighbours in memory (tiled brute force, all cores) for candidate KNN;
+SQLite is only the durable store of the vectors.
+
+Two optional hooks control what is cached:
+
+- `embed_text(ctx, entry) -> string` — the text an entry is embedded from
+  (default: its best title; `()` skips the entry). An entry is re-embedded when
+  this text changes. `match.learned.rhai` returns `title [A] primary artist` for
+  tracks, the title encoder's training input.
+- `embedding_model_id(ctx) -> string` — names the model (default `""`). The
+  cache records it; when it changes, a full `softmatch` run drops every cached
+  vector and re-embeds, so two scripts can share one `--embed-db` without mixing
+  vector spaces. An import-time (focused) run seeing a different id skips
+  semantic blocking instead of rebuilding the whole cache.
 
 The embedding dimension must match the `--embed-dim` flag (default `256`).
 
