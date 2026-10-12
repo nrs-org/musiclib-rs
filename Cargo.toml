@@ -48,6 +48,10 @@ path = "src/bin/server/main.rs"
 name = "migrate_http_cache"
 path = "src/bin/migrate_http_cache.rs"
 
+[[bin]]
+name = "repair_multi_work"
+path = "src/bin/repair_multi_work.rs"
+
 [features]
 default = ["store_protocol", "player"]
 # Generic C-ABI FFI rhai module (`pipeline::ffi`): bind/call any cdylib from a
