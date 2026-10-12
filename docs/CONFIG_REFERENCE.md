@@ -242,6 +242,13 @@ exponential backoff.
 | `max_backoff` | duration | `"1m"` | Upper bound on phase-2 backoff |
 | `rate_limit_statuses` | list\<int\> | `[]` | Extra status codes treated as rate-limit responses, in addition to 429 |
 
+**Spotify quota.** Besides the track/album/artist lookups, import makes one
+`api.spotify.com/v1/search?q=isrc:…` call per MusicBrainz track that has an
+ISRC (the ISRC → Spotify bridge). Give `api.spotify.com` its own scheduler
+entry with a small `max_concurrent` (the example uses 4) so a large
+MusicBrainz import doesn't hit Spotify's rolling rate limit; 429s are retried
+with `Retry-After` either way.
+
 ---
 
 ## Fetch-options YAML

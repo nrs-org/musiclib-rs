@@ -93,25 +93,27 @@ on top of 2's scorer.
 
 ## Status (2026-10-13)
 
-Step 1 landed on master: `8b3ac9f` (MB recordings/releases store `isrcs`),
-`70a638e` (no URL lookup for non-URL ids), `077db55` (Spotify
-`resolve_external_source` via `isrc:` search, exact-ISRC re-check). Gaps left
-from step 1:
+Step 1 is done:
 
-1. **ISRC case.** `lookup_isrc` compares case-insensitively, but stored
-   `isrc` sources are raw, and dedup matches identifiers exactly. A Spotify
-   track stored as `ushm21927082` never merges with `USHM21927082`. Upper-case
-   ISRCs in one place at canonicalization (the `registry::canonicalize` chain
-   used by `pipeline/ingest.rs`), not per backend.
-2. **Duration guard.** `lookup_isrc` returns every Spotify track carrying the
-   ISRC; a label-reused ISRC on an edit/remaster merges the wrong version (NRS
-   example: ハロ/ハワユ, Spotify 4:58 vs MB 4:50). Drop matches more than ~5s
-   off the recording. `resolve_external_source(entry_type, sources)` has no
-   duration today: needs a parameter or a small context struct, so update the
-   MB impl too.
-3. **All matches attached.** Keep several Spotify releases of one ISRC (useful
-   playback sources), but only those that pass 2, since each is also a dedup
-   key.
-4. **Quota.** One Spotify search per ISRC'd MB track at import. No code
-   change; document an `api.spotify.com` scheduler limit alongside the HTTP
-   cache.
+- `8b3ac9f`: MB recordings store their `isrcs` as `isrc` sources.
+- `70a638e`: MB's resolver no longer sends non-URL ids (upc, ean) to the URL
+  lookup.
+- `077db55`: Spotify's `resolve_external_source` searches `isrc:<code>` and
+  re-checks the ISRC on every result.
+- ISRC case: `std_values::normalize_isrc` (upper case, no `-`/spaces) is
+  applied in `flush::canonicalize_pair`, the one place every stored pair and
+  every dedup-barrier pair passes through. Both `lookup_isrc`s normalise what
+  they send and compare. Rows already stored are not rewritten: on
+  `nrs-next/musiclib.db`, 11 lower-case rows (one Spotify release,
+  `ushm2192708x`) still need an `UPDATE` or a re-import.
+- Duration guard: `resolve_external_source` takes a `ResolveContext`
+  (`specific_data` + `sources`). `ResolveContext::isrc_duration_matches`
+  rejects an ISRC match more than `ISRC_DURATION_TOLERANCE_MS` (5 s) from
+  every known length of the entity, and passes when either length is
+  unknown. It applies both ways: Spotify results by `duration_ms`, MB
+  `isrc/` results by recording `length`.
+- All passing matches are attached (several Spotify releases of one ISRC).
+- Quota: `api.spotify.com` scheduler entry in `config/http.example.yaml`
+  and a note in `docs/CONFIG_REFERENCE.md`.
+
+Next: the storage decision, then step 2.

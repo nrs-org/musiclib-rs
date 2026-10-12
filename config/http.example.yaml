@@ -62,3 +62,16 @@ schedulers:
       initial_backoff: "1s"
       backoff_multiplier: 2.0
       max_backoff: "1m"
+
+  # Spotify: undocumented rolling 30 s limit, 429 + Retry-After. Import makes
+  # one `isrc:` search per MusicBrainz track with an ISRC (the ISRC bridge),
+  # on top of the track/album/artist lookups. Search responses are cached by
+  # `db_cache` like any other GET.
+  api.spotify.com:
+    max_concurrent: 4
+    retry:
+      retry_after_attempts: 5
+      backoff_attempts: 3
+      initial_backoff: "1s"
+      backoff_multiplier: 2.0
+      max_backoff: "1m"
