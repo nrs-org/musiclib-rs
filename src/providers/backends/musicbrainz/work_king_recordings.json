@@ -1,0 +1,36 @@
+{
+  "recording-count": 3,
+  "recording-offset": 0,
+  "recordings": [
+    {
+      "title": "KING",
+      "length": 137840,
+      "disambiguation": "",
+      "id": "1ca1ed15-b54c-4d32-82d6-9c5271e3e07d",
+      "video": false,
+      "isrcs": [
+        "QZPJ32148788"
+      ],
+      "first-release-date": "2022-02-26"
+    },
+    {
+      "isrcs": [
+        "JPX562000062"
+      ],
+      "video": false,
+      "first-release-date": "2020-08-02",
+      "disambiguation": "",
+      "id": "6472bbab-cec1-41b9-b19f-12232639f0dd",
+      "title": "KING",
+      "length": 135000
+    },
+    {
+      "length": 134000,
+      "title": "KING",
+      "disambiguation": "",
+      "id": "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391",
+      "video": true,
+      "isrcs": []
+    }
+  ]
+}

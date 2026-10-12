@@ -275,7 +275,7 @@ pub async fn get_recording(
                         }
                         for (work_id, is_cover) in work_relations {
                             if is_cover {
-                                match work::find_original_performances(&client, &work_id).await {
+                                match work::find_original_anchors(&client, &work_id).await {
                                     Ok(originals) => {
                                         for (rec_id, title) in originals {
                                             original_refs
@@ -289,7 +289,7 @@ pub async fn get_recording(
                             }
                             match work::find_arrangement_source_work(&client, &work_id).await {
                                 Ok(Some(source_work_id)) => {
-                                    match work::find_original_performances(&client, &source_work_id)
+                                    match work::find_original_anchors(&client, &source_work_id)
                                         .await
                                     {
                                         Ok(originals) => {
@@ -482,6 +482,13 @@ mod tests {
         MusicBrainzClient::build_url(&format!("work/{mbid}"), &[("inc", "recording-rels")])
     }
 
+    fn work_recordings_api_url(mbid: &str) -> String {
+        MusicBrainzClient::build_url(
+            "recording",
+            &[("work", mbid), ("inc", "isrcs"), ("limit", "100")],
+        )
+    }
+
     async fn collect_child_names(
         source: &Arc<crate::providers::types::CachedChildSource<()>>,
     ) -> anyhow::Result<Vec<String>> {
@@ -496,12 +503,12 @@ mod tests {
     /// A cover is not a recording->recording relation — it's
     /// `recording --performance(attributes:["cover"])--> Work`, and the Work
     /// (`work_king.json`) has two untagged ("original") performances among
-    /// several tagged cover/live ones. Both untagged recordings should be
-    /// imported as `original` children, each tagged `original_relation_kind:
-    /// Some("cover")`; the tagged siblings (the other cover, the live
-    /// version) must NOT be pulled in.
+    /// several tagged cover/live ones. Only the anchor (the earliest, per
+    /// `work::find_original_anchors`) is imported as an `original` child,
+    /// tagged `original_relation_kind: Some("cover")`; the tagged siblings
+    /// (the other cover, the live version) must NOT be pulled in.
     #[tokio::test]
-    async fn test_cover_relation_imports_untagged_originals() -> anyhow::Result<()> {
+    async fn test_cover_relation_imports_original_anchor() -> anyhow::Result<()> {
         let mbid = "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391";
         let work_mbid = "7b11aea3-c733-42a5-a8cb-de0becb5f6ba";
         let mut http_client = MockHttpClient::new();
@@ -515,6 +522,11 @@ mod tests {
             &work_api_url(work_mbid),
             include_str!("./work_king.json"),
         );
+        http_client.add_route_json::<serde_json::Value>(
+            Method::GET,
+            &work_recordings_api_url(work_mbid),
+            include_str!("./work_king_recordings.json"),
+        );
 
         let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
         let rec = get_recording(
@@ -527,22 +539,27 @@ mod tests {
 
         // [0] = artist children (empty here), [1] = original-recording children.
         assert_eq!(rec.children.len(), 2);
-        let mut names = collect_child_names(&rec.children[1]).await?;
-        names.sort();
-        assert_eq!(names, vec!["KING".to_string(), "KING".to_string()]);
-
         let mut cursor = rec.children[1].owned_cursor();
-        let mut kinds = Vec::new();
+        let mut originals = Vec::new();
         while let Some((child, _)) = child_next(&mut cursor).await? {
-            kinds.push(child.original_relation_kind.clone().map(|c| c.to_string()));
             assert_eq!(
                 child.external_type.as_ref(),
                 EXTERNAL_TYPE_RECORDING_ORIGINAL
             );
+            originals.push((
+                child.sources.get(SOURCE).cloned().unwrap_or_default(),
+                child.original_relation_kind.clone().map(|c| c.to_string()),
+            ));
         }
         assert_eq!(
-            kinds,
-            vec![Some("cover".to_string()), Some("cover".to_string())]
+            originals,
+            vec![(
+                std::collections::HashSet::from([
+                    "https://musicbrainz.org/recording/6472bbab-cec1-41b9-b19f-12232639f0dd"
+                        .to_string()
+                ]),
+                Some("cover".to_string()),
+            )]
         );
 
         Ok(())
