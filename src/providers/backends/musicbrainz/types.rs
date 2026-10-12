@@ -194,8 +194,11 @@ impl FetchProvider for Provider {
             for id in ids {
                 let found = if source_key.as_ref() == "isrc" {
                     lookup_isrc(&self.client, id).await?
-                } else {
+                } else if id.starts_with("http://") || id.starts_with("https://") {
                     lookup_url(&self.client, id, self.mirror_db.as_deref()).await?
+                } else {
+                    // Non-URL namespaces without an MB lookup (upc, ean, ...).
+                    continue;
                 };
                 if let Some(found) = found {
                     for (k, v) in found.0 {
