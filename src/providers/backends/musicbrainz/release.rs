@@ -393,6 +393,10 @@ mod tests {
                 "https://musicbrainz.org/recording/{recording_mbid}"
             )])
         );
+        assert_eq!(
+            rec.sources.get("isrc").unwrap(),
+            &HashSet::from(["JPV752307972".to_string()])
+        );
 
         // 1 child source containing: 1 artist-credit (Watame) + 15 artist-rels
         assert_eq!(rec.children.len(), 1);

@@ -17,6 +17,9 @@
   "disambiguation": "",
   "first-release-date": "2024-01-10",
   "id": "d70b0d40-1dac-4703-a025-39073ead3e08",
+  "isrcs": [
+    "JPV752307972"
+  ],
   "length": 229000,
   "relations": [
     {
@@ -428,6 +431,33 @@
       "target-type": "artist",
       "type": "mix",
       "type-id": "3e3102e1-1896-4f50-b5b2-dd9824e46efe"
+    },
+    {
+      "attribute-ids": {},
+      "attribute-values": {},
+      "attributes": [],
+      "begin": null,
+      "direction": "forward",
+      "end": null,
+      "ended": false,
+      "source-credit": "",
+      "target-credit": "",
+      "target-type": "work",
+      "type": "performance",
+      "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+      "work": {
+        "attributes": [],
+        "disambiguation": "",
+        "id": "449529aa-9206-48da-85e5-07e663cfb494",
+        "iswcs": [],
+        "language": "jpn",
+        "languages": [
+          "jpn"
+        ],
+        "title": "Beautiful Circle",
+        "type": "Song",
+        "type-id": "f061270a-2fd6-32f1-a641-f0f8676d14e6"
+      }
     }
   ],
   "title": "Beautiful Circle",

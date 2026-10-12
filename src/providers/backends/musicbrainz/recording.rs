@@ -33,6 +33,9 @@ pub(crate) struct RecordingResponse {
     pub artist_credit: Vec<ArtistCredit>,
     #[serde(rename = "first-release-date")]
     pub first_release_date: Option<String>,
+    /// Populated by the `isrcs` inc; the cross-provider bridge to Spotify.
+    #[serde(default)]
+    pub isrcs: Vec<String>,
     #[serde(default)]
     pub relations: Vec<RecordingRelation>,
     /// Populated when `inc=releases+media` is requested.
@@ -93,7 +96,7 @@ pub(crate) struct RecordingTrack {
 
 // --- Constants ---
 
-pub(crate) const PARTS: &str = "artist-credits+artist-rels+url-rels+recording-rels+work-rels";
+pub(crate) const PARTS: &str = "artist-credits+isrcs+artist-rels+url-rels+recording-rels+work-rels";
 /// No `+recordings`: MusicBrainz rejects it outright on this endpoint
 /// ("recordings is not a valid inc parameter for the recording resource"),
 /// unlike on a release lookup (`release.rs`'s own `PARTS`, where it *is*
@@ -102,7 +105,7 @@ pub(crate) const PARTS: &str = "artist-credits+artist-rels+url-rels+recording-re
 /// back to disambiguate which of its tracks is *this* recording; see the
 /// single-track-medium fallback in `get_recording` below.
 pub(crate) const PARTS_WITH_RELEASES: &str =
-    "artist-credits+artist-rels+url-rels+recording-rels+work-rels+releases+media";
+    "artist-credits+isrcs+artist-rels+url-rels+recording-rels+work-rels+releases+media";
 
 // --- Public API ---
 
@@ -195,6 +198,13 @@ pub async fn get_recording(
                             .or_default()
                             .insert(u.resource.clone());
                     }
+                }
+                if !r.isrcs.is_empty() {
+                    sources
+                        .0
+                        .entry("isrc".into())
+                        .or_default()
+                        .extend(r.isrcs.iter().cloned());
                 }
 
                 // Collect per-release track lengths for this recording. A
