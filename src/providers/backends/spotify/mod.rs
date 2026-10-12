@@ -3,6 +3,7 @@ pub mod artist;
 pub mod canonicalize;
 pub mod client;
 pub mod coalesce;
+pub mod isrc;
 pub mod playlist;
 pub mod track;
 pub mod types;
@@ -24,13 +25,14 @@ use crate::{
             artist::{get_artist, get_artist_albums_raw, get_artist_raw},
             canonicalize::canonicalize,
             client::SpotifyClient,
+            isrc::lookup_isrc,
             playlist::{get_playlist, get_playlist_raw},
             track::{get_track, get_track_raw},
         },
         matcher::filter_children,
         types::{
-            CanonicalizeResult, EntityResult, EntryFetchOptions, EntryFetchOptionsPool, Error,
-            OptionsId,
+            CanonicalizeResult, EntityResult, EntryFetchOptions, EntryFetchOptionsPool, EntryType,
+            Error, ExternalSources, OptionsId,
         },
     },
 };
@@ -128,6 +130,34 @@ impl FetchProvider for Provider {
             extra: result.extra,
             specific_data: result.specific_data,
             aliases: result.aliases,
+        })
+    }
+
+    async fn resolve_external_source(
+        &self,
+        entry_type: EntryType,
+        sources: &ExternalSources,
+    ) -> Result<Option<ExternalSources>, Error> {
+        if entry_type != EntryType::Track {
+            return Ok(None);
+        }
+        let Some(isrcs) = sources.get("isrc") else {
+            return Ok(None);
+        };
+
+        let mut result = ExternalSources::default();
+        for isrc in isrcs {
+            if let Some(found) = lookup_isrc(&self.client, isrc).await? {
+                for (k, v) in found.0 {
+                    result.0.entry(k).or_default().extend(v);
+                }
+            }
+        }
+
+        Ok(if result.0.is_empty() {
+            None
+        } else {
+            Some(result)
         })
     }
 }
