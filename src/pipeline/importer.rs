@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::providers::{
-    FetchProvider,
+    FetchProvider, ResolveContext,
     std_values::StandardProviderKeys,
     types::{
         EntityResult, EntryFetchOptionsPool, EntryType, ExternalSources, OptionsId, child_next,
@@ -144,7 +144,11 @@ pub fn import(
                     called.insert(i);
                     continue;
                 }
-                match p.resolve_external_source(entry_type, &sources).await {
+                let ctx = ResolveContext {
+                    specific_data: &metadata.specific_data,
+                    sources: &sources,
+                };
+                match p.resolve_external_source(&ctx).await {
                     Ok(new) => {
                         called.insert(i);
                         if let Some(new) = new {

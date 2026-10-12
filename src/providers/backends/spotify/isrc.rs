@@ -6,6 +6,7 @@ use crate::providers::{
     backends::spotify::{
         SOURCE, canonicalize::track_url, client::SpotifyClient, track::ExternalIds, types::Paging,
     },
+    std_values::normalize_isrc,
     types::{Error, ExternalSources},
 };
 
@@ -17,6 +18,7 @@ pub(crate) struct IsrcSearchResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct IsrcSearchTrack {
     pub id: String,
+    pub duration_ms: Option<i64>,
     #[serde(default)]
     pub external_ids: ExternalIds,
 }
@@ -25,13 +27,16 @@ pub(crate) struct IsrcSearchTrack {
 /// rarely maps to more tracks than that (single + album + compilations).
 const SEARCH_LIMIT: &str = "10";
 
-/// Search Spotify for tracks carrying `isrc` and return their track URLs.
+/// Search Spotify for tracks carrying `isrc` and return the URLs of those
+/// whose length (ms) passes `accept_length`. Every passing release is kept:
+/// each is a playback source as well as a dedup key.
 pub async fn lookup_isrc(
     client: &SpotifyClient,
     isrc: &str,
+    accept_length: impl Fn(Option<i64>) -> bool,
 ) -> Result<Option<ExternalSources>, Error> {
+    let isrc = normalize_isrc(isrc);
     let query = format!("isrc:{isrc}");
-    let isrc = isrc.to_owned();
     client
         .get::<IsrcSearchResponse, _, _, Error, _>(
             "search",
@@ -47,7 +52,8 @@ pub async fn lookup_isrc(
                         t.external_ids
                             .isrc
                             .as_deref()
-                            .is_some_and(|i| i.eq_ignore_ascii_case(&isrc))
+                            .is_some_and(|i| normalize_isrc(i) == isrc)
+                            && accept_length(t.duration_ms)
                     })
                     .map(|t| track_url(&t.id))
                     .collect();
@@ -92,7 +98,9 @@ mod tests {
         );
 
         let client = SpotifyClient::new_with_token(Arc::new(http_client), "test_token");
-        let found = lookup_isrc(&client, isrc).await?.expect("expected a match");
+        let found = lookup_isrc(&client, isrc, |_| true)
+            .await?
+            .expect("expected a match");
 
         // The second item carries a different ISRC and must be filtered out.
         assert_eq!(
@@ -113,7 +121,28 @@ mod tests {
         );
 
         let client = SpotifyClient::new_with_token(Arc::new(http_client), "test_token");
-        assert!(lookup_isrc(&client, isrc).await?.is_none());
+        assert!(lookup_isrc(&client, isrc, |_| true).await?.is_none());
+        Ok(())
+    }
+
+    /// A label-reused ISRC on an edit: the candidate is kept only when its
+    /// length passes the caller's guard, and lower-case input still matches.
+    #[tokio::test]
+    async fn test_lookup_isrc_length_guard() -> anyhow::Result<()> {
+        let isrc = "JPV752307972";
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route_json::<IsrcSearchResponse>(
+            Method::GET,
+            &search_api_url(isrc),
+            include_str!("./search_isrc_beautiful_circle.json"),
+        );
+
+        let client = SpotifyClient::new_with_token(Arc::new(http_client), "test_token");
+        // The fixture track is 229,233 ms long.
+        let near = |len: Option<i64>| len.is_some_and(|l| (l - 226_000).abs() <= 5_000);
+        let far = |len: Option<i64>| len.is_some_and(|l| (l - 290_000).abs() <= 5_000);
+        assert!(lookup_isrc(&client, "jpv752307972", near).await?.is_some());
+        assert!(lookup_isrc(&client, isrc, far).await?.is_none());
         Ok(())
     }
 }

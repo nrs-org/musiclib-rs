@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use crate::{
     http::HttpClient,
     providers::{
-        CanonicalizeProvider, FetchProvider, RawFetchProvider, TryDefault,
+        CanonicalizeProvider, FetchProvider, RawFetchProvider, ResolveContext, TryDefault,
         backends::musicbrainz::{
             SOURCE,
             artist::{
@@ -26,8 +26,8 @@ use crate::{
         },
         matcher::filter_children,
         types::{
-            CanonicalizeResult, EntityResult, EntryFetchOptionsPool, EntryType, Error,
-            ExternalSources, OptionsId,
+            CanonicalizeResult, EntityResult, EntryFetchOptionsPool, Error, ExternalSources,
+            OptionsId,
         },
     },
 };
@@ -181,19 +181,18 @@ impl FetchProvider for Provider {
 
     async fn resolve_external_source(
         &self,
-        _entry_type: EntryType,
-        sources: &ExternalSources,
+        ctx: &ResolveContext<'_>,
     ) -> Result<Option<ExternalSources>, Error> {
         let mut result = ExternalSources::default();
 
-        for (source_key, ids) in sources.0.iter() {
+        for (source_key, ids) in ctx.sources.0.iter() {
             // Skip MB sources — no need to look ourselves up
             if source_key.as_ref() == SOURCE {
                 continue;
             }
             for id in ids {
                 let found = if source_key.as_ref() == "isrc" {
-                    lookup_isrc(&self.client, id).await?
+                    lookup_isrc(&self.client, id, |len| ctx.isrc_duration_matches(len)).await?
                 } else if id.starts_with("http://") || id.starts_with("https://") {
                     lookup_url(&self.client, id, self.mirror_db.as_deref()).await?
                 } else {

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use crate::{
     http::HttpClient,
     providers::{
-        CanonicalizeProvider, FetchProvider, RawFetchProvider, TryDefault,
+        CanonicalizeProvider, FetchProvider, RawFetchProvider, ResolveContext, TryDefault,
         backends::spotify::{
             album::{get_album, get_album_raw},
             artist::{get_artist, get_artist_albums_raw, get_artist_raw},
@@ -30,6 +30,7 @@ use crate::{
             track::{get_track, get_track_raw},
         },
         matcher::filter_children,
+        std_values::StandardProviderKeys,
         types::{
             CanonicalizeResult, EntityResult, EntryFetchOptions, EntryFetchOptionsPool, EntryType,
             Error, ExternalSources, OptionsId,
@@ -135,19 +136,20 @@ impl FetchProvider for Provider {
 
     async fn resolve_external_source(
         &self,
-        entry_type: EntryType,
-        sources: &ExternalSources,
+        ctx: &ResolveContext<'_>,
     ) -> Result<Option<ExternalSources>, Error> {
-        if entry_type != EntryType::Track {
+        if ctx.entry_type() != EntryType::Track {
             return Ok(None);
         }
-        let Some(isrcs) = sources.get("isrc") else {
+        let Some(isrcs) = ctx.sources.get(StandardProviderKeys::ISRC) else {
             return Ok(None);
         };
 
         let mut result = ExternalSources::default();
         for isrc in isrcs {
-            if let Some(found) = lookup_isrc(&self.client, isrc).await? {
+            if let Some(found) =
+                lookup_isrc(&self.client, isrc, |len| ctx.isrc_duration_matches(len)).await?
+            {
                 for (k, v) in found.0 {
                     result.0.entry(k).or_default().extend(v);
                 }

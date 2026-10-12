@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use std::{future::Future, sync::Arc};
 
 use crate::providers::types::{
-    CanonicalizeResult, EntityResult, EntryFetchOptions, EntryFetchOptionsPool, EntryType, Error,
-    ExternalSources, OptionsId,
+    CanonicalizeResult, EntityResult, EntryFetchOptions, EntryFetchOptionsPool, EntrySpecificData,
+    EntryType, Error, ExternalSources, OptionsId,
 };
 
 pub mod backends;
@@ -42,12 +42,45 @@ pub trait FetchProvider: CanonicalizeProvider {
         pool: Arc<EntryFetchOptionsPool>,
         root_id: OptionsId,
     ) -> Result<EntityResult, Error>;
+    /// Enrich an entity's sources with IDs in this provider's own namespace
+    /// (cross-provider linking, e.g. ISRC -> Spotify track).
     async fn resolve_external_source(
         &self,
-        _entry_type: EntryType,
-        _sources: &ExternalSources,
+        _ctx: &ResolveContext<'_>,
     ) -> Result<Option<ExternalSources>, Error> {
         Ok(None)
+    }
+}
+
+/// Two recordings sharing an ISRC whose lengths differ by more than this are
+/// different versions: labels reuse an ISRC for an edit or a remaster.
+pub const ISRC_DURATION_TOLERANCE_MS: i64 = 5_000;
+
+/// The entity a [`FetchProvider::resolve_external_source`] call cross-links.
+pub struct ResolveContext<'a> {
+    pub specific_data: &'a EntrySpecificData,
+    pub sources: &'a ExternalSources,
+}
+
+impl ResolveContext<'_> {
+    pub fn entry_type(&self) -> EntryType {
+        self.specific_data.entry_type()
+    }
+
+    /// Whether a recording found through this entity's ISRC, `candidate_ms`
+    /// long, is close enough in length to be the same version. True when
+    /// either side's length is unknown.
+    pub fn isrc_duration_matches(&self, candidate_ms: Option<i64>) -> bool {
+        let EntrySpecificData::Track { duration_ms, .. } = self.specific_data else {
+            return true;
+        };
+        let Some(candidate) = candidate_ms else {
+            return true;
+        };
+        duration_ms.is_empty()
+            || duration_ms
+                .iter()
+                .any(|d| (d - candidate).abs() <= ISRC_DURATION_TOLERANCE_MS)
     }
 }
 
@@ -77,4 +110,47 @@ pub trait TryDefault {
     fn try_default() -> Result<Self, Error>
     where
         Self: Sized;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExternalSources, ResolveContext};
+    use crate::providers::types::EntrySpecificData;
+
+    fn track(duration_ms: Vec<i64>) -> EntrySpecificData {
+        EntrySpecificData::Track {
+            duration_ms,
+            positions: Default::default(),
+            songs: vec![],
+        }
+    }
+
+    #[test]
+    fn isrc_duration_guard() {
+        let sources = ExternalSources::default();
+        // MB 4:50 vs a Spotify 4:58 edit under the same ISRC.
+        let data = track(vec![290_000]);
+        let ctx = ResolveContext {
+            specific_data: &data,
+            sources: &sources,
+        };
+        assert!(ctx.isrc_duration_matches(Some(293_000)));
+        assert!(!ctx.isrc_duration_matches(Some(298_000)));
+        assert!(ctx.isrc_duration_matches(None), "unknown candidate length");
+
+        // Any of the recording's per-release lengths may match.
+        let data = track(vec![290_000, 298_000]);
+        let ctx = ResolveContext {
+            specific_data: &data,
+            sources: &sources,
+        };
+        assert!(ctx.isrc_duration_matches(Some(298_000)));
+
+        let data = track(vec![]);
+        let ctx = ResolveContext {
+            specific_data: &data,
+            sources: &sources,
+        };
+        assert!(ctx.isrc_duration_matches(Some(1)), "unknown own length");
+    }
 }

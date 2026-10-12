@@ -228,7 +228,7 @@ mod live_tests {
         let client = client_from_env()?;
         // ISRC for "Beautiful Circle" — already used in the fixture suite.
         let isrc = "JPB602202407";
-        let found = lookup_isrc(&client, isrc).await?;
+        let found = lookup_isrc(&client, isrc, |_| true).await?;
         info!("[lookup_isrc] {isrc} -> {found:?}");
         Ok(())
     }
