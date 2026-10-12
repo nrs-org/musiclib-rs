@@ -65,6 +65,7 @@ pub async fn get_track(client: &DiscogsClient, url: &str) -> Result<EntityResult
                             positions: position
                                 .map(|p| [(SOURCE.into(), p)].into())
                                 .unwrap_or_default(),
+                            songs: vec![],
                         },
                         children: vec![Arc::new(CachedChildSource::from_children(artist_refs))],
                         aliases: vec![Alias {

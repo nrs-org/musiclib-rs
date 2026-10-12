@@ -3236,6 +3236,7 @@ mod tests {
             &EntrySpecificData::Track {
                 duration_ms: vec![duration_ms],
                 positions: Default::default(),
+                songs: vec![],
             },
             None,
         )

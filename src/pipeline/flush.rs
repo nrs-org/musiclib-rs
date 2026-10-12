@@ -498,14 +498,28 @@ pub async fn flush(
     // heuristic/Jev pass, since a cover and its original can be just as
     // acoustically dissimilar as two unrelated covers — the whole point is
     // to not depend on content-similarity rediscovering this link.
+    //
+    // An edition means "the same song": an entry whose pairs perform several
+    // songs (a karaoke stream video merged with the per-song MB recordings
+    // that link to it) is a container, so it gets no edition relation to any
+    // one song's original (`docs/plan-multi-work-recordings.md`). The pairs'
+    // own `has_rel` edges above still record which song each one covers.
+    let derived_ids: Vec<i64> = has_rel
+        .iter()
+        .filter(|edge| edge.original_relation_kind.is_some())
+        .map(|edge| entry_id_of(&edge.parent))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let containers = db.multi_song_entries(&derived_ids).await?;
     for edge in &has_rel {
         let Some(kind) = &edge.original_relation_kind else {
             continue;
         };
         let derived_id = entry_id_of(&edge.parent); // the cover/remix/arrangement
         let original_id = entry_id_of(&edge.child); // the original
-        if derived_id == original_id {
-            continue; // already merged (e.g. by dedup) — nothing to relate
+        if derived_id == original_id || containers.contains(&derived_id) {
+            continue; // already merged (e.g. by dedup), or a container of songs
         }
         let extra = serde_json::json!({
             "derived_entry": derived_id,
@@ -857,6 +871,7 @@ mod tests {
             specific_data: crate::providers::types::EntrySpecificData::Track {
                 duration_ms: vec![],
                 positions: HashMap::new(),
+                songs: vec![],
             },
             aliases: vec![],
         }
@@ -940,6 +955,73 @@ mod tests {
             "covers must not be related directly to one another"
         );
 
+        Ok(())
+    }
+
+    /// A karaoke-stream video that MusicBrainz models as one recording per
+    /// song, each linking to the video (so all of them share one entry), is
+    /// a container of songs: each recording's cover edge is kept as a
+    /// `has_rel`, but the entry gets no edition relation to either original.
+    #[tokio::test]
+    async fn flush_writes_no_original_relation_for_a_multi_song_entry() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let stream = p("stream_video");
+        let song = |work: &str| PairMetadata {
+            specific_data: crate::providers::types::EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: HashMap::new(),
+                songs: vec![vec![work.to_string()]],
+            },
+            ..track_metadata()
+        };
+
+        let state = State::new();
+        {
+            let mut metadata = state.metadata.lock().unwrap();
+            metadata.insert(stream.clone(), track_metadata());
+            for (segment, original, work) in
+                [("seg_a", "orig_a", "work_a"), ("seg_b", "orig_b", "work_b")]
+            {
+                metadata.insert(p(segment), song(work));
+                metadata.insert(p(original), song(work));
+                state
+                    .is_rel
+                    .lock()
+                    .unwrap()
+                    .push((p(segment), stream.clone()));
+                state.has_rel.lock().unwrap().push(ChildEdge {
+                    parent: p(segment),
+                    child: p(original),
+                    disc_no: None,
+                    track_no: None,
+                    contributions: vec![],
+                    original_relation_kind: Some("cover".to_string()),
+                });
+            }
+        }
+
+        flush(
+            Arc::new(state),
+            &[],
+            &db,
+            &DedupConfig::default(),
+            None,
+            true,
+        )
+        .await?;
+
+        let stream_id = db.find_entry_id_by_pair(&stream.0, &stream.1).await?;
+        assert_eq!(
+            db.find_entry_id_by_pair("x", "seg_a").await?,
+            stream_id,
+            "the per-song recordings share the video's entry"
+        );
+        assert!(db.all_relations().await?.is_empty());
+        assert_eq!(
+            db.all_child_rows().await?.len(),
+            2,
+            "per-recording edges kept"
+        );
         Ok(())
     }
 

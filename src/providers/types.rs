@@ -68,6 +68,14 @@ pub enum EntrySpecificData {
         /// release tracks) report slightly different lengths.
         duration_ms: Vec<i64>,
         positions: HashMap<String, TrackPosition>,
+        /// The songs this recording performs, each as the MusicBrainz work
+        /// MBIDs that make it up (works joined by a version relation, e.g. a
+        /// translated lyric and its original, are one song). Sorted; empty
+        /// when the source has no work data. Two or more songs mark a
+        /// multi-song recording (karaoke stream, medley): a container of
+        /// songs, never an edition of any one of them (see
+        /// `docs/plan-multi-work-recordings.md`).
+        songs: Vec<Vec<String>>,
     },
     Release {
         release_type: Option<String>,

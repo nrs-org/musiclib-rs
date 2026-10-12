@@ -1,7 +1,9 @@
 //! MusicBrainz Work lookups. Work is *not* a modeled entity in musiclib-rs
 //! (no `EntryType::Work`, never a `ChildRef`, never stored as an entry) — it
 //! exists here purely as a transient hop used to resolve "the original
-//! recording of a cover/arrangement".
+//! recording of a cover/arrangement". Recordings do keep the work MBIDs they
+//! perform as a fact, grouped into songs (`EntrySpecificData::Track::songs`,
+//! built by `group_into_songs`).
 //!
 //! MB doesn't flag a single recording as "the" canonical original performance
 //! of a Work. The best available signal is a `performance` relation with an
@@ -15,6 +17,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::providers::{backends::musicbrainz::client::MusicBrainzClient, types::Error};
 
@@ -251,6 +254,101 @@ async fn browse_release_facts(
     Ok(facts)
 }
 
+/// Work-work relation types under which two works are versions of one song
+/// (a translated lyric, a revision, an arrangement), as opposed to
+/// `medley`/`parts`, which join different songs.
+const SAME_SONG_WORK_RELATIONS: &[&str] = &[
+    "other version",
+    "based on",
+    "revision of",
+    "translation",
+    "arrangement",
+    "orchestration",
+];
+
+/// Groups the works one recording performs into songs: two of them are one
+/// song when either links to the other by a `SAME_SONG_WORK_RELATIONS`
+/// relation. MB commonly credits a translated cover with both the original
+/// work and its translation, which is still one song, not a medley. A work
+/// whose lookup fails stays a song of its own. Each song's works are
+/// sorted, and songs are sorted by their first work.
+pub(crate) async fn group_into_songs(
+    client: &MusicBrainzClient,
+    works: &[String],
+) -> Vec<Vec<String>> {
+    let mut song_of: Vec<usize> = (0..works.len()).collect();
+    fn root(song_of: &mut [usize], mut i: usize) -> usize {
+        while song_of[i] != i {
+            song_of[i] = song_of[song_of[i]];
+            i = song_of[i];
+        }
+        i
+    }
+    if works.len() > 1 {
+        for (i, work) in works.iter().enumerate() {
+            let linked = match same_song_links(client, work).await {
+                Ok(linked) => linked,
+                Err(e) => {
+                    warn!("musicbrainz: work-rels lookup failed for work {work}: {e}");
+                    continue;
+                }
+            };
+            for (j, other) in works.iter().enumerate() {
+                if linked.contains(other) {
+                    let (a, b) = (root(&mut song_of, i), root(&mut song_of, j));
+                    song_of[a.max(b)] = a.min(b);
+                }
+            }
+        }
+    }
+    let mut songs: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
+    for (i, work) in works.iter().enumerate() {
+        let r = root(&mut song_of, i);
+        songs.entry(r).or_default().push(work.clone());
+    }
+    let mut songs: Vec<Vec<String>> = songs
+        .into_values()
+        .map(|mut song| {
+            song.sort_unstable();
+            song.dedup();
+            song
+        })
+        .collect();
+    songs.sort_unstable();
+    songs
+}
+
+/// Works linked to `work_mbid` by a `SAME_SONG_WORK_RELATIONS` relation, in
+/// either direction.
+async fn same_song_links(
+    client: &MusicBrainzClient,
+    work_mbid: &str,
+) -> Result<Vec<String>, Error> {
+    let result = client
+        .get::<WorkResponse, _, _, Error, _>(
+            &format!("work/{work_mbid}"),
+            &[("inc", "work-rels")],
+            |resp| {
+                let linked: Vec<String> = resp
+                    .relations
+                    .iter()
+                    .filter(|r| {
+                        r.target_type == "work"
+                            && SAME_SONG_WORK_RELATIONS.contains(&r.relation_type.as_str())
+                    })
+                    .filter_map(|r| r.work.as_ref())
+                    .map(|w| w.id.clone())
+                    .collect();
+                async move { Ok(linked) }
+            },
+        )
+        .await;
+    match result {
+        Err(Error::NotFound(_)) => Ok(Vec::new()),
+        other => other,
+    }
+}
+
 /// If `work_mbid` is an Arrangement/Orchestration *of* another work (i.e.
 /// this work is the derived side), returns that source work's mbid.
 ///
@@ -301,7 +399,7 @@ mod tests {
     use http::Method;
     use serde_json::{Value, json};
 
-    use super::find_original_anchors;
+    use super::{find_original_anchors, group_into_songs};
     use crate::{
         http::ResponseStatus, providers::backends::musicbrainz::client::MusicBrainzClient,
         test_utils::MockHttpClient,
@@ -309,6 +407,10 @@ mod tests {
 
     fn work_api_url(mbid: &str) -> String {
         MusicBrainzClient::build_url(&format!("work/{mbid}"), &[("inc", "recording-rels")])
+    }
+
+    fn work_rels_api_url(mbid: &str) -> String {
+        MusicBrainzClient::build_url(&format!("work/{mbid}"), &[("inc", "work-rels")])
     }
 
     fn browse_api_url(mbid: &str) -> String {
@@ -451,6 +553,52 @@ mod tests {
 
         let anchors = find_original_anchors(&client, mbid).await?;
         assert_eq!(ids(&anchors), vec!["mv1"]);
+        Ok(())
+    }
+
+    fn work_rel(kind: &str, direction: &str, id: &str) -> Value {
+        json!({
+            "type": kind,
+            "target-type": "work",
+            "direction": direction,
+            "attributes": [],
+            "work": { "id": id, "title": id },
+        })
+    }
+
+    /// Shaped like "Say So (Japanese Version)" + a medley partner: the
+    /// original and its translation are one song, linked by `other version`
+    /// from either side; a work joined only by `medley` stays its own song.
+    #[tokio::test]
+    async fn groups_version_linked_works_into_one_song() -> anyhow::Result<()> {
+        let client = client_with(vec![
+            (
+                work_rels_api_url("orig"),
+                json!({ "title": "Say So", "relations": [
+                    work_rel("other version", "forward", "ja"),
+                    work_rel("medley", "backward", "other"),
+                ] })
+                .to_string(),
+            ),
+            (
+                work_rels_api_url("ja"),
+                json!({ "title": "Say So (Japanese Version)", "relations": [] }).to_string(),
+            ),
+            (
+                work_rels_api_url("other"),
+                json!({ "title": "Other", "relations": [] }).to_string(),
+            ),
+        ])?;
+
+        let works = ["ja", "orig", "other"].map(String::from);
+        let songs = group_into_songs(&client, &works).await;
+        assert_eq!(
+            songs,
+            vec![
+                vec!["ja".to_string(), "orig".to_string()],
+                vec!["other".to_string()],
+            ]
+        );
         Ok(())
     }
 }

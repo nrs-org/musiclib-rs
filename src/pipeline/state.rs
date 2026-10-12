@@ -296,7 +296,12 @@ fn specific_data_bytes(d: &EntrySpecificData) -> usize {
         EntrySpecificData::Track {
             duration_ms,
             positions,
-        } => duration_ms.len() * 8 + positions.keys().map(|k| k.len() + 32).sum::<usize>(),
+            songs,
+        } => {
+            duration_ms.len() * 8
+                + positions.keys().map(|k| k.len() + 32).sum::<usize>()
+                + songs.iter().flatten().map(|w| w.len() + 24).sum::<usize>()
+        }
         EntrySpecificData::Release { release_type, .. } => {
             release_type.as_ref().map_or(0, |s| s.len()) + 24
         }

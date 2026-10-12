@@ -133,6 +133,7 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                 specific_data: EntrySpecificData::Track {
                     duration_ms: duration_ms.into_iter().collect(),
                     positions: Default::default(),
+                    songs: vec![],
                 },
                 children: vec![Arc::new(CachedChildSource::from_children(vec![ChildRef {
                     entry_type: EntryType::Artist,

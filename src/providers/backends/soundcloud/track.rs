@@ -74,6 +74,7 @@ impl TrackResponse {
                     .into_iter()
                     .collect(),
                 positions: Default::default(),
+                songs: vec![],
             },
             children: vec![Arc::new(CachedChildSource::from_children(vec![artist_ref]))],
             aliases: vec![Alias {

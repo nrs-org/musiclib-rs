@@ -1340,6 +1340,7 @@ mod tests {
                 specific_data: EntrySpecificData::Track {
                     duration_ms: vec![180_000],
                     positions: Default::default(),
+                    songs: vec![],
                 },
                 children: vec![],
                 aliases: vec![],

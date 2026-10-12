@@ -263,11 +263,26 @@ pub async fn get_recording(
                             .map(|w| (w.id.clone(), rel.attributes.iter().any(|a| a == "cover")))
                     })
                     .collect();
+                let mut works: Vec<String> =
+                    work_relations.iter().map(|(id, _)| id.clone()).collect();
+                works.sort_unstable();
+                works.dedup();
 
                 let client = client.clone();
                 let extra = r.extra.clone();
 
                 async move {
+                    let songs = work::group_into_songs(&client, &works).await;
+                    // An edition means "the same song". A recording performing
+                    // several songs (karaoke stream, medley) is a container of
+                    // songs, so it is never a cover/arrangement of any one of
+                    // them: linking it to every song's original would merge all
+                    // of those songs into one edition group.
+                    let work_relations = if songs.len() > 1 {
+                        Vec::new()
+                    } else {
+                        work_relations
+                    };
                     let mut original_refs: Vec<ChildRef> = Vec::new();
                     if resolve_original_recordings {
                         for (rec_id, title) in remix_targets {
@@ -326,6 +341,7 @@ pub async fn get_recording(
                         specific_data: EntrySpecificData::Track {
                             duration_ms,
                             positions: Default::default(),
+                            songs,
                         },
                         children,
                         aliases,
@@ -537,6 +553,10 @@ mod tests {
         )
         .await?;
 
+        assert!(matches!(
+            rec.specific_data,
+            EntrySpecificData::Track { ref songs, .. } if songs == &vec![vec![work_mbid.to_string()]]
+        ));
         // [0] = artist children (empty here), [1] = original-recording children.
         assert_eq!(rec.children.len(), 2);
         let mut cursor = rec.children[1].owned_cursor();
@@ -562,6 +582,51 @@ mod tests {
             )]
         );
 
+        Ok(())
+    }
+
+    /// A recording that performs several songs (a karaoke stream, a medley)
+    /// is a container of songs, not a cover of any one of them: it records
+    /// its songs but resolves no originals. The mock has no `work/` routes,
+    /// so the works can't be grouped and count as separate songs, and an
+    /// original lookup would fail the test's child expectations.
+    #[tokio::test]
+    async fn test_multi_work_recording_resolves_no_originals() -> anyhow::Result<()> {
+        let mbid = "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391";
+        let mut recording: serde_json::Value =
+            serde_json::from_str(include_str!("./recording_king_cover.json"))?;
+        let relations = recording["relations"]
+            .as_array_mut()
+            .expect("fixture has relations");
+        let mut second = relations
+            .iter()
+            .find(|r| r["target-type"] == "work")
+            .expect("fixture performs a work")
+            .clone();
+        second["work"]["id"] = "11111111-2222-3333-4444-555555555555".into();
+        second["work"]["title"] = "Another Song".into();
+        relations.push(second);
+
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route_json::<RecordingResponse>(
+            Method::GET,
+            &recording_api_url(mbid),
+            Box::leak(recording.to_string().into_boxed_str()),
+        );
+        let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
+        let rec = get_recording(
+            &client,
+            &format!("https://musicbrainz.org/recording/{mbid}"),
+            false,
+            true,
+        )
+        .await?;
+
+        assert!(matches!(
+            rec.specific_data,
+            EntrySpecificData::Track { ref songs, .. } if songs.len() == 2
+        ));
+        assert_eq!(rec.children.len(), 1, "no original-recording children");
         Ok(())
     }
 

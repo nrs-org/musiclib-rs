@@ -97,9 +97,17 @@ mod entry_source {
         /// Supersedes `duration_ms` when present; `duration_ms` holds only the
         /// first element for backward compatibility.
         pub duration_ms_all: Option<String>,
+        /// JSON object of track facts that have no column of their own:
+        /// `{"songs": [[<MusicBrainz work MBID>, ...], ...]}` for a recording
+        /// that performs at least one work (see
+        /// `EntrySpecificData::Track::songs`). NULL when there are none.
+        pub track_extra: Option<String>,
         // Release-specific
         pub release_type: Option<String>,
         pub num_discs: Option<i32>,
+        /// For a release, its track count. For a track, the number of songs it
+        /// performs, when known: 2+ marks a multi-song recording such as a
+        /// karaoke stream (see `track_extra`).
         pub num_tracks: Option<i32>,
         // ReleaseGroup-specific
         pub primary_type: Option<String>,
@@ -339,7 +347,9 @@ pub const FACET_OF: &str = "facet_of";
 /// alternate playback sources. Deliberately does not include
 /// `release_variant` / `in_release_group` / `same_artist` — those relate
 /// different entities (releases, artists), not alternate takes of one
-/// track. See `build_edition_projection`.
+/// track — nor `medley`: an edition means "the same song", and a medley is
+/// several songs, so grouping through it would merge them all into one row
+/// (`docs/plan-multi-work-recordings.md`). See `build_edition_projection`.
 pub const EDITION_KINDS: &[&str] = &[
     DERIVED_FROM,
     "alt_version",
@@ -347,7 +357,6 @@ pub const EDITION_KINDS: &[&str] = &[
     "remix",
     "instrumental",
     "cover",
-    "medley",
     "arrangement",
 ];
 
@@ -762,8 +771,42 @@ fn source_row_from_model(m: entry_source::Model) -> SourceRow {
         release_type: m.release_type,
         primary_type: m.primary_type,
         release_date: m.release_date,
+        songs: songs_from_track_extra(m.track_extra.as_deref()),
         fetched_at: m.fetched_at,
     }
+}
+
+/// The `songs` array of an `entry_source.track_extra` value.
+pub fn songs_from_track_extra(track_extra: Option<&str>) -> Vec<Vec<String>> {
+    track_extra
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|v| serde_json::from_value(v.get("songs")?.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Merges per-pair song groups into the distinct songs of one entry: groups
+/// sharing a work are the same song. Canonical (sorted) so callers can
+/// compare results.
+pub fn merge_songs(groups: impl IntoIterator<Item = Vec<String>>) -> Vec<Vec<String>> {
+    let mut merged: Vec<BTreeSet<String>> = Vec::new();
+    for group in groups {
+        let mut song: BTreeSet<String> = group.into_iter().collect();
+        merged.retain(|other| {
+            if other.is_disjoint(&song) {
+                true
+            } else {
+                song.extend(other.iter().cloned());
+                false
+            }
+        });
+        merged.push(song);
+    }
+    let mut songs: Vec<Vec<String>> = merged
+        .into_iter()
+        .map(|s| s.into_iter().collect())
+        .collect();
+    songs.sort_unstable();
+    songs
 }
 
 fn contrib_row_from_model(m: contribution::Model) -> ContribRow {
@@ -1362,6 +1405,32 @@ impl MusicDb {
         .collect())
     }
 
+    /// Those of `entry_ids` whose pairs together perform more than one song
+    /// (see `merge_songs`): karaoke streams and medleys, including a stream
+    /// video merged with per-song MusicBrainz recordings that each link to
+    /// it. Such an entry is a container of songs, never an edition of one.
+    pub async fn multi_song_entries(&self, entry_ids: &[i64]) -> Result<HashSet<i64>, Error> {
+        let rows = chunked_id_query(entry_ids, |chunk| {
+            entry_source::Entity::find()
+                .filter(entry_source::Column::EntryId.is_in(chunk.iter().copied()))
+                .filter(entry_source::Column::TrackExtra.is_not_null())
+                .all(&self.db)
+        })
+        .await?;
+        let mut songs_by_entry: HashMap<i64, Vec<Vec<String>>> = HashMap::new();
+        for row in rows {
+            songs_by_entry
+                .entry(row.entry_id)
+                .or_default()
+                .extend(songs_from_track_extra(row.track_extra.as_deref()));
+        }
+        Ok(songs_by_entry
+            .into_iter()
+            .filter(|(_, groups)| merge_songs(groups.clone()).len() > 1)
+            .map(|(id, _)| id)
+            .collect())
+    }
+
     /// Entry ids with at least one alias containing `query` (case-insensitive
     /// substring match), ranked by `entry_alias_fts`'s bm25 score (best match
     /// first). Backed by the trigram-tokenized FTS index (see `new`), so a
@@ -1771,8 +1840,11 @@ impl MusicDb {
             .as_secs() as i64;
 
         let (durations, release_type, num_discs, num_tracks, primary_type) = match specific_data {
-            EntrySpecificData::Track { duration_ms, .. } => {
-                (duration_ms.as_slice(), None, None, None, None)
+            EntrySpecificData::Track {
+                duration_ms, songs, ..
+            } => {
+                let num_songs = (!songs.is_empty()).then_some(songs.len() as i32);
+                (duration_ms.as_slice(), None, None, num_songs, None)
             }
             EntrySpecificData::Release {
                 release_type,
@@ -1783,6 +1855,12 @@ impl MusicDb {
                 (&[][..], None, None, None, primary_type.clone())
             }
             EntrySpecificData::Artist => (&[][..], None, None, None, None),
+        };
+        let track_extra = match specific_data {
+            EntrySpecificData::Track { songs, .. } if !songs.is_empty() => {
+                Some(serde_json::json!({ "songs": songs }).to_string())
+            }
+            _ => None,
         };
         let duration_ms = durations.first().copied();
         let duration_ms_all = if durations.len() > 1 {
@@ -1799,6 +1877,7 @@ impl MusicDb {
             fetched_at: Set(Some(now)),
             duration_ms: Set(duration_ms),
             duration_ms_all: Set(duration_ms_all),
+            track_extra: Set(track_extra),
             release_type: Set(release_type),
             num_discs: Set(num_discs),
             num_tracks: Set(num_tracks),
@@ -1816,6 +1895,7 @@ impl MusicDb {
                 entry_source::Column::FetchedAt,
                 entry_source::Column::DurationMs,
                 entry_source::Column::DurationMsAll,
+                entry_source::Column::TrackExtra,
                 entry_source::Column::ReleaseType,
                 entry_source::Column::NumDiscs,
                 entry_source::Column::NumTracks,
@@ -2840,6 +2920,9 @@ pub struct SourceRow {
     pub release_type: Option<String>,
     pub primary_type: Option<String>,
     pub release_date: Option<String>,
+    /// The songs a track performs, from `track_extra` (see
+    /// `EntrySpecificData::Track::songs`); empty when unknown.
+    pub songs: Vec<Vec<String>>,
     /// NULL for a stub: a pair only ever seen in some listing, never fetched.
     pub fetched_at: Option<i64>,
 }
@@ -3106,6 +3189,7 @@ mod tests {
                 &EntrySpecificData::Track {
                     duration_ms: vec![],
                     positions: Default::default(),
+                    songs: vec![],
                 },
                 Some(run_id),
             )
@@ -3539,6 +3623,55 @@ mod tests {
         }
     }
 
+    /// A track's songs (as MusicBrainz works) land in `track_extra`, and
+    /// their count in `num_tracks`; a track with no works leaves both NULL.
+    #[tokio::test]
+    async fn upsert_pair_stores_track_works_and_song_count() {
+        let mdb = mem_db().await;
+        let entry = mdb.insert_entry(None).await.unwrap();
+        let track = |songs: Vec<Vec<String>>| EntrySpecificData::Track {
+            duration_ms: vec![],
+            positions: Default::default(),
+            songs,
+        };
+        mdb.upsert_pair(
+            "musicbrainz",
+            "stream",
+            entry,
+            None,
+            &track(vec![
+                vec!["w1".to_string(), "w1-ja".to_string()],
+                vec!["w2".to_string()],
+            ]),
+            None,
+        )
+        .await
+        .unwrap();
+        mdb.upsert_pair("youtube", "plain", entry, None, &track(vec![]), None)
+            .await
+            .unwrap();
+
+        let row = |id: &'static str| {
+            let db = &mdb.db;
+            async move {
+                entry_source::Entity::find()
+                    .filter(entry_source::Column::Identifier.eq(id))
+                    .one(db)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let stream = row("stream").await;
+        assert_eq!(stream.num_tracks, Some(2));
+        assert_eq!(
+            stream.track_extra.as_deref(),
+            Some(r#"{"songs":[["w1","w1-ja"],["w2"]]}"#)
+        );
+        let plain = row("plain").await;
+        assert_eq!((plain.num_tracks, plain.track_extra), (None, None));
+    }
+
     #[tokio::test]
     async fn search_entry_ids_by_alias_matches_substring_case_insensitively() {
         let mdb = mem_db().await;
@@ -3551,6 +3684,7 @@ mod tests {
             &EntrySpecificData::Track {
                 duration_ms: vec![],
                 positions: Default::default(),
+                songs: vec![],
             },
             None,
         )
@@ -3569,6 +3703,7 @@ mod tests {
             &EntrySpecificData::Track {
                 duration_ms: vec![],
                 positions: Default::default(),
+                songs: vec![],
             },
             None,
         )
@@ -3610,6 +3745,7 @@ mod tests {
             &EntrySpecificData::Track {
                 duration_ms: vec![],
                 positions: Default::default(),
+                songs: vec![],
             },
             None,
         )
@@ -3637,6 +3773,7 @@ mod tests {
             &EntrySpecificData::Track {
                 duration_ms: vec![],
                 positions: Default::default(),
+                songs: vec![],
             },
             None,
         )
@@ -3655,6 +3792,7 @@ mod tests {
             &EntrySpecificData::Track {
                 duration_ms: vec![],
                 positions: Default::default(),
+                songs: vec![],
             },
             None,
         )
@@ -3708,6 +3846,7 @@ mod tests {
                 fetched_at: Set(Some(0)),
                 duration_ms: Set(None),
                 duration_ms_all: Set(None),
+                track_extra: Set(None),
                 release_type: Set(None),
                 num_discs: Set(None),
                 num_tracks: Set(None),

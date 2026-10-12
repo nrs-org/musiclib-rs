@@ -146,6 +146,7 @@ pub async fn get_track(client: &SpotifyClient, url: &str) -> Result<EntityResult
             specific_data: EntrySpecificData::Track {
                 duration_ms: vec![t.duration_ms],
                 positions: [(SOURCE.into(), position.clone().unwrap())].into(),
+                songs: vec![],
             },
             children: vec![
                 Arc::new(CachedChildSource::from_children(artist_refs)),

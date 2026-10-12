@@ -140,6 +140,7 @@ fn entry_to_entity_result(entry: LocalEntry, base: &std::path::Path) -> EntityRe
         crate::providers::types::EntryType::Track => EntrySpecificData::Track {
             duration_ms: entry.duration_ms.into_iter().collect(),
             positions: Default::default(),
+            songs: vec![],
         },
         crate::providers::types::EntryType::Release => EntrySpecificData::Release {
             release_type: entry.release_type,

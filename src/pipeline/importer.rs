@@ -457,6 +457,7 @@ mod tests {
                     EntrySpecificData::Track {
                         duration_ms: vec![],
                         positions: Default::default(),
+                        songs: vec![],
                     },
                     vec![],
                 ),
@@ -589,6 +590,7 @@ mod tests {
             let track = EntrySpecificData::Track {
                 duration_ms: vec![],
                 positions: Default::default(),
+                songs: vec![],
             };
             let (specific_data, children) = match identifier {
                 "artist" => (
