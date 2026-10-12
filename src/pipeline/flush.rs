@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::musicdb::{MusicDb, PROVIDER_ORIGIN};
 use crate::providers::FetchProvider;
+use crate::providers::std_values::{StandardProviderKeys, normalize_isrc};
 use crate::providers::types::EntryType;
 use tracing::{debug, info, warn};
 
@@ -639,6 +640,9 @@ fn reconcile_type(members: &[Pair], metadata: &HashMap<Pair, PairMetadata>) -> O
 /// Canonicalize a pair via the first provider that recognises it; identity if
 /// none do (the pair is then stored verbatim as a stub).
 pub(crate) async fn canonicalize_pair(providers: &[Arc<dyn FetchProvider>], pair: &Pair) -> Pair {
+    if pair.0 == StandardProviderKeys::ISRC {
+        return (pair.0.clone(), normalize_isrc(&pair.1));
+    }
     for provider in providers {
         if let Some(c) = provider.canonicalize(&pair.0, &pair.1).await {
             return (c.canonical_source_key.into_owned(), c.canonical_identifier);
@@ -728,6 +732,17 @@ mod tests {
 
     fn p(s: &str) -> Pair {
         ("x".to_string(), s.to_string())
+    }
+
+    /// ISRCs are stored in one case whatever the provider returned, so a
+    /// lower-case Spotify ISRC and its MB recording share a dedup key.
+    #[tokio::test]
+    async fn canonicalize_pair_normalizes_isrc() {
+        let pair = ("isrc".to_string(), "ushm21927082".to_string());
+        assert_eq!(
+            canonicalize_pair(&[], &pair).await,
+            ("isrc".to_string(), "USHM21927082".to_string())
+        );
     }
 
     /// Two anchors chained through an unclaimed shared node stay in separate
