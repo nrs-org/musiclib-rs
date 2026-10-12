@@ -19,8 +19,8 @@ use crate::pipeline::embedding::{
 
 use crate::http::{HeaderName, HeaderValue, HttpClient, Method, Request as HttpRequest};
 use crate::musicdb::{
-    AliasRow, ChildRow, ContribRow, IdentityJudgment, MusicDb, NewDedupFeedback, PROVIDER_ORIGIN,
-    RelationRow, SoftIdentityProjection, SourceRow,
+    AliasRow, ChildRow, ContribRow, EDITION_KINDS, IdentityJudgment, MusicDb, NewDedupFeedback,
+    PROVIDER_ORIGIN, RelationRow, SoftIdentityProjection, SourceRow, merge_songs,
 };
 use crate::pipeline::dedup::DedupConfig;
 use crate::providers::FetchProvider;
@@ -49,6 +49,10 @@ pub struct EntryInfo {
     pub release_dates: Vec<String>,
     pub release_types: Vec<String>,
     pub primary_types: Vec<String>,
+    /// For tracks: the distinct songs its sources perform, each as its
+    /// MusicBrainz works (`musicdb::merge_songs`); empty when unknown. 2+
+    /// marks a container of songs (karaoke stream, medley).
+    pub songs: Vec<Vec<String>>,
     /// For tracks/releases: entry IDs of credited artists.
     /// For artists: entry IDs of items this artist is credited on.
     pub peer_entry_ids: Vec<i64>,
@@ -1744,6 +1748,7 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
                 .filter_map(|s| s.primary_type.clone())
                 .collect(),
         );
+        let songs = merge_songs(sources.iter().flat_map(|s| s.songs.iter().cloned()));
 
         // Collect every (source, name, primary) alias, then canonicalize. The
         // canonical order (clean sources first) is what lets pick_main_title /
@@ -1787,6 +1792,7 @@ async fn build_entry_infos(db: &MusicDb) -> anyhow::Result<HashMap<i64, EntryInf
             release_dates,
             release_types,
             primary_types,
+            songs,
             peer_entry_ids,
             track_positions,
             child_entry_ids,
@@ -1965,6 +1971,7 @@ pub async fn entry_infos_by_ids(
                 .filter_map(|s| s.primary_type.clone())
                 .collect(),
         );
+        let songs = merge_songs(sources.iter().flat_map(|s| s.songs.iter().cloned()));
 
         let mut sourced_aliases: Vec<(String, String, bool)> = Vec::new();
         for (src, id) in &pairs {
@@ -2007,6 +2014,7 @@ pub async fn entry_infos_by_ids(
                 release_dates,
                 release_types,
                 primary_types,
+                songs,
                 peer_entry_ids,
                 track_positions,
                 child_entry_ids,
@@ -2767,6 +2775,55 @@ fn resolve_derived_side(extra: &mut serde_json::Value, ea_id: i64, eb_id: i64) {
     obj.insert("source_entry".to_string(), serde_json::json!(source));
 }
 
+/// A track longer than this is a stream or a long mix, not one song.
+const LONG_FORM_MS: i64 = 20 * 60 * 1000;
+
+/// Why an edition-kind relation between `a` and `b` would break "an edition
+/// means the same song" (`docs/plan-multi-work-recordings.md`), or `None`
+/// when it's plausible. Enforced on every script's verdict, since a single
+/// wrong edition edge merges two songs' whole edition groups.
+///
+/// Deliberately no duration-ratio rule: shorts, TV-size cuts, rehearsal takes
+/// and extended mixes are legitimately several times shorter or longer than
+/// the song they're an edition of. Only containers of songs are refused.
+fn edition_guard(a: &EntryInfo, b: &EntryInfo) -> Option<String> {
+    [a, b]
+        .into_iter()
+        .filter(|e| e.entry_type == "track")
+        .find_map(|e| {
+            if e.songs.len() > 1 {
+                Some(format!("entry {} is a multi-song recording", e.entry_id))
+            } else if e.durations.iter().any(|&d| d > LONG_FORM_MS) {
+                Some(format!("entry {} is long-form", e.entry_id))
+            } else {
+                None
+            }
+        })
+}
+
+/// Enabled heuristic/Jev edition-kind relations that break `edition_guard`,
+/// with the reason. For repairing rows written before the guard existed;
+/// provider and manual rows are left to their owners.
+pub async fn edition_guard_violations(db: &MusicDb) -> anyhow::Result<Vec<(RelationRow, String)>> {
+    let entries = build_entry_infos(db).await?;
+    let mut violations = Vec::new();
+    for relation in db.edition_relations().await? {
+        if !relation.enabled || !matches!(relation.origin.as_str(), "heuristic" | "jev") {
+            continue;
+        }
+        let (Some(a), Some(b)) = (
+            entries.get(&relation.entry_a),
+            entries.get(&relation.entry_b),
+        ) else {
+            continue;
+        };
+        if let Some(why) = edition_guard(a, b) {
+            violations.push((relation, why));
+        }
+    }
+    Ok(violations)
+}
+
 /// Emit one candidate pair's console log and apply its verdict's DB write
 /// when `apply_relates` is set. Returns the verdict so the caller can write
 /// its CSV row and bump per-type stats.
@@ -2779,11 +2836,22 @@ async fn apply_candidate(
     config: &SoftMatchConfig,
 ) -> anyhow::Result<Verdict> {
     let Scored {
-        verdict,
+        mut verdict,
         origin,
         model_version,
         ..
     } = scored;
+
+    if let Verdict::Relate { kind, .. } = &verdict
+        && EDITION_KINDS.contains(&kind.as_str())
+        && let Some(why) = edition_guard(ea, eb)
+    {
+        info!(
+            "Dropped {kind} relation between entry {} and {}: {why}",
+            ea.entry_id, eb.entry_id
+        );
+        verdict = Verdict::Distinct;
+    }
 
     match &verdict {
         Verdict::Distinct | Verdict::Defer { .. } => {}
@@ -3178,6 +3246,34 @@ async fn open_embed_cache(
 mod tests {
     use super::*;
 
+    fn track_entry(id: i64, durations: Vec<i64>, num_songs: usize) -> EntryInfo {
+        EntryInfo {
+            entry_type: "track".to_string(),
+            songs: (0..num_songs).map(|i| vec![format!("work-{i}")]).collect(),
+            ..titled_entry(id, "Song", "musicbrainz", durations)
+        }
+    }
+
+    #[test]
+    fn edition_guard_rejects_only_containers_of_songs() {
+        let song = track_entry(1, vec![173_000], 1);
+        let cover = track_entry(2, vec![172_000], 0);
+        assert_eq!(edition_guard(&song, &cover), None);
+
+        let stream = track_entry(3, vec![], 7);
+        assert!(edition_guard(&song, &stream).is_some(), "multi-song");
+
+        let long = track_entry(4, vec![15_843_000], 0);
+        assert!(edition_guard(&long, &song).is_some(), "long-form");
+
+        let short = track_entry(5, vec![33_000], 0);
+        assert_eq!(
+            edition_guard(&song, &short),
+            None,
+            "a #shorts cut is still the song"
+        );
+    }
+
     /// Build a release-group entry carrying a single primary alias `title` on
     /// source `src`, with the given durations.
     fn titled_entry(id: i64, title: &str, src: &str, durations: Vec<i64>) -> EntryInfo {
@@ -3192,6 +3288,7 @@ mod tests {
             release_dates: vec![],
             release_types: vec![],
             primary_types: vec![],
+            songs: vec![],
             peer_entry_ids: vec![],
             track_positions: vec![],
             child_entry_ids: vec![],
