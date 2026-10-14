@@ -1,6 +1,6 @@
 mod types;
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 
@@ -13,6 +13,7 @@ use crate::providers::{
     },
 };
 
+use crate::providers::registry::canonicalize;
 use crate::providers::std_values::StandardProviderKeys;
 use types::{LocalChild, LocalEntry};
 
@@ -52,6 +53,15 @@ pub fn to_local_url(path: &std::path::Path) -> String {
     format!("local://{}", path.display())
 }
 
+/// The pair an existing entry file at `url` is stored under, as
+/// `canonicalize` gives it: its absolute path. Relative paths resolve
+/// against the CWD. `None` for anything but a readable `local://` file.
+pub fn canonical_pair(url: &str) -> Option<(String, String)> {
+    let abs = std::fs::canonicalize(parse_local_url(url)?).ok()?;
+    abs.is_file()
+        .then(|| (SOURCE.to_string(), to_local_url(&abs)))
+}
+
 fn match_local_url(url: &str, base_dir: &std::path::Path) -> Option<PathBuf> {
     let path = parse_local_url(url)?;
     if path.is_absolute() {
@@ -80,27 +90,31 @@ fn build_sources(raw: &std::collections::HashMap<String, Vec<String>>) -> Extern
     sources
 }
 
+/// A child's source as an imported pair. Paths (relative ones and
+/// `local://` URLs) resolve against the base file's directory and are
+/// normalized, so a file reached from several entries is one pair; a
+/// provider URL takes its canonical pair, so it meets that provider's own
+/// entry. Anything else stays as written.
+fn child_pair(key: &str, value: &str, base: &std::path::Path) -> (String, String) {
+    let rel = value.strip_prefix("local://").unwrap_or(value);
+    if rel.starts_with('/') || rel.starts_with('.') || !value.contains("://") {
+        let joined = base.join(rel);
+        let path = std::fs::canonicalize(&joined).unwrap_or(joined);
+        return (SOURCE.to_string(), to_local_url(&path));
+    }
+    match canonicalize(value) {
+        Some(c) => (c.canonical_source_key.into_owned(), c.canonical_identifier),
+        None => (key.to_string(), value.to_string()),
+    }
+}
+
 fn build_child_ref(child: &LocalChild, base: &std::path::Path) -> ChildRef {
     let mut sources = ExternalSources::default();
     for (k, vs) in &child.sources {
-        let resolved: HashSet<String> = vs
-            .iter()
-            .map(|v| {
-                // Resolve relative paths and local:// paths relative to the
-                // base file's directory.
-                let rel = v.strip_prefix("local://").unwrap_or(v.as_str());
-                if rel.starts_with('/') || rel.starts_with('.') || !v.contains("://") {
-                    to_local_url(&base.join(rel))
-                } else {
-                    v.clone()
-                }
-            })
-            .collect();
-        sources
-            .0
-            .entry(k.clone().into())
-            .or_default()
-            .extend(resolved);
+        for v in vs {
+            let (key, id) = child_pair(k, v, base);
+            sources.0.entry(key.into()).or_default().insert(id);
+        }
     }
 
     let contributions = child
@@ -129,7 +143,7 @@ fn build_child_ref(child: &LocalChild, base: &std::path::Path) -> ChildRef {
         appears_on: false,
         position,
         contributions,
-        original_relation_kind: None,
+        original_relation_kind: child.relation.clone().map(Into::into),
     }
 }
 
@@ -334,6 +348,33 @@ mod tests {
             .expect("expected third child");
         assert_eq!(third.entry_type, EntryType::Track);
         assert_eq!(third.position.as_ref().map(|p| p.track_no), Some(2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_child_original_and_normalized_paths() -> anyhow::Result<()> {
+        let parody = fetch("parody.yaml");
+        let mut children = parody.children[0].cursor();
+
+        // `../fixtures/artist.yaml` is the same file as `./artist.yaml`.
+        let (artist, _) = child_next(&mut children).await?.expect("expected artist");
+        let artist_ids = artist.sources.get("local").unwrap();
+        let expected = to_local_url(&std::fs::canonicalize(fixture_path("artist.yaml"))?);
+        assert_eq!(artist_ids.iter().next(), Some(&expected));
+
+        // A provider URL takes its canonical pair, and the relation carries over.
+        let (original, _) = child_next(&mut children).await?.expect("expected original");
+        assert_eq!(original.original_relation_kind.as_deref(), Some("cover"));
+        let canonical =
+            crate::providers::registry::canonicalize("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+                .expect("youtube URLs canonicalize");
+        let ids = original
+            .sources
+            .get(canonical.canonical_source_key.as_ref())
+            .expect("keyed by the canonical source");
+        assert!(ids.contains(&canonical.canonical_identifier));
+        assert!(original.sources.get("url").is_none());
 
         Ok(())
     }

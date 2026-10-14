@@ -49,6 +49,10 @@ pub struct LocalChild {
     pub position: Option<LocalTrackPosition>,
     #[serde(default)]
     pub contributions: Vec<LocalContribution>,
+    /// Set when this child is the original the entry is a `relation` of
+    /// (`cover`, `remix`, `arrangement`, ...); see
+    /// `ChildRef::original_relation_kind`.
+    pub relation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

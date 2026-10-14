@@ -1,0 +1,14 @@
+type: track
+aliases:
+  - name: My Parody
+    primary: true
+children:
+  - type: artist
+    name: Local Artist
+    sources:
+      local: ["../fixtures/artist.yaml"]
+  - type: track
+    name: Original Song
+    sources:
+      url: ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"]
+    relation: cover

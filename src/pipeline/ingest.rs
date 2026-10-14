@@ -12,7 +12,7 @@ use crate::{
     http::Activity,
     musicdb::MusicDb,
     providers::{
-        FetchProvider, registry::canonicalize as canonicalize_raw,
+        FetchProvider, backends::local, registry::canonicalize as canonicalize_raw,
         std_values::StandardProviderKeys, types::EntryFetchOptionsPool,
     },
 };
@@ -160,6 +160,8 @@ pub async fn ingest_entries(
         .map(|url| {
             canonicalize_raw(url)
                 .map(|c| (c.canonical_source_key.into_owned(), c.canonical_identifier))
+                // Local files canonicalize outside the URL registry.
+                .or_else(|| local::canonical_pair(url))
                 .unwrap_or_else(|| (StandardProviderKeys::UNKNOWN_URL.to_string(), url.clone()))
         })
         .collect();
