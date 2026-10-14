@@ -210,7 +210,8 @@ fn summary_json(entry: &EntrySummary, extras: &SummaryExtras) -> Value {
 /// soft-linked duplicates folded (a Discogs master and its MusicBrainz
 /// release group are one), so every pressing and listing of an album
 /// shares it; else `ed:` and its edition siblings (`EntrySummary::editions`)
-/// when it has any. Other kinds have none.
+/// when it has any. A release group gets its own `rg:` key, so it groups
+/// with its releases. Other kinds have none.
 async fn edition_groups(
     state: &Arc<AppState>,
     entries: &[&EntrySummary],
@@ -259,6 +260,18 @@ async fn edition_groups(
     };
 
     let mut out = HashMap::new();
+    for group in entries.iter().filter(|e| e.entry_type == "release_group") {
+        let least = group
+            .soft_linked_ids
+            .iter()
+            .copied()
+            .chain([group.entry_id])
+            .min();
+        out.insert(
+            group.entry_id,
+            format!("rg:{}", least.unwrap_or(group.entry_id)),
+        );
+    }
     for release in releases {
         let own: HashSet<(&str, &str)> = release
             .sources
