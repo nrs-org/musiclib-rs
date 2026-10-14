@@ -1,0 +1,8 @@
+type: track
+aliases:
+  - name: Demo Song
+    primary: true
+children:
+  - type: artist
+    sources:
+      local: ["local://demo/artist/singer"]

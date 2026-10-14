@@ -12,7 +12,7 @@ use crate::{
     http::Activity,
     musicdb::MusicDb,
     providers::{
-        FetchProvider, backends::local, registry::canonicalize as canonicalize_raw,
+        FetchProvider, registry::canonicalize as canonicalize_raw,
         std_values::StandardProviderKeys, types::EntryFetchOptionsPool,
     },
 };
@@ -155,16 +155,31 @@ pub async fn ingest_entries(
     // we can look up its entry_id after flush, regardless of whether flush
     // wrote it under the canonical pair or (no provider recognised it) the raw
     // one.
-    let lookup_pairs: Vec<(String, String)> = urls
-        .iter()
-        .map(|url| {
-            canonicalize_raw(url)
+    let mut lookup_pairs: Vec<(String, String)> = Vec::with_capacity(urls.len());
+    for url in &urls {
+        let canonical = match canonicalize_raw(url) {
+            Some(c) => Some(c),
+            // Some providers (e.g. local files) canonicalize outside the
+            // URL registry.
+            None => {
+                let mut found = None;
+                for provider in providers.iter() {
+                    found = provider
+                        .canonicalize(StandardProviderKeys::UNKNOWN_URL, url)
+                        .await;
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                found
+            }
+        };
+        lookup_pairs.push(
+            canonical
                 .map(|c| (c.canonical_source_key.into_owned(), c.canonical_identifier))
-                // Local files canonicalize outside the URL registry.
-                .or_else(|| local::canonical_pair(url))
-                .unwrap_or_else(|| (StandardProviderKeys::UNKNOWN_URL.to_string(), url.clone()))
-        })
-        .collect();
+                .unwrap_or_else(|| (StandardProviderKeys::UNKNOWN_URL.to_string(), url.clone())),
+        );
+    }
 
     let run_id = db.start_import_run().await?;
 

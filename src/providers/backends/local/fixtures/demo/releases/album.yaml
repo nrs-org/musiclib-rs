@@ -1,0 +1,13 @@
+type: release
+aliases:
+  - name: Demo Album
+    primary: true
+children:
+  - type: artist
+    sources:
+      local: ["local://demo/artist/singer"]
+  - type: track
+    sources:
+      local: ["../tracks/song.yaml"]
+    position:
+      track_no: 1

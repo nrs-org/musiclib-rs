@@ -1,6 +1,9 @@
 mod types;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 
@@ -28,6 +31,12 @@ impl Provider {
     pub fn new(base_dir: std::path::PathBuf) -> Self {
         Self { base_dir }
     }
+
+    fn resolver(&self) -> Resolver<'_> {
+        Resolver {
+            base_dir: &self.base_dir,
+        }
+    }
 }
 
 impl TryDefault for Provider {
@@ -40,34 +49,102 @@ impl TryDefault for Provider {
     }
 }
 
-/// Parse a `local://` URL into a filesystem path.
+/// Parse a `local://` URL into a filesystem path, without resolving
+/// namespaces (see `Resolver`).
 ///
 /// - `local:///absolute/path.yaml` → `/absolute/path.yaml`
-/// - `local://relative/path.yaml`  → `relative/path.yaml` (relative to CWD)
+/// - `local://relative/path.yaml`  → `relative/path.yaml`
 pub fn parse_local_url(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("local://")?;
     Some(PathBuf::from(rest))
 }
 
-pub fn to_local_url(path: &std::path::Path) -> String {
+pub fn to_local_url(path: &Path) -> String {
     format!("local://{}", path.display())
 }
 
-/// The pair an existing entry file at `url` is stored under, as
-/// `canonicalize` gives it: its absolute path. Relative paths resolve
-/// against the CWD. `None` for anything but a readable `local://` file.
-pub fn canonical_pair(url: &str) -> Option<(String, String)> {
-    let abs = std::fs::canonicalize(parse_local_url(url)?).ok()?;
-    abs.is_file()
-        .then(|| (SOURCE.to_string(), to_local_url(&abs)))
+/// Each entry kind's name in a namespaced URL and its directory in a
+/// namespace.
+const KIND_DIRS: [(&str, &str); 4] = [
+    ("artist", "artists"),
+    ("release_group", "release_groups"),
+    ("release", "releases"),
+    ("track", "tracks"),
+];
+
+/// Where local entries live and what they are called.
+///
+/// Every directory directly under `base_dir` (symlinks followed) is a
+/// *namespace*: `local://<ns>/<kind>/<id>` names the file
+/// `<base_dir>/<ns>/<kind>s/<id>.yaml`, e.g. `local://ctbgd/track/kitto` is
+/// `ctbgd/tracks/kitto.yaml`. A file in a namespace is always identified by
+/// that URL, however it was reached, so an entry keeps its identity when
+/// the files move. Any other file is identified by its absolute path
+/// (`local:///abs/path.yaml`); relative paths resolve against `base_dir`.
+struct Resolver<'a> {
+    base_dir: &'a Path,
 }
 
-fn match_local_url(url: &str, base_dir: &std::path::Path) -> Option<PathBuf> {
-    let path = parse_local_url(url)?;
-    if path.is_absolute() {
-        Some(path)
-    } else {
-        Some(base_dir.join(path))
+impl Resolver<'_> {
+    /// The file `url` names. Relative paths resolve against `relative_to`.
+    fn file_of(&self, url: &str, relative_to: &Path) -> Option<PathBuf> {
+        let rest = url.strip_prefix("local://").unwrap_or(url);
+        if rest.starts_with('/') {
+            return Some(PathBuf::from(rest));
+        }
+        if let Some(file) = self.namespaced_file(rest) {
+            return Some(file);
+        }
+        Some(relative_to.join(rest))
+    }
+
+    /// `<ns>/<kind>/<id>` as a file, when that file exists.
+    fn namespaced_file(&self, rest: &str) -> Option<PathBuf> {
+        let mut parts = rest.splitn(3, '/');
+        let (ns, kind, id) = (parts.next()?, parts.next()?, parts.next()?);
+        if ns.is_empty() || id.is_empty() || id.contains('/') {
+            return None;
+        }
+        let (_, dir) = KIND_DIRS.iter().find(|(name, _)| *name == kind)?;
+        let file = self.base_dir.join(ns).join(dir).join(format!("{id}.yaml"));
+        file.is_file().then_some(file)
+    }
+
+    /// The URL identifying `file`: namespaced when it sits in a namespace,
+    /// else its absolute path.
+    fn url_of(&self, file: &Path) -> String {
+        let abs = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        self.namespaced_url(&abs)
+            .unwrap_or_else(|| to_local_url(&abs))
+    }
+
+    fn namespaced_url(&self, abs: &Path) -> Option<String> {
+        for ns in std::fs::read_dir(self.base_dir).ok()?.flatten() {
+            let name = ns.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(root) = std::fs::canonicalize(ns.path()) else {
+                continue;
+            };
+            if !root.is_dir() {
+                continue;
+            }
+            let Ok(rel) = abs.strip_prefix(&root) else {
+                continue;
+            };
+            let mut parts = rel.iter().map(|p| p.to_string_lossy());
+            let (Some(dir), Some(file), None) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            let Some((kind, _)) = KIND_DIRS.iter().find(|(_, d)| *d == dir) else {
+                continue;
+            };
+            if let Some(id) = file.strip_suffix(".yaml") {
+                return Some(format!("local://{name}/{kind}/{id}"));
+            }
+        }
+        None
     }
 }
 
@@ -90,17 +167,16 @@ fn build_sources(raw: &std::collections::HashMap<String, Vec<String>>) -> Extern
     sources
 }
 
-/// A child's source as an imported pair. Paths (relative ones and
-/// `local://` URLs) resolve against the base file's directory and are
-/// normalized, so a file reached from several entries is one pair; a
-/// provider URL takes its canonical pair, so it meets that provider's own
-/// entry. Anything else stays as written.
-fn child_pair(key: &str, value: &str, base: &std::path::Path) -> (String, String) {
-    let rel = value.strip_prefix("local://").unwrap_or(value);
-    if rel.starts_with('/') || rel.starts_with('.') || !value.contains("://") {
-        let joined = base.join(rel);
-        let path = std::fs::canonicalize(&joined).unwrap_or(joined);
-        return (SOURCE.to_string(), to_local_url(&path));
+/// A child's source as an imported pair. Local files (paths and `local://`
+/// URLs, relative ones from the base file's directory) take the URL that
+/// identifies them (`Resolver::url_of`), so a file reached from several
+/// entries is one pair; a provider URL takes its canonical pair, so it
+/// meets that provider's own entry. Anything else stays as written.
+fn child_pair(key: &str, value: &str, base: &Path, resolver: &Resolver<'_>) -> (String, String) {
+    if (value.starts_with("local://") || !value.contains("://"))
+        && let Some(file) = resolver.file_of(value, base)
+    {
+        return (SOURCE.to_string(), resolver.url_of(&file));
     }
     match canonicalize(value) {
         Some(c) => (c.canonical_source_key.into_owned(), c.canonical_identifier),
@@ -108,11 +184,11 @@ fn child_pair(key: &str, value: &str, base: &std::path::Path) -> (String, String
     }
 }
 
-fn build_child_ref(child: &LocalChild, base: &std::path::Path) -> ChildRef {
+fn build_child_ref(child: &LocalChild, base: &Path, resolver: &Resolver<'_>) -> ChildRef {
     let mut sources = ExternalSources::default();
     for (k, vs) in &child.sources {
         for v in vs {
-            let (key, id) = child_pair(k, v, base);
+            let (key, id) = child_pair(k, v, base, resolver);
             sources.0.entry(key.into()).or_default().insert(id);
         }
     }
@@ -147,7 +223,11 @@ fn build_child_ref(child: &LocalChild, base: &std::path::Path) -> ChildRef {
     }
 }
 
-fn entry_to_entity_result(entry: LocalEntry, base: &std::path::Path) -> EntityResult<()> {
+fn entry_to_entity_result(
+    entry: LocalEntry,
+    base: &Path,
+    resolver: &Resolver<'_>,
+) -> EntityResult<()> {
     let sources = build_sources(&entry.sources);
 
     let specific_data = match entry.entry_type {
@@ -182,7 +262,7 @@ fn entry_to_entity_result(entry: LocalEntry, base: &std::path::Path) -> EntityRe
     let children = entry
         .children
         .iter()
-        .map(|c| build_child_ref(c, base))
+        .map(|c| build_child_ref(c, base, resolver))
         .collect::<Vec<_>>();
 
     EntityResult {
@@ -201,13 +281,15 @@ impl CanonicalizeProvider for Provider {
         if source_key != StandardProviderKeys::UNKNOWN_URL && source_key != SOURCE {
             return None;
         }
-        let path = match_local_url(identifier, &self.base_dir)?;
-        // Canonicalize path to absolute to ensure stable identifiers.
-        let abs = std::fs::canonicalize(&path).ok()?;
-        let entry = read_entry(&abs).ok()?;
+        if !identifier.starts_with("local://") {
+            return None;
+        }
+        let resolver = self.resolver();
+        let path = resolver.file_of(identifier, &self.base_dir)?;
+        let entry = read_entry(&path).ok()?;
         Some(CanonicalizeResult {
             canonical_source_key: SOURCE.into(),
-            canonical_identifier: to_local_url(&abs),
+            canonical_identifier: resolver.url_of(&path),
             entry_type: entry.entry_type,
             external_type: EXTERNAL_TYPE_ENTRY.into(),
         })
@@ -226,11 +308,13 @@ impl FetchProvider for Provider {
         if source_key != SOURCE {
             return Err(Error::UnsupportedSourceKey(source_key.to_string()));
         }
-        let path = match_local_url(identifier, &self.base_dir)
+        let resolver = self.resolver();
+        let path = resolver
+            .file_of(identifier, &self.base_dir)
             .ok_or_else(|| Error::InvalidUrl(identifier.to_string()))?;
         let entry = read_entry(&path)?;
-        let base = path.parent().unwrap_or(std::path::Path::new("."));
-        let result = entry_to_entity_result(entry, base);
+        let base = path.parent().unwrap_or(Path::new("."));
+        let result = entry_to_entity_result(entry, base, &resolver);
 
         let children = result
             .children
@@ -263,6 +347,8 @@ mod tests {
 
     use crate::providers::types::{ChildSource, EntrySpecificData, EntryType, child_next};
 
+    use crate::providers::CanonicalizeProvider;
+
     use super::{entry_to_entity_result, read_entry, to_local_url};
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -275,7 +361,8 @@ mod tests {
         let path = fixture_path(name);
         let entry = read_entry(&path).expect("read_entry failed");
         let base = path.parent().unwrap();
-        entry_to_entity_result(entry, base)
+        let provider = fixtures_provider();
+        entry_to_entity_result(entry, base, &provider.resolver())
     }
 
     fn fixtures_provider() -> super::Provider {
@@ -380,11 +467,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_namespaced_urls_identify_files_in_a_namespace() -> anyhow::Result<()> {
+        let provider = fixtures_provider();
+        let song = fixture_path("demo/tracks/song.yaml");
+        let absolute = to_local_url(&std::fs::canonicalize(&song)?);
+        for query in [
+            "local://demo/track/song",
+            absolute.as_str(),
+            "local://demo/tracks/song.yaml",
+        ] {
+            let c = provider
+                .canonicalize(super::SOURCE, query)
+                .await
+                .unwrap_or_else(|| panic!("{query} should canonicalize"));
+            assert_eq!(c.canonical_identifier, "local://demo/track/song", "{query}");
+            assert_eq!(c.entry_type, EntryType::Track);
+        }
+        // Outside a namespace, a file keeps its absolute path.
+        let outside = provider
+            .canonicalize(super::SOURCE, "local://track.yaml")
+            .await
+            .expect("relative to base_dir");
+        assert!(outside.canonical_identifier.starts_with("local:///"));
+        assert!(
+            provider
+                .canonicalize(super::SOURCE, "local://demo/track/nope")
+                .await
+                .is_none()
+        );
+        assert!(
+            provider
+                .canonicalize(super::SOURCE, "https://example.com")
+                .await
+                .is_none()
+        );
+
+        // Children resolve to the same identifiers, by URL or relative path.
+        let album = fetch("demo/releases/album.yaml");
+        let mut children = album.children[0].cursor();
+        let mut ids = Vec::new();
+        while let Some((child, _)) = child_next(&mut children).await? {
+            ids.extend(child.sources.get("local").unwrap().iter().cloned());
+        }
+        ids.sort();
+        assert_eq!(
+            ids,
+            ["local://demo/artist/singer", "local://demo/track/song"]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_local_url_resolution() -> anyhow::Result<()> {
         let base = fixture_path("release.yaml");
         let base_dir = base.parent().unwrap();
         let entry = read_entry(&base).expect("read_entry failed");
-        let result = entry_to_entity_result(entry, base_dir);
+        let provider = fixtures_provider();
+        let result = entry_to_entity_result(entry, base_dir, &provider.resolver());
 
         // The local:// child sources should be resolved to absolute paths.
         let mut cursor = result.children[0].cursor();

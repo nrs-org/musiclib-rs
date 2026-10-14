@@ -85,11 +85,25 @@ point them at the same URL.
 
 #### `local`
 
-Resolves `local://` URIs to files on disk.
+Resolves `local://` URIs to YAML entry files on disk.
 
 | Field | Type | Notes |
 |---|---|---|
-| `base_dir` | path? | Base directory for relative `local://` paths. Defaults to CWD. |
+| `base_dir` | path? | Directory holding the namespaces; relative `local://` paths resolve against it too. Defaults to CWD. |
+
+Every directory directly under `base_dir` (a symlink works) is a
+**namespace**. `local://<ns>/<kind>/<id>` names the file
+`<base_dir>/<ns>/<kind>s/<id>.yaml`, where `<kind>` is `artist`,
+`release_group`, `release` or `track`: `local://ctbgd/track/kitto` is
+`<base_dir>/ctbgd/tracks/kitto.yaml`. A file inside a namespace is always
+stored under its namespaced URL, however it was referenced (by that URL, by
+absolute path, or by a path relative to another entry file), so its identity
+survives moving the files. Any other file is identified by its absolute path,
+`local:///abs/path.yaml`.
+
+In an entry file, a child's `relation` (`cover`, `remix`, `arrangement`, ...)
+marks it as the original the entry derives from; child URLs from other
+providers are canonicalized, so they meet that provider's own entries.
 
 ### Full example
 
