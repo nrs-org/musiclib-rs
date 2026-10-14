@@ -146,8 +146,10 @@ async fn lookup(state: &Arc<AppState>, params: &HashMap<String, String>) -> Hype
 }
 
 /// Sources by how canonical their URLs are for binding, best first; any
-/// other source with an http(s) identifier ranks after these.
+/// other source with a URL identifier ranks after these. A local entry is
+/// its file, so its `local://` URL comes first.
 const URL_PRIORITY: &[&str] = &[
+    "local",
     "musicbrainz",
     "vgmdb",
     "spotify",
@@ -181,9 +183,9 @@ fn summary_json(entry: &EntrySummary, extras: &SummaryExtras) -> Value {
     let subtitle = extras.subtitles.get(&entry.entry_id);
     let mut urls: Vec<&SourceRef> = Vec::new();
     for source in &entry.sources {
-        if source.identifier.starts_with("http")
-            && !urls.iter().any(|u| u.identifier == source.identifier)
-        {
+        let is_url =
+            source.identifier.starts_with("http") || source.identifier.starts_with("local://");
+        if is_url && !urls.iter().any(|u| u.identifier == source.identifier) {
             urls.push(source);
         }
     }
@@ -539,10 +541,13 @@ async fn tracklist_json(state: &Arc<AppState>, entry_id: i64) -> anyhow::Result<
     Ok(json!(rows))
 }
 
-/// `contains` suggestions: a release's tracks, first position first
-/// (`outgoing`), and with `directions=both` also the releases listing a
-/// track (`incoming`, see `appearances`). Other kinds suggest nothing.
-/// Each embeds its target's entry summary.
+/// Suggestions, each embedding its target's entry summary:
+/// - `contains`: a release's tracks, first position first (`outgoing`),
+///   and with `directions=both` also the releases listing a track
+///   (`incoming`, see `appearances`);
+/// - `remix`: the originals an entry is a cover, remix or arrangement of
+///   (`incoming`: NRS remix relations run from the source to the derived
+///   work; see `originals`), NRS's one kind for derived works.
 async fn suggest_relations(
     state: &Arc<AppState>,
     store_id: &str,
@@ -568,22 +573,41 @@ async fn suggest_relations(
         Ok(None) => return respond::not_found(),
         Err(e) => return internal(e),
     };
-    let mut found: Vec<(&str, i64, TrackPosition)> = tracks
+    // (kind, direction, target, confidence, evidence)
+    let mut found: Vec<(&str, &str, i64, f64, String)> = tracks
         .iter()
-        .map(|t| ("outgoing", t.entry_id, t.position))
+        .map(|t| {
+            (
+                "contains",
+                "outgoing",
+                t.entry_id,
+                1.0,
+                position_evidence(t.position),
+            )
+        })
         .collect();
     if incoming {
         match appearances(state, entry_id).await {
-            Ok(releases) => found.extend(
-                releases
-                    .into_iter()
-                    .map(|(id, position)| ("incoming", id, position)),
-            ),
+            Ok(releases) => found.extend(releases.into_iter().map(|(id, position)| {
+                ("contains", "incoming", id, 1.0, position_evidence(position))
+            })),
             Err(e) => return internal(e),
         }
     }
+    match originals(state, entry_id).await {
+        Ok(originals) => found.extend(originals.into_iter().map(|(id, kind, confidence)| {
+            (
+                "remix",
+                "incoming",
+                id,
+                confidence,
+                format!("musiclib {kind}"),
+            )
+        })),
+        Err(e) => return internal(e),
+    }
 
-    let target_ids: Vec<i64> = found.iter().map(|&(_, id, _)| id).collect();
+    let target_ids: Vec<i64> = found.iter().map(|&(_, _, id, _, _)| id).collect();
     let targets = match entry_summaries(&state.db, &target_ids).await {
         Ok(s) => s,
         Err(e) => return internal(e),
@@ -595,23 +619,71 @@ async fn suggest_relations(
     };
     let suggestions: Vec<_> = found
         .into_iter()
-        .map(|(direction, id, position)| {
-            let evidence = match position {
-                (Some(d), Some(t)) => format!("tracklist disc {d} track {t}"),
-                (None, Some(t)) => format!("tracklist track {t}"),
-                _ => "tracklist".to_string(),
-            };
+        .map(|(kind, direction, id, confidence, evidence)| {
             json!({
-                "kind": "contains",
+                "kind": kind,
                 "direction": direction,
                 "target_store_id": id.to_string(),
                 "target": targets.get(&id).map(|t| summary_json(t, &extras)),
-                "confidence": 1.0,
+                "confidence": confidence,
                 "evidence": evidence,
             })
         })
         .collect();
     respond::json(StatusCode::OK, json!({ "suggestions": suggestions }))
+}
+
+fn position_evidence(position: TrackPosition) -> String {
+    match position {
+        (Some(d), Some(t)) => format!("tracklist disc {d} track {t}"),
+        (None, Some(t)) => format!("tracklist track {t}"),
+        _ => "tracklist".to_string(),
+    }
+}
+
+/// Musiclib relation kinds that make an entry a derived work of another.
+const DERIVED_KINDS: [&str; 3] = ["cover", "remix", "arrangement"];
+
+/// The entries `entry_id` (or a soft-linked duplicate of it) is a derived
+/// work of, as `(original, kind, confidence)`: enabled `DERIVED_KINDS`
+/// relations whose `extra` names it the derived side.
+async fn originals(
+    state: &Arc<AppState>,
+    entry_id: i64,
+) -> anyhow::Result<Vec<(i64, String, f64)>> {
+    let summaries = entry_summaries(&state.db, &[entry_id]).await?;
+    let Some(entry) = summaries.get(&entry_id) else {
+        return Ok(Vec::new());
+    };
+    let own: HashSet<i64> = entry
+        .soft_linked_ids
+        .iter()
+        .copied()
+        .chain([entry_id])
+        .collect();
+    let mut out: Vec<(i64, String, f64)> = Vec::new();
+    for row in state.db.relations_around(entry_id).await? {
+        if !row.enabled || !DERIVED_KINDS.contains(&row.kind.as_str()) {
+            continue;
+        }
+        let Some(extra) = row
+            .extra
+            .as_deref()
+            .and_then(|e| serde_json::from_str::<Value>(e).ok())
+        else {
+            continue;
+        };
+        let (Some(derived), Some(source)) = (
+            extra["derived_entry"].as_i64(),
+            extra["source_entry"].as_i64(),
+        ) else {
+            continue;
+        };
+        if own.contains(&derived) && !own.contains(&source) && !out.iter().any(|o| o.0 == source) {
+            out.push((source, row.kind, row.confidence));
+        }
+    }
+    Ok(out)
 }
 
 /// The releases listing a track, each at its earliest position there (see
