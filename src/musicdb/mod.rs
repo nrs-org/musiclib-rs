@@ -2697,6 +2697,95 @@ impl MusicDb {
         .collect())
     }
 
+    /// The entry holding a pair whose identifier is exactly `identifier`,
+    /// under any source (the first source by name when several share it),
+    /// returned with that pair's source.
+    pub async fn find_entry_by_identifier(
+        &self,
+        identifier: &str,
+    ) -> Result<Option<(String, i64)>, Error> {
+        Ok(entry_source::Entity::find()
+            .filter(entry_source::Column::Identifier.eq(identifier))
+            .order_by_asc(entry_source::Column::Source)
+            .one(&self.db)
+            .await?
+            .map(|m| (m.source, m.entry_id)))
+    }
+
+    /// Every pair of `entry_id` (by source, then identifier) with its own
+    /// first duration and its aliases in insertion order. The store
+    /// protocol's `resolve` exposes these so a client can prefer the pair it
+    /// bound over the entry as a whole.
+    pub async fn entry_pair_facts(&self, entry_id: i64) -> Result<Vec<PairFacts>, Error> {
+        let sources = entry_source::Entity::find()
+            .filter(entry_source::Column::EntryId.eq(entry_id))
+            .order_by_asc(entry_source::Column::Source)
+            .order_by_asc(entry_source::Column::Identifier)
+            .all(&self.db)
+            .await?;
+        let pairs: Vec<(String, String)> = sources
+            .iter()
+            .map(|s| (s.source.clone(), s.identifier.clone()))
+            .collect();
+        let mut aliases = chunked_pair_query(&pairs, |chunk| {
+            entry_alias::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    entry_alias::Column::Source,
+                    entry_alias::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?;
+        aliases.sort_by_key(|a| a.id);
+        let mut by_pair: HashMap<(String, String), Vec<PairAlias>> = HashMap::new();
+        for a in aliases {
+            by_pair
+                .entry((a.source, a.identifier))
+                .or_default()
+                .push(PairAlias {
+                    id: a.id,
+                    name: a.name,
+                    primary: a.primary,
+                });
+        }
+        Ok(sources
+            .into_iter()
+            .map(|s| PairFacts {
+                aliases: by_pair
+                    .remove(&(s.source.clone(), s.identifier.clone()))
+                    .unwrap_or_default(),
+                source: s.source,
+                identifier: s.identifier,
+                duration_ms: s.duration_ms,
+            })
+            .collect())
+    }
+
+    /// Each of `pairs`' own best alias: primary first, then the oldest.
+    /// Pairs without any alias are absent.
+    pub async fn pair_titles(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<HashMap<(String, String), String>, Error> {
+        let mut aliases = chunked_pair_query(pairs, |chunk| {
+            entry_alias::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    entry_alias::Column::Source,
+                    entry_alias::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?;
+        aliases.sort_by_key(|a| (!a.primary, a.id));
+        let mut out = HashMap::new();
+        for a in aliases {
+            out.entry((a.source, a.identifier)).or_insert(a.name);
+        }
+        Ok(out)
+    }
+
     /// contribution rows whose *track* pair is one of `pairs` (indexed).
     pub async fn contrib_rows_for_track_pairs(
         &self,
@@ -2925,6 +3014,22 @@ pub struct SourceRow {
     pub songs: Vec<Vec<String>>,
     /// NULL for a stub: a pair only ever seen in some listing, never fetched.
     pub fetched_at: Option<i64>,
+}
+
+/// One pair of an entry, as `MusicDb::entry_pair_facts` returns it.
+pub struct PairFacts {
+    pub source: String,
+    pub identifier: String,
+    /// The pair's first known duration (`entry_source.duration_ms`).
+    pub duration_ms: Option<i64>,
+    /// Ascending `id`, i.e. insertion order.
+    pub aliases: Vec<PairAlias>,
+}
+
+pub struct PairAlias {
+    pub id: i64,
+    pub name: String,
+    pub primary: bool,
 }
 
 pub struct AliasRow {

@@ -128,7 +128,7 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
 
     #[cfg(feature = "store_protocol")]
     if store_protocol::handles(&path) {
-        return Ok(store_protocol::route(&state, &method, &path, body).await);
+        return Ok(store_protocol::route(&state, &method, &path, &query, body).await);
     }
     #[cfg(feature = "player")]
     if player::handles(&path) {
@@ -195,8 +195,10 @@ async fn main() -> anyhow::Result<()> {
     let activity = HttpActivityClient::new(http);
 
     let providers = build_providers(&registry_config, activity.clone())?;
+    // No providers still serves the library read-only (`resolve`, `lookup`,
+    // the player API); only ingesting needs one.
     if providers.is_empty() {
-        anyhow::bail!("No providers available -- check your credential env vars");
+        tracing::warn!("No providers available (no credentials?) -- ingest is disabled");
     }
     info!("Loaded {} provider(s)", providers.len());
     let providers = Arc::new(providers);

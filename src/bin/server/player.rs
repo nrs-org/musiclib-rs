@@ -33,7 +33,7 @@ use serde_json::json;
 use crate::{
     entries::{component_members, dedupe_by_edition, entry_summaries, entry_summaries_with},
     fetch_options,
-    respond::{self, HyperResponse},
+    respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
 
@@ -167,22 +167,6 @@ fn frontend() -> HyperResponse {
         .header("Cache-Control", "no-cache")
         .body(http_body_util::Full::new(body))
         .expect("response builder")
-}
-
-fn parse_query(query: &str) -> HashMap<String, String> {
-    query
-        .split('&')
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| {
-            let mut it = p.splitn(2, '=');
-            let k = it.next()?;
-            let v = it.next().unwrap_or("");
-            Some((
-                urlencoding::decode(k).ok()?.into_owned(),
-                urlencoding::decode(v).ok()?.into_owned(),
-            ))
-        })
-        .collect()
 }
 
 /// `(embed_url, capabilities)` for a source this player can actually mount an

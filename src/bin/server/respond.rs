@@ -2,6 +2,8 @@
 //! `src/bin/ytdlp_server.rs` (no framework — see that file for the
 //! request-handling loop this binary's `main.rs` mirrors).
 
+use std::collections::HashMap;
+
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
@@ -39,6 +41,23 @@ pub fn error(status: StatusCode, code: &str, message: &str) -> HyperResponse {
 
 pub fn not_found() -> HyperResponse {
     error(StatusCode::NOT_FOUND, "not_found", "no such resource")
+}
+
+/// Percent-decoded `key=value` pairs of a query string (later keys win).
+pub fn parse_query(query: &str) -> HashMap<String, String> {
+    query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| {
+            let mut it = p.splitn(2, '=');
+            let k = it.next()?;
+            let v = it.next().unwrap_or("");
+            Some((
+                urlencoding::decode(k).ok()?.into_owned(),
+                urlencoding::decode(v).ok()?.into_owned(),
+            ))
+        })
+        .collect()
 }
 
 pub fn method_not_allowed() -> HyperResponse {
