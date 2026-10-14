@@ -815,6 +815,8 @@ fn contrib_row_from_model(m: contribution::Model) -> ContribRow {
         identifier: m.identifier,
         artist_source: m.artist_source,
         artist_identifier: m.artist_identifier,
+        role: m.role,
+        main_artist: m.main_artist,
     }
 }
 
@@ -1441,6 +1443,18 @@ impl MusicDb {
         query: &str,
         limit: usize,
     ) -> Result<Vec<i64>, Error> {
+        self.search_entry_ids_by_alias_of_type(query, None, limit)
+            .await
+    }
+
+    /// `search_entry_ids_by_alias`, keeping only entries whose `entry_type`
+    /// is `entry_type` when one is given.
+    pub async fn search_entry_ids_by_alias_of_type(
+        &self,
+        query: &str,
+        entry_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<i64>, Error> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
@@ -1450,7 +1464,7 @@ impl MusicDb {
         // rather than silently dropping short queries.
         if trimmed.chars().count() < 3 {
             return self
-                .search_entry_ids_by_alias_substring(trimmed, limit)
+                .search_entry_ids_by_alias_substring(trimmed, entry_type, limit)
                 .await;
         }
         let phrase = format!("\"{}\"", trimmed.replace('"', "\"\""));
@@ -1460,11 +1474,12 @@ impl MusicDb {
              FROM entry_alias_fts \
              JOIN entry_alias ea ON ea.id = entry_alias_fts.rowid \
              JOIN entry_source es ON es.source = ea.source AND es.identifier = ea.identifier \
-             WHERE entry_alias_fts MATCH ? \
+             JOIN entry e ON e.id = es.entry_id \
+             WHERE entry_alias_fts MATCH ? AND (?2 IS NULL OR e.entry_type = ?2) \
              GROUP BY es.entry_id \
              ORDER BY MIN(entry_alias_fts.rank) \
-             LIMIT ?",
-            [phrase.into(), (limit as i64).into()],
+             LIMIT ?3",
+            [phrase.into(), entry_type.into(), (limit as i64).into()],
         );
         self.db
             .query_all_raw(stmt)
@@ -1480,6 +1495,7 @@ impl MusicDb {
     async fn search_entry_ids_by_alias_substring(
         &self,
         query: &str,
+        entry_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<i64>, Error> {
         let pattern = format!(
@@ -1494,9 +1510,10 @@ impl MusicDb {
             "SELECT DISTINCT es.entry_id AS entry_id \
              FROM entry_alias ea \
              JOIN entry_source es ON es.source = ea.source AND es.identifier = ea.identifier \
-             WHERE ea.name LIKE ? ESCAPE '\\' \
-             LIMIT ?",
-            [pattern.into(), (limit as i64).into()],
+             JOIN entry e ON e.id = es.entry_id \
+             WHERE ea.name LIKE ? ESCAPE '\\' AND (?2 IS NULL OR e.entry_type = ?2) \
+             LIMIT ?3",
+            [pattern.into(), entry_type.into(), (limit as i64).into()],
         );
         self.db
             .query_all_raw(stmt)
@@ -3045,6 +3062,8 @@ pub struct ContribRow {
     pub identifier: String,
     pub artist_source: String,
     pub artist_identifier: String,
+    pub role: String,
+    pub main_artist: bool,
 }
 
 /// A contribution's identity under its parent pair: (artist pair, role,
@@ -3836,6 +3855,64 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn search_entry_ids_by_alias_of_type_keeps_that_type() {
+        let mdb = mem_db().await;
+        let track = mdb.insert_entry(Some(EntryType::Track)).await.unwrap();
+        mdb.upsert_pair(
+            "youtube",
+            "v1",
+            track,
+            None,
+            &EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: Default::default(),
+                songs: vec![],
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        mdb.insert_aliases_for_pair("youtube", "v1", &[alias("Fervor")], None)
+            .await
+            .unwrap();
+        let release = mdb.insert_entry(Some(EntryType::Release)).await.unwrap();
+        mdb.upsert_pair(
+            "spotify",
+            "a1",
+            release,
+            None,
+            &EntrySpecificData::Release {
+                release_type: None,
+                num_discs: None,
+                num_tracks: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        mdb.insert_aliases_for_pair("spotify", "a1", &[alias("Fervor")], None)
+            .await
+            .unwrap();
+
+        // The FTS path and the short-query LIKE fallback.
+        for query in ["fervor", "fe"] {
+            let mut all = mdb
+                .search_entry_ids_by_alias_of_type(query, None, 10)
+                .await
+                .unwrap();
+            all.sort();
+            assert_eq!(all, vec![track, release], "{query}");
+            assert_eq!(
+                mdb.search_entry_ids_by_alias_of_type(query, Some("release"), 10)
+                    .await
+                    .unwrap(),
+                vec![release],
+                "{query}"
+            );
+        }
     }
 
     #[tokio::test]

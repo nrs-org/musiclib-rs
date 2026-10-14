@@ -4,14 +4,15 @@
 //! plain localhost HTTP — never in-process — so musiclib-rs stays a portable
 //! service rather than a Cargo-workspace dependency.
 //!
-//! Implements: capability negotiation, `resolve`, `lookup`, `ingest` (as a
-//! job, per spec §7), the generic job resource, and `suggest_relations`,
-//! which proposes `contains` for a release's tracklist. Credits are not
-//! mapped to NRS relation kinds yet. `ingest` is reported unsupported when
-//! the server started without any provider (no credentials).
+//! Implements: capability negotiation, `resolve`, `lookup`, `search`,
+//! `ingest` (as a job, per spec §7), the generic job resource, and
+//! `suggest_relations`, which proposes `contains` between a release and its
+//! tracks, in both directions. Credits are not mapped to NRS relation kinds
+//! yet. `ingest` is reported unsupported when the server started without any
+//! provider (no credentials).
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -19,14 +20,14 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use musiclib_rs::{
     musicdb::PairFacts, pipeline::ingest::ingest_entry, providers::registry::canonicalize,
 };
 
 use crate::{
-    entries::entry_summaries,
+    entries::{EntrySummary, SourceRef, entry_summaries},
     respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
@@ -48,17 +49,18 @@ pub async fn route(
     match (method, rest) {
         (&Method::GET, "/capabilities") => capabilities(state),
         (&Method::GET, "/lookup") => lookup(state, &parse_query(query)).await,
+        (&Method::GET, "/search") => search(state, &parse_query(query)).await,
         (&Method::GET, p) if p.starts_with("/entries/") => {
             let p = &p["/entries/".len()..];
             match p.strip_suffix("/suggested-relations") {
-                Some(id) => suggest_relations(state, id).await,
+                Some(id) => suggest_relations(state, id, &parse_query(query)).await,
                 None => resolve(state, p).await,
             }
         }
         (&Method::POST, "/ingest") => ingest(state, body).await,
         (&Method::GET, p) if p.starts_with("/jobs/") => job_status(state, &p["/jobs/".len()..]),
         (&Method::DELETE, p) if p.starts_with("/jobs/") => job_cancel(state, &p["/jobs/".len()..]),
-        (_, "/capabilities" | "/lookup" | "/ingest") => respond::method_not_allowed(),
+        (_, "/capabilities" | "/lookup" | "/search" | "/ingest") => respond::method_not_allowed(),
         _ => respond::not_found(),
     }
 }
@@ -68,10 +70,11 @@ fn capabilities(state: &Arc<AppState>) -> HyperResponse {
         StatusCode::OK,
         json!({
             "store": "musiclib",
-            "protocol_version": "0.2",
+            "protocol_version": "0.3",
             "operations": {
                 "resolve": true,
                 "lookup": true,
+                "search": true,
                 "ingest": !state.providers.is_empty(),
                 "suggest_relations": true,
             },
@@ -142,6 +145,187 @@ async fn lookup(state: &Arc<AppState>, params: &HashMap<String, String>) -> Hype
     }
 }
 
+/// Sources by how canonical their URLs are for binding, best first; any
+/// other source with an http(s) identifier ranks after these.
+const URL_PRIORITY: &[&str] = &[
+    "musicbrainz",
+    "vgmdb",
+    "spotify",
+    "youtube",
+    "nicovideo",
+    "soundcloud",
+    "discogs",
+];
+
+/// The protocol's entry summary (spec §5) of `entry`. `title` and `urls`
+/// span its soft-identity component, as `entry_summaries` does, so a client
+/// recognizes the entry under any duplicate's URL.
+fn summary_json(entry: &EntrySummary, subtitle: Option<&String>) -> Value {
+    let mut urls: Vec<&SourceRef> = Vec::new();
+    for source in &entry.sources {
+        if source.identifier.starts_with("http")
+            && !urls.iter().any(|u| u.identifier == source.identifier)
+        {
+            urls.push(source);
+        }
+    }
+    let canonical = urls.iter().min_by_key(|u| {
+        let rank = URL_PRIORITY
+            .iter()
+            .position(|&s| s == u.source)
+            .unwrap_or(URL_PRIORITY.len());
+        (rank, u.identifier.as_str())
+    });
+    json!({
+        "store_id": entry.entry_id.to_string(),
+        "title": entry.title.clone().unwrap_or_default(),
+        "kind": entry.entry_type,
+        "subtitle": subtitle,
+        "release_date": entry.release_date,
+        "canonical_url": canonical.map(|u| &u.identifier),
+        "urls": urls.iter().map(|u| &u.identifier).collect::<Vec<_>>(),
+    })
+}
+
+/// Each non-artist entry's main artists, comma-joined: its `listed_artist`
+/// credits, else its other main-artist credits (a YouTube uploader). Only
+/// credits naming an artist entry count; some release credits name a
+/// recording or release instead.
+async fn artist_subtitles(
+    state: &Arc<AppState>,
+    entries: &[&EntrySummary],
+) -> anyhow::Result<HashMap<i64, String>> {
+    let db = &state.db;
+    let credited: Vec<&EntrySummary> = entries
+        .iter()
+        .copied()
+        .filter(|e| e.entry_type != "artist")
+        .collect();
+    let pairs: Vec<(String, String)> = credited
+        .iter()
+        .flat_map(|e| &e.sources)
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let contribs: Vec<_> = db
+        .contrib_rows_for_track_pairs(&pairs)
+        .await?
+        .into_iter()
+        .filter(|c| c.main_artist)
+        .collect();
+    let artist_pairs: Vec<(String, String)> = contribs
+        .iter()
+        .map(|c| (c.artist_source.clone(), c.artist_identifier.clone()))
+        .collect();
+    let artist_of_pair: HashMap<(String, String), i64> = db
+        .source_rows_for_pairs(&artist_pairs)
+        .await?
+        .into_iter()
+        .map(|s| ((s.source, s.identifier), s.entry_id))
+        .collect();
+    let candidate_ids: Vec<i64> = artist_of_pair.values().copied().collect();
+    let artist_ids: Vec<i64> = db
+        .entry_rows_by_ids(&candidate_ids)
+        .await?
+        .into_iter()
+        .filter(|e| e.entry_type == "artist")
+        .map(|e| e.id)
+        .collect();
+    let artists = entry_summaries(db, &artist_ids).await?;
+
+    let mut out = HashMap::new();
+    for entry in credited {
+        let own: HashSet<(&str, &str)> = entry
+            .sources
+            .iter()
+            .map(|s| (s.source.as_str(), s.identifier.as_str()))
+            .collect();
+        let names_for = |listed: bool| {
+            let mut names: Vec<&str> = Vec::new();
+            for c in &contribs {
+                if !own.contains(&(c.source.as_str(), c.identifier.as_str()))
+                    || (c.role == "listed_artist") != listed
+                {
+                    continue;
+                }
+                let name = artist_of_pair
+                    .get(&(c.artist_source.clone(), c.artist_identifier.clone()))
+                    .and_then(|id| artists.get(id))
+                    .and_then(|a| a.title.as_deref());
+                if let Some(name) = name.filter(|n| !names.contains(n)) {
+                    names.push(name);
+                }
+            }
+            names
+        };
+        let mut names = names_for(true);
+        if names.is_empty() {
+            names = names_for(false);
+        }
+        if !names.is_empty() {
+            out.insert(entry.entry_id, names.join(", "));
+        }
+    }
+    Ok(out)
+}
+
+/// Default and maximum `search` result counts.
+const SEARCH_LIMIT: (usize, usize) = (20, 100);
+
+/// Entries with an alias matching `q`, best first, optionally of one `kind`
+/// (`entry_type`). Soft-linked duplicates are one result, under the
+/// best-ranked of their ids; edition siblings (a track and its instrumental)
+/// stay separate, unlike the player's search.
+async fn search(state: &Arc<AppState>, params: &HashMap<String, String>) -> HyperResponse {
+    let q = params.get("q").map(|q| q.trim()).unwrap_or_default();
+    let kind = params
+        .get("kind")
+        .map(String::as_str)
+        .filter(|k| !k.is_empty());
+    let limit = match params.get("limit") {
+        None => SEARCH_LIMIT.0,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) => n.clamp(1, SEARCH_LIMIT.1),
+            Err(_) => {
+                return respond::error(StatusCode::BAD_REQUEST, "invalid_input", "bad limit");
+            }
+        },
+    };
+    // Over-fetch: duplicates fold away below.
+    let raw = match state
+        .db
+        .search_entry_ids_by_alias_of_type(q, kind, limit * 2)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => return internal(e),
+    };
+    let summaries = match entry_summaries(&state.db, &raw).await {
+        Ok(s) => s,
+        Err(e) => return internal(e),
+    };
+    let mut covered = HashSet::new();
+    let hits: Vec<&EntrySummary> = raw
+        .iter()
+        .filter_map(|id| summaries.get(id))
+        .filter(|s| {
+            let new = !covered.contains(&s.entry_id);
+            covered.insert(s.entry_id);
+            covered.extend(s.soft_linked_ids.iter().copied());
+            new
+        })
+        .take(limit)
+        .collect();
+    let subtitles = match artist_subtitles(state, &hits).await {
+        Ok(s) => s,
+        Err(e) => return internal(e),
+    };
+    let results: Vec<Value> = hits
+        .iter()
+        .map(|s| summary_json(s, subtitles.get(&s.entry_id)))
+        .collect();
+    respond::json(StatusCode::OK, json!({ "results": results }))
+}
+
 /// A pair's own best alias: primary first, then the oldest.
 fn pair_title(pair: &PairFacts) -> Option<&str> {
     pair.aliases
@@ -205,17 +389,14 @@ async fn resolve(state: &Arc<AppState>, store_id: &str) -> HyperResponse {
             Err(e) => return internal(e),
         }
     }
-    respond::json(
-        StatusCode::OK,
-        json!({
-            "store_id": entry_id.to_string(),
-            "title": entry.title,
-            "kind": entry.entry_type,
-            "cover_url": null,
-            "release_date": entry.release_date,
-            "extra": extra,
-        }),
-    )
+    let subtitles = match artist_subtitles(state, &[entry]).await {
+        Ok(subtitles) => subtitles,
+        Err(e) => return internal(e),
+    };
+    let mut body = summary_json(entry, subtitles.get(&entry_id));
+    body["cover_url"] = Value::Null;
+    body["extra"] = extra;
+    respond::json(StatusCode::OK, body)
 }
 
 /// A release's tracks in order, each as the release lists it: the listed
@@ -249,36 +430,149 @@ async fn tracklist_json(state: &Arc<AppState>, entry_id: i64) -> anyhow::Result<
     Ok(json!(rows))
 }
 
-/// A release's tracklist as `contains` suggestions: every track entry one of
-/// its pairs lists as a child, first position first. Other kinds suggest
-/// nothing.
-async fn suggest_relations(state: &Arc<AppState>, store_id: &str) -> HyperResponse {
+/// `contains` suggestions: a release's tracks, first position first
+/// (`outgoing`), and with `directions=both` also the releases listing a
+/// track (`incoming`, see `appearances`). Other kinds suggest nothing.
+/// Each embeds its target's entry summary.
+async fn suggest_relations(
+    state: &Arc<AppState>,
+    store_id: &str,
+    params: &HashMap<String, String>,
+) -> HyperResponse {
     let entry_id = match parse_store_id(store_id) {
         Ok(id) => id,
         Err(response) => return response,
     };
-    let suggestions = match tracklist(state, entry_id).await {
+    let incoming = match params.get("directions").map(String::as_str) {
+        None | Some("outgoing") => false,
+        Some("both") => true,
+        Some(_) => {
+            return respond::error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "directions must be outgoing or both",
+            );
+        }
+    };
+    let tracks = match tracklist(state, entry_id).await {
         Ok(Some(tracks)) => tracks,
         Ok(None) => return respond::not_found(),
         Err(e) => return internal(e),
     };
-    let suggestions: Vec<_> = suggestions
+    let mut found: Vec<(&str, i64, TrackPosition)> = tracks
+        .iter()
+        .map(|t| ("outgoing", t.entry_id, t.position))
+        .collect();
+    if incoming {
+        match appearances(state, entry_id).await {
+            Ok(releases) => found.extend(
+                releases
+                    .into_iter()
+                    .map(|(id, position)| ("incoming", id, position)),
+            ),
+            Err(e) => return internal(e),
+        }
+    }
+
+    let target_ids: Vec<i64> = found.iter().map(|&(_, id, _)| id).collect();
+    let targets = match entry_summaries(&state.db, &target_ids).await {
+        Ok(s) => s,
+        Err(e) => return internal(e),
+    };
+    let target_refs: Vec<&EntrySummary> = targets.values().collect();
+    let subtitles = match artist_subtitles(state, &target_refs).await {
+        Ok(s) => s,
+        Err(e) => return internal(e),
+    };
+    let suggestions: Vec<_> = found
         .into_iter()
-        .map(|t| {
-            let evidence = match t.position {
+        .map(|(direction, id, position)| {
+            let evidence = match position {
                 (Some(d), Some(t)) => format!("tracklist disc {d} track {t}"),
                 (None, Some(t)) => format!("tracklist track {t}"),
                 _ => "tracklist".to_string(),
             };
             json!({
                 "kind": "contains",
-                "target_store_id": t.entry_id.to_string(),
+                "direction": direction,
+                "target_store_id": id.to_string(),
+                "target": targets.get(&id).map(|t| summary_json(t, subtitles.get(&id))),
                 "confidence": 1.0,
                 "evidence": evidence,
             })
         })
         .collect();
     respond::json(StatusCode::OK, json!({ "suggestions": suggestions }))
+}
+
+/// The releases listing a track, each at its earliest position there (see
+/// `position_order`), oldest release first. The track's soft-linked
+/// duplicates count as the track, and soft-linked duplicate releases are one
+/// release, under the oldest. Empty for a non-track.
+async fn appearances(
+    state: &Arc<AppState>,
+    entry_id: i64,
+) -> anyhow::Result<Vec<(i64, TrackPosition)>> {
+    let db = &state.db;
+    let summaries = entry_summaries(db, &[entry_id]).await?;
+    let Some(track) = summaries.get(&entry_id).filter(|e| e.entry_type == "track") else {
+        return Ok(Vec::new());
+    };
+    let pairs: Vec<(String, String)> = track
+        .sources
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let listings = db.child_rows_for_child_pairs(&pairs).await?;
+    let parent_pairs: Vec<(String, String)> = listings
+        .iter()
+        .map(|c| (c.parent_source.clone(), c.parent_identifier.clone()))
+        .collect();
+    let parent_of_pair: HashMap<(String, String), i64> = db
+        .source_rows_for_pairs(&parent_pairs)
+        .await?
+        .into_iter()
+        .map(|s| ((s.source, s.identifier), s.entry_id))
+        .collect();
+    let parent_ids: Vec<i64> = parent_of_pair.values().copied().collect();
+    let releases: HashSet<i64> = db
+        .entry_rows_by_ids(&parent_ids)
+        .await?
+        .into_iter()
+        .filter(|e| e.entry_type == "release")
+        .map(|e| e.id)
+        .collect();
+
+    let mut earliest: BTreeMap<i64, TrackPosition> = BTreeMap::new();
+    for c in &listings {
+        let pair = (c.parent_source.clone(), c.parent_identifier.clone());
+        let Some(&id) = parent_of_pair.get(&pair).filter(|id| releases.contains(id)) else {
+            continue;
+        };
+        let position = (c.disc_no, c.track_no);
+        if earliest
+            .get(&id)
+            .is_none_or(|&p| position_order(position) < position_order(p))
+        {
+            earliest.insert(id, position);
+        }
+    }
+    let ids: Vec<i64> = earliest.keys().copied().collect();
+    let summaries = entry_summaries(db, &ids).await?;
+    let mut by_date: Vec<&EntrySummary> = ids.iter().filter_map(|id| summaries.get(id)).collect();
+    // Undated last.
+    by_date.sort_by_key(|s| (s.release_date.is_none(), s.release_date.clone(), s.entry_id));
+    let mut covered = HashSet::new();
+    Ok(by_date
+        .into_iter()
+        .filter(|s| {
+            let new = !covered.contains(&s.entry_id);
+            covered.insert(s.entry_id);
+            covered.extend(s.soft_linked_ids.iter().copied());
+            new
+        })
+        .map(|s| (s.entry_id, earliest[&s.entry_id]))
+        .collect())
 }
 
 /// `(disc, track)`.
