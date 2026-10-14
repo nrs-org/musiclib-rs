@@ -70,7 +70,7 @@ fn capabilities(state: &Arc<AppState>) -> HyperResponse {
         StatusCode::OK,
         json!({
             "store": "musiclib",
-            "protocol_version": "0.3",
+            "protocol_version": "0.5",
             "operations": {
                 "resolve": true,
                 "lookup": true,
@@ -157,10 +157,28 @@ const URL_PRIORITY: &[&str] = &[
     "discogs",
 ];
 
+/// What an entry summary carries beyond `EntrySummary`: per entry id, its
+/// `subtitle` (`artist_subtitles`) and `edition_group` (`edition_groups`).
+struct SummaryExtras {
+    subtitles: HashMap<i64, String>,
+    edition_groups: HashMap<i64, String>,
+}
+
+async fn summary_extras(
+    state: &Arc<AppState>,
+    entries: &[&EntrySummary],
+) -> anyhow::Result<SummaryExtras> {
+    Ok(SummaryExtras {
+        subtitles: artist_subtitles(state, entries).await?,
+        edition_groups: edition_groups(state, entries).await?,
+    })
+}
+
 /// The protocol's entry summary (spec §5) of `entry`. `title` and `urls`
 /// span its soft-identity component, as `entry_summaries` does, so a client
 /// recognizes the entry under any duplicate's URL.
-fn summary_json(entry: &EntrySummary, subtitle: Option<&String>) -> Value {
+fn summary_json(entry: &EntrySummary, extras: &SummaryExtras) -> Value {
+    let subtitle = extras.subtitles.get(&entry.entry_id);
     let mut urls: Vec<&SourceRef> = Vec::new();
     for source in &entry.sources {
         if source.identifier.starts_with("http")
@@ -184,7 +202,88 @@ fn summary_json(entry: &EntrySummary, subtitle: Option<&String>) -> Value {
         "release_date": entry.release_date,
         "canonical_url": canonical.map(|u| &u.identifier),
         "urls": urls.iter().map(|u| &u.identifier).collect::<Vec<_>>(),
+        "edition_group": extras.edition_groups.get(&entry.entry_id),
     })
+}
+
+/// Each release's edition group (spec §5): `rg:` and its release group,
+/// soft-linked duplicates folded (a Discogs master and its MusicBrainz
+/// release group are one), so every pressing and listing of an album
+/// shares it; else `ed:` and its edition siblings (`EntrySummary::editions`)
+/// when it has any. Other kinds have none.
+async fn edition_groups(
+    state: &Arc<AppState>,
+    entries: &[&EntrySummary],
+) -> anyhow::Result<HashMap<i64, String>> {
+    let db = &state.db;
+    let releases: Vec<&EntrySummary> = entries
+        .iter()
+        .copied()
+        .filter(|e| e.entry_type == "release")
+        .collect();
+    let pairs: Vec<(String, String)> = releases
+        .iter()
+        .flat_map(|e| &e.sources)
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let listings = db.child_rows_for_child_pairs(&pairs).await?;
+    let parent_pairs: Vec<(String, String)> = listings
+        .iter()
+        .map(|c| (c.parent_source.clone(), c.parent_identifier.clone()))
+        .collect();
+    let parent_of_pair: HashMap<(String, String), i64> = db
+        .source_rows_for_pairs(&parent_pairs)
+        .await?
+        .into_iter()
+        .map(|s| ((s.source, s.identifier), s.entry_id))
+        .collect();
+    let parent_ids: Vec<i64> = parent_of_pair.values().copied().collect();
+    let group_ids: Vec<i64> = db
+        .entry_rows_by_ids(&parent_ids)
+        .await?
+        .into_iter()
+        .filter(|e| e.entry_type == "release_group")
+        .map(|e| e.id)
+        .collect();
+    // A release group's key: the least id of it and its soft-linked twins.
+    let groups = entry_summaries(db, &group_ids).await?;
+    let group_key = |id: i64| {
+        groups.get(&id).map(|g| {
+            g.soft_linked_ids
+                .iter()
+                .copied()
+                .chain([id])
+                .min()
+                .unwrap_or(id)
+        })
+    };
+
+    let mut out = HashMap::new();
+    for release in releases {
+        let own: HashSet<(&str, &str)> = release
+            .sources
+            .iter()
+            .map(|s| (s.source.as_str(), s.identifier.as_str()))
+            .collect();
+        let group = listings
+            .iter()
+            .filter(|c| own.contains(&(c.child_source.as_str(), c.child_identifier.as_str())))
+            .filter_map(|c| {
+                parent_of_pair.get(&(c.parent_source.clone(), c.parent_identifier.clone()))
+            })
+            .filter_map(|&id| group_key(id))
+            .min();
+        let key = match group {
+            Some(group) => format!("rg:{group}"),
+            None if release.editions.len() > 1 => {
+                let least = release.editions.iter().map(|e| e.entry_id).min();
+                format!("ed:{}", least.unwrap_or(release.entry_id))
+            }
+            None => continue,
+        };
+        out.insert(release.entry_id, key);
+    }
+    Ok(out)
 }
 
 /// Each non-artist entry's main artists, comma-joined: its `listed_artist`
@@ -315,14 +414,11 @@ async fn search(state: &Arc<AppState>, params: &HashMap<String, String>) -> Hype
         })
         .take(limit)
         .collect();
-    let subtitles = match artist_subtitles(state, &hits).await {
-        Ok(s) => s,
+    let extras = match summary_extras(state, &hits).await {
+        Ok(extras) => extras,
         Err(e) => return internal(e),
     };
-    let results: Vec<Value> = hits
-        .iter()
-        .map(|s| summary_json(s, subtitles.get(&s.entry_id)))
-        .collect();
+    let results: Vec<Value> = hits.iter().map(|s| summary_json(s, &extras)).collect();
     respond::json(StatusCode::OK, json!({ "results": results }))
 }
 
@@ -389,11 +485,11 @@ async fn resolve(state: &Arc<AppState>, store_id: &str) -> HyperResponse {
             Err(e) => return internal(e),
         }
     }
-    let subtitles = match artist_subtitles(state, &[entry]).await {
-        Ok(subtitles) => subtitles,
+    let extras = match summary_extras(state, &[entry]).await {
+        Ok(extras) => extras,
         Err(e) => return internal(e),
     };
-    let mut body = summary_json(entry, subtitles.get(&entry_id));
+    let mut body = summary_json(entry, &extras);
     body["cover_url"] = Value::Null;
     body["extra"] = extra;
     respond::json(StatusCode::OK, body)
@@ -480,8 +576,8 @@ async fn suggest_relations(
         Err(e) => return internal(e),
     };
     let target_refs: Vec<&EntrySummary> = targets.values().collect();
-    let subtitles = match artist_subtitles(state, &target_refs).await {
-        Ok(s) => s,
+    let extras = match summary_extras(state, &target_refs).await {
+        Ok(extras) => extras,
         Err(e) => return internal(e),
     };
     let suggestions: Vec<_> = found
@@ -496,7 +592,7 @@ async fn suggest_relations(
                 "kind": "contains",
                 "direction": direction,
                 "target_store_id": id.to_string(),
-                "target": targets.get(&id).map(|t| summary_json(t, subtitles.get(&id))),
+                "target": targets.get(&id).map(|t| summary_json(t, &extras)),
                 "confidence": 1.0,
                 "evidence": evidence,
             })
