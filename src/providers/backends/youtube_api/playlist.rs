@@ -14,12 +14,16 @@ use crate::providers::{
             types::EXTERNAL_TYPE_VIDEO,
         },
     },
+    listing::{ListingKey, ListingOrder, listing_source},
     types::{
         Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
         CompiledEntryDataMatcher, EntityResult, EntrySpecificData, EntryType, Error, PageFetcher,
-        PaginatedChildSource, default_eval_leaf, static_eval_expr,
+        default_eval_leaf, static_eval_expr,
     },
 };
+
+/// Listing kind of a playlist's items (`providers::listing`).
+pub(crate) const PLAYLIST_ITEMS_KIND: &str = "youtube:playlist_items";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PlaylistListResponse {
@@ -182,10 +186,17 @@ impl PageFetcher for PlaylistItemsPageFetcher {
 pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityResult<()>, Error> {
     let id = match_playlist_url(url).expect("Invalid YouTube playlist URL");
     let url = playlist_url(id);
-    let children_source = PaginatedChildSource::new(Box::new(PlaylistItemsPageFetcher {
-        client: client.clone(),
-        playlist_id: id.to_string(),
-    }))
+    // A playlist's order is whatever its owner made it, so a refresh
+    // refetches it whole.
+    let children_source = listing_source(
+        client.listings.as_ref(),
+        ListingKey::new(PLAYLIST_ITEMS_KIND, id),
+        ListingOrder::Unordered,
+        Box::new(PlaylistItemsPageFetcher {
+            client: client.clone(),
+            playlist_id: id.to_string(),
+        }),
+    )
     .with_static_eval(|expr| {
         static_eval_expr(expr, &|matcher| match matcher {
             CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {

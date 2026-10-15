@@ -11,7 +11,8 @@ use anyhow::Context as _;
 use clap::Parser;
 use musiclib_rs::{
     app_dirs,
-    http::HttpClientConfig,
+    http::{HttpClientConfig, quota::QuotaLedger},
+    httpcache,
     musicdb::MusicDb,
     pipeline::{
         dedup::{DedupConfig, dedup_db, merge_configs},
@@ -21,13 +22,14 @@ use musiclib_rs::{
     },
     providers::{
         fetch_options_yaml::load_from_file,
-        registry::{RegistryConfig, build_providers},
+        listing::{ListingMode, ListingStore, QuotaBudget},
+        registry::{RegistryConfig, build_providers_with_listings},
         types::{
             ChildMatcher, ChildMatcherExpr, ChildRule, EntryFetchOptions, EntryFetchOptionsPool,
         },
     },
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -69,6 +71,24 @@ struct Args {
     /// is cheap: responses are in the HTTP cache).
     #[arg(long)]
     max_fetches: Option<usize>,
+    /// Refresh growing listings (uploads, discographies, playlists) instead
+    /// of serving their snapshots. `auto` (the bare flag) refreshes YouTube
+    /// uploads incrementally and the rest in full; `full` refetches all.
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "auto")]
+    refresh: Option<RefreshArg>,
+    /// YouTube units refreshes may use today, counting every run's usage
+    /// (Pacific-time day). Once spent, listings are served from their
+    /// snapshots. With `--refresh`, the rest of the budget goes to full
+    /// refreshes of the oldest uploads snapshots after the import. Meant for
+    /// the cron job; leave it off for manual refreshes.
+    #[arg(long)]
+    quota_budget: Option<u64>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum RefreshArg {
+    Auto,
+    Full,
 }
 
 /// Load YAML config from an explicit path (errors if missing) or a default
@@ -145,14 +165,41 @@ async fn main() -> anyhow::Result<()> {
     let youtube_quota = Arc::new(AtomicU64::new(0));
     http_config.youtube_quota_counter = Some(Arc::clone(&youtube_quota));
 
+    // Listing snapshots and the quota ledger live in the HTTP cache DB
+    // (in memory when there's none: every listing is then a snapshot miss).
+    let cache_db_url = http_config
+        .db_cache
+        .as_ref()
+        .map_or_else(|| "sqlite::memory:".to_owned(), |c| c.path.clone());
+    let cache_db = httpcache::db::connect(cache_db_url).await?;
+    let ledger = Arc::new(QuotaLedger::new(cache_db.clone(), Arc::clone(&youtube_quota)).await?);
+    let mode = match args.refresh {
+        None => ListingMode::Cached,
+        Some(RefreshArg::Auto) => ListingMode::Auto,
+        Some(RefreshArg::Full) => ListingMode::Full,
+    };
+    let mut listings = ListingStore::new(cache_db, mode)
+        .await?
+        .with_kind_modes(registry_config.listings.clone());
+    if let Some(units) = args.quota_budget {
+        listings = listings.with_budget(QuotaBudget {
+            units,
+            ledger: Arc::clone(&ledger),
+        });
+    }
+    let listings = Arc::new(listings);
+
     // The quota total is otherwise only logged once, at clean exit — a killed
     // process (SIGTERM during a batch, common when driving many imports and
     // culling stuck/unwanted ones) leaves no record at all of what it really
     // consumed, even though the counter itself was tracking correctly the
     // whole time. Log it periodically too so a killed run's log still has a
     // recent, accurate figure instead of nothing.
+    // The ledger is flushed on the same tick, so a killed run's units still
+    // count toward the day.
     {
         let youtube_quota = Arc::clone(&youtube_quota);
+        let ledger = Arc::clone(&ledger);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             interval.tick().await; // skip the immediate first tick
@@ -162,6 +209,9 @@ async fn main() -> anyhow::Result<()> {
                     "YouTube Data API quota used so far: {} unit(s)",
                     youtube_quota.load(Ordering::Relaxed),
                 );
+                if let Err(e) = ledger.flush().await {
+                    warn!("recording YouTube quota use failed: {e}");
+                }
             }
         });
     }
@@ -180,7 +230,8 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let providers = build_providers(&registry_config, http)?;
+    let providers =
+        build_providers_with_listings(&registry_config, http, Some(Arc::clone(&listings)))?;
     if providers.is_empty() {
         anyhow::bail!("No providers available -- check your credential env vars");
     }
@@ -265,10 +316,21 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Full refreshes of the oldest uploads snapshots, with whatever budget
+    // the import left. Items they find are imported by the next run.
+    if args.refresh.is_some() {
+        listings.full_refresh_pass().await?;
+    }
+    listings.log_summary().await;
+
     info!(
         "YouTube Data API quota used: {} unit(s)",
         youtube_quota.load(Ordering::Relaxed),
     );
+    match ledger.used_today().await {
+        Ok(units) => info!("YouTube Data API quota used today, all runs: {units} unit(s)"),
+        Err(e) => warn!("recording YouTube quota use failed: {e}"),
+    }
     info!("Done.");
     Ok(())
 }

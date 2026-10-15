@@ -23,11 +23,11 @@ use crate::{
                 types::{EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_VIDEO},
             },
         },
+        listing::{ListingKey, ListingOrder, listing_source},
         types::{
             Alias, CachedChildSource, ChildPage, ChildRef, ChildSource, CompiledChildMatcher,
             CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData,
-            EntryType, Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf,
-            static_eval_expr,
+            EntryType, Error, PageFetcher, Tribool, default_eval_leaf, static_eval_expr,
         },
     },
 };
@@ -155,6 +155,23 @@ pub(crate) const PLAYLISTS_PARTS: &str = "snippet";
 pub(crate) const PLAYLISTS_MAX_RESULTS: &str = "50";
 pub(crate) const UPLOADS_PARTS: &str = "snippet";
 pub(crate) const UPLOADS_MAX_RESULTS: &str = "50";
+
+/// Listing kinds (`providers::listing`). Uploads are newest first, so they
+/// refresh incrementally; a channel's playlists have no usable order.
+pub(crate) const UPLOADS_KIND: &str = "youtube:uploads";
+pub(crate) const CHANNEL_PLAYLISTS_KIND: &str = "youtube:channel_playlists";
+
+/// The page fetcher for an uploads playlist, also used by the full-refresh
+/// pass to rebuild one from its listing ID.
+pub(crate) fn uploads_fetcher(
+    client: &YoutubeClient,
+    uploads_playlist_id: &str,
+) -> Box<dyn PageFetcher> {
+    Box::new(ChannelUploadsPageFetcher {
+        client: client.clone(),
+        uploads_playlist_id: uploads_playlist_id.to_owned(),
+    })
+}
 
 // --- Page fetchers ---
 
@@ -496,20 +513,25 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
 
                 // Source 1: playlists owned by the channel (Release)
                 let channel_id_for_ytmusic = channel_id.clone();
-                let playlists_source =
-                    PaginatedChildSource::new(Box::new(ChannelPlaylistsPageFetcher {
+                let playlists_source = listing_source(
+                    client.listings.as_ref(),
+                    ListingKey::new(CHANNEL_PLAYLISTS_KIND, channel_id.clone()),
+                    ListingOrder::Unordered,
+                    Box::new(ChannelPlaylistsPageFetcher {
                         client: client.clone(),
                         channel_id,
-                    }))
-                    .with_static_eval(release_eval);
+                    }),
+                )
+                .with_static_eval(release_eval);
 
                 // Source 2: videos uploaded by the channel (Track)
-                let uploads_source =
-                    PaginatedChildSource::new(Box::new(ChannelUploadsPageFetcher {
-                        client: client.clone(),
-                        uploads_playlist_id,
-                    }))
-                    .with_static_eval(track_eval);
+                let uploads_source = listing_source(
+                    client.listings.as_ref(),
+                    ListingKey::new(UPLOADS_KIND, uploads_playlist_id.clone()),
+                    ListingOrder::NewestFirst,
+                    uploads_fetcher(&client, &uploads_playlist_id),
+                )
+                .with_static_eval(track_eval);
 
                 // Source 3 (optional): YouTube Music discography via ytmusicapi server.
                 // Only added when YTMUSICAPI_SERVER_URL is configured on the client.
@@ -890,6 +912,114 @@ mod tests {
             "【雑談＆お礼】新衣装だったりガンダムだったり嬉しいね！【角巻わため/ホロライブ４期生】"
         );
 
+        Ok(())
+    }
+
+    /// The uploads listing as snapshots: the first run builds one, a refresh
+    /// after two new uploads reads the new first page plus one known page and
+    /// stops, and a cached run serves the merged listing without a request.
+    #[tokio::test]
+    async fn uploads_snapshot_refreshes_incrementally() -> anyhow::Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::providers::listing::{ListingMode, ListingStore};
+
+        let channel_id = "UCqm3BQLlJfvkTsX_hvm0UmA";
+        let uploads_playlist_id = "UUqm3BQLlJfvkTsX_hvm0UmA";
+        let uploads_url = channel_uploads_api_url(uploads_playlist_id);
+
+        // The recorded first page, as the whole listing.
+        let mut known: serde_json::Value =
+            serde_json::from_str(include_str!("./channel_watame_uploads_page1.json"))?;
+        known.as_object_mut().unwrap().remove("nextPageToken");
+        let known_ids: Vec<String> = known["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                i["snippet"]["resourceId"]["videoId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        // Two new uploads on a first page, the old listing behind them.
+        let mut new_page = known.clone();
+        let template = known["items"][0].clone();
+        let new_items: Vec<serde_json::Value> = ["NEWVIDEO001", "NEWVIDEO002"]
+            .iter()
+            .map(|id| {
+                let mut item = template.clone();
+                item["snippet"]["resourceId"]["videoId"] = (*id).into();
+                item
+            })
+            .collect();
+        new_page["items"] = new_items.into();
+        new_page["nextPageToken"] = "PAGE2".into();
+        let page2_url = YoutubeClient::build_url(
+            "playlistItems",
+            &[
+                ("part", UPLOADS_PARTS),
+                ("playlistId", uploads_playlist_id),
+                ("maxResults", UPLOADS_MAX_RESULTS),
+                ("pageToken", "PAGE2"),
+            ],
+        );
+
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route_json::<ChannelListResponse>(
+            Method::GET,
+            &channel_api_url(channel_id),
+            include_str!("./channel_watame.json"),
+        );
+        let json = |v: &serde_json::Value| Bytes::from(serde_json::to_vec(v).unwrap());
+        // First call (the build) sees the old listing, later ones the new.
+        http_client.add_route(Method::GET, &uploads_url, ResponseStatus::OK, json(&known));
+        http_client.add_route(
+            Method::GET,
+            &uploads_url,
+            ResponseStatus::OK,
+            json(&new_page),
+        );
+        http_client.add_route(Method::GET, &page2_url, ResponseStatus::OK, json(&known));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        http_client.set_on_route_callback(move |_, url| {
+            if url.contains("playlistItems") {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let http: Arc<dyn crate::http::HttpClient> = Arc::new(http_client);
+        let db = crate::httpcache::db::connect("sqlite::memory:".into()).await?;
+
+        let uploads = |mode| {
+            let http = Arc::clone(&http);
+            let db = db.clone();
+            async move {
+                let mut client = YoutubeClient::new_with_client(http, "key".into())?;
+                client.listings = Some(Arc::new(ListingStore::new(db, mode).await?));
+                let url = format!("https://www.youtube.com/channel/{channel_id}");
+                let channel = get_channel(&client, &url).await?;
+                let mut cursor = channel.children[1].cursor();
+                let mut ids = Vec::new();
+                while let Some((child, _)) = child_next(&mut cursor).await? {
+                    let url = child.sources.get(SOURCE).unwrap().iter().next().unwrap();
+                    ids.push(url.trim_start_matches("https://youtu.be/").to_owned());
+                }
+                anyhow::Ok(ids)
+            }
+        };
+
+        assert_eq!(uploads(ListingMode::Cached).await?, known_ids);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let refreshed = uploads(ListingMode::Auto).await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(refreshed[..2], ["NEWVIDEO001", "NEWVIDEO002"]);
+        assert_eq!(refreshed[2..], known_ids[..]);
+
+        assert_eq!(uploads(ListingMode::Cached).await?, refreshed);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         Ok(())
     }
 

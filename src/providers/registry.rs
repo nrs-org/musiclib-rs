@@ -9,6 +9,7 @@ use crate::{
     providers::{
         CanonicalizeProvider, FetchProvider,
         backends::{discogs, local, musicbrainz, nicovideo, soundcloud, spotify, youtube_api},
+        listing::{ListingMode, ListingStore},
         std_values::StandardProviderKeys,
         types::{CanonicalizeResult, Error},
     },
@@ -239,6 +240,10 @@ pub struct LocalConfig {
 ///
 /// discogs: ~      # disabled
 /// local: false
+///
+/// # Per-kind override of `import --refresh` (see `providers::listing`).
+/// listings:
+///   youtube:playlist_items: cached   # never refresh playlists' items
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -250,6 +255,8 @@ pub struct RegistryConfig {
     pub soundcloud: Option<YtdlpConfig>,
     pub nicovideo: Option<YtdlpConfig>,
     pub local: Option<LocalConfig>,
+    /// Listing mode per listing kind, overriding the run's mode.
+    pub listings: std::collections::HashMap<String, ListingMode>,
 }
 
 impl Default for RegistryConfig {
@@ -262,6 +269,7 @@ impl Default for RegistryConfig {
             soundcloud: Some(YtdlpConfig::default()),
             nicovideo: Some(YtdlpConfig::default()),
             local: Some(LocalConfig::default()),
+            listings: Default::default(),
         }
     }
 }
@@ -278,6 +286,17 @@ pub fn build_providers(
     config: &RegistryConfig,
     http: Arc<dyn HttpClient>,
 ) -> Result<Vec<Arc<dyn FetchProvider>>, Error> {
+    build_providers_with_listings(config, http, None)
+}
+
+/// `build_providers`, with growing listings served as snapshots from
+/// `listings` (see `providers::listing`). Without a store, listings are walked
+/// page by page through the HTTP cache.
+pub fn build_providers_with_listings(
+    config: &RegistryConfig,
+    http: Arc<dyn HttpClient>,
+    listings: Option<Arc<ListingStore>>,
+) -> Result<Vec<Arc<dyn FetchProvider>>, Error> {
     let mut providers: Vec<Arc<dyn FetchProvider>> = Vec::new();
 
     if let Some(cfg) = &config.youtube_api {
@@ -292,6 +311,9 @@ pub fn build_providers(
                     && let Some(url) = url_cred.resolve()
                 {
                     provider = provider.with_ytmusicapi_url(url);
+                }
+                if let Some(store) = &listings {
+                    provider = provider.with_listings(Arc::clone(store));
                 }
                 providers.push(Arc::new(provider));
             }

@@ -17,6 +17,7 @@ use crate::{
             playlist::{get_playlist, get_playlist_items_raw, get_playlist_raw},
             video::{get_video, get_video_raw},
         },
+        listing::{ListingOrder, ListingStore},
         matcher::filter_children,
         types::{CanonicalizeResult, EntityResult, EntryFetchOptionsPool, Error, OptionsId},
     },
@@ -47,6 +48,19 @@ impl Provider {
 
     pub fn with_ytmusicapi_url(mut self, url: String) -> Self {
         self.client = self.client.with_ytmusicapi_url(url);
+        self
+    }
+
+    /// Serve growing listings as snapshots from `store`, and let its
+    /// full-refresh pass rebuild uploads listings.
+    pub fn with_listings(mut self, store: Arc<ListingStore>) -> Self {
+        self.client.listings = Some(Arc::clone(&store));
+        let client = self.client.clone();
+        store.register_factory(
+            super::channel::UPLOADS_KIND,
+            ListingOrder::NewestFirst,
+            Arc::new(move |id| super::channel::uploads_fetcher(&client, id)),
+        );
         self
     }
 

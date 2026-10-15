@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
     http::{self, HttpClient, Request, default_http_client},
-    providers::{backends::build_url, types::Error},
+    providers::{backends::build_url, listing::ListingStore, types::Error},
 };
 
 #[derive(Clone)]
@@ -15,6 +15,8 @@ pub struct YoutubeClient {
     /// Base URL of the optional ytmusicapi server (e.g. `http://localhost:9001`).
     /// When present, `get_channel` will add a third child source with YTMusic discography.
     pub ytmusicapi_url: Option<String>,
+    /// Serves growing listings (uploads, playlists) as snapshots when set.
+    pub(crate) listings: Option<Arc<ListingStore>>,
 }
 
 impl YoutubeClient {
@@ -40,6 +42,7 @@ impl YoutubeClient {
             client,
             api_key,
             ytmusicapi_url: None,
+            listings: None,
         })
     }
 
