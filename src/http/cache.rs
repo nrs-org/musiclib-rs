@@ -32,7 +32,7 @@ impl CacheClientConfig {
 }
 
 tokio::task_local! {
-    static BYPASS: ();
+    static BYPASS: bool;
 }
 
 /// Run `fut` with every cache layer bypassed: requests it makes are neither
@@ -45,11 +45,18 @@ tokio::task_local! {
 /// activity, memory-cache and DB-cache layers run in the caller's task, and
 /// only layers below the caches (coalescer, scheduler) spawn.
 pub async fn bypass<F: Future>(fut: F) -> F::Output {
-    BYPASS.scope((), fut).await
+    BYPASS.scope(true, fut).await
+}
+
+/// Undo `bypass` for `fut`: for lookups made while refreshing a listing whose
+/// answers don't change (e.g. resolving an album's playlist ID), so they stay
+/// cached.
+pub async fn allow<F: Future>(fut: F) -> F::Output {
+    BYPASS.scope(false, fut).await
 }
 
 fn bypassed() -> bool {
-    BYPASS.try_with(|_| ()).is_ok()
+    BYPASS.try_with(|b| *b).unwrap_or(false)
 }
 
 pub struct CacheHttpClient {
@@ -192,7 +199,12 @@ mod tests {
         assert_eq!(&*client.get_text(req.clone()).await?.text().await?, "0");
         let bypassed = super::bypass(client.get_text(req.clone())).await?;
         assert_eq!(&*bypassed.text().await?, "1");
-        assert_eq!(&*client.get_text(req).await?.text().await?, "0");
+        assert_eq!(&*client.get_text(req.clone()).await?.text().await?, "0");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // `allow` inside `bypass` uses the cache again.
+        let allowed = super::bypass(super::allow(client.get_text(req))).await?;
+        assert_eq!(&*allowed.text().await?, "0");
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
         Ok(())
     }

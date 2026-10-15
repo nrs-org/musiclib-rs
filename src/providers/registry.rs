@@ -323,11 +323,12 @@ pub fn build_providers_with_listings(
     if let Some(cfg) = &config.spotify {
         match (cfg.client_id.resolve(), cfg.client_secret.resolve()) {
             (Some(id), Some(secret)) => {
-                providers.push(Arc::new(spotify::Provider::new_with_http_client(
-                    Arc::clone(&http),
-                    &id,
-                    &secret,
-                )));
+                let mut provider =
+                    spotify::Provider::new_with_http_client(Arc::clone(&http), &id, &secret);
+                if let Some(store) = &listings {
+                    provider = provider.with_listings(Arc::clone(store));
+                }
+                providers.push(Arc::new(provider));
             }
             _ => skip_missing("spotify", "client_id or client_secret not set"),
         }
@@ -370,15 +371,19 @@ pub fn build_providers_with_listings(
         }
         provider = provider.with_fetch_release_durations(cfg.fetch_release_durations);
         provider = provider.with_resolve_original_recordings(cfg.resolve_original_recordings);
+        if let Some(store) = &listings {
+            provider = provider.with_listings(Arc::clone(store));
+        }
         providers.push(Arc::new(provider));
     }
 
     if let Some(cfg) = &config.discogs {
         let token = cfg.user_token.as_ref().and_then(|c| c.resolve());
-        providers.push(Arc::new(discogs::Provider::new_with_client(
-            Arc::clone(&http),
-            token,
-        )?));
+        let mut provider = discogs::Provider::new_with_client(Arc::clone(&http), token)?;
+        if let Some(store) = &listings {
+            provider = provider.with_listings(Arc::clone(store));
+        }
+        providers.push(Arc::new(provider));
     }
 
     if let Some(cfg) = &config.soundcloud {

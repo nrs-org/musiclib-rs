@@ -9,10 +9,11 @@ use crate::providers::{
         client::SpotifyClient,
         types::{EXTERNAL_TYPE_ALBUM, Image, Paging},
     },
+    listing::{ListingKey, ListingOrder, listing_source},
     types::{
         Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
         CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData, EntryType,
-        Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf, static_eval_expr,
+        Error, PageFetcher, Tribool, default_eval_leaf, static_eval_expr,
     },
 };
 
@@ -170,10 +171,15 @@ pub async fn get_artist(client: &SpotifyClient, url: &str) -> Result<EntityResul
     get_artist_raw::<ArtistResponse, _, _, Error, _>(client, url, |a, id| {
         let canonical = artist_url(id);
 
-        let albums_source = PaginatedChildSource::new(Box::new(ArtistAlbumsPageFetcher {
-            client: client.clone(),
-            artist_id: id.to_string(),
-        }))
+        let albums_source = listing_source(
+            client.listings.as_ref(),
+            ListingKey::new("spotify:artist_albums", id),
+            ListingOrder::Unordered,
+            Box::new(ArtistAlbumsPageFetcher {
+                client: client.clone(),
+                artist_id: id.to_string(),
+            }),
+        )
         .with_static_eval(album_eval);
 
         let result = Ok(EntityResult {

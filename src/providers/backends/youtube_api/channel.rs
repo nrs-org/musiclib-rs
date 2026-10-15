@@ -1,16 +1,11 @@
-use std::{
-    collections::HashSet,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{collections::HashSet, sync::Arc};
 
-use futures::{Stream, StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::future::Future;
+use tracing::warn;
 
 use crate::{
-    http::{HttpClient, Request},
+    http::{HttpClient, Request, allow_cache},
     providers::{
         backends::{
             ExtraJSON,
@@ -25,7 +20,7 @@ use crate::{
         },
         listing::{ListingKey, ListingOrder, listing_source},
         types::{
-            Alias, CachedChildSource, ChildPage, ChildRef, ChildSource, CompiledChildMatcher,
+            Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
             CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData,
             EntryType, Error, PageFetcher, Tribool, default_eval_leaf, static_eval_expr,
         },
@@ -160,6 +155,9 @@ pub(crate) const UPLOADS_MAX_RESULTS: &str = "50";
 /// refresh incrementally; a channel's playlists have no usable order.
 pub(crate) const UPLOADS_KIND: &str = "youtube:uploads";
 pub(crate) const CHANNEL_PLAYLISTS_KIND: &str = "youtube:channel_playlists";
+/// Served by the ytmusicapi server, not the Data API, so it costs no quota;
+/// the `ytmusic:` prefix keeps it out of the YouTube budget.
+pub(crate) const YTMUSIC_DISCOGRAPHY_KIND: &str = "ytmusic:discography";
 
 /// The page fetcher for an uploads playlist, also used by the full-refresh
 /// pass to rebuild one from its listing ID.
@@ -274,16 +272,6 @@ impl PageFetcher for ChannelUploadsPageFetcher {
     }
 }
 
-/// Fetches the full YTMusic discography list upfront, then yields one entry at a time.
-/// For entries missing `audioPlaylistId`, resolves it lazily via `GET /albums/{browseId}`.
-struct YtmusicDiscographySource {
-    stream: BoxStream<'static, Result<(ChildRef, ()), Error>>,
-    /// Known total count once fetched; used for size_hint.
-    total: Option<usize>,
-    /// Items consumed so far; used to compute remaining hint.
-    consumed: usize,
-}
-
 async fn fetch_discography(
     http: Arc<dyn HttpClient>,
     server_url: &str,
@@ -347,100 +335,54 @@ async fn resolve_playlist_id(
         .ok_or_else(|| Error::InvalidUrl(format!("no audioPlaylistId for album {browse_id}")))
 }
 
-fn discography_stream(
+/// The YTMusic discography of a channel, as one page. Releases without an
+/// `audioPlaylistId` are resolved via `GET /albums/{browseId}`; a release
+/// that can't be resolved is skipped with a warning.
+struct YtmusicDiscographyPageFetcher {
     http: Arc<dyn HttpClient>,
     server_url: String,
     channel_id: String,
-) -> BoxStream<'static, Result<(ChildRef, ()), Error>> {
-    // State: (http, server_url, channel_id, Option<pending releases>)
-    // The releases are fetched lazily on the first iteration step.
-    futures::stream::unfold(
-        (
-            http,
-            server_url,
-            channel_id,
-            None::<std::collections::VecDeque<YtmusicRelease>>,
-        ),
-        |(http, server_url, channel_id, mut releases)| async move {
-            if releases.is_none() {
-                match fetch_discography(Arc::clone(&http), &server_url, &channel_id).await {
-                    Ok(r) => releases = Some(r.into()),
-                    Err(e) => return Some((Err(e), (http, server_url, channel_id, None))),
-                }
-            }
-            let queue = releases.as_mut().unwrap();
-            loop {
-                let release = queue.pop_front()?;
-                let playlist_id = match release.audio_playlist_id {
-                    Some(id) => id,
-                    None => match release.browse_id {
-                        Some(bid) => {
-                            match resolve_playlist_id(Arc::clone(&http), &server_url, &bid).await {
-                                Ok(id) => id,
-                                Err(e) => {
-                                    return Some((
-                                        Err(e),
-                                        (http, server_url, channel_id, releases),
-                                    ));
-                                }
-                            }
+}
+
+#[async_trait::async_trait]
+impl PageFetcher for YtmusicDiscographyPageFetcher {
+    async fn fetch_page(&mut self, _page_token: Option<&str>) -> Result<ChildPage, Error> {
+        let releases =
+            fetch_discography(Arc::clone(&self.http), &self.server_url, &self.channel_id).await?;
+        let mut children = Vec::with_capacity(releases.len());
+        for release in releases {
+            let playlist_id = match (release.audio_playlist_id, release.browse_id) {
+                (Some(id), _) => id,
+                // A browse ID's playlist never changes, so the lookup stays
+                // cached even while the discography is being refreshed.
+                (None, Some(bid)) => {
+                    let lookup =
+                        resolve_playlist_id(Arc::clone(&self.http), &self.server_url, &bid);
+                    match allow_cache(lookup).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            warn!(
+                                "ytmusic discography of {}: skipping {bid}: {e}",
+                                self.channel_id
+                            );
+                            continue;
                         }
-                        None => continue,
-                    },
-                };
-                let child = ChildRef {
-                    entry_type: EntryType::Release,
-                    sources: [(SOURCE.into(), HashSet::from([playlist_url(&playlist_id)]))].into(),
-                    name: release.title,
-                    external_type: EXTERNAL_TYPE_PLAYLIST.into(),
-                    ..Default::default()
-                };
-                let remaining = releases.clone().map(|q| q.len());
-                let _ = remaining; // used for size_hint via YtmusicDiscographySource.total
-                return Some((Ok((child, ())), (http, server_url, channel_id, releases)));
-            }
-        },
-    )
-    .boxed()
-}
-
-impl YtmusicDiscographySource {
-    fn new(http: Arc<dyn HttpClient>, server_url: String, channel_id: String) -> Self {
-        Self {
-            stream: discography_stream(http, server_url, channel_id),
-            total: None,
-            consumed: 0,
+                    }
+                }
+                (None, None) => continue,
+            };
+            children.push(ChildRef {
+                entry_type: EntryType::Release,
+                sources: [(SOURCE.into(), HashSet::from([playlist_url(&playlist_id)]))].into(),
+                name: release.title,
+                external_type: EXTERNAL_TYPE_PLAYLIST.into(),
+                ..Default::default()
+            });
         }
-    }
-}
-
-impl Stream for YtmusicDiscographySource {
-    type Item = Result<(ChildRef, ()), Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let result = self.stream.as_mut().poll_next(cx);
-        if matches!(result, Poll::Ready(Some(Ok(_)))) {
-            self.consumed += 1;
-        }
-        result
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self.total {
-            Some(n) => {
-                let remaining = n.saturating_sub(self.consumed);
-                (remaining, Some(remaining))
-            }
-            None => (0, None),
-        }
-    }
-}
-
-impl Unpin for YtmusicDiscographySource {}
-
-impl ChildSource for YtmusicDiscographySource {
-    fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
-        release_eval(expr)
+        Ok(ChildPage {
+            children,
+            next_page_token: None,
+        })
     }
 }
 
@@ -540,11 +482,17 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
                     Arc::new(CachedChildSource::new(Box::new(uploads_source))),
                 ];
                 if let Some(ytmusicapi_url) = &client.ytmusicapi_url {
-                    let ytmusic_source = YtmusicDiscographySource::new(
-                        client.client.clone(),
-                        ytmusicapi_url.clone(),
-                        channel_id_for_ytmusic,
-                    );
+                    let ytmusic_source = listing_source(
+                        client.listings.as_ref(),
+                        ListingKey::new(YTMUSIC_DISCOGRAPHY_KIND, channel_id_for_ytmusic.clone()),
+                        ListingOrder::Unordered,
+                        Box::new(YtmusicDiscographyPageFetcher {
+                            http: client.client.clone(),
+                            server_url: ytmusicapi_url.clone(),
+                            channel_id: channel_id_for_ytmusic,
+                        }),
+                    )
+                    .with_static_eval(release_eval);
                     children.push(Arc::new(CachedChildSource::new(Box::new(ytmusic_source))));
                 }
 

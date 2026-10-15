@@ -10,11 +10,12 @@ use crate::providers::{
         client::DiscogsClient,
         types::{EXTERNAL_TYPE_MASTER, EXTERNAL_TYPE_RELEASE},
     },
+    listing::{ListingKey, ListingOrder, listing_source},
     std_values::StandardProviderKeys,
     types::{
         Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
         CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData, EntryType,
-        Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf, static_eval_expr,
+        Error, PageFetcher, Tribool, default_eval_leaf, static_eval_expr,
     },
 };
 
@@ -237,10 +238,15 @@ pub async fn get_artist(client: &DiscogsClient, url: &str) -> Result<EntityResul
             }
         }
 
-        let releases_source = PaginatedChildSource::new(Box::new(ArtistReleasesPageFetcher {
-            client: client.clone(),
-            artist_id: id.to_string(),
-        }))
+        let releases_source = listing_source(
+            client.listings.as_ref(),
+            ListingKey::new("discogs:artist_releases", id),
+            ListingOrder::Unordered,
+            Box::new(ArtistReleasesPageFetcher {
+                client: client.clone(),
+                artist_id: id.to_string(),
+            }),
+        )
         .with_static_eval(release_or_release_group_eval);
 
         let mut sources: crate::providers::types::ExternalSources =

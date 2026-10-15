@@ -4,7 +4,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
     http::{HeaderName, HeaderValue, HttpClient, Request, default_http_client},
-    providers::{backends::build_url, types::Error},
+    providers::{backends::build_url, listing::ListingStore, types::Error},
 };
 
 pub struct MusicBrainzClient {
@@ -12,6 +12,8 @@ pub struct MusicBrainzClient {
     user_agent: HeaderValue,
     token: Option<HeaderValue>,
     base_url: Arc<str>,
+    /// Serves artist browses as snapshots when set.
+    pub(crate) listings: Option<Arc<ListingStore>>,
 }
 
 impl Clone for MusicBrainzClient {
@@ -21,6 +23,7 @@ impl Clone for MusicBrainzClient {
             user_agent: self.user_agent.clone(),
             token: self.token.clone(),
             base_url: self.base_url.clone(),
+            listings: self.listings.clone(),
         }
     }
 }
@@ -82,6 +85,7 @@ impl MusicBrainzClient {
             user_agent,
             token,
             base_url,
+            listings: None,
         })
     }
 

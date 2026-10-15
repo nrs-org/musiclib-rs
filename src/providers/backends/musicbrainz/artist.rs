@@ -13,10 +13,11 @@ use crate::providers::{
         types::{EXTERNAL_TYPE_RECORDING, EXTERNAL_TYPE_RELEASE, EXTERNAL_TYPE_RELEASE_GROUP},
         url::{UrlResource, url_source_key},
     },
+    listing::{ListingKey, ListingOrder, listing_source},
     types::{
         Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
         CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData, EntryType,
-        Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf, static_eval_expr,
+        Error, PageFetcher, Tribool, default_eval_leaf, static_eval_expr,
     },
 };
 
@@ -468,25 +469,44 @@ pub async fn get_artist(client: &MusicBrainzClient, url: &str) -> Result<EntityR
             }
         }
 
+        // Browses have no usable order, so a refresh refetches them whole.
+        let listing = |kind, fetcher| {
+            listing_source(
+                client.listings.as_ref(),
+                ListingKey::new(kind, mbid),
+                ListingOrder::Unordered,
+                fetcher,
+            )
+        };
+
         // Source 0: release-groups (ReleaseGroup children)
-        let rg_source = PaginatedChildSource::new(Box::new(ArtistReleaseGroupsPageFetcher {
-            client: client.clone(),
-            artist_id: mbid.to_string(),
-        }))
+        let rg_source = listing(
+            "musicbrainz:artist_release_groups",
+            Box::new(ArtistReleaseGroupsPageFetcher {
+                client: client.clone(),
+                artist_id: mbid.to_string(),
+            }),
+        )
         .with_static_eval(release_group_eval);
 
         // Source 1: releases (Release children — standalone releases not in a release-group)
-        let release_source = PaginatedChildSource::new(Box::new(ArtistReleasesPageFetcher {
-            client: client.clone(),
-            artist_id: mbid.to_string(),
-        }))
+        let release_source = listing(
+            "musicbrainz:artist_releases",
+            Box::new(ArtistReleasesPageFetcher {
+                client: client.clone(),
+                artist_id: mbid.to_string(),
+            }),
+        )
         .with_static_eval(release_eval);
 
         // Source 2: recordings (Track children — standalone recordings)
-        let recording_source = PaginatedChildSource::new(Box::new(ArtistRecordingsPageFetcher {
-            client: client.clone(),
-            artist_id: mbid.to_string(),
-        }))
+        let recording_source = listing(
+            "musicbrainz:artist_recordings",
+            Box::new(ArtistRecordingsPageFetcher {
+                client: client.clone(),
+                artist_id: mbid.to_string(),
+            }),
+        )
         .with_static_eval(recording_eval);
 
         // Source 3: recording relationships (appearances — recordings linked via relationships,
