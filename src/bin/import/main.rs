@@ -74,7 +74,14 @@ struct Args {
     /// Refresh growing listings (uploads, discographies, playlists) instead
     /// of serving their snapshots. `auto` (the bare flag) refreshes YouTube
     /// uploads incrementally and the rest in full; `full` refetches all.
-    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "auto")]
+    /// (`--refresh=full` needs the `=`, so `--refresh <url>` reads the URL.)
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "auto"
+    )]
     refresh: Option<RefreshArg>,
     /// YouTube units refreshes may use today, counting every run's usage
     /// (Pacific-time day). Once spent, listings are served from their
@@ -83,6 +90,11 @@ struct Args {
     /// the cron job; leave it off for manual refreshes.
     #[arg(long)]
     quota_budget: Option<u64>,
+    /// Skip the full-refresh pass after the import. For all but the last of
+    /// several runs sharing one day's budget, so an early run's pass doesn't
+    /// spend what later runs need for finding new items.
+    #[arg(long)]
+    no_full_refresh_pass: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -318,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Full refreshes of the oldest uploads snapshots, with whatever budget
     // the import left. Items they find are imported by the next run.
-    if args.refresh.is_some() {
+    if args.refresh.is_some() && !args.no_full_refresh_pass {
         listings.full_refresh_pass().await?;
     }
     listings.log_summary().await;
@@ -333,4 +345,27 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("Done.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Args, RefreshArg};
+
+    /// A bare `--refresh` is `auto` and leaves a following URL alone; only
+    /// `--refresh=full` takes a value.
+    #[test]
+    fn refresh_flag_parsing() {
+        let args = Args::try_parse_from(["import", "--refresh", "https://youtu.be/x"]).unwrap();
+        assert!(matches!(args.refresh, Some(RefreshArg::Auto)));
+        assert_eq!(args.urls, ["https://youtu.be/x"]);
+
+        let args = Args::try_parse_from(["import", "--refresh=full", "u"]).unwrap();
+        assert!(matches!(args.refresh, Some(RefreshArg::Full)));
+
+        let args = Args::try_parse_from(["import", "u"]).unwrap();
+        assert!(args.refresh.is_none());
+        assert!(Args::try_parse_from(["import", "--refresh=bogus", "u"]).is_err());
+    }
 }

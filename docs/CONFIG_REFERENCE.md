@@ -105,6 +105,17 @@ In an entry file, a child's `relation` (`cover`, `remix`, `arrangement`, ...)
 marks it as the original the entry derives from; child URLs from other
 providers are canonicalized, so they meet that provider's own entries.
 
+### `listings`
+
+Overrides `import --refresh` per listing kind (see
+[Library updates](#library-updates-import---refresh)). The only useful value
+is `cached`, which never refreshes that kind:
+
+```yaml
+listings:
+  youtube:playlist_items: cached   # playlists' items stay as first fetched
+```
+
 ### Full example
 
 See `config/providers.example.yaml`. A minimal providers file that reads
@@ -201,6 +212,11 @@ ttl:
 
 The effective TTL is `initial × multiplier^(consecutive_error_count)`, capped at `max`.
 
+> **Note:** expiry is recorded but not yet enforced. Reads ignore `ttl` and
+> `swr`, so a stored response is served until it is replaced. New uploads and
+> releases are picked up by refreshing listings instead: see
+> [Library updates](#library-updates-import---refresh).
+
 #### Duration formats
 
 Durations are strings: `"500ms"`, `"30s"`, `"5m"`, `"1h"`, `"7d"`.
@@ -262,6 +278,45 @@ ISRC (the ISRC → Spotify bridge). Give `api.spotify.com` its own scheduler
 entry with a small `max_concurrent` (the example uses 4) so a large
 MusicBrainz import doesn't hit Spotify's rolling rate limit; 429s are retried
 with `Retry-After` either way.
+
+---
+
+## Library updates (`import --refresh`)
+
+Growing listings (a channel's uploads and playlists, playlist items, artist
+discographies on Spotify, MusicBrainz, Discogs and YouTube Music) are cached as
+one snapshot each, in the `db_cache` database. Updates only add: removed items
+stay. Design: `docs/plan-update.md`.
+
+| Invocation | Listings |
+|---|---|
+| `import <url>` | served from snapshots; a missing one is built from the HTTP cache |
+| `import --refresh <url>` | YouTube uploads refreshed incrementally (fetch until a page of known videos, usually 1–2 units per channel); everything else refetched in full |
+| `import --refresh=full <url>` | everything refetched in full |
+
+`--refresh=full` needs the `=`; a bare `--refresh` leaves the next argument
+for the URL list.
+
+**Quota budget.** `--quota-budget <units>` caps the YouTube units refreshes
+may use today, counting every run's usage in a per-day ledger (Pacific time,
+when YouTube resets the quota). Once spent, listings are served from their
+snapshots. With `--refresh`, the rest of the budget then goes to full
+refreshes of the uploads snapshots whose last full fetch is oldest, which
+catches videos that appeared below the page an incremental refresh stopped
+at. `--no-full-refresh-pass` skips that step. Manual runs normally pass no
+budget.
+
+**Daily cron.** `scripts/update.sh` runs every roots file in
+`<config_dir>/update_roots/`: `NAME.txt` lists root URLs and is imported with
+fetch options `NAME.yaml`, with `--refresh --quota-budget 8000` (override with
+`QUOTA_BUDGET`). Only the last run does the full-refresh pass. For example:
+
+```cron
+0 6 * * *  cd ~/dev/nrs-org/musiclib-rs && nix develop -c scripts/update.sh >> ~/.cache/musiclib-rs/update.log 2>&1
+```
+
+To pick up a release right away, refresh just that root:
+`import --refresh 'https://www.youtube.com/channel/…' --fetch-options vtuber_fetch_discography.yaml`.
 
 ---
 

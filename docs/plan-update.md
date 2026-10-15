@@ -311,12 +311,16 @@ only rate-limit.
 
 ## Phase 6: cron
 
-- `scripts/update.sh`: `import --refresh --quota-budget 8000`
-  over each roots file, run daily. There's no separate weekly job: the
-  full-refresh pass spends each day's leftover budget. With several roots
-  files run one after another, only the last one's pass has budget left,
-  which is fine because the pass works on the whole snapshot table.
-- Manual refresh needs nothing extra: `import --refresh <url>`.
+- `scripts/update.sh`: `import --refresh --quota-budget 8000` over each
+  roots file `<config_dir>/update_roots/NAME.txt` (fetch options
+  `NAME.yaml`), run daily. There's no separate weekly job: the full-refresh
+  pass spends each day's leftover budget. With several roots files run one
+  after another, all but the last pass `--no-full-refresh-pass`: an early
+  run's pass would otherwise spend the budget later runs need for their
+  incremental refreshes. The last one's pass works on the whole snapshot
+  table, so nothing is lost.
+- Manual refresh needs nothing extra: `import --refresh <url>`. Because of
+  that form, `--refresh=full` requires the `=`.
 - Document `--refresh`, `listings:` and the cron setup in
   `docs/CONFIG_REFERENCE.md` and `CLAUDE.md`.
 

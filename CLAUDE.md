@@ -19,6 +19,11 @@ cargo run --bin update_fixtures -- fixtures.yaml <filter>   # filter by path/url
 RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url>... [--url-file urls.txt] \
   --fetch-options config/fetch_options/fetch_discography.yaml
 
+# Update: refresh growing listings (uploads, discographies) instead of
+# serving their snapshots; --refresh=full refetches everything
+cargo run --bin import -- --refresh <url> --fetch-options <name>
+scripts/update.sh    # daily cron: every <config_dir>/update_roots/NAME.txt, budgeted
+
 # Re-apply dedup barrier to an existing DB (no new URLs ingested)
 RUST_LOG=musiclib_rs=info,dedup=info cargo run --bin dedup
 
@@ -77,6 +82,10 @@ Children are exposed as `ChildSource<T>: Stream<Item = Result<(ChildRef, T), Err
 - `CachedChildSource` — read-through buffer over another source, allowing multiple cursors to replay/extend the same stream.
 
 `ChildSource` also exposes `evaluate_expr(&CompiledMatcherExpr) -> Tribool` for **static analysis** of matcher expressions against pending items without consuming them — used by the matcher system for early-exit in quantifier checks.
+
+#### Listing snapshots (`providers/listing.rs`)
+
+Growing listings (YouTube uploads/playlists, artist discographies, playlist items) are built with `listing_source(store, ListingKey, ListingOrder, fetcher)`. With a `ListingStore` (only the `import` binary passes one, via `build_providers_with_listings`) the listing is cached as one snapshot of `ChildRef`s in the HTTP cache DB; without one it's a plain `PaginatedChildSource`. `import --refresh` refreshes snapshots once per run: `NewestFirst` (YouTube uploads) incrementally, stopping at the first page of known items; `Unordered` in full. Refresh pages skip every cache layer via the task-local `http::bypass_cache`. Updates are add-only, and the importer always gets a complete listing. YouTube refreshes are capped by `--quota-budget` against a per-day ledger (`http::quota::QuotaLedger`); leftover budget fully refreshes the oldest uploads snapshots (`full_refresh_pass`). Design: `docs/plan-update.md`.
 
 #### Fetch-options DAG
 
@@ -168,6 +177,8 @@ Each backend ships checked-in JSON fixtures next to its source (e.g. `youtube_ap
 
 - `scripts/import.sh` is a convenience wrapper — it re-runs the importer against a fixed example URL with vtuber fetch options, relying on the default config directory for `http.yaml` and `providers.yaml`.
 - `scripts/dedup.sh` and `scripts/clear_yt_cache.sh` are similar convenience wrappers.
+- `scripts/update.sh` is the daily cron update (see `docs/CONFIG_REFERENCE.md`, "Library updates").
+- The DB HTTP cache records TTLs but never expires entries on read; updates come from listing refreshes, not TTLs.
 - Edition: 2024.
 - `docs/BATCHING_PROVIDERS.md` is the original design doc for the coalescer; its firing rule section is superseded (see the status note at its top).
 - `docs/CONFIG_REFERENCE.md` has full annotated examples for `providers.yaml`, `http.yaml`, fetch-options files, and dedup barrier files.
