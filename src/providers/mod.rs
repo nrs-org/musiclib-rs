@@ -8,6 +8,7 @@ use crate::providers::types::{
 
 pub mod backends;
 pub mod fetch_options_yaml;
+pub mod listing;
 pub mod matcher;
 pub mod registry;
 pub mod std_values;

@@ -117,55 +117,61 @@ impl DbHttpCache {
     }
 
     async fn init_db(db_url: String) -> Result<DatabaseConnection, Error> {
-        // A `:memory:` database is private per connection, so it must use a
-        // single pooled connection or every cursor sees an empty DB.
-        let is_memory = db_url.contains(":memory:") || db_url.contains("mode=memory");
-
-        let db_url = if db_url.starts_with("sqlite://") && !db_url.contains('?') {
-            format!("{db_url}?mode=rwc")
-        } else {
-            db_url
-        };
-
-        let mut opts = ConnectOptions::new(db_url);
-        opts.sqlx_logging(false);
-        if is_memory {
-            opts.max_connections(1);
-        } else {
-            // A real connection pool (not a single serialized connection) is
-            // required: the importer fans out cache reads/writes via
-            // `buffer_unordered`, and funnelling them all through one connection
-            // — or, worse, a global mutex held across body extraction —
-            // deadlocks. sqlx applies a 5s `busy_timeout` per connection by
-            // default, so concurrent writers wait rather than erroring.
-            opts.max_connections(32)
-                .acquire_timeout(std::time::Duration::from_secs(30));
-
-            // journal_mode/synchronous/busy_timeout are per-*connection*
-            // SQLite settings, so they must go through `map_sqlx_sqlite_opts`
-            // (which customizes the template `SqliteConnectOptions` the pool
-            // uses to establish every connection) rather than a `PRAGMA ...`
-            // statement run once against the pooled `DatabaseConnection`
-            // after connecting -- that only ever lands on whichever single
-            // connection happens to service it, leaving the other 31 at
-            // sqlx-sqlite's bare default (5s busy_timeout) instead of the 30s
-            // intended here to cover worst-case write queues when
-            // `buffer_unordered` fans out many concurrent cache writes.
-            opts.map_sqlx_sqlite_opts(|o| {
-                use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
-                o.journal_mode(SqliteJournalMode::Wal)
-                    .synchronous(SqliteSynchronous::Normal)
-                    .busy_timeout(std::time::Duration::from_secs(30))
-            });
-        }
-
-        let db = Database::connect(opts).await?;
-
+        let db = connect(db_url).await?;
         db.get_schema_registry("musiclib_rs::httpcache::db::*")
             .sync(&db)
             .await?;
         Ok(db)
     }
+}
+
+/// Open the HTTP cache DB at `db_url` with the pool and per-connection
+/// settings it needs, without touching its schema. Other stores kept in the
+/// same file (listing snapshots, the quota ledger) open it through this too.
+pub async fn connect(db_url: String) -> Result<DatabaseConnection, DbErr> {
+    // A `:memory:` database is private per connection, so it must use a
+    // single pooled connection or every cursor sees an empty DB.
+    let is_memory = db_url.contains(":memory:") || db_url.contains("mode=memory");
+
+    let db_url = if db_url.starts_with("sqlite://") && !db_url.contains('?') {
+        format!("{db_url}?mode=rwc")
+    } else {
+        db_url
+    };
+
+    let mut opts = ConnectOptions::new(db_url);
+    opts.sqlx_logging(false);
+    if is_memory {
+        opts.max_connections(1);
+    } else {
+        // A real connection pool (not a single serialized connection) is
+        // required: the importer fans out cache reads/writes via
+        // `buffer_unordered`, and funnelling them all through one connection
+        // — or, worse, a global mutex held across body extraction —
+        // deadlocks. sqlx applies a 5s `busy_timeout` per connection by
+        // default, so concurrent writers wait rather than erroring.
+        opts.max_connections(32)
+            .acquire_timeout(std::time::Duration::from_secs(30));
+
+        // journal_mode/synchronous/busy_timeout are per-*connection*
+        // SQLite settings, so they must go through `map_sqlx_sqlite_opts`
+        // (which customizes the template `SqliteConnectOptions` the pool
+        // uses to establish every connection) rather than a `PRAGMA ...`
+        // statement run once against the pooled `DatabaseConnection`
+        // after connecting -- that only ever lands on whichever single
+        // connection happens to service it, leaving the other 31 at
+        // sqlx-sqlite's bare default (5s busy_timeout) instead of the 30s
+        // intended here to cover worst-case write queues when
+        // `buffer_unordered` fans out many concurrent cache writes.
+        opts.map_sqlx_sqlite_opts(|o| {
+            use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
+            o.journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal)
+                .busy_timeout(std::time::Duration::from_secs(30))
+        });
+    }
+
+    Database::connect(opts).await
 }
 
 impl DbHttpCache {

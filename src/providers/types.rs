@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 // dict of external identifier (mostly URLs), grouped by source (e.g. "wikidata", "spotify", etc.)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExternalSources(pub HashMap<Cow<'static, str>, HashSet<String>>);
 
 impl ExternalSources {
@@ -52,7 +52,7 @@ where
 }
 
 // track position within a release, with optional disc number (for multi-disc releases)
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackPosition {
     pub disc_no: Option<i32>,
     pub track_no: i32,
@@ -121,8 +121,11 @@ pub struct Alias {
     pub primary: bool,
 }
 
-// reference to a child entry (e.g. track within a release), with optional name and position
-#[derive(Default, Clone)]
+// reference to a child entry (e.g. track within a release), with optional name and position.
+// Serializable so a listing can be stored as a snapshot (`providers::listing`);
+// `#[serde(default)]` lets snapshots written before a field existed still load.
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChildRef {
     pub entry_type: EntryType,
     /// Backend-specific type string (e.g. `"youtube:video"`, `"youtube:playlist"`).
@@ -156,7 +159,8 @@ pub struct ChildRef {
 
 // contribution of an artist to an entry, with role (e.g. "main", "featured", "producer", etc.) and
 // optional flag for main artist
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Contribution {
     pub role: String,
     pub main_artist: bool,
@@ -213,6 +217,8 @@ pub enum Error {
     InvalidPattern(String),
     #[error("Not found: {0}")]
     NotFound(String),
+    #[error("Listing snapshot error: {0}")]
+    Listing(String),
 }
 
 // Matchers based on entry metadata (requires fetching the entry)
@@ -705,8 +711,15 @@ fn paginated_stream(
 
 impl PaginatedChildSource {
     pub fn new(fetcher: Box<dyn PageFetcher>) -> Self {
+        Self::from_stream(paginated_stream(fetcher))
+    }
+
+    /// A listing whose items come from `stream` rather than straight from a
+    /// `PageFetcher`, e.g. a snapshot (`providers::listing`). Static
+    /// evaluation and the declaration check work as with `new`.
+    pub fn from_stream(stream: BoxStream<'static, Result<(ChildRef, ()), Error>>) -> Self {
         Self {
-            stream: paginated_stream(fetcher),
+            stream,
             static_eval: indeterminate_eval,
             trusted: true,
         }
