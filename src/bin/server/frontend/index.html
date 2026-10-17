@@ -1798,6 +1798,8 @@
     padding: 8px;
     border-top: 1px solid var(--rail);
     background: var(--paper-deep);
+  }
+
   /* Another device is playing: the dock shows what and where instead of an
      embed (see `Player.renderRemoteCard`). */
   .player-dock-remote {
@@ -2073,7 +2075,11 @@
     bottom: 0;
     height: var(--player-bar-h);
     display: grid;
-    grid-template-columns: auto 1fr auto auto auto auto;
+    /* Art and info lead; every later control gets its own auto column on
+       the same row, so adding a bar button never wraps it off the bar. */
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-auto-flow: column;
+    grid-auto-columns: auto;
     align-items: center;
     gap: 16px;
     padding: 0 16px;
