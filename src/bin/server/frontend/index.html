@@ -4350,13 +4350,12 @@
     return { render };
   })();
 
-  // ---------- spotify: connect + playback, entirely client-side ----------
+  // ---------- spotify: connect + playback ----------
   //
-  // Authorization Code with PKCE (https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
-  // needs no client secret and no server involvement, so the whole flow —
-  // and the token store — lives here in the browser via localStorage. This
-  // is a personal, single-user, localhost app: that's an appropriate place
-  // to keep it, not a backend concern.
+  // Authorization Code with PKCE (https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow):
+  // the browser runs the redirect, and the server (`spotify_auth.rs`)
+  // trades the code for tokens and keeps the login, shared by every device.
+  // Playback is the Web Playback SDK in this tab, on borrowed access tokens.
   const Spotify = (() => {
     const SCOPES = "streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state";
     // YouTube's embed-permission check treats the raw IP-literal origin
