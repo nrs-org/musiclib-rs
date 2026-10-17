@@ -114,6 +114,13 @@ Config, cache, and data directories follow the
 | Cache | `~/.cache/musiclib-rs/` | `~/Library/Caches/nrs-org/musiclib-rs/` |
 | Data | `~/.local/share/musiclib-rs/` | `~/Library/Application Support/nrs-org/musiclib-rs/` |
 
+To relocate a directory, pass `--config-dir`, `--cache-dir`, or `--data-dir`
+to any binary that reads it, or set `MUSICLIB_CONFIG_DIR`,
+`MUSICLIB_CACHE_DIR`, or `MUSICLIB_DATA_DIR`. A flag takes precedence over its
+variable, and an empty variable counts as unset. Relative paths resolve against
+the working directory. Scripts in the config directory, such as `match.rhai`
+and the `jev/` files it reads, load relative to that directory.
+
 When no explicit `--http-config` / `--registry-config` / `--db` flag is passed,
 binaries look in these directories and fall back to built-in defaults if the
 file is absent.

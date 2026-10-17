@@ -16,12 +16,15 @@ struct Cli {
     /// Defaults to <cache_dir>/http_cache.db.
     #[arg(short, long)]
     db: Option<PathBuf>,
+    #[command(flatten)]
+    dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     let cli = Cli::parse();
+    cli.dirs.apply();
     let db = cli
         .db
         .unwrap_or_else(|| musiclib_rs::app_dirs::cache_dir().join("http_cache.db"));

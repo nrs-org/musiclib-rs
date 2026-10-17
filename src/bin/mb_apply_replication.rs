@@ -49,10 +49,13 @@ struct Cli {
     /// one applied (replication_sequence must equal the db's current value).
     #[arg(long)]
     undo: bool,
+    #[command(flatten)]
+    dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    cli.dirs.apply();
 
     let db = cli
         .db

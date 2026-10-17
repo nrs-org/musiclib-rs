@@ -69,6 +69,8 @@ struct Args {
     /// is cheap: responses are in the HTTP cache).
     #[arg(long)]
     max_fetches: Option<usize>,
+    #[command(flatten)]
+    dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 /// Load YAML config from an explicit path (errors if missing) or a default
@@ -116,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     let args = Args::parse();
+    args.dirs.apply();
     let config_dir = app_dirs::config_dir();
 
     let registry_config: RegistryConfig = load_config(

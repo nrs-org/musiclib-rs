@@ -37,11 +37,14 @@ struct Cli {
     /// Base URL for the replication-packets endpoint.
     #[arg(long, default_value = DEFAULT_BASE_URL)]
     base_url: String,
+    #[command(flatten)]
+    dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 fn main() -> Result<()> {
     dotenv::dotenv().ok();
     let cli = Cli::parse();
+    cli.dirs.apply();
 
     let token = std::env::var("METABRAINZ_ACCESS_TOKEN").context(
         "METABRAINZ_ACCESS_TOKEN is not set — add it to .env \

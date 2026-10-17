@@ -70,6 +70,8 @@ struct Args {
     /// Concurrent recording fetches.
     #[arg(long, default_value_t = 16)]
     concurrency: usize,
+    #[command(flatten)]
+    dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
@@ -454,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    args.dirs.apply();
     let config_dir = app_dirs::config_dir();
     let registry_config: RegistryConfig = load_config(
         args.registry_config.as_deref(),

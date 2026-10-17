@@ -27,7 +27,7 @@ use tracing::info;
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// Music library database. Defaults to <state_dir>/musiclib.db.
+    /// Music library database. Defaults to <data_dir>/musiclib.db.
     #[arg(long)]
     db: Option<String>,
     /// Provider credentials config. Defaults to <config_dir>/providers.yaml.
@@ -40,6 +40,8 @@ struct Args {
     /// <config_dir>/dedup_barriers/*.yaml.
     #[arg(long)]
     dedup_config: Vec<String>,
+    #[command(flatten)]
+    dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
@@ -76,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     let args = Args::parse();
+    args.dirs.apply();
     let config_dir = app_dirs::config_dir();
 
     let registry_config: RegistryConfig = load_config(
