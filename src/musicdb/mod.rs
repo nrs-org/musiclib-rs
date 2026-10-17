@@ -3116,9 +3116,11 @@ impl MusicDb {
     /// `original` made by `transformation` (a `version_tokens` marker such as
     /// `"instrumental"` or `"live"`; `None` for an unspecified alternate
     /// version). Upserts the pair's `derived_from` row with that direction,
-    /// replacing its `extra`. The pair's other non-provider edition-kind rows
-    /// are tombstoned, since this supersedes them; provider rows (cover,
-    /// remix, arrangement) stay, as they never mark a degenerate edition.
+    /// replacing its `extra`. Every other non-provider edition-kind row
+    /// between the two entries' soft-identity components (any member of one
+    /// to any member of the other) is tombstoned, since this supersedes them;
+    /// provider rows (cover, remix, arrangement) stay, as they never mark a
+    /// degenerate edition.
     pub async fn set_edition_derivation(
         &self,
         original: i64,
@@ -3137,9 +3139,44 @@ impl MusicDb {
         if let Some(t) = transformation.filter(|t| !t.trim().is_empty()) {
             extra["transformation"] = t.trim().into();
         }
+        let (identity, _) = self
+            .display_projections_around(&[original, derived])
+            .await?;
+        let members = |id: i64| {
+            let canonical = identity.component_of(id).unwrap_or(id);
+            identity
+                .members_by_component
+                .get(&canonical)
+                .cloned()
+                .unwrap_or_else(|| vec![id])
+        };
+        let (originals, deriveds) = (members(original), members(derived));
+        if originals.iter().any(|m| deriveds.contains(m)) {
+            return Err(Error::InvalidInput(
+                "both entries are the same identity, not two editions".into(),
+            ));
+        }
         let (a, b) = ordered_pair(original, derived);
         let _guard = self.write_lock.lock().await;
         let txn = self.db.begin().await?;
+        let between = Condition::any()
+            .add(
+                Condition::all()
+                    .add(entry_relation::Column::EntryA.is_in(originals.clone()))
+                    .add(entry_relation::Column::EntryB.is_in(deriveds.clone())),
+            )
+            .add(
+                Condition::all()
+                    .add(entry_relation::Column::EntryA.is_in(deriveds))
+                    .add(entry_relation::Column::EntryB.is_in(originals)),
+            );
+        entry_relation::Entity::update_many()
+            .col_expr(entry_relation::Column::Enabled, false.into())
+            .filter(between)
+            .filter(entry_relation::Column::Kind.is_in(EDITION_KINDS.iter().copied()))
+            .filter(entry_relation::Column::Origin.ne(PROVIDER_ORIGIN))
+            .exec(&txn)
+            .await?;
         entry_relation::Entity::insert(entry_relation::ActiveModel {
             entry_a: Set(a),
             entry_b: Set(b),
@@ -3165,19 +3202,6 @@ impl MusicDb {
         )
         .exec(&txn)
         .await?;
-        let superseded: Vec<&str> = EDITION_KINDS
-            .iter()
-            .copied()
-            .filter(|k| *k != DERIVED_FROM)
-            .collect();
-        entry_relation::Entity::update_many()
-            .col_expr(entry_relation::Column::Enabled, false.into())
-            .filter(entry_relation::Column::EntryA.eq(a))
-            .filter(entry_relation::Column::EntryB.eq(b))
-            .filter(entry_relation::Column::Kind.is_in(superseded))
-            .filter(entry_relation::Column::Origin.ne(PROVIDER_ORIGIN))
-            .exec(&txn)
-            .await?;
         txn.commit().await?;
         Ok(())
     }
@@ -4033,7 +4057,7 @@ mod tests {
     async fn set_edition_derivation_overrides_heuristic_and_manual_rows() {
         let mdb = mem_db().await;
         let db = &mdb.db;
-        for id in 1..=4 {
+        for id in 1..=5 {
             insert_entry(db, id).await;
         }
         insert_edition_rel(
@@ -4042,6 +4066,16 @@ mod tests {
             2,
             DERIVED_FROM,
             r#"{"derived_entry":2,"source_entry":1,"transformation":"instrumental"}"#,
+        )
+        .await;
+        // 5 is the same identity as 1, with its own instrumental edge to 2.
+        insert_rel(db, 1, 5, SAME_IDENTITY, 1.0).await;
+        insert_edition_rel(
+            db,
+            2,
+            5,
+            DERIVED_FROM,
+            r#"{"derived_entry":2,"source_entry":5,"transformation":"instrumental"}"#,
         )
         .await;
         entry_relation::Entity::insert(entry_relation::ActiveModel {
@@ -4085,6 +4119,10 @@ mod tests {
             .unwrap();
         assert!(!manual.enabled, "superseded by the derivation");
         assert!(mdb.set_edition_derivation(1, 1, None).await.is_err());
+        assert!(
+            mdb.set_edition_derivation(1, 5, None).await.is_err(),
+            "same identity"
+        );
     }
 
     /// Listened time only grows; skips (under `MIN_COUNTED_PLAY_SECONDS`)
