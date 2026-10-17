@@ -50,6 +50,12 @@ pub trait FetchProvider: CanonicalizeProvider {
     ) -> Result<Option<ExternalSources>, Error> {
         Ok(None)
     }
+    /// `(source key, identifier prefix)` pairs naming entries that soft-dedup
+    /// (`pipeline::softmatch`) must not link: an entry with a matching source
+    /// is skipped in every candidate pair.
+    fn soft_match_exclusions(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// Two recordings sharing an ISRC whose lengths differ by more than this are

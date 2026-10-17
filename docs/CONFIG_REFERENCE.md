@@ -105,6 +105,13 @@ In an entry file, a child's `relation` (`cover`, `remix`, `arrangement`, ...)
 marks it as the original the entry derives from; child URLs from other
 providers are canonicalized, so they meet that provider's own entries.
 
+A namespace may hold an optional `namespace.yaml` with settings for all its
+entries:
+
+| Field | Type | Notes |
+|---|---|---|
+| `soft_match` | bool | Default `true`. `false` keeps soft-dedup (`softmatch`, and the online pass after each ingest) from linking any of the namespace's entries: every candidate pair involving one is skipped. Use it when the entry files already author identity and originals. A file that fails to parse also excludes the namespace, with a warning. |
+
 ### Full example
 
 See `config/providers.example.yaml`. A minimal providers file that reads

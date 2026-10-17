@@ -1347,6 +1347,32 @@ impl ChannelMask {
 
 type CandidateChannels = HashMap<(i64, i64), ChannelMask>;
 
+/// Every provider's soft-dedup exclusions (see
+/// `FetchProvider::soft_match_exclusions`).
+fn soft_match_exclusions(providers: &[Arc<dyn FetchProvider>]) -> Vec<(String, String)> {
+    let exclusions: Vec<(String, String)> = providers
+        .iter()
+        .flat_map(|provider| provider.soft_match_exclusions())
+        .collect();
+    if !exclusions.is_empty() {
+        let names: Vec<String> = exclusions
+            .iter()
+            .map(|(source, prefix)| format!("{source}:{prefix}"))
+            .collect();
+        info!("Soft-dedup skips entries under {}", names.join(", "));
+    }
+    exclusions
+}
+
+/// Whether `entry` has a source under one of `exclusions`.
+fn is_excluded(entry: &EntryInfo, exclusions: &[(String, String)]) -> bool {
+    entry.pairs.iter().any(|(source, identifier)| {
+        exclusions
+            .iter()
+            .any(|(excluded, prefix)| source == excluded && identifier.starts_with(prefix.as_str()))
+    })
+}
+
 fn candidate_pair(a: i64, b: i64) -> (i64, i64) {
     (a.min(b), a.max(b))
 }
@@ -2608,6 +2634,7 @@ async fn score_candidates(
     ctx: &ScriptCtx<'_>,
     known: &KnownRelations,
     barrier: &HashMap<Pair, crate::pipeline::dedup::AnchorId>,
+    exclusions: &[(String, String)],
     config: &SoftMatchConfig,
     embed_cache: Option<&EmbeddingCache>,
     precomputed: Option<CandidateChannels>,
@@ -2696,12 +2723,19 @@ async fn score_candidates(
     };
     let mut to_score: Vec<(Arc<EntryInfo>, Arc<EntryInfo>, Option<ChannelMask>)> = Vec::new();
     let (mut soft_same, mut related, mut soft_different, mut barred) = (0usize, 0, 0, 0);
+    let mut excluded = 0usize;
     while let Some((id_a, id_b)) = work_queue.pop_front() {
         let (ea, eb) = match (share(id_a), share(id_b)) {
             (Some(a), Some(b)) => (a, b),
             _ => continue,
         };
 
+        // Excluded entries (e.g. a local namespace with `soft_match: false`)
+        // are authored: their files define identity and originals.
+        if is_excluded(&ea, exclusions) || is_excluded(&eb, exclusions) {
+            excluded += 1;
+            continue;
+        }
         if soft_identity.are_same(id_a, id_b) {
             soft_same += 1;
             continue;
@@ -2725,8 +2759,8 @@ async fn score_candidates(
     info!(
         "Skipped {} candidate pair(s) before scoring: {soft_same} already linked, \
          {related} already related, {soft_different} marked different, \
-         {barred} behind a dedup barrier",
-        soft_same + related + soft_different + barred
+         {barred} behind a dedup barrier, {excluded} excluded from soft-dedup",
+        soft_same + related + soft_different + barred + excluded
     );
 
     let total_scored = to_score.len();
@@ -3014,6 +3048,7 @@ pub async fn match_db(
         &ctx,
         &known,
         &barrier,
+        &soft_match_exclusions(providers),
         config,
         embed_cache.as_deref(),
         None,
@@ -3122,6 +3157,7 @@ pub async fn match_entries(
         &ctx,
         &known,
         &barrier,
+        &soft_match_exclusions(providers),
         config,
         embed_cache.as_deref(),
         Some(candidate_channels),
