@@ -957,7 +957,8 @@ fn parse_relate_body(body: &[u8], toggle: bool) -> Result<RelateRequest, HyperRe
         ));
     }
     let kind = req.kind.as_str();
-    if !RELATE_KINDS.contains(&kind) && !(toggle && TOGGLE_KINDS.contains(&kind)) {
+    let allowed = RELATE_KINDS.contains(&kind) || (toggle && TOGGLE_KINDS.contains(&kind));
+    if !allowed {
         return Err(respond::error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
