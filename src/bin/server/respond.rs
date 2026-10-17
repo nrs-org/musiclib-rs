@@ -4,19 +4,27 @@
 
 use std::collections::HashMap;
 
+use std::convert::Infallible;
+
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::{Response, StatusCode};
 use serde::Serialize;
 use serde_json::Value;
 
-pub type HyperResponse = Response<Full<Bytes>>;
+/// Boxed so a handler can stream (the player's SSE feed, see `playback`)
+/// as well as return a plain buffered body (`full`).
+pub type HyperResponse = Response<UnsyncBoxBody<Bytes, Infallible>>;
+
+pub fn full(body: impl Into<Bytes>) -> UnsyncBoxBody<Bytes, Infallible> {
+    Full::new(body.into()).boxed_unsync()
+}
 
 pub fn json(status: StatusCode, body: Value) -> HyperResponse {
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(body.to_string())))
+        .body(full(body.to_string()))
         .expect("response builder")
 }
 

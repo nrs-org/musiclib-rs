@@ -10,6 +10,8 @@ use musiclib_rs::{
 };
 
 use crate::jobs::JobManager;
+#[cfg(feature = "player")]
+use crate::playback::PlaybackHub;
 
 /// Shared server state, handed to every request handler behind one `Arc`.
 /// Both route groups (`store_protocol`, `player`) read from the same
@@ -48,4 +50,8 @@ pub struct AppState {
     pub nrs_url: String,
     #[cfg(feature = "player")]
     pub nrs_pool: Mutex<Option<Arc<crate::nrs_pool::NrsPool>>>,
+    /// The player's one playback session (queue, devices, position) — see
+    /// `playback`.
+    #[cfg(feature = "player")]
+    pub playback: Arc<PlaybackHub>,
 }

@@ -1798,6 +1798,119 @@
     padding: 8px;
     border-top: 1px solid var(--rail);
     background: var(--paper-deep);
+  /* Another device is playing: the dock shows what and where instead of an
+     embed (see `Player.renderRemoteCard`). */
+  .player-dock-remote {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+  }
+
+  .player-dock-remote img {
+    flex: none;
+    width: 64px;
+    height: 64px;
+    object-fit: cover;
+    border: 1px solid var(--rail);
+  }
+
+  .player-dock-remote-text { min-width: 0; flex: 1; }
+
+  .player-dock-remote button {
+    margin-top: 10px;
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .player-dock-remote button:hover { border-color: var(--ink-soft); }
+
+  /* Under a remote's muted video mirror: where the audio is, and a way to
+     take it over (the card carries this when there's no mirror). */
+  .player-dock-remote-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 8px 6px 12px;
+    border-top: 1px solid var(--rail);
+    background: var(--paper-deep);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+
+  .player-dock-remote-strip[hidden] { display: none; }
+
+  .player-dock-remote-strip span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .player-dock-remote-strip button {
+    flex: none;
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .player-dock-remote-strip button:hover { border-color: var(--ink-soft); }
+
+  /* The bar's device button turns brass while another device is playing —
+     the "you're a remote right now" cue. */
+  #player-bar-devices.is-remote { color: var(--brass-ink); }
+
+  .player-devices {
+    position: fixed;
+    right: 16px;
+    bottom: calc(var(--player-bar-h) + 8px);
+    width: min(280px, calc(100vw - 32px));
+    z-index: 80;
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
+    padding: 6px 0;
+  }
+
+  .player-devices[hidden] { display: none; }
+
+  .player-devices-label {
+    margin: 4px 12px 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .player-devices button {
+    display: flex;
+    width: 100%;
+    gap: 8px;
+    align-items: baseline;
+    border: none;
+    background: transparent;
+    padding: 6px 12px;
+    text-align: left;
+    font-size: 13px;
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  .player-devices button:hover { background: var(--paper-deeper); }
+
+  .player-devices button[aria-checked="true"] { color: var(--brass-ink); font-weight: 500; }
+
+  .player-devices-note {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-soft);
   }
 
   /* ---------- dock "up next" queue list ---------- */
@@ -1960,7 +2073,7 @@
     bottom: 0;
     height: var(--player-bar-h);
     display: grid;
-    grid-template-columns: auto 1fr auto auto auto;
+    grid-template-columns: auto 1fr auto auto auto auto;
     align-items: center;
     gap: 16px;
     padding: 0 16px;
@@ -2227,10 +2340,15 @@
 
   <div id="player-dock" class="player-dock" hidden>
     <div id="player-dock-surface" class="player-dock-surface"></div>
+    <div id="player-dock-remote-strip" class="player-dock-remote-strip" hidden>
+      <span class="player-dock-remote-strip-where"></span>
+      <button type="button" id="player-dock-remote-strip-take">Play here</button>
+    </div>
     <div id="player-dock-switch" class="player-dock-switch"></div>
     <div id="player-dock-editions" class="editions player-dock-editions" hidden></div>
     <div id="player-dock-queue" class="player-dock-queue" hidden></div>
   </div>
+  <div id="player-devices" class="player-devices" hidden role="menu" aria-label="Play on"></div>
   <footer id="player-bar" class="player-bar" hidden aria-label="Now playing">
     <button id="player-bar-art" class="player-bar-art" type="button" aria-label="Toggle player">
       <img id="player-bar-thumb" alt="" hidden />
@@ -2265,6 +2383,7 @@
         <input id="player-bar-volume-global-slider" class="player-bar-volume-slider" type="range" min="0" max="100" value="80" step="1" aria-label="Global volume" title="Global volume — scales everything" />
       </div>
     </div>
+    <button id="player-bar-devices" class="bar-btn" type="button" aria-label="Devices" aria-haspopup="true" aria-expanded="false"></button>
     <button id="player-bar-expand" class="bar-btn" type="button" aria-label="Collapse player" aria-pressed="true">
       <span id="player-bar-expand-icon"></span>
     </button>
@@ -2323,9 +2442,10 @@
   //
   // When a track is playable from more than one source, the player mounts
   // whichever comes first in this order (`sortByProviderPreference`, used by
-  // `Player.mount`) — configured from Settings mode. Persisted client-side
-  // only (localStorage), same as every other bit of playback UI state (see
-  // e.g. `player_volume_by_provider` above). `PLATFORM_COLOR`'s keys are this
+  // `Player.mountEngine`) — configured from Settings mode. Persisted per
+  // browser (localStorage), unlike the shared playback session: each device
+  // knows best what it can play (its own Spotify connection, say), and only
+  // the active device picks a source. `PLATFORM_COLOR`'s keys are this
   // app's current universe of known providers; that list is expected to grow
   // (more direct-playback backends), so a stored preference that predates a
   // new one just doesn't mention it — `sortByProviderPreference` sorts any
@@ -2489,6 +2609,10 @@
       '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M19 5a10 10 0 0 1 0 14"></path>',
     "volume-x":
       '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>',
+    // Feather's "speaker" — the device picker (Spotify Connect's own
+    // affordance is a speaker-and-screen glyph).
+    speaker:
+      '<rect x="4" y="2" width="16" height="20" rx="2"></rect><circle cx="12" cy="14" r="4"></circle><line x1="12" y1="6" x2="12.01" y2="6"></line>',
     headphones:
       '<path d="M4 13v-1a8 8 0 0 1 16 0v1"></path><rect x="2" y="13" width="5" height="7" rx="2"></rect><rect x="17" y="13" width="5" height="7" rx="2"></rect>',
     // Simplified, hand-drawn nods to each provider's mark (rounded-rect +
@@ -3864,7 +3988,7 @@
   // ---------- settings mode: playback source preference ----------
   //
   // Which provider the player should prefer when a track is playable from more than one (see
-  // `sortByProviderPreference`, used by `Player.mount`). A plain ordered
+  // `sortByProviderPreference`, used by `Player.mountEngine`). A plain ordered
   // list rather than a single "preferred provider" dropdown so it keeps
   // making sense as more providers gain direct playback support — reordering
   // is what "prefer Spotify over YouTube, but fall back to YouTube" means
@@ -4222,7 +4346,8 @@
     /// device, creating the device (and prompting the SDK's own connection
     /// handshake) on first use. Returns once playback has been requested —
     /// UI state (playing/paused) comes from `player_state_changed` events.
-    async function play(spotifyId) {
+    /// `positionMs` resumes mid-track (a transfer from another device).
+    async function play(spotifyId, positionMs = 0) {
       await ensurePlayer();
       const device = await waitForDevice(8000);
       if (!device) throw new Error("Spotify player didn't come online in time.");
@@ -4230,7 +4355,7 @@
       const res = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ uris: [`spotify:track:${spotifyId}`] }),
+        body: JSON.stringify({ uris: [`spotify:track:${spotifyId}`], position_ms: Math.round(positionMs) }),
       });
       if (!res.ok && res.status !== 204) {
         throw new Error(`Spotify refused to play (${res.status}).`);
@@ -4245,8 +4370,8 @@
       stateListener = cb;
     }
 
-    async function togglePlay() {
-      if (player) await player.togglePlay();
+    async function resume() {
+      if (player) await player.resume();
     }
 
     /// Unlike the iframe-based providers, Spotify plays through a Connect
@@ -4399,7 +4524,7 @@
       handleRedirect,
       isConnected,
       play,
-      togglePlay,
+      resume,
       pause,
       setStateListener,
       getCurrentState,
@@ -4411,6 +4536,110 @@
 
   const SPOTIFY_TRACK_PREFIX = "https://open.spotify.com/track/";
 
+  // ---------- remote: this tab as one device of the server's single
+  // playback session ----------
+  //
+  // Like Spotify Connect: the queue, what's playing, position and volume
+  // live on the server (playback.rs, docs/plan-single-user-player.md), not
+  // here. Every open tab is a *device* subscribed to the session's SSE
+  // feed; at most one is *active* and actually mounts the embed, and every
+  // other one is a remote control showing the same state. Controls are
+  // commands to the server (`command`), and the active device reports what
+  // its embed really did (`report`).
+  const Remote = (() => {
+    const DEVICE_KEY = "playback_device_id";
+    // Taken out of sessionStorage on load and put back on `pagehide`: a
+    // reload keeps its id (and so picks the session back up, see
+    // `PlaybackHub::connect`), while a duplicated tab, which copies
+    // sessionStorage, finds nothing there and mints its own.
+    let deviceId = null;
+    try {
+      deviceId = sessionStorage.getItem(DEVICE_KEY);
+      sessionStorage.removeItem(DEVICE_KEY);
+    } catch {}
+    if (!deviceId) {
+      // `crypto.randomUUID` needs a secure context, which a phone hitting
+      // the server by LAN IP isn't; `getRandomValues` works everywhere.
+      deviceId = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
+    }
+    window.addEventListener("pagehide", () => {
+      try {
+        sessionStorage.setItem(DEVICE_KEY, deviceId);
+      } catch {}
+    });
+
+    function deviceName() {
+      const ua = navigator.userAgent;
+      const browser = /Edg\//.test(ua)
+        ? "Edge"
+        : /Firefox\//.test(ua)
+          ? "Firefox"
+          : /Chrome\//.test(ua)
+            ? "Chrome"
+            : /Safari\//.test(ua)
+              ? "Safari"
+              : "Browser";
+      const os = /Android/.test(ua)
+        ? "Android"
+        : /iPhone|iPad/.test(ua)
+          ? "iOS"
+          : /Mac OS X/.test(ua)
+            ? "macOS"
+            : /Windows/.test(ua)
+              ? "Windows"
+              : /Linux/.test(ua)
+                ? "Linux"
+                : "";
+      return os ? `${browser} on ${os}` : browser;
+    }
+
+    const listeners = [];
+    let snapshot = null;
+
+    function connect() {
+      // encodeURIComponent, not URLSearchParams: the latter writes spaces
+      // as `+`, which the server's `parse_query` (plain percent-decoding)
+      // keeps literally. EventSource reconnects on its own (the server
+      // sends `retry: 2000`), re-registering this device each time.
+      const source = new EventSource(
+        `/api/playback/events?device_id=${encodeURIComponent(deviceId)}&name=${encodeURIComponent(deviceName())}`
+      );
+      source.onmessage = (e) => {
+        let snap;
+        try {
+          snap = JSON.parse(e.data);
+        } catch {
+          return;
+        }
+        snapshot = snap;
+        for (const fn of listeners) fn(snap);
+      };
+    }
+
+    function command(cmd) {
+      return postJson("/api/playback/command", { device_id: deviceId, ...cmd });
+    }
+
+    function report(fields) {
+      return fetch("/api/playback/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: deviceId, ...fields }),
+      }).catch(() => {});
+    }
+
+    return {
+      deviceId,
+      connect,
+      command,
+      report,
+      subscribe: (fn) => listeners.push(fn),
+      get snapshot() {
+        return snapshot;
+      },
+    };
+  })();
+
   // ---------- player: persistent bottom bar + floating dock ----------
   //
   // Lives outside `main` and is never rebuilt when the library view
@@ -4419,6 +4648,11 @@
   // Connect session) keeps running. The bar is always-visible transport
   // (title, prev/play-pause/next); the dock is the actual video/embed
   // surface, collapsible without tearing down what's mounted in it.
+  //
+  // Two halves: the *view* (bar, dock, queue panel, device picker) renders
+  // the server's session snapshot on every device; the *engine* (the
+  // provider adapters below) only runs on the active device, mounting
+  // whatever the snapshot says is current and reporting back what it does.
   const Player = (() => {
     const barEl = document.getElementById("player-bar");
     const dockEl = document.getElementById("player-dock");
@@ -4436,6 +4670,12 @@
     const playPauseIcon = document.getElementById("player-bar-playpause-icon");
     const nextBtn = document.getElementById("player-bar-next");
     const repeatBtn = document.getElementById("player-bar-repeat");
+    const devicesBtn = document.getElementById("player-bar-devices");
+    const devicesEl = document.getElementById("player-devices");
+    const remoteStripEl = document.getElementById("player-dock-remote-strip");
+    document.getElementById("player-dock-remote-strip-take").addEventListener("click", () =>
+      Remote.command({ type: "transfer", to: Remote.deviceId }).catch(() => {})
+    );
     const expandBtn = document.getElementById("player-bar-expand");
     const expandIcon = document.getElementById("player-bar-expand-icon");
     const progressEl = document.getElementById("player-bar-progress");
@@ -4448,18 +4688,38 @@
     const volumePlayerIcon = document.getElementById("player-bar-volume-player-icon");
 
     // Static icons that never change; the dynamic ones (play/pause, expand,
-    // repeat's off/all/one, mute) are (re)rendered by setPlayPauseUI/
-    // setExpanded/setQueueUI/setVolumeUI as state changes.
+    // repeat's off/all/one, mute) are (re)rendered as state changes.
     shuffleBtn.innerHTML = svgIcon("shuffle", 13);
     prevBtn.innerHTML = svgIcon("skip-back", 16);
     nextBtn.innerHTML = svgIcon("skip-forward", 16);
     playPauseIcon.innerHTML = svgIcon("play", 15);
     repeatBtn.innerHTML = svgIcon("repeat", 13);
+    devicesBtn.innerHTML = svgIcon("speaker", 15);
     expandIcon.innerHTML = svgIcon("chevron-down", 14);
 
-    let currentEntryId = null;
+    // Latest session snapshot from the server (see `Remote`).
+    let snap = null;
+    let onChangeCallback = null;
     let currentTitle = "";
+
+    // ---- engine state: only meaningful while this tab is the active
+    // device ----
+    //
+    // `provider` is what's mounted *here* (null otherwise); `mountedKey` is
+    // the `track_seq|source` that mount is for, so a snapshot naming a
+    // different track (or an explicitly switched source) remounts.
     let provider = null;
+    let mountedKey = null;
+    let mountedTrackSeq = null;
+    // The server's `playing` as of the last snapshot — play/pause is only
+    // driven on a *change* of it (see `reconcileEngine`).
+    let lastSnapPlaying = null;
+    let lastSeekSeq = null;
+    // What the embed itself says. `null` right after a mount (not known
+    // yet), so its first real state always gets reported.
+    let localPlaying = null;
+    let localControllable = false;
+    let endedReported = false;
     let ytPlayer = null;
     // SoundCloud Widget JS API instance for whichever iframe is currently
     // mounted (see `mountSoundcloud`) — null whenever `provider` isn't
@@ -4473,8 +4733,11 @@
     let nicoIframe = null;
     let nicoPlayerId = 0;
     let nicoPlaying = false;
+    // A Spotify track mounted paused (a transfer of a paused session) isn't
+    // sent to the Connect device until the first play — `{ id, positionMs }`.
+    let spotifyPending = null;
     let expanded = true;
-    // Whether the dock is currently reparented into Player mode's big stage
+    // Whether the dock is currently overlaid on Player mode's big stage
     // (see `setStageMode`) instead of floating over Library/Graph. Affects
     // whether the "up next" panel renders the full queue or just what's
     // ahead (`renderDockQueue`) and whether the bar's collapse chevron is
@@ -4484,18 +4747,10 @@
     // The `#player-stage-mount` placeholder to overlay the dock onto while
     // `stageMode` is active — see `syncStagePosition`.
     let stageMountEl = null;
-    let onEndedCallback = null;
-    let onPrevHandler = null;
-    let onNextHandler = null;
-    let onShuffleHandler = null;
-    let onRepeatHandler = null;
-    let onQueueJumpHandler = null;
-    let onQueueRemoveHandler = null;
-    // Bumped on every mountSource() call. Spotify.play() is async and can
-    // still resolve after the user has switched to a different source —
-    // mountSpotify() checks its own snapshot against the live value to
-    // notice it's stale and pause the now-unwanted stream instead of
-    // letting it start audio behind whatever's mounted now.
+    // Bumped on every mount/unmount. Spotify.play() and the widget API
+    // loaders are async and can resolve after the user has moved on — each
+    // adapter checks its own snapshot against the live value to notice
+    // it's stale.
     let mountToken = 0;
     // The current track's sources in preference order (see `mount`) and
     // which one is mounted — `sourceFailed` walks forward through them so an
@@ -4504,14 +4759,45 @@
     let currentSources = [];
     let currentSourceIdx = 0;
 
-    // ---- uniform progress: elapsed/duration + seek, polled the same way ----
+    function isActive() {
+      return !!snap && snap.active_device === Remote.deviceId;
+    }
+
+    function hasTrack() {
+      return !!snap?.current;
+    }
+
+    // ---- reporting (active device only) ----
+
+    let lastReportAt = 0;
+
+    function report(fields) {
+      if (!isActive() || mountedTrackSeq == null) return;
+      Remote.report({ track_seq: mountedTrackSeq, ...fields });
+    }
+
+    // Natural end of track, or an unplayable source to skip past: the
+    // server advances the queue (or repeats) for everyone.
+    function reportEnded(token) {
+      if (token !== mountToken || endedReported) return;
+      endedReported = true;
+      report({ ended: true });
+    }
+
+    // ---- uniform progress: elapsed/duration + seek ----
+    //
+    // `progress` is the position (seconds) as of `at` (performance.now()),
+    // advancing while `playing`. The active device feeds it from its
+    // embed's own position (`engineProgress`), every other device from the
+    // snapshot (`onSnapshot`); one ticker renders it either way.
     //
     // Neither embed pushes a continuous time update: YouTube's IFrame API is
     // pull-only (getCurrentTime/getDuration) and Spotify's SDK only fires
-    // `player_state_changed` on play/pause/seek/track-change. A single poll
-    // loop, swapped out per-provider in mountSource(), covers both uniformly
-    // and doubles as the Spotify end-of-track detector (see below) since the
+    // `player_state_changed` on play/pause/seek/track-change. A poll loop,
+    // swapped out per-provider in mountSource(), covers both uniformly and
+    // doubles as the Spotify end-of-track detector (see below) since the
     // SDK has no `ended` event of its own.
+    let progress = { pos: 0, at: 0, playing: false, duration: 0 };
     let progressTimer = null;
     let seeking = false;
     let lastSpotifyPlaying = false;
@@ -4524,16 +4810,55 @@
       return `${m}:${String(s).padStart(2, "0")}`;
     }
 
-    function showProgress(show) {
-      progressEl.hidden = !show;
+    function progressNow() {
+      let p = progress.pos;
+      if (progress.playing) p += (performance.now() - progress.at) / 1000;
+      return progress.duration > 0 ? Math.min(p, progress.duration) : p;
     }
 
-    function updateProgressUI(position, duration) {
-      if (seeking) return;
-      seekInput.max = String(Math.max(1, Math.round(duration)));
+    function renderProgress() {
+      progressEl.hidden = !(progress.duration > 0);
+      if (seeking || progressEl.hidden) return;
+      const position = progressNow();
+      seekInput.max = String(Math.max(1, Math.round(progress.duration)));
       seekInput.value = String(Math.round(position));
       timeElapsedEl.textContent = formatTime(position);
-      timeTotalEl.textContent = formatTime(duration);
+      timeTotalEl.textContent = formatTime(progress.duration);
+    }
+
+    setInterval(renderProgress, 500);
+
+    // The embed's own position, from whichever poll loop is running. Sent
+    // on to the server every couple of seconds; the server only rebroadcasts
+    // it when it drifts from what remotes are already extrapolating.
+    //
+    // Ignored until the embed has reported a real play/pause state: before
+    // that, positions are pre-start placeholders (YouTube says 0 before its
+    // `start` seek lands), and reporting them — or "not playing" — would
+    // make the server pause the session and rewind it to 0.
+    function engineProgress(position, duration) {
+      if (localPlaying === null) return;
+      progress = { pos: position, at: performance.now(), playing: localPlaying, duration };
+      renderProgress();
+      const now = performance.now();
+      if (now - lastReportAt < 2000) return;
+      lastReportAt = now;
+      report({
+        playing: localPlaying,
+        position_ms: Math.round(position * 1000),
+        duration_ms: Math.round(duration * 1000),
+      });
+    }
+
+    // The embed's own play/pause state (and whether it can be controlled at
+    // all yet). Reported immediately when it changes.
+    function engineState(isPlaying, controllable) {
+      const changed = isPlaying !== localPlaying;
+      progress = { pos: progressNow(), at: performance.now(), playing: isPlaying, duration: progress.duration };
+      localPlaying = isPlaying;
+      localControllable = controllable;
+      renderPlayPause();
+      if (changed) report({ playing: isPlaying, position_ms: Math.round(progress.pos * 1000) });
     }
 
     function stopProgressPolling() {
@@ -4545,32 +4870,31 @@
 
     function startYoutubeProgressPolling() {
       stopProgressPolling();
-      showProgress(true);
       progressTimer = setInterval(() => {
         if (!ytPlayer || typeof ytPlayer.getCurrentTime !== "function") return;
         const duration = ytPlayer.getDuration();
         if (!duration) return;
-        updateProgressUI(ytPlayer.getCurrentTime(), duration);
+        engineProgress(ytPlayer.getCurrentTime(), duration);
       }, 500);
     }
 
     function startSpotifyProgressPolling(token) {
       stopProgressPolling();
-      showProgress(true);
       lastSpotifyPlaying = false;
       lastSpotifyPosition = 0;
       progressTimer = setInterval(async () => {
+        if (spotifyPending) return;
         const state = await Spotify.getCurrentState();
         if (!state || token !== mountToken) return;
         const position = state.position / 1000;
         const duration = state.duration / 1000;
-        updateProgressUI(position, duration);
+        engineProgress(position, duration);
         // The SDK has no distinct "ended" event — a track that finished on
         // its own reports paused at position 0 right after having been
         // playing near the end, which a user pause/seek back to 0 wouldn't.
         const wasNearEnd = duration > 0 && lastSpotifyPosition >= duration - 1.2;
         if (lastSpotifyPlaying && state.paused && state.position === 0 && wasNearEnd) {
-          onEndedCallback?.();
+          reportEnded(token);
         }
         lastSpotifyPlaying = !state.paused;
         lastSpotifyPosition = position;
@@ -4582,14 +4906,13 @@
     // in `mountSoundcloud`) — this loop only has to cover position/duration.
     function startSoundcloudProgressPolling() {
       stopProgressPolling();
-      showProgress(true);
       progressTimer = setInterval(() => {
         if (!scWidget) return;
         scWidget.getDuration((durationMs) => {
           if (!durationMs || provider !== "soundcloud") return;
           scWidget.getPosition((positionMs) => {
             if (provider !== "soundcloud") return;
-            updateProgressUI(positionMs / 1000, durationMs / 1000);
+            engineProgress(positionMs / 1000, durationMs / 1000);
           });
         });
       }, 500);
@@ -4601,93 +4924,148 @@
     });
     seekInput.addEventListener("change", () => {
       const value = Number(seekInput.value);
-      if (provider === "youtube" && ytPlayer) ytPlayer.seekTo(value, true);
-      else if (provider === "spotify") Spotify.seek(value * 1000).catch(() => {});
-      else if (provider === "soundcloud" && scWidget) scWidget.seekTo(value * 1000);
-      else if (provider === "nicovideo") nicoPostMessage({ eventName: "seek", data: { time: value * 1000 } });
+      // Shown right away; the active device seeks once the server bumps
+      // `seek_seq` (see `reconcileEngine`), wherever the drag happened.
+      progress = { ...progress, pos: value, at: performance.now() };
       seeking = false;
+      renderProgress();
+      Remote.command({ type: "seek", position_ms: Math.round(value * 1000) }).catch(() => {});
     });
+
+    function engineSeek(seconds) {
+      if (provider === "youtube" && ytPlayer?.seekTo) ytPlayer.seekTo(seconds, true);
+      else if (provider === "spotify") {
+        if (spotifyPending) spotifyPending.positionMs = seconds * 1000;
+        else Spotify.seek(seconds * 1000).catch(() => {});
+      } else if (provider === "soundcloud" && scWidget) scWidget.seekTo(seconds * 1000);
+      else if (provider === "nicovideo") nicoPostMessage({ eventName: "seek", data: { time: seconds * 1000 } });
+      progress = { ...progress, pos: seconds, at: performance.now() };
+      renderProgress();
+    }
+
+    function enginePlay() {
+      if (provider === "youtube" && ytPlayer?.playVideo) ytPlayer.playVideo();
+      else if (provider === "spotify") {
+        if (spotifyPending) {
+          const { id, positionMs, token } = spotifyPending;
+          spotifyPending = null;
+          startSpotify(id, positionMs, token);
+        } else Spotify.resume().catch(() => {});
+      } else if (provider === "soundcloud" && scWidget) scWidget.play();
+      else if (provider === "nicovideo") nicoPostMessage({ eventName: "play" });
+    }
+
+    function enginePause() {
+      if (provider === "youtube" && ytPlayer?.pauseVideo) ytPlayer.pauseVideo();
+      else if (provider === "spotify" && !spotifyPending) Spotify.pause().catch(() => {});
+      else if (provider === "soundcloud" && scWidget) scWidget.pause();
+      else if (provider === "nicovideo") nicoPostMessage({ eventName: "pause" });
+    }
 
     // ---- volume: two 0..100 dials whose product is the effective volume,
     // applied to whichever provider is mounted in its own scale (YouTube:
     // 0..100, Spotify SDK: 0..1) ----
     //
     // - "global" scales everything together.
-    // - "player" is per-provider — it persists a separate value for
-    //   youtube/spotify and swaps in the one for whichever is mounted, so it
-    //   doubles as a balance control between the two.
+    // - "player" is per-provider — a separate value for each provider, and
+    //   the dial shows the one for whichever is playing, so it doubles as a
+    //   balance control between them.
     //
-    // Both persisted so they carry across tracks and page reloads instead of
-    // resetting to a default every time something new gets mounted.
+    // Both are part of the shared session (any device's sliders steer the
+    // active device's volume). A session that has none yet is seeded from
+    // this browser's old per-browser settings, if it has any.
     let volumeGlobal = 80;
     let volumeByProvider = {};
     let muted = false;
-    // Whether the mounted provider exposes any volume control at all (false
-    // for a bare "other" embed) — distinct from `muted`, which disables the
-    // sliders on top of a controllable provider rather than because there's
-    // nothing to control.
-    let volumeControllable = true;
-    try {
-      // getItem returns null, not a numeric string, when nothing's been
-      // saved yet — Number(null) is 0, not NaN, so that has to be checked
-      // for explicitly or every first-time visitor would start muted.
-      const raw = localStorage.getItem("player_volume_global");
-      const saved = raw === null ? NaN : Number(raw);
-      if (Number.isFinite(saved) && saved >= 0 && saved <= 100) {
-        volumeGlobal = saved;
-      } else {
-        // Migrate the pre-split single-dial value, if any, so upgrading
-        // doesn't silently reset an existing visitor's volume.
-        const rawLegacy = localStorage.getItem("player_volume");
-        const savedLegacy = rawLegacy === null ? NaN : Number(rawLegacy);
-        if (Number.isFinite(savedLegacy) && savedLegacy >= 0 && savedLegacy <= 100) {
-          volumeGlobal = savedLegacy;
-        }
-      }
-      const rawByProvider = localStorage.getItem("player_volume_by_provider");
-      if (rawByProvider) {
-        const parsed = JSON.parse(rawByProvider);
+    // Snapshots arriving while a slider is being dragged would otherwise
+    // yank it back to a value that's already been superseded.
+    let volumeEditedAt = 0;
+    let volumeSeeded = false;
+    let volumeSendTimer = null;
+    let volumePending = {};
+
+    function seedVolume() {
+      if (volumeSeeded) return;
+      volumeSeeded = true;
+      const seed = { type: "volume", seed: true, by_provider: {} };
+      try {
+        const raw = localStorage.getItem("player_volume_global") ?? localStorage.getItem("player_volume");
+        const saved = raw === null ? NaN : Number(raw);
+        if (Number.isFinite(saved) && saved >= 0 && saved <= 100) seed.global = saved;
+        const parsed = JSON.parse(localStorage.getItem("player_volume_by_provider") || "null");
         for (const key of Object.keys(PLATFORM_COLOR)) {
           const v = parsed?.[key];
-          if (Number.isFinite(v) && v >= 0 && v <= 100) volumeByProvider[key] = v;
+          if (Number.isFinite(v) && v >= 0 && v <= 100) seed.by_provider[key] = v;
         }
-      }
-    } catch {}
+      } catch {}
+      Remote.command(seed).catch(() => {});
+    }
+
+    // Coalesces slider drags into at most one command per 150ms, the last
+    // value always winning.
+    function sendVolume(fields) {
+      volumeEditedAt = performance.now();
+      volumePending = {
+        ...volumePending,
+        ...fields,
+        by_provider: { ...(volumePending.by_provider || {}), ...(fields.by_provider || {}) },
+      };
+      if (volumeSendTimer) return;
+      volumeSendTimer = setTimeout(() => {
+        const payload = volumePending;
+        volumePending = {};
+        volumeSendTimer = null;
+        Remote.command({ type: "volume", ...payload }).catch(() => {});
+      }, 150);
+    }
+
+    // The provider the per-player dial is scoped to: what's mounted here,
+    // or (as a remote) what the active device reports having mounted.
+    function volumeProvider() {
+      return isActive() ? provider : snap?.mounted?.provider || null;
+    }
+
+    function volumeControllable() {
+      // NicoNico has no volume branch in `applyVolume` — `volumeChange`/
+      // `mute` commands were tried against a live embed (0..1 scale, 0..100
+      // scale, and a plain `mute` boolean) and none of them moved the
+      // `volume`/`muted` fields `playerMetadataChange` reports back, unlike
+      // `play`/`pause`/`seek`, which all took effect. Same as a bare "other"
+      // embed: no programmatic control at all.
+      if (isActive()) return ["youtube", "spotify", "soundcloud"].includes(provider);
+      return snap?.mounted?.controllable !== false && ["youtube", "spotify", "soundcloud"].includes(volumeProvider());
+    }
 
     function playerVolume() {
-      return volumeByProvider[provider] ?? 100;
+      return volumeByProvider[volumeProvider()] ?? 100;
     }
 
     function setVolumeUI() {
+      const controllable = volumeControllable();
       volumeGlobalSlider.value = String(volumeGlobal);
       volumePlayerSlider.value = String(playerVolume());
-      // Muted disables both dials on top of whatever `volumeControllable`
-      // already dictates — there's nothing to drag them to while the
-      // effective volume is pinned to zero.
-      volumeGlobalSlider.disabled = !volumeControllable || muted;
-      volumePlayerSlider.disabled = !volumeControllable || muted;
+      // Muted disables both dials on top of whatever the provider already
+      // dictates — there's nothing to drag them to while the effective
+      // volume is pinned to zero.
+      volumeGlobalSlider.disabled = !controllable || muted;
+      volumePlayerSlider.disabled = !controllable || muted;
       const silent = muted || volumeGlobal === 0 || playerVolume() === 0;
-      muteBtn.disabled = !volumeControllable;
+      muteBtn.disabled = !controllable;
       muteBtn.innerHTML = svgIcon(silent ? "volume-x" : "volume-2", 14);
       muteBtn.setAttribute("aria-label", silent ? "Unmute" : "Mute");
       muteBtn.setAttribute("aria-pressed", String(muted));
       // The per-player dial's icon names whichever provider it's actually
       // scoped to right now — headphones is the fallback for "other"
       // embeds and the no-track-loaded state, which have no such mark.
-      const iconName = provider in PLATFORM_COLOR ? provider : "headphones";
-      volumePlayerIcon.innerHTML = svgIcon(iconName, 14);
-      volumePlayerIcon.style.color = PLATFORM_COLOR[provider] || "";
+      const p = volumeProvider();
+      volumePlayerIcon.innerHTML = svgIcon(p in PLATFORM_COLOR ? p : "headphones", 14);
+      volumePlayerIcon.style.color = PLATFORM_COLOR[p] || "";
     }
 
-    // NicoNico has no volume branch here — `volumeChange`/`mute` commands
-    // were tried against a live embed (0..1 scale, 0..100 scale, and a plain
-    // `mute` boolean) and none of them moved the `volume`/`muted` fields
-    // `playerMetadataChange` reports back, unlike `play`/`pause`/`seek`,
-    // which all took effect. `volumeControllable` is `false` for it in
-    // `mountSource` accordingly — same as a bare "other" embed.
     function applyVolume() {
+      if (!isActive()) return;
       const effective = muted ? 0 : (volumeGlobal / 100) * (playerVolume() / 100) * 100;
-      if (provider === "youtube" && ytPlayer) ytPlayer.setVolume(effective);
+      if (provider === "youtube" && ytPlayer?.setVolume) ytPlayer.setVolume(effective);
       else if (provider === "spotify") Spotify.setVolume(effective / 100).catch(() => {});
       else if (provider === "soundcloud" && scWidget) scWidget.setVolume(effective);
     }
@@ -4697,27 +5075,26 @@
     volumeGlobalSlider.addEventListener("input", () => {
       volumeGlobal = Number(volumeGlobalSlider.value);
       muted = false;
-      try {
-        localStorage.setItem("player_volume_global", String(volumeGlobal));
-      } catch {}
       applyVolume();
       setVolumeUI();
+      sendVolume({ global: volumeGlobal, muted: false });
     });
 
     volumePlayerSlider.addEventListener("input", () => {
-      volumeByProvider[provider] = Number(volumePlayerSlider.value);
+      const p = volumeProvider();
+      if (!p) return;
+      volumeByProvider[p] = Number(volumePlayerSlider.value);
       muted = false;
-      try {
-        localStorage.setItem("player_volume_by_provider", JSON.stringify(volumeByProvider));
-      } catch {}
       applyVolume();
       setVolumeUI();
+      sendVolume({ by_provider: { [p]: volumeByProvider[p] }, muted: false });
     });
 
     muteBtn.addEventListener("click", () => {
       muted = !muted;
       applyVolume();
       setVolumeUI();
+      sendVolume({ muted });
     });
 
     // ---- YouTube: IFrame Player API, not a bare <iframe> ----
@@ -4754,11 +5131,13 @@
 
     function setExpanded(v) {
       expanded = v;
-      dockEl.hidden = (!v && !stageMode) || !currentEntryId;
+      dockEl.hidden = (!v && !stageMode) || !hasTrack();
       expandBtn.setAttribute("aria-pressed", String(v));
       expandBtn.setAttribute("aria-label", v ? "Collapse player" : "Expand player");
       expandIcon.innerHTML = svgIcon(v ? "chevron-down" : "chevron-up", 14);
       if (stageMode) syncStagePosition();
+      // Collapsing unloads a remote's video mirror; expanding brings it back.
+      renderRemoteSurface();
     }
 
     // Lines the dock's `position: fixed` box up with `#player-stage-mount`'s
@@ -4804,8 +5183,9 @@
         dockEl.style.width = "";
         dockEl.style.right = "";
         dockEl.style.bottom = "";
-        dockEl.hidden = !expanded || !currentEntryId;
+        dockEl.hidden = !expanded || !hasTrack();
       }
+      lastQueueKey = null;
       renderDockQueue();
     }
 
@@ -4819,15 +5199,11 @@
     // switch between a video and the compact Spotify surface).
     new ResizeObserver(syncStagePosition).observe(dockEl);
 
-    function hasTrack() {
-      return currentEntryId != null;
-    }
-
     function updateBarMeta(title, sub, thumbUrl) {
       titleBtn.textContent = title || "(untitled)";
       subEl.textContent = sub || "";
       if (thumbUrl) {
-        thumbImg.src = thumbUrl;
+        if (thumbImg.getAttribute("src") !== thumbUrl) thumbImg.src = thumbUrl;
         thumbImg.hidden = false;
       } else {
         thumbImg.removeAttribute("src");
@@ -4835,66 +5211,90 @@
       }
     }
 
-    function setPlayPauseUI(isPlaying, controllable) {
+    // The bar's play/pause: the embed's real state on the active device,
+    // the session's everywhere else. Any device can press play on a track
+    // nobody is playing — that makes it the active device.
+    function renderPlayPause() {
+      const playing = isActive() ? !!localPlaying : !!snap?.playing;
+      const controllable = isActive() ? localControllable : hasTrack();
       playPauseBtn.disabled = !controllable;
-      playPauseIcon.innerHTML = svgIcon(isPlaying ? "pause" : "play", 15);
-      playPauseBtn.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
+      playPauseIcon.innerHTML = svgIcon(playing ? "pause" : "play", 15);
+      playPauseBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
     }
 
     // Called by every provider adapter when its source can't play. Mounts the
     // next source in preference order if there is one; only once every
-    // remaining source has failed does the track get skipped. `token` is
-    // the failing mount's `mountToken` — a late error from a source the user
-    // already switched away from is ignored.
+    // remaining source has failed is the track reported as ended, so the
+    // server skips it. `token` is the failing mount's `mountToken` — a late
+    // error from a source since switched away from is ignored.
     function sourceFailed(token) {
       if (token !== mountToken) return false;
       if (currentSourceIdx + 1 < currentSources.length) {
-        mountSourceAt(currentSourceIdx + 1);
+        localPlaying = null;
+        localControllable = false;
+        mountSourceAt(currentSourceIdx + 1, { startAt: 0, autoplay: !!snap?.playing });
         return true;
       }
-      setPlayPauseUI(false, false);
-      if (onEndedCallback) setTimeout(() => token === mountToken && onEndedCallback?.(), 1800);
+      engineState(false, false);
+      setTimeout(() => reportEnded(token), 1800);
       return false;
     }
 
-    function mountYoutube(videoId, watchUrl) {
+    function mountYoutube(videoId, watchUrl, { startAt, autoplay }) {
+      const token = mountToken;
       const wrapper = el("div", { className: "yt-mount" });
       const placeholder = el("div");
       wrapper.appendChild(placeholder);
       surfaceEl.appendChild(wrapper);
-      setPlayPauseUI(false, false);
-      const token = mountToken;
       loadYoutubeApi().then((YT) => {
         // The user may have skipped to a different track before the API
         // finished loading — the player would still spin up detached from
         // the dock, so bail rather than create an orphaned instance.
-        if (!wrapper.isConnected) return;
+        if (!wrapper.isConnected || token !== mountToken) return;
         ytPlayer = new YT.Player(placeholder, {
           videoId,
-          playerVars: { playsinline: 1, autoplay: 1, enablejsapi: 1 },
+          playerVars: {
+            playsinline: 1,
+            autoplay: autoplay ? 1 : 0,
+            enablejsapi: 1,
+            start: Math.floor(startAt),
+          },
           events: {
             // Autoplay can be silently blocked (e.g. no prior user gesture,
-            // or the browser's policy for unmuted video) — asserting
-            // "playing" here regardless of that would desync the bar's icon
-            // from reality, so read the actual state instead of assuming.
+            // or the browser's policy for unmuted video) — so rather than
+            // asserting "playing", give it a moment and report "paused" if
+            // nothing started (a PLAYING event reports itself).
             onReady: (e) => {
-              setPlayPauseUI(e.target.getPlayerState() === 1, true);
+              if (token !== mountToken) return;
+              localControllable = true;
+              renderPlayPause();
               applyVolume();
+              if (!autoplay) {
+                engineState(false, true);
+                return;
+              }
+              // The `autoplay=1` player param alone proved unreliable for a
+              // player created mid-session (a transfer came up paused),
+              // while an explicit playVideo() starts it.
+              e.target.playVideo();
+              setTimeout(() => {
+                if (token !== mountToken) return;
+                const st = e.target.getPlayerState();
+                if (st !== YT.PlayerState.PLAYING && st !== YT.PlayerState.BUFFERING) engineState(false, true);
+              }, 2500);
             },
             onStateChange: (e) => {
-              if (e.data === YT.PlayerState.PLAYING) setPlayPauseUI(true, true);
-              else if (e.data === YT.PlayerState.PAUSED) setPlayPauseUI(false, true);
-              else if (e.data === YT.PlayerState.ENDED) onEndedCallback?.();
+              if (token !== mountToken) return;
+              if (e.data === YT.PlayerState.PLAYING) engineState(true, true);
+              else if (e.data === YT.PlayerState.PAUSED) engineState(false, true);
+              else if (e.data === YT.PlayerState.ENDED) reportEnded(token);
             },
             onError: (e) => {
               if (!wrapper.isConnected || token !== mountToken) return;
               if (sourceFailed(token)) return;
               const message = YT_ERROR_MESSAGES[e.data] || "This video can't be played here.";
-              const willSkip = !!onEndedCallback;
               wrapper.innerHTML = "";
-              wrapper.appendChild(
-                el("p", { className: "note", text: message + (willSkip ? " Skipping…" : "") })
-              );
+              wrapper.appendChild(el("p", { className: "note", text: message + " Skipping…" }));
               wrapper.appendChild(
                 el("a", { className: "stamp", href: watchUrl, target: "_blank", rel: "noopener noreferrer" }, [
                   el("span", { className: "dot" }),
@@ -4908,39 +5308,52 @@
       return wrapper;
     }
 
-    function mountSpotify(spotifyId, title, token) {
-      const status = el("p", { className: "player-dock-spotify-sub", text: "Connecting to Spotify…" });
+    function startSpotify(spotifyId, positionMs, token) {
+      const status = surfaceEl.querySelector(".player-dock-spotify-sub");
+      Spotify.play(spotifyId, positionMs)
+        .then(() => {
+          // The user may have moved on while this request was in flight —
+          // the device would otherwise start playing this track anyway,
+          // underneath whatever's mounted now.
+          if (token !== mountToken) {
+            Spotify.pause().catch(() => {});
+            return;
+          }
+          if (status) status.textContent = "Playing via your Spotify account";
+          applyVolume();
+        })
+        .catch((err) => {
+          if (token !== mountToken) return;
+          if (status) status.textContent = err.message;
+          sourceFailed(token);
+        });
+    }
+
+    function mountSpotify(spotifyId, title, { startAt, autoplay }) {
+      const token = mountToken;
+      const status = el("p", {
+        className: "player-dock-spotify-sub",
+        text: autoplay ? "Connecting to Spotify…" : "Paused",
+      });
       surfaceEl.appendChild(
         el("div", { className: "player-dock-spotify" }, [
           el("p", { className: "player-dock-spotify-title", text: title || "(untitled)" }),
           status,
         ])
       );
-      setPlayPauseUI(false, false);
       Spotify.setStateListener((state) => {
         if (!state || token !== mountToken) return;
         const playingThis = state.track_window?.current_track?.id === spotifyId;
         if (!playingThis) return;
-        setPlayPauseUI(!state.paused, true);
+        engineState(!state.paused, true);
         status.textContent = state.paused ? "Paused" : "Playing via your Spotify account";
       });
-      Spotify.play(spotifyId)
-        .then(() => {
-          // The user may have switched to a different source while this
-          // request was in flight — the device would otherwise start
-          // playing this track anyway, underneath whatever's mounted now.
-          if (token !== mountToken) {
-            Spotify.pause().catch(() => {});
-            return;
-          }
-          status.textContent = "Playing via your Spotify account";
-          applyVolume();
-        })
-        .catch((err) => {
-          if (token !== mountToken) return;
-          status.textContent = err.message;
-          sourceFailed(token);
-        });
+      if (autoplay) {
+        startSpotify(spotifyId, startAt * 1000, token);
+      } else {
+        spotifyPending = { id: spotifyId, positionMs: startAt * 1000, token };
+        engineState(false, true);
+      }
     }
 
     // ---- SoundCloud: Widget JS API over an iframe pointed at the widget
@@ -4964,7 +5377,7 @@
       return scApiPromise;
     }
 
-    function mountSoundcloud(embedUrl) {
+    function mountSoundcloud(embedUrl, { startAt, autoplay }) {
       const wrapper = el("div", { className: "yt-mount" });
       const iframe = el("iframe", {
         src: embedUrl,
@@ -4974,7 +5387,6 @@
       });
       wrapper.appendChild(iframe);
       surfaceEl.appendChild(wrapper);
-      setPlayPauseUI(false, false);
       const token = mountToken;
       loadSoundcloudApi().then((SC) => {
         // Same staleness guard as `mountYoutube` — the user may have moved
@@ -4985,11 +5397,13 @@
           if (token !== mountToken) return;
           scWidget = widget;
           applyVolume();
-          widget.play();
+          if (startAt > 0) widget.seekTo(startAt * 1000);
+          if (autoplay) widget.play();
+          else engineState(false, true);
         });
-        widget.bind(SC.Widget.Events.PLAY, () => setPlayPauseUI(true, true));
-        widget.bind(SC.Widget.Events.PAUSE, () => setPlayPauseUI(false, true));
-        widget.bind(SC.Widget.Events.FINISH, () => onEndedCallback?.());
+        widget.bind(SC.Widget.Events.PLAY, () => token === mountToken && engineState(true, true));
+        widget.bind(SC.Widget.Events.PAUSE, () => token === mountToken && engineState(false, true));
+        widget.bind(SC.Widget.Events.FINISH, () => reportEnded(token));
         widget.bind(SC.Widget.Events.ERROR, () => sourceFailed(token));
       });
       return wrapper;
@@ -5019,28 +5433,29 @@
       if (e.origin !== NICONICO_ORIGIN || !nicoIframe) return;
       const msg = e.data;
       if (!msg || String(msg.playerId) !== String(nicoPlayerId)) return;
+      const token = mountToken;
       if (msg.eventName === "playerStatusChange") {
         const status = msg.data?.playerStatus;
         if (status === 2) {
           nicoPlaying = true;
-          setPlayPauseUI(true, true);
+          engineState(true, true);
         } else if (status === 3) {
           nicoPlaying = false;
-          setPlayPauseUI(false, true);
+          engineState(false, true);
         } else if (status === 4) {
           nicoPlaying = false;
-          onEndedCallback?.();
+          reportEnded(token);
         }
       } else if (msg.eventName === "playerMetadataChange") {
         // `currentTime`/`duration` are milliseconds, confirmed against a
         // live embed (undocumented — see the adapter's module doc above);
-        // `updateProgressUI` takes seconds, same as every other provider.
+        // `engineProgress` takes seconds, same as every other provider.
         const { currentTime, duration } = msg.data || {};
         if (typeof currentTime === "number" && typeof duration === "number" && duration > 0) {
-          updateProgressUI(currentTime / 1000, duration / 1000);
+          engineProgress(currentTime / 1000, duration / 1000);
         }
       } else if (msg.eventName === "error") {
-        sourceFailed(mountToken);
+        sourceFailed(token);
       }
     });
 
@@ -5052,7 +5467,7 @@
       );
     }
 
-    function mountNicovideo(embedUrl) {
+    function mountNicovideo(embedUrl, { startAt, autoplay }) {
       nicoPlayerId++;
       nicoPlaying = false;
       const myPlayerId = nicoPlayerId;
@@ -5063,171 +5478,425 @@
       });
       wrapper.appendChild(iframe);
       surfaceEl.appendChild(wrapper);
-      setPlayPauseUI(false, false);
       iframe.addEventListener("load", () => {
         if (!wrapper.isConnected || myPlayerId !== nicoPlayerId) return;
         nicoIframe = iframe;
-        nicoPostMessage({ eventName: "play" });
+        localControllable = true;
+        renderPlayPause();
+        if (autoplay) nicoPostMessage({ eventName: "play" });
+        if (startAt > 0) nicoPostMessage({ eventName: "seek", data: { time: startAt * 1000 } });
+        if (!autoplay) engineState(false, true);
       });
       return wrapper;
     }
 
-    function mountSource(source) {
-      const isSpotify =
-        source.provider === "spotify" && Spotify.isConnected() && source.identifier.startsWith(SPOTIFY_TRACK_PREFIX);
-      // Spotify plays via a Connect device, not the DOM — clearing/replacing
-      // surfaceEl below doesn't stop it like it would a YouTube iframe, so
-      // switching away from an active Spotify source has to pause it
-      // explicitly (switching Spotify -> Spotify doesn't need this: the
-      // follow-up play() call below just replaces what the device streams).
-      if (provider === "spotify" && !isSpotify) {
-        Spotify.pause().catch(() => {});
-      }
+    // Tears down whatever the engine has mounted. Spotify plays via a
+    // Connect device, not the DOM — clearing the surface doesn't stop it
+    // like it would an iframe, so it has to be paused explicitly.
+    function clearSurface() {
+      if (provider === "spotify" && !spotifyPending) Spotify.pause().catch(() => {});
       mountToken++;
       surfaceEl.innerHTML = "";
       ytPlayer = null;
       scWidget = null;
       nicoIframe = null;
+      spotifyPending = null;
+      provider = null;
+      stopProgressPolling();
+    }
+
+    function unmountEngine() {
+      clearSurface();
+      mountedKey = null;
+      mountedTrackSeq = null;
+      localPlaying = null;
+      localControllable = false;
+      remoteCardKey = null;
+    }
+
+    function mountSource(source, opts) {
+      const isSpotify =
+        source.provider === "spotify" && Spotify.isConnected() && source.identifier.startsWith(SPOTIFY_TRACK_PREFIX);
+      clearSurface();
+      const token = mountToken;
+      // The source's own provider (a Spotify track without a Spotify
+      // connection is still "Spotify" to a remote, just as a bare preview
+      // embed), plus whether this engine can actually control it.
+      const mounted = (art) =>
+        report({
+          mounted: {
+            provider: source.provider,
+            identifier: source.identifier,
+            art: art || null,
+            controllable: provider !== "other",
+          },
+        });
       surfaceEl.className = "player-dock-surface " + (isSpotify ? "compact" : "video");
       if (isSpotify) {
         provider = "spotify";
         const spotifyId = source.identifier.slice(SPOTIFY_TRACK_PREFIX.length);
-        const token = mountToken;
-        mountSpotify(spotifyId, currentTitle, token);
-        updateBarMeta(currentTitle, "Spotify", null);
+        mountSpotify(spotifyId, currentTitle, opts);
+        mounted(null);
         Spotify.getTrackArt(spotifyId).then((art) => {
           // Mounting may have moved on to a different source while this
           // lookup was in flight — don't let a stale response clobber the
           // bar's current thumbnail.
-          if (art && token === mountToken) updateBarMeta(currentTitle, "Spotify", art);
+          if (art && token === mountToken) mounted(art);
         });
-        startSpotifyProgressPolling(mountToken);
-        volumeControllable = true;
+        startSpotifyProgressPolling(token);
       } else if (source.provider === "youtube") {
         provider = "youtube";
         const videoId = source.embed_url.split("/").pop();
-        mountYoutube(videoId, source.identifier);
-        updateBarMeta(currentTitle, "YouTube", `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`);
+        mountYoutube(videoId, source.identifier, opts);
+        mounted(`https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`);
         startYoutubeProgressPolling();
-        volumeControllable = true;
       } else if (source.provider === "soundcloud") {
         provider = "soundcloud";
-        mountSoundcloud(source.embed_url);
-        updateBarMeta(currentTitle, "SoundCloud", null);
+        mountSoundcloud(source.embed_url, opts);
+        mounted(null);
         startSoundcloudProgressPolling();
-        volumeControllable = true;
       } else if (source.provider === "nicovideo") {
         provider = "nicovideo";
-        mountNicovideo(source.embed_url);
-        updateBarMeta(currentTitle, "Niconico", null);
-        stopProgressPolling();
-        showProgress(true);
-        // See `applyVolume`'s doc comment — verified against a live embed to
-        // not respond to any volume/mute command tried.
-        volumeControllable = false;
+        mountNicovideo(source.embed_url, opts);
+        mounted(null);
       } else {
         provider = "other";
         surfaceEl.appendChild(
           el("iframe", { src: source.embed_url, allow: "autoplay; encrypted-media", allowFullscreen: true })
         );
-        updateBarMeta(currentTitle, source.provider, null);
-        setPlayPauseUI(true, false);
-        stopProgressPolling();
-        showProgress(false);
-        // No programmatic control over a bare embed's own volume — the
-        // widget has whatever built-in controls it ships with, if any.
-        volumeControllable = false;
+        mounted(null);
+        // No programmatic control over a bare embed at all — it has
+        // whatever built-in controls it ships with, if any.
+        engineState(true, false);
       }
       // The player dial is per-provider — refresh it to whichever value is
       // stored for the provider just mounted.
       setVolumeUI();
     }
 
-    function renderSwitcher(sources) {
-      switchEl.innerHTML = "";
-      if (sources.length <= 1) return;
-      sources.forEach((s, i) => {
-        switchEl.appendChild(
-          el("button", {
-            type: "button",
-            text: s.provider,
-            "aria-pressed": i === 0,
-            onclick: () => mountSourceAt(i),
-          })
-        );
+    // Playable sources per entry, for both the engine (what to mount) and
+    // the switcher (what else there is). Small and per-session.
+    const sourcesCache = new Map();
+    function loadSources(entryId) {
+      if (!sourcesCache.has(entryId)) {
+        const p = api(`/api/entries/${entryId}/playable-sources`)
+          .then((r) => r.sources)
+          .catch(() => {
+            sourcesCache.delete(entryId);
+            return [];
+          });
+        sourcesCache.set(entryId, p);
+      }
+      return sourcesCache.get(entryId);
+    }
+
+    // Mounts what the snapshot says is current, picking up where the
+    // session is (a transfer, or a reload resuming): from its position, and
+    // playing only if the session is.
+    function mountEngine(s, key) {
+      clearSurface();
+      mountedKey = key;
+      mountedTrackSeq = s.track_seq;
+      lastSeekSeq = s.seek_seq;
+      lastSnapPlaying = s.playing;
+      localPlaying = null;
+      localControllable = false;
+      endedReported = false;
+      remoteCardKey = null;
+      const startAt = s.position_ms > 1500 ? s.position_ms / 1000 : 0;
+      const opts = { startAt, autoplay: s.playing };
+      progress = { pos: startAt, at: performance.now(), playing: false, duration: (s.duration_ms || 0) / 1000 };
+      renderPlayPause();
+      loadSources(s.current.entry_id).then((list) => {
+        if (mountedKey !== key) return;
+        // Ordered by this device's Settings-mode source preference, not
+        // playable-sources' own (DB-row) order — see
+        // `sortByProviderPreference` — starting from an explicit pick if
+        // there is one. `sourceFailed` walks on down the list.
+        const ordered = sortByProviderPreference(list);
+        if (!ordered.length) {
+          // Nothing this device can play: skip it, same as a failed embed.
+          surfaceEl.className = "player-dock-surface compact";
+          surfaceEl.appendChild(el("p", { className: "player-dock-spotify-sub", text: "No playable source. Skipping…" }));
+          const token = mountToken;
+          setTimeout(() => reportEnded(token), 1200);
+          return;
+        }
+        currentSources = ordered;
+        const picked = s.source ? ordered.findIndex((x) => x.identifier === s.source) : -1;
+        mountSourceAt(Math.max(picked, 0), opts);
       });
     }
 
-    // Mounts `currentSources[idx]` and marks it in the switcher — shared by
-    // a manual switcher click and `sourceFailed`'s automatic fallback.
-    function mountSourceAt(idx) {
+    // Mounts `currentSources[idx]`: the preferred (or explicitly picked)
+    // source, or the next one after a failure. Its `mounted` report moves
+    // the switcher's pressed button on every device.
+    function mountSourceAt(idx, opts) {
       currentSourceIdx = idx;
-      mountSource(currentSources[idx]);
-      switchEl.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(i === idx)));
+      mountSource(currentSources[idx], opts);
     }
 
-    function mount(entryId, sources, title, opts) {
-      const firstPlay = !currentEntryId;
-      if (entryId !== currentEntryId) fillEditions(dockEditionsEl, [], null);
-      currentEntryId = entryId;
-      currentTitle = title;
-      onEndedCallback = (opts && opts.onEnded) || null;
-      barEl.hidden = false;
-      document.body.classList.add("has-player");
-      // Ordered by the user's Settings-mode source preference, not
-      // playable-sources' own (DB-row) order — see `sortByProviderPreference`.
-      currentSources = sortByProviderPreference(sources);
-      renderSwitcher(currentSources);
-      mountSourceAt(0);
-      setExpanded(firstPlay ? true : expanded);
+    // Brings the engine in line with a snapshot while this tab is active:
+    // remount on a new track/source, seek on a new `seek_seq`, and
+    // play/pause only when the server's `playing` *changes* — a level
+    // check would undo a pause made in the embed itself if any other
+    // snapshot arrived before that pause's report did.
+    function reconcileEngine(s) {
+      if (!s.current) {
+        if (mountedKey !== null) unmountEngine();
+        return;
+      }
+      const key = `${s.track_seq}|${s.source || ""}`;
+      if (key !== mountedKey) {
+        mountEngine(s, key);
+        return;
+      }
+      if (s.seek_seq !== lastSeekSeq) {
+        lastSeekSeq = s.seek_seq;
+        engineSeek(s.position_ms / 1000);
+      }
+      if (s.playing !== lastSnapPlaying) {
+        lastSnapPlaying = s.playing;
+        if (s.playing !== localPlaying) s.playing ? enginePlay() : enginePause();
+      }
+      applyVolume();
     }
 
-    function togglePlay() {
-      if (provider === "youtube" && ytPlayer) {
-        if (ytPlayer.getPlayerState() === 1) ytPlayer.pauseVideo();
-        else ytPlayer.playVideo();
-      } else if (provider === "spotify") {
-        Spotify.togglePlay();
-      } else if (provider === "soundcloud" && scWidget) {
-        scWidget.toggle();
-      } else if (provider === "nicovideo") {
-        nicoPostMessage({ eventName: nicoPlaying ? "pause" : "play" });
+    function deviceLabel(id) {
+      const d = snap?.devices.find((x) => x.id === id);
+      if (!d) return "another device";
+      // Two tabs in the same browser share a name; tell them apart.
+      const twins = snap.devices.filter((x) => x.name === d.name).length > 1;
+      return twins ? `${d.name} (${d.id.slice(0, 4)})` : d.name;
+    }
+
+    // What the dock shows on a device that isn't playing: the track, where
+    // it's playing (if anywhere), and a way to take it over.
+    let remoteCardKey = null;
+    function renderRemoteCard() {
+      const s = snap;
+      const where = s.active_device
+        ? `${s.playing ? "Playing" : "Paused"} on ${deviceLabel(s.active_device)}`
+        : "Not playing on any device";
+      const art = s.mounted?.art || null;
+      const key = [s.current.entry_id, where, art].join("|");
+      if (key === remoteCardKey) return;
+      remoteCardKey = key;
+      surfaceEl.className = "player-dock-surface compact";
+      surfaceEl.innerHTML = "";
+      surfaceEl.appendChild(
+        el("div", { className: "player-dock-remote" }, [
+          art ? el("img", { src: art, alt: "" }) : null,
+          el("div", { className: "player-dock-remote-text" }, [
+            el("p", { className: "player-dock-spotify-title", text: s.current.title || "(untitled)" }),
+            el("p", { className: "player-dock-spotify-sub", text: where }),
+            el("button", {
+              type: "button",
+              text: "Play here",
+              onclick: () => Remote.command({ type: "transfer", to: Remote.deviceId }).catch(() => {}),
+            }),
+          ]),
+        ].filter(Boolean))
+      );
+    }
+
+    // ---- video mirror: audio is Spotify-Connect-style (one device), but
+    // video is just a view — every other screen shows a muted copy of the
+    // active device's video, steered to the session position ----
+    //
+    // YouTube only: it's the one video provider that can be muted (NicoNico
+    // ignores volume/mute, see `volumeControllable`) — a mirror that can't
+    // be silenced would just be a second audio device. Anything else shows
+    // `renderRemoteCard` instead. Only loaded while this tab is visible and
+    // its dock is showing; a hidden or collapsed one doesn't need to stream.
+    const MIRROR_DRIFT = 0.75; // seconds off before re-seeking while playing
+    const MIRROR_SEEK_COOLDOWN = 2000; // ms: let a seek land before judging it
+    let mirror = null; // { key, wrapper, player, ready, lastSeekAt }
+
+    function mirrorVideoId(s) {
+      const m = s?.mounted;
+      if (!m || m.provider !== "youtube") return null;
+      const match = /youtu\.be\/([\w-]+)/.exec(m.identifier) || /[?&]v=([\w-]+)/.exec(m.identifier);
+      return match ? match[1] : null;
+    }
+
+    function teardownMirror() {
+      if (!mirror) return;
+      mirror.wrapper.remove();
+      mirror = null;
+      remoteCardKey = null;
+      remoteStripEl.hidden = true;
+    }
+
+    function mountMirror(key, videoId) {
+      teardownMirror();
+      surfaceEl.innerHTML = "";
+      surfaceEl.className = "player-dock-surface video";
+      const wrapper = el("div", { className: "yt-mount" });
+      const placeholder = el("div");
+      wrapper.appendChild(placeholder);
+      surfaceEl.appendChild(wrapper);
+      const m = { key, wrapper, player: null, ready: false, lastSeekAt: 0 };
+      mirror = m;
+      loadYoutubeApi().then((YT) => {
+        if (mirror !== m) return;
+        m.player = new YT.Player(placeholder, {
+          videoId,
+          // No controls: the mirror follows the session, so its own
+          // play/seek UI would only fight `syncMirror`.
+          playerVars: { playsinline: 1, mute: 1, controls: 0, disablekb: 1, start: Math.floor(progressNow()) },
+          events: {
+            onReady: (e) => {
+              if (mirror !== m) return;
+              e.target.mute();
+              m.ready = true;
+              syncMirror();
+            },
+            onStateChange: () => mirror === m && syncMirror(),
+          },
+        });
+      });
+    }
+
+    // Steers the mirror to the session: play/pause to match, and re-seek
+    // when it has drifted (a remote's position is the snapshot
+    // extrapolated, re-anchored whenever the server rebroadcasts).
+    function syncMirror() {
+      const m = mirror;
+      if (!m?.ready) return;
+      const p = m.player;
+      const S = window.YT.PlayerState;
+      const st = p.getPlayerState();
+      if (st === S.ENDED) return;
+      const want = progressNow();
+      if (progress.playing && st !== S.PLAYING && st !== S.BUFFERING) p.playVideo();
+      else if (!progress.playing && st === S.PLAYING) p.pauseVideo();
+      if (st === S.BUFFERING) return;
+      const now = performance.now();
+      const drift = Math.abs(p.getCurrentTime() - want);
+      if (drift > (progress.playing ? MIRROR_DRIFT : 0.3) && now - m.lastSeekAt > MIRROR_SEEK_COOLDOWN) {
+        m.lastSeekAt = now;
+        p.seekTo(want, true);
       }
     }
 
-    function setTransportHandlers(prevFn, nextFn, prevEnabled, nextEnabled) {
-      onPrevHandler = prevFn;
-      onNextHandler = nextFn;
-      prevBtn.disabled = !prevEnabled;
-      nextBtn.disabled = !nextEnabled;
+    setInterval(syncMirror, 1000);
+
+    // "Playing on … / Play here", under the mirror (the card carries it
+    // otherwise).
+    function renderRemoteStrip() {
+      const s = snap;
+      const where = s.active_device
+        ? `${s.playing ? "Playing" : "Paused"} on ${deviceLabel(s.active_device)}`
+        : "Not playing on any device";
+      remoteStripEl.hidden = false;
+      remoteStripEl.querySelector(".player-dock-remote-strip-where").textContent = where;
     }
 
-    /// Bound once by the app-level queue wiring (unlike setTransportHandlers,
-    /// these don't change per-track) — shuffle/repeat toggle the queue's
-    /// mode without touching what's currently mounted, and jump/remove act
-    /// on the "up next" list rendered into the dock by renderDockQueue.
-    function setQueueHandlers(shuffleFn, repeatFn, jumpFn, removeFn) {
-      onShuffleHandler = shuffleFn;
-      onRepeatHandler = repeatFn;
-      onQueueJumpHandler = jumpFn;
-      onQueueRemoveHandler = removeFn;
+    // The dock surface on a device that isn't playing: the mirror when
+    // there's a video to mirror and somewhere to show it, the card
+    // otherwise.
+    function renderRemoteSurface() {
+      if (!snap?.current || isActive()) return;
+      const videoId =
+        !dockEl.hidden && document.visibilityState === "visible" ? mirrorVideoId(snap) : null;
+      if (!videoId) {
+        teardownMirror();
+        renderRemoteCard();
+        return;
+      }
+      const key = `${snap.track_seq}|${videoId}`;
+      if (mirror?.key !== key) mountMirror(key, videoId);
+      syncMirror();
+      renderRemoteStrip();
+    }
+
+    document.addEventListener("visibilitychange", renderRemoteSurface);
+
+    // Source switcher: every playable source of the current track, the
+    // mounted one pressed. Picking one is a command, so a remote can switch
+    // what the active device plays too.
+    let switcherKey = null;
+    function renderSwitcher() {
+      const s = snap;
+      if (!s?.current) {
+        switchEl.innerHTML = "";
+        switcherKey = null;
+        return;
+      }
+      const entryId = s.current.entry_id;
+      loadSources(entryId).then((list) => {
+        if (snap?.current?.entry_id !== entryId) return;
+        const ordered = sortByProviderPreference(list);
+        const picked = snap.mounted?.identifier || snap.source || null;
+        const key = [entryId, picked, ordered.map((x) => x.identifier).join(",")].join("|");
+        if (key === switcherKey) return;
+        switcherKey = key;
+        switchEl.innerHTML = "";
+        if (ordered.length <= 1) return;
+        for (const src of ordered) {
+          switchEl.appendChild(
+            el("button", {
+              type: "button",
+              text: src.provider,
+              "aria-pressed": String(src.identifier === picked),
+              onclick: () => Remote.command({ type: "select_source", identifier: src.identifier }).catch(() => {}),
+            })
+          );
+        }
+      });
+    }
+
+    // Edition switcher (the dock strip under the source switcher): the
+    // current track's other editions, e.g. the instrumental. Picking one
+    // replaces it in the queue for every device. Editions aren't all
+    // playable, so look before replacing.
+    let editionsEntryId = null;
+    function renderEditions() {
+      const entryId = snap?.current?.entry_id ?? null;
+      if (entryId === editionsEntryId) return;
+      editionsEntryId = entryId;
+      fillEditions(dockEditionsEl, [], null);
+      if (entryId == null) return;
+      api(`/api/entries/${entryId}`)
+        .then((entry) => {
+          if (editionsEntryId === entryId) fillEditions(dockEditionsEl, entry.editions, switchEdition);
+        })
+        .catch(() => {});
+    }
+
+    async function switchEdition(ed) {
+      const current = snap?.current;
+      if (!current) return;
+      const sources = await loadSources(ed.entry_id);
+      if (snap?.current?.entry_id !== current.entry_id) return;
+      if (!sources.length) {
+        setStatus(`No playable source for the ${friendlyType(ed.transformation || ed.kind || "original")} edition.`);
+        return;
+      }
+      const item = { entry_id: ed.entry_id, title: ed.title || current.title || null };
+      Remote.command({ type: "replace_current", item }).catch((err) => setStatus(err.message));
     }
 
     // Renders either "up next" (default, floating dock) or the full queue
     // with the current track marked (stage mode, Player mode's big screen)
-    // — same panel, reused rather than duplicated, because it's already
-    // exactly the queue-shaped state this dock owns. Pulled straight from
-    // `Queue` rather than taking a param: the list to show depends only on
-    // `stageMode`, and every caller that changes queue shape already goes
-    // through `setQueueUI`/`setStageMode` right after mutating `Queue`.
+    // — same panel, reused rather than duplicated. Only rebuilt when the
+    // queue's shape actually changed, not on every progress snapshot, so
+    // it doesn't flicker under the pointer.
+    let lastQueueKey = null;
     function renderDockQueue() {
+      const rows = snap?.queue || [];
+      const pos = rows.findIndex((r) => r.is_current);
+      const items = stageMode ? rows : rows.slice(pos + 1);
+      const key = [stageMode, hasTrack(), JSON.stringify(items)].join("|");
+      if (key === lastQueueKey) return;
+      lastQueueKey = key;
       dockQueueEl.innerHTML = "";
-      if (!currentEntryId) {
+      if (!hasTrack()) {
         dockQueueEl.hidden = true;
         return;
       }
       dockQueueEl.hidden = false;
-      const items = stageMode ? Queue.all() : Queue.upcoming();
       dockQueueEl.appendChild(el("p", { className: "player-dock-queue-label", text: stageMode ? "Queue" : "Up next" }));
       if (!items.length) {
         dockQueueEl.appendChild(el("p", { className: "player-dock-queue-empty", text: "Nothing queued." }));
@@ -5240,8 +5909,8 @@
       // preceded it — otherwise the panel's own header already says it all.
       let sawNonPostQueueRow = false;
       for (const item of items) {
-        const isCurrent = !!item.isCurrent;
-        if (isCurrent || !item.isPostQueue) {
+        const isCurrent = !!item.is_current;
+        if (isCurrent || !item.is_post_queue) {
           sawNonPostQueueRow = true;
         } else if (sawNonPostQueueRow) {
           dockQueueEl.appendChild(el("p", { className: "player-dock-queue-divider", text: "Post-queue" }));
@@ -5252,7 +5921,9 @@
           className: "player-dock-queue-remove",
           "aria-label": "Remove from queue",
           disabled: isCurrent,
-          onclick: isCurrent ? null : () => onQueueRemoveHandler?.(item.orderIndex),
+          onclick: isCurrent
+            ? null
+            : () => Remote.command({ type: "remove", order_index: item.order_index }).catch(() => {}),
         });
         removeBtn.innerHTML = svgIcon("x", 12);
         dockQueueEl.appendChild(
@@ -5261,7 +5932,7 @@
               type: "button",
               className: "player-dock-queue-jump",
               text: item.title || "(untitled)",
-              onclick: () => onQueueJumpHandler?.(item.orderIndex),
+              onclick: () => Remote.command({ type: "jump", order_index: item.order_index }).catch(() => {}),
             }),
             removeBtn,
           ])
@@ -5269,275 +5940,156 @@
       }
     }
 
-    /// Refreshes everything queue-shaped in the UI: the shuffle/repeat
-    /// button states and the dock's queue panel. Called by the app-level
-    /// queue module every time it changes shape (toggle, skip, add, remove).
-    function setQueueUI(shuffled, repeatMode) {
-      shuffleBtn.setAttribute("aria-pressed", String(shuffled));
-      const repeatActive = repeatMode !== "off";
-      repeatBtn.setAttribute("aria-pressed", String(repeatActive));
-      repeatBtn.innerHTML = svgIcon(repeatMode === "one" ? "repeat-1" : "repeat", 13);
+    function renderDevices() {
+      devicesBtn.classList.toggle("is-remote", !!snap?.active_device && !isActive());
+      if (devicesEl.hidden || !snap) return;
+      devicesEl.innerHTML = "";
+      devicesEl.appendChild(el("p", { className: "player-devices-label", text: "Play on" }));
+      for (const d of snap.devices) {
+        const self = d.id === Remote.deviceId;
+        const active = d.id === snap.active_device;
+        devicesEl.appendChild(
+          el(
+            "button",
+            {
+              type: "button",
+              role: "menuitemradio",
+              "aria-checked": String(active),
+              onclick: () => {
+                closeDevices();
+                if (!active) Remote.command({ type: "transfer", to: d.id }).catch(() => {});
+              },
+            },
+            [
+              el("span", { text: deviceLabel(d.id) }),
+              self ? el("span", { className: "player-devices-note", text: "this tab" }) : null,
+            ].filter(Boolean)
+          )
+        );
+      }
+    }
+
+    function closeDevices() {
+      devicesEl.hidden = true;
+      devicesBtn.setAttribute("aria-expanded", "false");
+    }
+
+    devicesBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      devicesEl.hidden = !devicesEl.hidden;
+      devicesBtn.setAttribute("aria-expanded", String(!devicesEl.hidden));
+      renderDevices();
+    });
+    document.addEventListener("click", (e) => {
+      if (!devicesEl.hidden && !devicesEl.contains(e.target)) closeDevices();
+    });
+
+    function onSnapshot(s) {
+      snap = s;
+      currentTitle = s.current?.title || "";
+      if (s.volume) {
+        if (performance.now() - volumeEditedAt > 600) {
+          volumeGlobal = s.volume.global;
+          volumeByProvider = { ...s.volume.by_provider };
+          muted = s.volume.muted;
+        }
+      } else {
+        seedVolume();
+      }
+
+      if (isActive()) {
+        teardownMirror();
+        reconcileEngine(s);
+      } else {
+        if (mountedKey !== null) unmountEngine();
+        progress = {
+          pos: s.position_ms / 1000,
+          at: performance.now(),
+          playing: s.playing,
+          duration: (s.duration_ms || 0) / 1000,
+        };
+        if (!s.current) {
+          teardownMirror();
+          surfaceEl.innerHTML = "";
+          remoteCardKey = null;
+        }
+      }
+
+      const has = hasTrack();
+      barEl.hidden = !has;
+      document.body.classList.toggle("has-player", has);
+      if (!has) dockEl.hidden = true;
+      else if (dockEl.hidden && (expanded || stageMode)) setExpanded(expanded);
+      // After the dock's visibility is settled — the mirror only loads
+      // into a dock that's showing.
+      renderRemoteSurface();
+      if (has) {
+        const p = s.mounted?.provider;
+        const parts = [p ? providerLabel(p) : null];
+        if (!isActive()) {
+          parts.push(s.active_device ? `on ${deviceLabel(s.active_device)}` : "not playing");
+        }
+        updateBarMeta(currentTitle, parts.filter(Boolean).join(" · "), s.mounted?.art || null);
+      }
+      prevBtn.disabled = !s.has_prev;
+      nextBtn.disabled = !s.has_next;
+      shuffleBtn.setAttribute("aria-pressed", String(s.shuffled));
+      repeatBtn.setAttribute("aria-pressed", String(s.repeat !== "off"));
+      repeatBtn.innerHTML = svgIcon(s.repeat === "one" ? "repeat-1" : "repeat", 13);
       repeatBtn.setAttribute(
         "aria-label",
-        repeatMode === "off" ? "Repeat off" : repeatMode === "all" ? "Repeat all" : "Repeat one"
+        s.repeat === "off" ? "Repeat off" : s.repeat === "all" ? "Repeat all" : "Repeat one"
       );
+      renderPlayPause();
+      renderProgress();
+      setVolumeUI();
+      renderSwitcher();
+      renderEditions();
       renderDockQueue();
+      renderDevices();
+      if (stageMode) syncStagePosition();
+      onChangeCallback?.();
+    }
+
+    // Play/pause. On the active device this drives the embed directly
+    // (inside the click's user gesture, which autoplay policies want) and
+    // the embed's report updates everyone else; anywhere else it's a
+    // command — and with nobody playing, "play" makes this tab the player.
+    function togglePlay() {
+      if (isActive() && localControllable) {
+        if (localPlaying) enginePause();
+        else enginePlay();
+        return;
+      }
+      if (!snap?.current) return;
+      Remote.command({ type: snap.active_device ? "toggle" : "play" }).catch(() => {});
     }
 
     function isPlayingEntry(entryId) {
-      return currentEntryId === entryId;
+      return snap?.current?.entry_id === entryId;
     }
 
-    /// Fills the dock's edition switcher for `entryId` (ignored if a
-    /// different track has been mounted since the caller's lookup started).
-    /// `onPick` gets the chosen `EditionRef` — swapping what's playing is
-    /// the queue's business, not the dock's.
-    function setEditions(entryId, editions, onPick) {
-      if (entryId !== currentEntryId) return;
-      fillEditions(dockEditionsEl, editions, onPick);
-    }
-
-    prevBtn.addEventListener("click", () => onPrevHandler?.());
-    nextBtn.addEventListener("click", () => onNextHandler?.());
+    prevBtn.addEventListener("click", () => Remote.command({ type: "prev" }).catch(() => {}));
+    nextBtn.addEventListener("click", () => Remote.command({ type: "next" }).catch(() => {}));
     playPauseBtn.addEventListener("click", togglePlay);
-    shuffleBtn.addEventListener("click", () => onShuffleHandler?.());
-    repeatBtn.addEventListener("click", () => onRepeatHandler?.());
+    shuffleBtn.addEventListener("click", () => Remote.command({ type: "toggle_shuffle" }).catch(() => {}));
+    repeatBtn.addEventListener("click", () => Remote.command({ type: "cycle_repeat" }).catch(() => {}));
     expandBtn.addEventListener("click", () => setExpanded(!expanded));
     artBtn.addEventListener("click", () => setExpanded(!expanded));
     titleBtn.addEventListener("click", () => {
-      if (currentEntryId) viewEntry(currentEntryId);
+      if (snap?.current) viewEntry(snap.current.entry_id);
     });
 
+    Remote.subscribe(onSnapshot);
+
     return {
-      mount,
       togglePlay,
       isPlayingEntry,
-      setEditions,
-      setTransportHandlers,
-      setQueueHandlers,
-      setQueueUI,
       setStageMode,
       syncStagePosition,
       hasTrack,
-    };
-  })();
-
-  // ---------- queue: play order, shuffle and repeat, independent of what's
-  // on screen ----------
-  //
-  // `items` is the queue in the order it was built (a tracklist's disc/track
-  // order, or a single standalone track); `order` is the permutation of
-  // indices into `items` that playback actually walks — identity when
-  // shuffle is off, reshuffled with the current track pinned first when
-  // it's on. `pos` indexes into `order`, not `items`, so "what's next" is
-  // always `order[pos + 1]` regardless of shuffle. Keeping the natural order
-  // separate means switching shuffle off restores it exactly instead of
-  // compounding reshuffles.
-  //
-  // Three layers, in play order: the current item (`order[pos]`), then the
-  // "Queue" layer — tracks explicitly added one at a time via `queueNext`
-  // (the UI's "Queue" button) — then "Post-queue": whatever background
-  // playlist is providing continuous playback (a release tracklist, a
-  // shuffle-all batch, auto-recommended filler) once the Queue layer is
-  // exhausted. `queueEnd` is the boundary between the two: order[pos+1 ..
-  // queueEnd) is Queue, order[queueEnd ..) is Post-queue. Critically, `set`
-  // (used by startQueue/playStandalone/shuffleLibrary to load a whole
-  // batch) puts its entire batch straight into Post-queue — none of it was
-  // an explicit one-at-a-time pick — so a `queueNext` afterwards still lands
-  // right after the current track instead of at the end of a 100-track
-  // shuffle batch.
-  const Queue = (() => {
-    let items = [];
-    let order = [];
-    let pos = -1;
-    let shuffled = false;
-    let repeatMode = "off"; // "off" | "all" | "one"
-    let queueEnd = 0;
-
-    function identityOrder() {
-      return items.map((_, i) => i);
-    }
-
-    // Fisher-Yates over everything except `anchorIdx`, which is pinned
-    // first — used both for "shuffle just turned on" (anchor = currently
-    // playing item) and "queue just (re)started" (anchor = the requested
-    // start item).
-    function shuffleFrom(anchorIdx) {
-      const rest = items.map((_, i) => i).filter((i) => i !== anchorIdx);
-      for (let i = rest.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [rest[i], rest[j]] = [rest[j], rest[i]];
-      }
-      return [anchorIdx, ...rest];
-    }
-
-    function set(newItems, startIndex) {
-      items = newItems;
-      const anchor = items[startIndex] ? startIndex : 0;
-      order = shuffled ? shuffleFrom(anchor) : identityOrder();
-      pos = order.indexOf(anchor);
-      // The whole batch is Post-queue — see the module doc above.
-      queueEnd = pos + 1;
-    }
-
-    function current() {
-      return pos >= 0 && pos < order.length ? items[order[pos]] : null;
-    }
-
-    function hasPrev() {
-      if (!order.length) return false;
-      return pos > 0 || repeatMode === "all";
-    }
-
-    function hasNext() {
-      if (!order.length) return false;
-      return pos < order.length - 1 || repeatMode === "all";
-    }
-
-    function moveTo(newPos) {
-      if (newPos < 0) {
-        if (repeatMode !== "all") return null;
-        newPos = order.length - 1;
-      } else if (newPos >= order.length) {
-        if (repeatMode !== "all") return null;
-        newPos = 0;
-      }
-      pos = newPos;
-      return current();
-    }
-
-    function prev() {
-      return moveTo(pos - 1);
-    }
-
-    function next() {
-      return moveTo(pos + 1);
-    }
-
-    // Called on natural end-of-track (not a manual skip): repeat-one
-    // replays the same item in place rather than advancing, matching how
-    // Spotify treats repeat-one — manual skips still move on regardless.
-    function advanceOnEnded() {
-      return repeatMode === "one" ? current() : next();
-    }
-
-    // Swaps the item at the current position (the dock's edition switcher)
-    // without moving `pos` or touching the rest of the play order.
-    function replaceCurrent(item) {
-      if (pos < 0 || pos >= order.length) return;
-      items = items.slice();
-      items[order[pos]] = item;
-    }
-
-    function jumpTo(orderIndex) {
-      if (orderIndex < 0 || orderIndex >= order.length) return null;
-      pos = orderIndex;
-      return current();
-    }
-
-    function removeAt(orderIndex) {
-      if (orderIndex === pos || orderIndex < 0 || orderIndex >= order.length) return false;
-      order.splice(orderIndex, 1);
-      if (orderIndex < pos) pos--;
-      if (orderIndex < queueEnd) queueEnd--;
-      return true;
-    }
-
-    function toggleShuffle() {
-      shuffled = !shuffled;
-      const anchor = current();
-      if (!anchor) {
-        order = shuffled ? order : identityOrder();
-        queueEnd = pos + 1;
-        return;
-      }
-      const anchorIdx = order[pos];
-      order = shuffled ? shuffleFrom(anchorIdx) : identityOrder();
-      pos = order.indexOf(anchorIdx);
-      // Reshuffling scrambles the Queue/Post-queue split along with
-      // everything else — rather than tracking stale positions through it,
-      // treat the reshuffled upcoming list as pure Post-queue; it re-splits
-      // cleanly the next time something is queued.
-      queueEnd = pos + 1;
-    }
-
-    function cycleRepeat() {
-      repeatMode = repeatMode === "off" ? "all" : repeatMode === "all" ? "one" : "off";
-      return repeatMode;
-    }
-
-    // Everything after `pos` in play order, each tagged with its absolute
-    // position in `order` (so the dock's queue panel can jump/remove by it)
-    // and whether it's past `queueEnd` — i.e. Post-queue rather than the
-    // explicitly-queued layer.
-    function upcoming() {
-      return order.slice(pos + 1).map((itemIdx, i) => {
-        const orderIndex = pos + 1 + i;
-        return { ...items[itemIdx], orderIndex, isPostQueue: orderIndex >= queueEnd };
-      });
-    }
-
-    // The whole play order — past, current, and upcoming — for Player
-    // mode's full queue panel (see `Player.setStageMode`/`renderDockQueue`).
-    // Same `orderIndex`/`isPostQueue` tagging as `upcoming()`, plus
-    // `isCurrent` so the renderer can mark and lock the playing row.
-    function all() {
-      return order.map((itemIdx, i) => ({
-        ...items[itemIdx],
-        orderIndex: i,
-        isCurrent: i === pos,
-        isPostQueue: i >= queueEnd,
-      }));
-    }
-
-    // Manually queue a track: inserted right after whatever's already in
-    // the Queue layer but ahead of Post-queue (clamped to just after `pos`
-    // so it never lands behind a `queueEnd` left over from before playback
-    // caught up to it) — see the module doc above.
-    function queueNext(item) {
-      const idx = items.length;
-      items = items.concat([item]);
-      const insertAt = Math.max(queueEnd, pos + 1);
-      order.splice(insertAt, 0, idx);
-      queueEnd = insertAt + 1;
-      return true;
-    }
-
-    // Append items to the very end of Post-queue (auto-recommend's top-up),
-    // without resetting position. Never needs to touch `queueEnd` itself:
-    // new items always land contiguous with whatever Post-queue tail
-    // already ends the queue (or start one, if `queueEnd` was already
-    // `order.length`).
-    function appendPostQueue(newItems) {
-      if (!newItems.length) return;
-      const startIdx = items.length;
-      items = items.concat(newItems);
-      const newIndices = newItems.map((_, i) => startIdx + i);
-      order = order.concat(newIndices);
-    }
-
-    return {
-      set,
-      current,
-      hasPrev,
-      hasNext,
-      prev,
-      next,
-      advanceOnEnded,
-      jumpTo,
-      replaceCurrent,
-      removeAt,
-      toggleShuffle,
-      cycleRepeat,
-      upcoming,
-      all,
-      queueNext,
-      appendPostQueue,
-      get shuffled() {
-        return shuffled;
-      },
-      get repeatMode() {
-        return repeatMode;
+      onChange: (fn) => {
+        onChangeCallback = fn;
       },
     };
   })();
@@ -5560,33 +6112,10 @@
     }
   }
 
-  // Pushes the queue's current shape (transport enabled state, shuffle/
-  // repeat button state, queue panel) into Player. Called after every Queue
-  // mutation that doesn't already remount a track. Also the single place
-  // that top-up auto-recommend fetches get triggered from — see
-  // `ensureAutoRecommend` — so any queue change (a track finishing, a
-  // manual add/remove, a reshuffle) is a chance to notice the upcoming list
-  // is running low and refill it ahead of time.
-  function syncTransport() {
-    Player.setTransportHandlers(
-      () => {
-        if (Queue.prev()) playCurrent();
-      },
-      () => {
-        if (Queue.next()) playCurrent();
-      },
-      Queue.hasPrev(),
-      Queue.hasNext()
-    );
-    Player.setQueueUI(Queue.shuffled, Queue.repeatMode);
-    ensureAutoRecommend();
-  }
-
   // Player mode's empty state ("nothing playing") vs. its stage/queue
-  // wrapper — kept in sync here (called after every mount, and once on
-  // entering the mode) rather than only when the mode switch happens, so
-  // starting playback from Library/the rail while Player mode is already
-  // open updates it live.
+  // wrapper — kept in sync on every session change rather than only when
+  // the mode switch happens, so playback started from Library/the rail (or
+  // from another device) while Player mode is open updates it live.
   function refreshPlayerStageVisibility() {
     const has = Player.hasTrack();
     playerStageWrapEl.hidden = !has;
@@ -5596,118 +6125,59 @@
     Player.syncStagePosition();
   }
 
-  Player.setQueueHandlers(
-    () => {
-      Queue.toggleShuffle();
-      syncTransport();
-    },
-    () => {
-      Queue.cycleRepeat();
-      syncTransport();
-    },
-    (orderIndex) => {
-      if (Queue.jumpTo(orderIndex)) playCurrent();
-    },
-    (orderIndex) => {
-      Queue.removeAt(orderIndex);
-      syncTransport();
-    }
-  );
-
-  function mountQueueItem(entryId, title, sources) {
-    Player.mount(entryId, sources, title, { onEnded: handleTrackEnded });
-    ShuffleMix.notePlayed(entryId);
-    syncTransport();
+  Player.onChange(() => {
     refreshPlayIndicators();
     refreshPlayerStageVisibility();
-    api(`/api/entries/${entryId}`)
-      .then((entry) => Player.setEditions(entryId, entry.editions, switchEdition))
-      .catch(() => {});
-  }
+  });
 
-  // The dock's edition switcher: swaps the playing queue item for another
-  // edition of it (e.g. the instrumental) in place, keeping the rest of the
-  // queue as-is. Editions aren't all playable, so look before replacing.
-  async function switchEdition(ed) {
-    const item = Queue.current();
-    if (!item) return;
-    let sources = [];
+  // ---------- queue actions: commands to the shared session ----------
+  //
+  // The queue itself (play order, shuffle/repeat, the Queue vs Post-queue
+  // layers, auto-recommend top-up) lives server-side now — see
+  // playback.rs's `Queue`. These just say what the library UI wants; the
+  // result arrives as a snapshot, on every device. They play on whichever
+  // device is active, or on this one if none is.
+  async function playbackCommand(cmd) {
     try {
-      sources = (await api(`/api/entries/${ed.entry_id}/playable-sources`)).sources;
-    } catch {}
-    if (Queue.current() !== item) return;
-    if (!sources.length) {
-      setStatus(`No playable source for the ${friendlyType(ed.transformation || ed.kind || "original")} edition.`);
-      return;
-    }
-    const replacement = { entry_id: ed.entry_id, title: ed.title || item.title };
-    Queue.replaceCurrent(replacement);
-    mountQueueItem(replacement.entry_id, replacement.title, sources);
-  }
-
-  // Natural end-of-track: advance within the queue as already built. The
-  // proactive top-up in `syncTransport` (via `ensureAutoRecommend`) should
-  // normally mean there's already something next by the time a track ends,
-  // but `advanceOnEnded` returning nothing (repeat off, nothing queued or
-  // recommended yet) falls back to awaiting a fetch right here rather than
-  // replaying the track that just finished — `advanceOnEnded` doesn't move
-  // `pos` when it fails, so re-reading `Queue.current()` without first
-  // fetching+advancing would just hand `playCurrent` the same track again.
-  async function handleTrackEnded() {
-    if (Queue.advanceOnEnded()) {
-      playCurrent();
-      return;
-    }
-    await ensureAutoRecommend();
-    if (Queue.next()) {
-      playCurrent();
+      await Remote.command(cmd);
+      return true;
+    } catch (err) {
+      setStatus(err.message);
+      return false;
     }
   }
 
-  async function playCurrent() {
-    const item = Queue.current();
-    if (!item) return;
-    let sources = [];
-    try {
-      sources = (await api(`/api/entries/${item.entry_id}/playable-sources`)).sources;
-    } catch {
-      // fall through with an empty source list — nothing to play, but we
-      // shouldn't leave the queue pointing at a stale mount either.
-    }
-    if (!sources.length) return;
-    mountQueueItem(item.entry_id, item.title, sources);
+  // What the server's queue stores of a track (`playback::QueueItem`).
+  function queueItem(t) {
+    return { entry_id: t.entry_id, title: t.title ?? null };
   }
 
   function startQueue(items, index) {
-    Queue.set(items, index);
-    playCurrent();
+    playbackCommand({
+      type: "set_queue",
+      items: items.map(queueItem),
+      start_index: index,
+    });
   }
 
-  function playStandalone(entryId, title, sources) {
-    Queue.set([{ entry_id: entryId, title }], 0);
-    mountQueueItem(entryId, title, sources);
+  function playStandalone(entryId, title) {
+    startQueue([{ entry_id: entryId, title }], 0);
   }
 
   // The "Queue" affordance on a track's play button / tracklist row: adds
-  // it to the Queue layer, ahead of Post-queue (a shuffle-all batch, a
-  // tracklist's own continuation, auto-recommend filler — see `Queue`'s
-  // module doc) — without disturbing what's currently playing. If nothing's
-  // playing yet there's nothing to queue *behind*, so this just starts it
-  // instead — matches what a lone "Queue" click on an idle player should do.
-  function queueTrack(entryId, title) {
-    if (!Queue.current()) {
-      Queue.set([{ entry_id: entryId, title }], 0);
-      playCurrent();
-      return;
+  // it to the Queue layer, ahead of Post-queue, without disturbing what's
+  // playing — or just starts it, if nothing is.
+  async function queueTrack(entryId, title) {
+    const wasPlaying = Player.hasTrack();
+    if ((await playbackCommand({ type: "queue", item: { entry_id: entryId, title: title ?? null } })) && wasPlaying) {
+      setStatus(`Queued "${title || "track"}".`);
     }
-    Queue.queueNext({ entry_id: entryId, title });
-    syncTransport();
-    setStatus(`Queued "${title || "track"}".`);
   }
 
   /// "Shuffle all" in the rail header — there's no playlist concept yet, so
   /// this is the closest equivalent to Spotify's Liked-Songs shuffle: a
-  /// playable batch mixing familiar and new tracks (see `ShuffleMix`).
+  /// playable batch mixing familiar and new tracks (see `ShuffleMix`),
+  /// played on the shared session in the order the mix arranged it.
   async function shuffleLibrary() {
     setStatus("Shuffling your library…");
     let tracks = [];
@@ -5721,56 +6191,52 @@
       setStatus("No playable tracks found to shuffle.");
       return;
     }
-    setStatus("");
-    playMixBatch(tracks);
+    if (await playMixBatch(tracks)) setStatus("");
   }
 
-  /// Plays a `ShuffleMix` batch in the order it was arranged. The player's
-  /// own shuffle mode is turned off first, since `Queue.set` would reshuffle
-  /// the batch and undo the mix's spacing.
+  /// Plays a `ShuffleMix` batch ("Shuffle all", or the settings preview) on
+  /// the shared session, in the order the mix arranged it.
   function playMixBatch(tracks) {
-    if (Queue.shuffled) Queue.toggleShuffle();
-    Queue.set(tracks, 0);
-    playCurrent();
+    return playbackCommand({ type: "shuffle_library", items: tracks.map(queueItem) });
   }
 
-  // How many upcoming tracks (queued or already recommended) to keep in
-  // view before topping the auto-recommended tail up again.
-  const AUTO_RECOMMEND_LOOKAHEAD = 3;
-  // Auto-recommend, proactive: keeps the auto-recommended tail topped up
-  // *before* the queue runs dry, both so playback doesn't hit a dead end
-  // waiting on a fetch and so "up next" shows recommended tracks ahead of
-  // time rather than only once nothing else is left. Called from
-  // `syncTransport` after every queue change; `inFlight` dedupes concurrent
-  // callers (including `handleTrackEnded`'s fallback awaiting the same
-  // fetch a proactive call already kicked off) onto one request. Repeat
-  // on/one never needs a recommendation (there's always a next track), so
-  // it's a no-op there. Failures are silent — a later queue change (or the
-  // ended-track fallback) just retries.
-  let autoRecommendInFlight = null;
-  function ensureAutoRecommend() {
-    if (Queue.repeatMode !== "off") return Promise.resolve();
-    if (Queue.upcoming().length >= AUTO_RECOMMEND_LOOKAHEAD) return Promise.resolve();
-    if (!autoRecommendInFlight) {
-      autoRecommendInFlight = (async () => {
-        try {
-          const current = Queue.current();
-          const skip = [...Queue.upcoming(), ...(current ? [current] : [])].map((t) => t.entry_id);
-          const tracks = await ShuffleMix.generate(20, { skip });
-          if (tracks.length) {
-            Queue.appendPostQueue(tracks);
-            syncTransport();
-          }
-        } catch {
-          // library entirely unplayable (or request failed) — nothing to
-          // recommend right now.
-        } finally {
-          autoRecommendInFlight = null;
-        }
-      })();
+  // Auto-recommend: the server flags `wants_recommend` when fewer than a
+  // few tracks are left ahead (repeat off), and the active device answers
+  // with a shuffle-mix batch, since the mix's settings and play log live in
+  // this browser. One request at a time; after a failure or an empty batch,
+  // wait before asking again instead of retrying on every snapshot.
+  const RECOMMEND_RETRY_MS = 15000;
+  let recommendInFlight = false;
+  let recommendFailedAt = -Infinity;
+  Remote.subscribe(async (s) => {
+    if (!s.wants_recommend || s.active_device !== Remote.deviceId) return;
+    if (recommendInFlight || performance.now() - recommendFailedAt < RECOMMEND_RETRY_MS) return;
+    recommendInFlight = true;
+    try {
+      const skip = s.queue.map((r) => r.entry_id);
+      const tracks = await ShuffleMix.generate(20, { skip });
+      if (!tracks.length) throw new Error("nothing to recommend");
+      await Remote.command({ type: "recommend", items: tracks.map(queueItem) });
+    } catch {
+      recommendFailedAt = performance.now();
+    } finally {
+      recommendInFlight = false;
     }
-    return autoRecommendInFlight;
-  }
+  });
+
+  // Each browser keeps its own play log for the mix's cooldown, so every
+  // device notes a play when the session moves on to a new track (not the
+  // one already playing when this tab opened).
+  let notedTrackSeq = null;
+  Remote.subscribe((s) => {
+    if (notedTrackSeq === null) notedTrackSeq = s.track_seq;
+    if (s.current && s.playing && s.track_seq !== notedTrackSeq) {
+      notedTrackSeq = s.track_seq;
+      ShuffleMix.notePlayed(s.current.entry_id);
+    }
+  });
+
+  Remote.connect();
 
   async function api(path) {
     const res = await fetch(path);

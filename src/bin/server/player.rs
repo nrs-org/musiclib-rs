@@ -32,7 +32,7 @@ use serde_json::json;
 
 use crate::{
     entries::{component_members, dedupe_by_edition, entry_summaries, entry_summaries_with},
-    fetch_options, nrs_pool,
+    fetch_options, nrs_pool, playback,
     respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
@@ -89,6 +89,12 @@ pub async fn route(
         "/api/library/nrs-pool" if *method == Method::GET => {
             nrs_pool_json(state, &parse_query(query)).await
         }
+        "/api/playback" if *method == Method::GET => playback::snapshot(state),
+        "/api/playback/events" if *method == Method::GET => {
+            playback::events(state, &parse_query(query))
+        }
+        "/api/playback/command" if *method == Method::POST => playback::command(state, &body),
+        "/api/playback/report" if *method == Method::POST => playback::report(state, &body),
         "/api/fetch-options/files" if *method == Method::GET => fetch_options_files(),
         "/api/fetch-options/entry-points" if *method == Method::GET => {
             fetch_options_entry_points(&parse_query(query)).await
@@ -139,6 +145,10 @@ pub async fn route(
         | "/api/library/search"
         | "/api/library/shuffle"
         | "/api/library/nrs-pool"
+        | "/api/playback"
+        | "/api/playback/events"
+        | "/api/playback/command"
+        | "/api/playback/report"
         | "/api/fetch-options/files"
         | "/api/fetch-options/entry-points"
         | "/api/ingest"
@@ -169,7 +179,7 @@ fn frontend() -> HyperResponse {
         .status(StatusCode::OK)
         .header("Content-Type", "text/html; charset=utf-8")
         .header("Cache-Control", "no-cache")
-        .body(http_body_util::Full::new(body))
+        .body(respond::full(body))
         .expect("response builder")
 }
 
