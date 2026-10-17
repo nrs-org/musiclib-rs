@@ -313,6 +313,16 @@
 
   .ghost-btn:hover { border-color: var(--brass); color: var(--brass-ink); }
 
+  .rail-head-actions { display: inline-flex; gap: 4px; }
+
+  #shuffle-mix {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
   .ghost-btn[disabled] {
     opacity: 0.4;
     cursor: default;
@@ -710,6 +720,292 @@
   .provider-pref-moves button[disabled] {
     opacity: 0.3;
     cursor: default;
+  }
+
+  /* ---------- settings mode: shuffle mix ---------- */
+
+  .settings-view.has-mix { max-width: 720px; }
+
+  .mix-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .mix-seg {
+    display: inline-flex;
+    border: 1px solid var(--rail);
+  }
+
+  .mix-seg button {
+    border: 0;
+    background: transparent;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .mix-seg button + button { border-left: 1px solid var(--rail); }
+  .mix-seg button:hover { color: var(--brass-ink); }
+
+  .mix-seg button[aria-pressed="true"] {
+    background: var(--paper-deeper);
+    color: var(--brass-ink);
+  }
+
+  .mix-pool {
+    font-size: 12px;
+    color: var(--ink-soft);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0 0 14px;
+  }
+
+  .mix-pool .ghost-btn { padding: 2px 8px; }
+  .mix-pool.is-error { color: var(--danger); }
+
+  .mix-pool details { flex-basis: 100%; }
+  .mix-pool summary { cursor: pointer; color: var(--ink-faint); }
+
+  .mix-pool details ul {
+    margin: 6px 0 0;
+    padding-left: 18px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+
+  .mix-bar {
+    display: flex;
+    height: 16px;
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+    overflow: hidden;
+  }
+
+  .mix-bar span { transition: flex-grow 120ms ease-out; min-width: 0; }
+
+  .mix-legend {
+    display: flex;
+    gap: 6px 14px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--ink-soft);
+    margin: 6px 0 4px;
+  }
+
+  .mix-legend b {
+    font-family: var(--mono);
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  .mix-swatch {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    margin-right: 5px;
+    vertical-align: 0;
+  }
+
+  .mix-new {
+    background: repeating-linear-gradient(135deg, var(--ink-faint) 0 1.5px, transparent 1.5px 5px);
+  }
+
+  .mix-group { margin-top: 22px; }
+
+  .mix-group h3 {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--rail);
+  }
+
+  .mix-row {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr) 64px;
+    align-items: center;
+    gap: 2px 12px;
+    padding: 5px 0;
+  }
+
+  .mix-row > label,
+  .mix-row > .mix-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .mix-row input[type="range"] {
+    width: 100%;
+    margin: 0;
+    accent-color: var(--brass);
+  }
+
+  .mix-row input[type="range"]:disabled { opacity: 0.35; }
+
+  .mix-row input[type="checkbox"],
+  .mix-check input {
+    accent-color: var(--brass);
+    margin: 0;
+  }
+
+  .mix-row output {
+    font-family: var(--mono);
+    font-size: 12px;
+    text-align: right;
+  }
+
+  .mix-count {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
+  .mix-hint {
+    grid-column: 2 / -1;
+    font-size: 12px;
+    color: var(--ink-faint);
+  }
+
+  .mix-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+
+  .mix-row.is-off > label { color: var(--ink-faint); }
+
+  .mix-chart svg {
+    display: block;
+    width: 100%;
+    height: 120px;
+    overflow: visible;
+  }
+
+  .mix-chart .bin { fill: var(--paper-deeper); }
+  .mix-chart .curve { fill: none; stroke: var(--brass); stroke-width: 1.6; }
+  .mix-chart .axis { stroke: var(--rail); }
+  .mix-chart .floor { stroke: var(--danger); stroke-dasharray: 3 3; }
+
+  .mix-chart text {
+    font-family: var(--mono);
+    font-size: 10px;
+    fill: var(--ink-faint);
+  }
+
+  .mix-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .mix-stat {
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+    padding: 7px 9px;
+  }
+
+  .mix-stat b {
+    display: block;
+    font-family: var(--serif);
+    font-size: 19px;
+    font-weight: 500;
+    line-height: 1.2;
+  }
+
+  .mix-stat span { font-size: 11px; color: var(--ink-soft); }
+
+  .mix-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--rail);
+  }
+
+  .mix-list li {
+    display: grid;
+    grid-template-columns: 1.8em minmax(0, 1fr) auto 52px;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 9px;
+    font-size: 13px;
+    background: var(--paper-deep);
+    position: relative;
+  }
+
+  .mix-list li + li { border-top: 1px solid var(--rail); }
+
+  .mix-list .n {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
+  .mix-list .t {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mix-list .why {
+    font-size: 11px;
+    color: var(--ink-soft);
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mix-list .p {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-align: right;
+  }
+
+  .mix-list .meter {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    background: var(--brass);
+    opacity: 0.6;
+  }
+
+  .mix-tag {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 6px;
+    vertical-align: 1px;
+  }
+
+  .mix-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 10px 0;
+  }
+
+  @media (max-width: 560px) {
+    .mix-row { grid-template-columns: minmax(0, 1fr) 56px; }
+    .mix-row > label,
+    .mix-row > .mix-label { grid-column: 1 / -1; }
+    .mix-hint { grid-column: 1 / -1; }
+    .mix-list .why { display: none; }
+    .mix-list li { grid-template-columns: 1.8em minmax(0, 1fr) 46px; }
   }
 
   /* ---------- main: browsing / entry detail ---------- */
@@ -1873,7 +2169,10 @@
       <div class="rail-head">
         <div class="rail-head-row">
           <p class="wordmark">Library</p>
-          <button id="shuffle-library" class="ghost-btn" type="button" title="Play a random shuffle of your whole library">Shuffle all</button>
+          <span class="rail-head-actions">
+            <button id="shuffle-library" class="ghost-btn" type="button" title="Play a shuffle of your library, mixing familiar and new tracks">Shuffle all</button>
+            <button id="shuffle-mix" class="ghost-btn" type="button" title="Shuffle mix settings" aria-label="Shuffle mix settings"></button>
+          </span>
         </div>
         <nav class="mode-switcher" id="mode-switcher" aria-label="View">
           <button type="button" data-mode="library" aria-pressed="true">Library</button>
@@ -1989,6 +2288,7 @@
   const playerStageMountEl = document.getElementById("player-stage-mount");
   const playerStageEmptyEl = document.getElementById("player-stage-empty");
   const shuffleLibraryBtn = document.getElementById("shuffle-library");
+  const shuffleMixBtn = document.getElementById("shuffle-mix");
 
   const PLATFORM_COLOR = {
     youtube: "#b5342f",
@@ -2170,6 +2470,8 @@
       '<polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path><text x="12.5" y="15.5" text-anchor="middle" font-size="8" font-family="sans-serif" font-weight="700" stroke="none" fill="currentColor">1</text>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"></polyline>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"></polyline>',
+    sliders:
+      '<line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="9" cy="6" r="2" fill="var(--paper)"></circle><circle cx="15" cy="12" r="2" fill="var(--paper)"></circle><circle cx="7" cy="18" r="2" fill="var(--paper)"></circle>',
     x: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
     plus: '<line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>',
     "volume-2":
@@ -2694,10 +2996,865 @@
     return { render: init };
   })();
 
+  // ---------- shuffle mix: familiar vs new ----------
+  //
+  // "Shuffle all" and the auto-recommend top-up draw each batch from two
+  // pools. Familiar tracks are the ones NRS has scored, directly or through
+  // an album or artist (`/api/library/nrs-pool`, see `nrs_pool.rs`); new
+  // tracks come from the server's uniform sampler with the familiar pool
+  // excluded. The settings decide the split and how NRS scores become draw
+  // odds. They live in localStorage like this player's other preferences,
+  // as does the play log the cooldown reads. Without a reachable NRS app
+  // every batch is new, which is the plain library shuffle.
+  const ShuffleMix = (() => {
+    const SETTINGS_KEY = "shuffle_mix";
+    const PLAYS_KEY = "shuffle_mix_plays";
+    const MAX_PLAYS = 3000;
+    const POOL_MAX_AGE_MS = 10 * 60 * 1000;
+    const SIM_RUNS = 150;
+    const TIERS = ["direct", "album", "artist"];
+    const TIER_LABEL = { direct: "Scored track", album: "Scored album", artist: "Scored artist", new: "New" };
+    const TIER_COLOR = {
+      direct: "var(--type-track)",
+      album: "var(--type-release)",
+      artist: "var(--type-artist)",
+    };
+    // Cooldown half-life choices in hours: a log-ish scale reads better on
+    // one slider than linear hours.
+    const HALF_LIVES = [0, 1, 2, 4, 6, 12, 24, 48, 72, 168, 336, 720];
+    const DEFAULTS = {
+      familiar: 0.7,
+      directOn: true,
+      direct: 1,
+      albumOn: true,
+      album: 0.6,
+      artistOn: true,
+      artist: 0.35,
+      artistMainOnly: true,
+      combine: "max",
+      floor: 0,
+      basis: "score",
+      sharpness: 1.5,
+      cooldownHours: 24,
+      cooldownStrength: 0.85,
+      perSourceCap: 4,
+      placement: "spread",
+      familiarFirst: true,
+      batch: 100,
+    };
+    const PRESETS = [
+      { id: "comfort", label: "Comfort", values: { familiar: 0.9, direct: 1, album: 0.5, artist: 0.2, sharpness: 2.5, cooldownHours: 12, cooldownStrength: 0.7 } },
+      { id: "balanced", label: "Balanced", values: { familiar: 0.7, direct: 1, album: 0.6, artist: 0.35, sharpness: 1.5, cooldownHours: 24, cooldownStrength: 0.85 } },
+      { id: "explore", label: "Explore", values: { familiar: 0.4, direct: 1, album: 0.8, artist: 0.6, sharpness: 0.8, cooldownHours: 48, cooldownStrength: 0.95 } },
+      { id: "discover", label: "Discover", values: { familiar: 0.1, direct: 1, album: 1, artist: 1, sharpness: 0.5, cooldownHours: 72, cooldownStrength: 1 } },
+    ];
+
+    function readJson(key, fallback) {
+      try {
+        return JSON.parse(localStorage.getItem(key) || "null") ?? fallback;
+      } catch {
+        return fallback;
+      }
+    }
+
+    function writeJson(key, value) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch {}
+    }
+
+    function loadSettings() {
+      const saved = readJson(SETTINGS_KEY, {});
+      const out = { ...DEFAULTS };
+      for (const k of Object.keys(DEFAULTS)) {
+        if (typeof saved[k] === typeof DEFAULTS[k]) out[k] = saved[k];
+      }
+      return out;
+    }
+
+    let settings = loadSettings();
+    // entry id -> last time it started playing (ms).
+    let plays = readJson(PLAYS_KEY, {});
+
+    function set(patch) {
+      settings = { ...settings, ...patch };
+      writeJson(SETTINGS_KEY, settings);
+      syncControls();
+      schedule();
+    }
+
+    function notePlayed(entryId) {
+      plays[entryId] = Date.now();
+      const ids = Object.keys(plays);
+      if (ids.length > MAX_PLAYS) {
+        ids.sort((a, b) => plays[a] - plays[b]);
+        for (const id of ids.slice(0, ids.length - MAX_PLAYS)) delete plays[id];
+      }
+      writeJson(PLAYS_KEY, plays);
+      schedule();
+    }
+
+    // ---- the familiar pool ----
+
+    let pool = null;
+    let poolLoadedAt = 0;
+    let poolError = null;
+    let nrsUrl = null;
+    let poolLoading = null;
+
+    function loadPool(refresh = false) {
+      const fresh = pool && Date.now() - poolLoadedAt < POOL_MAX_AGE_MS;
+      if (fresh && !refresh) return Promise.resolve(pool);
+      if (poolLoading && !refresh) return poolLoading;
+      poolLoading = (async () => {
+        try {
+          const res = await api(`/api/library/nrs-pool${refresh ? "?refresh=1" : ""}`);
+          nrsUrl = res.nrs_url;
+          if (res.available) {
+            pool = res.pool;
+            poolLoadedAt = Date.now();
+            poolError = null;
+          } else {
+            poolError = res.error || "NRS is unavailable";
+          }
+        } catch (err) {
+          poolError = err.message;
+        } finally {
+          poolLoading = null;
+        }
+        schedule();
+        return pool;
+      })();
+      schedule();
+      return poolLoading;
+    }
+
+    // ---- scores to odds ----
+
+    function lowerBound(sorted, v) {
+      let lo = 0;
+      let hi = sorted.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (sorted[mid] < v) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    }
+
+    function upperBound(sorted, v) {
+      let lo = 0;
+      let hi = sorted.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (sorted[mid] <= v) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    }
+
+    // One row per familiar track that any enabled tier reaches: its value
+    // (tier weight x NRS score, the strongest or the sum across tiers), the
+    // tier and pool source that contributed most, and its draw weight. A
+    // source below the score floor doesn't count. `base` is the value's
+    // position on the chosen basis in (0, 1]; `w` is `base ^ sharpness`
+    // times the cooldown factor `cool`.
+    function weigh(s = settings) {
+      const counts = { direct: 0, album: 0, artist: 0 };
+      if (!pool) return { rows: [], all: [], counts, vmax: 0, sorted: [] };
+      const src = pool.sources;
+      const best = (indices) => {
+        let b = null;
+        for (const i of indices) {
+          const score = src[i].score;
+          if (score >= s.floor && (b === null || score > src[b].score)) b = i;
+        }
+        return b;
+      };
+      const all = [];
+      for (const track of pool.tracks) {
+        const picks = {
+          direct: best(track.direct),
+          album: best(track.albums),
+          artist: best(track.artists.filter(([, main]) => main || !s.artistMainOnly).map(([i]) => i)),
+        };
+        let value = 0;
+        let tier = null;
+        let source = null;
+        let top = 0;
+        for (const k of TIERS) {
+          if (picks[k] === null) continue;
+          counts[k]++;
+          if (!s[`${k}On`] || !(s[k] > 0)) continue;
+          const c = src[picks[k]].score * s[k];
+          value = s.combine === "sum" ? value + c : Math.max(value, c);
+          if (c > top) {
+            top = c;
+            tier = k;
+            source = picks[k];
+          }
+        }
+        if (value > 0) all.push({ track, value, tier, source, base: 0, raw: 0, cool: 1, w: 0 });
+      }
+      const sorted = all.map((r) => r.value).sort((a, b) => a - b);
+      const vmax = sorted.length ? sorted[sorted.length - 1] : 0;
+      const now = Date.now();
+      for (const r of all) {
+        r.base =
+          s.basis === "percentile"
+            ? (lowerBound(sorted, r.value) + upperBound(sorted, r.value)) / 2 / sorted.length
+            : r.value / vmax;
+        r.raw = s.sharpness > 0 ? Math.pow(r.base, s.sharpness) : 1;
+        const at = plays[r.track.entry_id];
+        if (at && s.cooldownHours > 0 && s.cooldownStrength > 0) {
+          const ageHours = (now - at) / 3.6e6;
+          r.cool = 1 - s.cooldownStrength * Math.pow(2, -ageHours / s.cooldownHours);
+        }
+        r.w = r.raw * r.cool;
+      }
+      return { rows: all.filter((r) => r.w > 0), all, counts, vmax, sorted };
+    }
+
+    // `k` rows by weight, without replacement (Efraimidis-Spirakis: the
+    // largest u^(1/w) wins, compared as log(u)/w), keeping at most
+    // `perSourceCap` per album or artist the value came through.
+    function drawFamiliar(rows, k, s, skip) {
+      if (k <= 0 || !rows.length) return [];
+      const keyed = [];
+      for (const r of rows) {
+        if (skip && skip.has(r.track.entry_id)) continue;
+        keyed.push([Math.log(Math.random()) / r.w, r]);
+      }
+      keyed.sort((a, b) => b[0] - a[0]);
+      const perSource = new Map();
+      const out = [];
+      for (const [, r] of keyed) {
+        if (out.length >= k) break;
+        if (s.perSourceCap > 0 && r.tier !== "direct") {
+          const n = perSource.get(r.source) || 0;
+          if (n >= s.perSourceCap) continue;
+          perSource.set(r.source, n + 1);
+        }
+        out.push(r);
+      }
+      return out;
+    }
+
+    function shuffleInPlace(a) {
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    }
+
+    // Draw order is weight order, so both lists are shuffled first. "Spread"
+    // interleaves them at their own even, jittered spacing.
+    function arrange(familiar, fresh, s) {
+      shuffleInPlace(familiar);
+      shuffleInPlace(fresh);
+      let out;
+      if (s.placement === "spread" && familiar.length && fresh.length) {
+        const keyed = [
+          ...familiar.map((x, i) => [(i + 0.15 + 0.7 * Math.random()) / familiar.length, x]),
+          ...fresh.map((x, i) => [(i + 0.15 + 0.7 * Math.random()) / fresh.length, x]),
+        ];
+        keyed.sort((a, b) => a[0] - b[0]);
+        out = keyed.map(([, x]) => x);
+      } else {
+        out = shuffleInPlace([...familiar, ...fresh]);
+      }
+      if (s.familiarFirst) {
+        const i = out.findIndex((x) => x.mix !== "new");
+        if (i > 0) out.unshift(out.splice(i, 1)[0]);
+      }
+      return out;
+    }
+
+    // Recently started tracks, newest first, within two cooldown half-lives
+    // (a day when the cooldown is off): the new sampler skips these.
+    function recentPlays(s) {
+      const windowMs = (s.cooldownHours > 0 ? 2 * s.cooldownHours : 24) * 3.6e6;
+      const now = Date.now();
+      return Object.entries(plays)
+        .filter(([, at]) => now - at < windowMs)
+        .sort((a, b) => b[1] - a[1])
+        .map(([id]) => Number(id));
+    }
+
+    /// One batch of `n` queue items (`{entry_id, title, mix}`, `mix` being
+    /// the tier or "new"), arranged per the settings. `skip` ids (already
+    /// queued) are never drawn.
+    async function generate(n, { skip = [] } = {}) {
+      const s = settings;
+      await loadPool();
+      const skipSet = new Set(skip.map(Number));
+      const { rows } = weigh(s);
+      const want = pool ? Math.round(n * s.familiar) : 0;
+      const familiar = drawFamiliar(rows, want, s, skipSet).map((r) => ({
+        entry_id: r.track.entry_id,
+        title: r.track.title,
+        mix: r.tier,
+      }));
+      const need = n - familiar.length;
+      let fresh = [];
+      if (need > 0) {
+        const params = new URLSearchParams({ limit: String(need) });
+        const exclude = TIERS.filter((t) => s[`${t}On`]).map((t) => (t === "direct" ? "track" : t));
+        if (pool && exclude.length) params.set("exclude", exclude.join(","));
+        const avoid = [...new Set([...skipSet, ...recentPlays(s)])].slice(0, 400);
+        if (avoid.length) params.set("skip", avoid.join(","));
+        fresh = (await api(`/api/library/shuffle?${params}`)).tracks.map((t) => ({ ...t, mix: "new" }));
+      }
+      return arrange(familiar, fresh, s);
+    }
+
+    // ---- settings UI ----
+
+    let sectionEl = null;
+    const syncers = [];
+    let refs = {};
+    let renderHandle = null;
+    let previewItems = [];
+
+    function syncControls() {
+      for (const sync of syncers) sync();
+      updateRailButton();
+    }
+
+    function schedule() {
+      if (!sectionEl || !sectionEl.isConnected) {
+        updateRailButton();
+        return;
+      }
+      clearTimeout(renderHandle);
+      renderHandle = setTimeout(renderDerived, 90);
+    }
+
+    function updateRailButton() {
+      const pct = Math.round(settings.familiar * 100);
+      shuffleMixBtn.innerHTML = svgIcon("sliders", 13) + `<span>${pct}%</span>`;
+      shuffleMixBtn.title = `Shuffle mix: ${pct}% familiar, ${100 - pct}% new. Click to adjust.`;
+    }
+
+    const fmtNum = (n) => Number(n).toLocaleString();
+    const fmtPct = (x) => `${Math.round(x * 100)}%`;
+
+    function slider(key, label, { min, max, step, fmt, hint, values, enabled }) {
+      // `values`: the slider walks indices into a fixed list instead.
+      const input = el("input", {
+        type: "range",
+        min: values ? 0 : min,
+        max: values ? values.length - 1 : max,
+        step: values ? 1 : step,
+        "aria-label": label,
+      });
+      const out = el("output");
+      input.oninput = () => set({ [key]: values ? values[Number(input.value)] : Number(input.value) });
+      const row = el("div", { className: "mix-row" }, [
+        el("span", { className: "mix-label", text: label }),
+        input,
+        out,
+        hint ? el("span", { className: "mix-hint", text: hint }) : null,
+      ]);
+      syncers.push(() => {
+        const v = settings[key];
+        if (values) {
+          let i = values.indexOf(v);
+          if (i < 0) i = values.findIndex((x) => x >= v);
+          input.value = String(i < 0 ? values.length - 1 : i);
+        } else {
+          input.value = String(v);
+        }
+        out.textContent = fmt(v);
+        if (enabled) input.disabled = !enabled();
+      });
+      return row;
+    }
+
+    function seg(key, options, label) {
+      const buttons = options.map(([value, text]) =>
+        el("button", { type: "button", text, onclick: () => set({ [key]: value }) })
+      );
+      syncers.push(() => {
+        options.forEach(([value], i) => buttons[i].setAttribute("aria-pressed", String(settings[key] === value)));
+      });
+      return el("span", { className: "mix-seg", role: "group", "aria-label": label }, buttons);
+    }
+
+    function check(key, label) {
+      const box = el("input", { type: "checkbox" });
+      box.onchange = () => set({ [key]: box.checked });
+      syncers.push(() => {
+        box.checked = settings[key];
+      });
+      return el("label", { className: "mix-check" }, [box, el("span", { text: label })]);
+    }
+
+    function tierRow(tier, label, extra) {
+      const box = el("input", { type: "checkbox", "aria-label": `Use ${label.toLowerCase()}` });
+      box.onchange = () => set({ [`${tier}On`]: box.checked });
+      const count = el("span", { className: "mix-count" });
+      refs[`count_${tier}`] = count;
+      const input = el("input", { type: "range", min: 0, max: 2, step: 0.05, "aria-label": `${label} weight` });
+      input.oninput = () => set({ [tier]: Number(input.value) });
+      const out = el("output");
+      const row = el("div", { className: "mix-row" }, [
+        el("label", {}, [
+          box,
+          el("span", { className: "mix-tag", style: `background:${TIER_COLOR[tier]}` }),
+          el("span", { text: label }),
+          count,
+        ]),
+        input,
+        out,
+        extra ? el("span", { className: "mix-hint" }, [extra]) : null,
+      ]);
+      syncers.push(() => {
+        const on = settings[`${tier}On`];
+        box.checked = on;
+        row.classList.toggle("is-off", !on);
+        input.disabled = !on;
+        input.value = String(settings[tier]);
+        out.textContent = `×${settings[tier].toFixed(2)}`;
+      });
+      return row;
+    }
+
+    function group(title, children) {
+      return el("div", { className: "mix-group" }, [el("h3", { text: title }), ...children]);
+    }
+
+    function presetMatches(p) {
+      return Object.entries(p.values).every(([k, v]) => Math.abs(settings[k] - v) < 1e-9);
+    }
+
+    function section() {
+      if (sectionEl) {
+        schedule();
+        return sectionEl;
+      }
+      const presetButtons = PRESETS.map((p) =>
+        el("button", { type: "button", text: p.label, onclick: () => set(p.values) })
+      );
+      syncers.push(() => {
+        PRESETS.forEach((p, i) => presetButtons[i].setAttribute("aria-pressed", String(presetMatches(p))));
+      });
+
+      refs.pool = el("div", { className: "mix-pool" });
+      refs.bar = el("div", { className: "mix-bar", role: "img" });
+      refs.legend = el("div", { className: "mix-legend" });
+      refs.chart = el("div", { className: "mix-chart" });
+      refs.stats = el("div", { className: "mix-stats" });
+      refs.held = el("span", { className: "mix-count" });
+      refs.likely = el("ol", { className: "mix-list" });
+      refs.preview = el("ol", { className: "mix-list", hidden: true });
+      refs.playPreview = el("button", {
+        className: "ghost-btn",
+        type: "button",
+        text: "Play this batch",
+        disabled: true,
+        onclick: () => previewItems.length && playMixBatch(previewItems),
+      });
+
+      sectionEl = el("div", { className: "settings-section", id: "shuffle-mix-settings" }, [
+        el("div", { className: "mix-head" }, [
+          el("h2", { text: "Shuffle mix" }),
+          el("span", { className: "mix-seg", role: "group", "aria-label": "Presets" }, presetButtons),
+        ]),
+        el("p", {
+          className: "sub",
+          text:
+            "Shuffle all and auto-recommend fill each batch with familiar tracks (ones NRS has scored, directly or through an album or artist) and new tracks from the rest of your library.",
+        }),
+        refs.pool,
+        refs.bar,
+        refs.legend,
+        slider("familiar", "Familiar share", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          fmt: fmtPct,
+          hint: "The rest of each batch is new tracks. A small familiar pool tops up with new ones.",
+        }),
+
+        group("Where familiar tracks come from", [
+          tierRow("direct", "Tracks you scored"),
+          tierRow("album", "On albums you scored"),
+          tierRow("artist", "By artists you scored", check("artistMainOnly", "Main artist credits only")),
+          el("div", { className: "mix-row" }, [
+            el("span", { className: "mix-label", text: "Reached more than one way" }),
+            el("span", {}, [seg("combine", [["max", "Strongest"], ["sum", "Add up"]], "Combine tiers")]),
+            el("span"),
+            el("span", {
+              className: "mix-hint",
+              text: "A track's value is tier weight × NRS score: the strongest tier, or every tier added together.",
+            }),
+          ]),
+          slider("floor", "Ignore scores below", {
+            min: 0,
+            max: 8,
+            step: 0.05,
+            fmt: (v) => v.toFixed(2),
+            hint: "Scores under this don't make a track familiar.",
+          }),
+        ]),
+
+        group("How scores become odds", [
+          el("div", { className: "mix-row" }, [
+            el("span", { className: "mix-label", text: "Rank by" }),
+            el("span", {}, [seg("basis", [["score", "NRS score"], ["percentile", "Percentile"]], "Basis")]),
+            el("span"),
+            el("span", {
+              className: "mix-hint",
+              text: "Percentile spaces tracks evenly by rank, so a few very high scores don't dominate.",
+            }),
+          ]),
+          slider("sharpness", "Favor top scores", {
+            min: 0,
+            max: 5,
+            step: 0.05,
+            fmt: (v) => v.toFixed(2),
+            hint: "Odds ∝ value^this. 0: every familiar track equally likely. 1: proportional. Higher: mostly your favorites.",
+          }),
+          refs.chart,
+          refs.stats,
+        ]),
+
+        group("Repetition", [
+          slider("cooldownHours", "Cooldown half-life", {
+            values: HALF_LIVES,
+            fmt: (h) => (h === 0 ? "off" : h < 48 ? `${h} h` : `${Math.round(h / 24)} d`),
+            hint: "A just-played familiar track's odds recover by half every this long.",
+          }),
+          slider("cooldownStrength", "Cooldown strength", {
+            min: 0,
+            max: 1,
+            step: 0.01,
+            fmt: fmtPct,
+            hint: "How far a just-played track's odds drop. 100%: it can't come straight back.",
+            enabled: () => settings.cooldownHours > 0,
+          }),
+          slider("perSourceCap", "Max per album or artist", {
+            min: 0,
+            max: 20,
+            step: 1,
+            fmt: (v) => (v === 0 ? "∞" : String(v)),
+            hint: "Per batch, for tracks reached through one album or artist. Directly scored tracks aren't capped.",
+          }),
+          el("div", { className: "mix-row" }, [
+            el("span", { className: "mix-label", text: "Play log" }),
+            el("span", {}, [refs.held]),
+            el("button", {
+              className: "ghost-btn",
+              type: "button",
+              text: "Clear",
+              onclick: () => {
+                plays = {};
+                writeJson(PLAYS_KEY, plays);
+                schedule();
+              },
+            }),
+          ]),
+        ]),
+
+        group("Order", [
+          el("div", { className: "mix-row" }, [
+            el("span", { className: "mix-label", text: "New tracks" }),
+            el("span", {}, [seg("placement", [["spread", "Spread evenly"], ["random", "Anywhere"]], "Placement")]),
+            el("span"),
+          ]),
+          el("div", { className: "mix-row" }, [
+            el("span", { className: "mix-label", text: "Opening track" }),
+            el("span", {}, [check("familiarFirst", "Start with a familiar track")]),
+            el("span"),
+          ]),
+          slider("batch", "Shuffle all batch", {
+            min: 20,
+            max: 300,
+            step: 10,
+            fmt: (v) => String(v),
+            hint: "Auto-recommend adds 20 at a time with the same mix.",
+          }),
+        ]),
+
+        group("Most likely familiar picks per batch", [refs.likely]),
+
+        group("Try it", [
+          el("div", { className: "mix-actions" }, [
+            el("button", {
+              className: "ghost-btn",
+              type: "button",
+              text: "Preview a batch",
+              onclick: async () => {
+                try {
+                  previewItems = await generate(settings.batch);
+                } catch (err) {
+                  setStatus(`Couldn't build a batch: ${err.message}`);
+                  return;
+                }
+                renderPreview();
+              },
+            }),
+            refs.playPreview,
+          ]),
+          refs.preview,
+        ]),
+      ]);
+      syncControls();
+      loadPool();
+      schedule();
+      return sectionEl;
+    }
+
+    function whyText(r) {
+      const src = pool.sources[r.source];
+      if (r.tier === "direct") return `scored ${src.score.toFixed(2)}`;
+      return `${r.tier === "album" ? "on" : "by"} ${src.title} · ${src.score.toFixed(2)}`;
+    }
+
+    function renderPool() {
+      const box = refs.pool;
+      box.innerHTML = "";
+      box.classList.toggle("is-error", !!poolError && !pool);
+      const refresh = el("button", {
+        className: "ghost-btn",
+        type: "button",
+        text: poolLoading ? "Loading…" : pool ? "Refresh" : "Retry",
+        disabled: !!poolLoading,
+        onclick: () => loadPool(true),
+      });
+      if (!pool) {
+        box.append(
+          el("span", {
+            text: poolLoading
+              ? "Reading scores from NRS…"
+              : `Couldn't read NRS${nrsUrl ? ` at ${nrsUrl}` : ""}: ${poolError}. Shuffles are all new tracks until it's reachable.`,
+          }),
+          refresh
+        );
+        return;
+      }
+      const mins = Math.max(0, Math.round((Date.now() / 1000 - pool.built_at) / 60));
+      box.append(
+        el("span", {
+          text:
+            `${fmtNum(pool.nrs_entries)} NRS music entries → ${fmtNum(pool.tracks.length)} playable familiar tracks · ` +
+            `read ${mins === 0 ? "just now" : `${mins} min ago`}` +
+            (poolError ? ` · last refresh failed: ${poolError}` : ""),
+        }),
+        refresh
+      );
+      if (pool.unresolved.length || pool.unplayable) {
+        box.append(
+          el("details", {}, [
+            el("summary", {
+              text: [
+                pool.unresolved.length ? `${fmtNum(pool.unresolved.length)} NRS entries aren't in this library` : null,
+                pool.unplayable ? `${fmtNum(pool.unplayable)} reached tracks have no playable source` : null,
+              ]
+                .filter(Boolean)
+                .join(" · "),
+            }),
+            el(
+              "ul",
+              {},
+              pool.unresolved.map((u) =>
+                el("li", {}, [el("a", { href: u.url, target: "_blank", rel: "noopener", text: u.title || u.nrs_id })])
+              )
+            ),
+          ])
+        );
+      }
+    }
+
+    function renderChart(w) {
+      const host = refs.chart;
+      const { all, vmax, sorted } = w;
+      if (!all.length) {
+        host.innerHTML = "";
+        return;
+      }
+      const W = Math.max(280, host.clientWidth || 600);
+      const H = 120;
+      const pad = { l: 4, r: 4, t: 8, b: 18 };
+      const iw = W - pad.l - pad.r;
+      const ih = H - pad.t - pad.b;
+      const BINS = 40;
+      const bins = new Array(BINS).fill(0);
+      for (const r of all) bins[Math.min(BINS - 1, Math.floor((r.value / vmax) * BINS))]++;
+      const bmax = Math.max(...bins);
+      const x = (v) => pad.l + (v / vmax) * iw;
+      let rects = "";
+      bins.forEach((n, i) => {
+        if (!n) return;
+        const h = (n / bmax) * ih * 0.9;
+        rects += `<rect class="bin" x="${(pad.l + (i / BINS) * iw).toFixed(1)}" y="${(pad.t + ih - h).toFixed(1)}" width="${Math.max(1, iw / BINS - 1).toFixed(1)}" height="${h.toFixed(1)}"></rect>`;
+      });
+      // Relative odds of one pick as a function of value, before cooldown.
+      const s = settings;
+      const curveAt = (v) => {
+        const base =
+          s.basis === "percentile"
+            ? (lowerBound(sorted, v) + upperBound(sorted, v)) / 2 / sorted.length
+            : v / vmax;
+        return s.sharpness > 0 ? Math.pow(base, s.sharpness) : 1;
+      };
+      const pts = [];
+              setPlayPauseUI(false, false);
+              if (willSkip) setTimeout(() => onEndedCallback?.(), 1800);
+      for (let i = 0; i <= 80; i++) {
+        const v = (i / 80) * vmax;
+        pts.push(`${x(v).toFixed(1)},${(pad.t + ih - curveAt(v) * ih).toFixed(1)}`);
+      }
+      host.innerHTML =
+        `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Familiar tracks by value, with the odds curve">` +
+        rects +
+        `<line class="axis" x1="${pad.l}" y1="${pad.t + ih}" x2="${W - pad.r}" y2="${pad.t + ih}"></line>` +
+        `<polyline class="curve" points="${pts.join(" ")}"></polyline>` +
+        `<text x="${pad.l}" y="${H - 4}">0</text>` +
+        `<text x="${W - pad.r}" y="${H - 4}" text-anchor="end">value ${vmax.toFixed(2)}</text>` +
+        `<text x="${W - pad.r}" y="${pad.t + 2}" text-anchor="end" dominant-baseline="hanging">odds per pick</text>` +
+        `</svg>`;
+    }
+
+    function stat(value, label) {
+      return el("div", { className: "mix-stat" }, [el("b", { text: value }), el("span", { text: label })]);
+    }
+
+    function renderDerived() {
+      if (!sectionEl) return;
+      renderPool();
+      const s = settings;
+      const w = weigh(s);
+      for (const t of TIERS) {
+        refs[`count_${t}`].textContent = pool ? fmtNum(w.counts[t]) : "–";
+      }
+
+      const n = s.batch;
+      const want = pool ? Math.round(n * s.familiar) : 0;
+      const sim = { hits: new Map(), tiers: { direct: 0, album: 0, artist: 0 } };
+      if (want > 0 && w.rows.length) {
+        for (let i = 0; i < SIM_RUNS; i++) {
+          for (const r of drawFamiliar(w.rows, want, s)) {
+            sim.hits.set(r, (sim.hits.get(r) || 0) + 1);
+            sim.tiers[r.tier]++;
+          }
+        }
+      }
+      const per = Object.fromEntries(TIERS.map((t) => [t, sim.tiers[t] / SIM_RUNS]));
+      const familiarCount = TIERS.reduce((a, t) => a + per[t], 0);
+      const newCount = n - familiarCount;
+
+      refs.bar.innerHTML = "";
+      for (const t of TIERS) {
+        if (per[t] > 0) refs.bar.append(el("span", { style: `flex-grow:${per[t]};background:${TIER_COLOR[t]}` }));
+      }
+      if (newCount > 0) refs.bar.append(el("span", { className: "mix-new", style: `flex-grow:${newCount}` }));
+      refs.bar.setAttribute(
+        "aria-label",
+        `Per batch of ${n}: ${Math.round(familiarCount)} familiar, ${Math.round(newCount)} new`
+      );
+      refs.legend.innerHTML = "";
+      for (const t of TIERS) {
+        refs.legend.append(
+          el("span", {}, [
+            el("span", { className: "mix-swatch", style: `background:${TIER_COLOR[t]}` }),
+            document.createTextNode(`${TIER_LABEL[t]} `),
+            el("b", { text: per[t].toFixed(per[t] < 10 ? 1 : 0) }),
+          ])
+        );
+      }
+      refs.legend.append(
+        el("span", {}, [
+          el("span", { className: "mix-swatch mix-new" }),
+          document.createTextNode("New "),
+          el("b", { text: newCount.toFixed(newCount < 10 ? 1 : 0) }),
+        ]),
+        el("span", { text: `per ${n}-track batch` })
+      );
+
+      renderChart(w);
+
+      // Effective pool: exp(entropy) of one pick's distribution, i.e. the
+      // size of a uniform pool that's as unpredictable.
+      let total = 0;
+      for (const r of w.rows) total += r.w;
+      let entropy = 0;
+      for (const r of w.rows) {
+        const p = r.w / total;
+        if (p > 0) entropy -= p * Math.log(p);
+      }
+      const effective = w.rows.length ? Math.exp(entropy) : 0;
+      const byWeight = w.rows.map((r) => r.w).sort((a, b) => b - a);
+      const topN = Math.max(1, Math.round(byWeight.length * 0.1));
+      const topShare = total ? byWeight.slice(0, topN).reduce((a, b) => a + b, 0) / total : 0;
+      const held = w.all.filter((r) => r.cool < 0.5).length;
+      const distinct = sim.hits.size;
+      refs.stats.innerHTML = "";
+      refs.stats.append(
+        stat(fmtNum(w.rows.length), "familiar tracks eligible"),
+        stat(`≈ ${fmtNum(Math.round(effective))}`, "effective pool (as varied as a uniform pool this size)"),
+        stat(fmtPct(topShare), "of the odds go to the top 10%"),
+        stat(
+          fmtNum(distinct),
+          `different familiar tracks across ${SIM_RUNS} simulated batches`
+        )
+      );
+      const logged = Object.keys(plays).length;
+      refs.held.textContent = `${fmtNum(logged)} plays logged · ${fmtNum(held)} familiar tracks under half odds from cooldown`;
+
+      const likely = [...sim.hits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+      refs.likely.innerHTML = "";
+      if (!likely.length) {
+        refs.likely.append(
+          el("li", {}, [el("span"), el("span", { className: "t", text: pool ? "No familiar picks with these settings." : "No NRS scores loaded." })])
+        );
+      }
+      likely.forEach(([r, hits], i) => {
+        const p = hits / SIM_RUNS;
+        refs.likely.append(
+          el("li", {}, [
+            el("span", { className: "n", text: String(i + 1) }),
+            el("span", { className: "t" }, [
+              el("span", { className: "mix-tag", style: `background:${TIER_COLOR[r.tier]}` }),
+              document.createTextNode(r.track.title || `#${r.track.entry_id}`),
+            ]),
+            el("span", { className: "why", text: whyText(r) }),
+            el("span", { className: "p", text: fmtPct(p) }),
+            el("span", { className: "meter", style: `width:${(p * 100).toFixed(1)}%` }),
+          ])
+        );
+      });
+    }
+
+    function renderPreview() {
+      const list = refs.preview;
+      list.innerHTML = "";
+      list.hidden = !previewItems.length;
+      refs.playPreview.disabled = !previewItems.length;
+      previewItems.forEach((item, i) => {
+        list.append(
+          el("li", {}, [
+            el("span", { className: "n", text: String(i + 1) }),
+            el("span", { className: "t" }, [
+              el("span", { className: `mix-tag${item.mix === "new" ? " mix-new" : ""}`, style: item.mix === "new" ? "" : `background:${TIER_COLOR[item.mix]}` }),
+              document.createTextNode(item.title || `#${item.entry_id}`),
+            ]),
+            el("span", { className: "why", text: TIER_LABEL[item.mix] }),
+            el("span"),
+          ])
+        );
+      });
+    }
+
+    updateRailButton();
+    return { generate, notePlayed, section, batchSize: () => settings.batch };
+  })();
+
   // ---------- settings mode: playback source preference ----------
   //
-  // The one setting this app has right now: which provider the player
-  // should prefer when a track is playable from more than one (see
+  // Which provider the player should prefer when a track is playable from more than one (see
   // `sortByProviderPreference`, used by `Player.mount`). A plain ordered
   // list rather than a single "preferred provider" dropdown so it keeps
   // making sense as more providers gain direct playback support — reordering
@@ -2749,7 +3906,8 @@
       );
 
       viewEl.appendChild(
-        el("div", { className: "settings-view" }, [
+        el("div", { className: "settings-view has-mix" }, [
+          ShuffleMix.section(),
           el("div", { className: "settings-section" }, [
             el("h2", { text: "Playback source" }),
             el("p", {
@@ -3701,8 +4859,6 @@
                   el("span", { text: "Watch on YouTube" }),
                 ])
               );
-              setPlayPauseUI(false, false);
-              if (willSkip) setTimeout(() => onEndedCallback?.(), 1800);
             },
           },
         });
@@ -4397,6 +5553,7 @@
 
   function mountQueueItem(entryId, title, sources) {
     Player.mount(entryId, sources, title, { onEnded: handleTrackEnded });
+    ShuffleMix.notePlayed(entryId);
     syncTransport();
     refreshPlayIndicators();
     refreshPlayerStageVisibility();
@@ -4463,16 +5620,13 @@
   }
 
   /// "Shuffle all" in the rail header — there's no playlist concept yet, so
-  /// this is the closest equivalent to Spotify's Liked-Songs shuffle: pull a
-  /// random, already-playable batch from across the whole library (server
-  /// picks and filters it — see `player.rs`'s `shuffle_library`) and queue
-  /// it up. Turns the player's own shuffle mode on too so skipping around
-  /// afterwards stays random rather than walking this batch in order.
+  /// this is the closest equivalent to Spotify's Liked-Songs shuffle: a
+  /// playable batch mixing familiar and new tracks (see `ShuffleMix`).
   async function shuffleLibrary() {
     setStatus("Shuffling your library…");
     let tracks = [];
     try {
-      tracks = (await api("/api/library/shuffle?limit=100")).tracks;
+      tracks = await ShuffleMix.generate(ShuffleMix.batchSize());
     } catch (err) {
       setStatus(`Couldn't shuffle the library: ${err.message}`);
       return;
@@ -4482,8 +5636,15 @@
       return;
     }
     setStatus("");
+    playMixBatch(tracks);
+  }
+
+  /// Plays a `ShuffleMix` batch in the order it was arranged. The player's
+  /// own shuffle mode is turned off first, since `Queue.set` would reshuffle
+  /// the batch and undo the mix's spacing.
+  function playMixBatch(tracks) {
+    if (Queue.shuffled) Queue.toggleShuffle();
     Queue.set(tracks, 0);
-    if (!Queue.shuffled) Queue.toggleShuffle();
     playCurrent();
   }
 
@@ -4507,7 +5668,9 @@
     if (!autoRecommendInFlight) {
       autoRecommendInFlight = (async () => {
         try {
-          const { tracks } = await api("/api/library/shuffle?limit=20");
+          const current = Queue.current();
+          const skip = [...Queue.upcoming(), ...(current ? [current] : [])].map((t) => t.entry_id);
+          const tracks = await ShuffleMix.generate(20, { skip });
           if (tracks.length) {
             Queue.appendPostQueue(tracks);
             syncTransport();
@@ -4607,6 +5770,10 @@
   // ---------- search ----------
 
   shuffleLibraryBtn.addEventListener("click", shuffleLibrary);
+  shuffleMixBtn.addEventListener("click", () => {
+    goToMode("settings");
+    document.getElementById("shuffle-mix-settings")?.scrollIntoView({ block: "start" });
+  });
 
   let debounceHandle;
   searchEl.addEventListener("input", () => {
