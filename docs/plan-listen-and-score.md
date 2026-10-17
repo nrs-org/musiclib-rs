@@ -1,6 +1,8 @@
 # Plan: listen and score
 
-Status: proposal, not implemented.
+Status: implemented on `feat/listen-and-score` (2026-10-17). The plan
+below is kept as written; **As built** at the end lists where the code
+differs from it and what's still open.
 
 ## Goal
 
@@ -176,3 +178,42 @@ keyboard shortcuts so you can use it without leaving what you're doing.
 - Plays under 10 s are skips.
 - The drawer scores albums too, including album art, and grades the
   track's MV.
+
+## As built
+
+Differences from the plan:
+
+- **`nrs` Cargo feature** (default on, needs `player`) holds `nrs_pool` and
+  `nrs_bridge`. `--no-default-features --features player` builds a player
+  with no NRS code at all. The drawer and the shuffle mix treat the missing
+  routes (404) like an unreachable NRS app.
+- **Export ledger, not a column.** `play_event` has no NRS column. Exported
+  seconds live in `play_export (play_id, target, exported_seconds)`, where
+  `target` names the consumer (`"nrs"`). The play log stays NRS-free.
+- **Play routes:** `POST /api/plays/{id}` (not PATCH, so `sendBeacon` can
+  send the last report), and `GET /api/plays/last?since=` for the cooldown.
+  The cooldown's "Clear" now resets a per-browser cutoff; the log is kept.
+- **Bridge routes:** `POST /api/nrs/score` (by `nrs_id` or library
+  `entry_id`, with `set` upserts and `add` one-offs), `POST /api/nrs/export`
+  (run an export now), and a generic `/api/nrs/v1/*` passthrough in place of
+  the per-feature `/visual` and `/related` proxies. A write through the
+  passthrough marks the pool stale, since approving a suggestion can bind
+  entries.
+- **Export cadence:** every 2 minutes (first run 20 s after start), not
+  after each finished play.
+- **MV fallback:** when NRS has no video for the target (or the target isn't
+  in NRS yet), the MV shown is the target's own YouTube source.
+- **Fixing a fold:** `POST /api/relations/derive` (`MusicDb::set_edition_derivation`)
+  writes a manual `derived_from` row with the chosen direction and
+  transformation, and tombstones the other non-provider edition-kind rows
+  between the two editions' identity components. Otherwise a heuristic row
+  from a duplicate of the original keeps the old fold.
+- **Library tab:** shows the edition group with what each edition scores
+  as, and the fix form for the playing edition (not for the original). It
+  has no relate/unrelate buttons; "Open in library" goes to the entry page,
+  which has them.
+
+Not built yet:
+
+- Existing visual grades to compare against (`/visual-grades`).
+- Soft-identity candidates in the Library tab.
