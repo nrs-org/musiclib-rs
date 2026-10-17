@@ -1790,6 +1790,16 @@
     color: var(--brass-ink);
   }
 
+  /* Edition switcher for the playing track — same buttons as the entry
+     page's `.editions`, laid out as a dock strip like the source switcher. */
+  .player-dock-editions {
+    gap: 6px;
+    margin: 0;
+    padding: 8px;
+    border-top: 1px solid var(--rail);
+    background: var(--paper-deep);
+  }
+
   /* ---------- dock "up next" queue list ---------- */
 
   .player-dock-queue {
@@ -2218,6 +2228,7 @@
   <div id="player-dock" class="player-dock" hidden>
     <div id="player-dock-surface" class="player-dock-surface"></div>
     <div id="player-dock-switch" class="player-dock-switch"></div>
+    <div id="player-dock-editions" class="editions player-dock-editions" hidden></div>
     <div id="player-dock-queue" class="player-dock-queue" hidden></div>
   </div>
   <footer id="player-bar" class="player-bar" hidden aria-label="Now playing">
@@ -2364,10 +2375,9 @@
   // whole detail view — see that function for why.
   let cardEls = null;
 
-  // Which entry Graph mode is anchored on — independent of `activeId`
-  // (Library mode's own "what's open" pointer): browsing Library and
-  // inspecting relations can point at two different entries at once, each
-  // remembered separately so switching modes doesn't clobber the other.
+  // Graph mode's anchor is kept separately from Library's open entry so
+  // its persistent editor survives mode switches. Returning to Library
+  // from Graph opens this anchor, including after a focus change.
   let graphActiveId = null;
 
   // ---------- modes: Library / Graph / Player / Import ----------
@@ -2403,7 +2413,8 @@
 
   function goToMode(mode) {
     if (mode === "library") {
-      if (activeId) viewEntry(activeId);
+      const entryId = (currentMode === "graph" && graphActiveId) || activeId;
+      if (entryId) viewEntry(entryId);
       else {
         history.pushState({}, "", "/");
         setMode("library");
@@ -3701,8 +3712,6 @@
         return s.sharpness > 0 ? Math.pow(base, s.sharpness) : 1;
       };
       const pts = [];
-              setPlayPauseUI(false, false);
-              if (willSkip) setTimeout(() => onEndedCallback?.(), 1800);
       for (let i = 0; i <= 80; i++) {
         const v = (i / 80) * vmax;
         pts.push(`${x(v).toFixed(1)},${(pad.t + ih - curveAt(v) * ih).toFixed(1)}`);
@@ -4416,6 +4425,7 @@
     const surfaceEl = document.getElementById("player-dock-surface");
     const switchEl = document.getElementById("player-dock-switch");
     const dockQueueEl = document.getElementById("player-dock-queue");
+    const dockEditionsEl = document.getElementById("player-dock-editions");
     const artBtn = document.getElementById("player-bar-art");
     const thumbImg = document.getElementById("player-bar-thumb");
     const titleBtn = document.getElementById("player-bar-title");
@@ -4487,6 +4497,12 @@
     // notice it's stale and pause the now-unwanted stream instead of
     // letting it start audio behind whatever's mounted now.
     let mountToken = 0;
+    // The current track's sources in preference order (see `mount`) and
+    // which one is mounted — `sourceFailed` walks forward through them so an
+    // unplayable source (an embed-blocked YouTube video, say) falls back to
+    // the next-best one instead of skipping the whole track.
+    let currentSources = [];
+    let currentSourceIdx = 0;
 
     // ---- uniform progress: elapsed/duration + seek, polled the same way ----
     //
@@ -4750,6 +4766,10 @@
     // `setStageMode`) — this overlay is the whole point.
     function syncStagePosition() {
       if (!stageMode || !stageMountEl || dockEl.hidden) return;
+      // The placeholder is otherwise empty — give it the dock's height so
+      // `#view-player` has real content to scroll when the full queue runs
+      // past the viewport (the scroll listener below then moves the dock).
+      stageMountEl.style.height = `${dockEl.offsetHeight}px`;
       const r = stageMountEl.getBoundingClientRect();
       dockEl.style.left = `${r.left}px`;
       dockEl.style.top = `${r.top}px`;
@@ -4771,6 +4791,7 @@
     // navigation.
     function setStageMode(active, stageHost) {
       if (active === stageMode) return;
+      if (!active && stageMountEl) stageMountEl.style.height = "";
       stageMode = active;
       stageMountEl = active ? stageHost : null;
       document.body.classList.toggle("player-stage", active);
@@ -4794,6 +4815,9 @@
     // re-measure it explicitly.
     window.addEventListener("resize", syncStagePosition);
     document.getElementById("view-player").addEventListener("scroll", syncStagePosition);
+    // …and so can the dock's own height changing (queue re-render, source
+    // switch between a video and the compact Spotify surface).
+    new ResizeObserver(syncStagePosition).observe(dockEl);
 
     function hasTrack() {
       return currentEntryId != null;
@@ -4817,12 +4841,29 @@
       playPauseBtn.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
     }
 
+    // Called by every provider adapter when its source can't play. Mounts the
+    // next source in preference order if there is one; only once every
+    // remaining source has failed does the track get skipped. `token` is
+    // the failing mount's `mountToken` — a late error from a source the user
+    // already switched away from is ignored.
+    function sourceFailed(token) {
+      if (token !== mountToken) return false;
+      if (currentSourceIdx + 1 < currentSources.length) {
+        mountSourceAt(currentSourceIdx + 1);
+        return true;
+      }
+      setPlayPauseUI(false, false);
+      if (onEndedCallback) setTimeout(() => token === mountToken && onEndedCallback?.(), 1800);
+      return false;
+    }
+
     function mountYoutube(videoId, watchUrl) {
       const wrapper = el("div", { className: "yt-mount" });
       const placeholder = el("div");
       wrapper.appendChild(placeholder);
       surfaceEl.appendChild(wrapper);
       setPlayPauseUI(false, false);
+      const token = mountToken;
       loadYoutubeApi().then((YT) => {
         // The user may have skipped to a different track before the API
         // finished loading — the player would still spin up detached from
@@ -4846,7 +4887,8 @@
               else if (e.data === YT.PlayerState.ENDED) onEndedCallback?.();
             },
             onError: (e) => {
-              if (!wrapper.isConnected) return;
+              if (!wrapper.isConnected || token !== mountToken) return;
+              if (sourceFailed(token)) return;
               const message = YT_ERROR_MESSAGES[e.data] || "This video can't be played here.";
               const willSkip = !!onEndedCallback;
               wrapper.innerHTML = "";
@@ -4897,6 +4939,7 @@
         .catch((err) => {
           if (token !== mountToken) return;
           status.textContent = err.message;
+          sourceFailed(token);
         });
     }
 
@@ -4947,11 +4990,7 @@
         widget.bind(SC.Widget.Events.PLAY, () => setPlayPauseUI(true, true));
         widget.bind(SC.Widget.Events.PAUSE, () => setPlayPauseUI(false, true));
         widget.bind(SC.Widget.Events.FINISH, () => onEndedCallback?.());
-        widget.bind(SC.Widget.Events.ERROR, () => {
-          if (token !== mountToken) return;
-          setPlayPauseUI(false, false);
-          if (onEndedCallback) setTimeout(() => onEndedCallback?.(), 1800);
-        });
+        widget.bind(SC.Widget.Events.ERROR, () => sourceFailed(token));
       });
       return wrapper;
     }
@@ -5001,8 +5040,7 @@
           updateProgressUI(currentTime / 1000, duration / 1000);
         }
       } else if (msg.eventName === "error") {
-        setPlayPauseUI(false, false);
-        if (onEndedCallback) setTimeout(() => onEndedCallback?.(), 1800);
+        sourceFailed(mountToken);
       }
     });
 
@@ -5109,22 +5147,28 @@
       switchEl.innerHTML = "";
       if (sources.length <= 1) return;
       sources.forEach((s, i) => {
-        const btn = el("button", {
-          type: "button",
-          text: s.provider,
-          "aria-pressed": i === 0,
-          onclick: () => {
-            mountSource(s);
-            for (const b of switchEl.querySelectorAll("button")) b.setAttribute("aria-pressed", "false");
-            btn.setAttribute("aria-pressed", "true");
-          },
-        });
-        switchEl.appendChild(btn);
+        switchEl.appendChild(
+          el("button", {
+            type: "button",
+            text: s.provider,
+            "aria-pressed": i === 0,
+            onclick: () => mountSourceAt(i),
+          })
+        );
       });
+    }
+
+    // Mounts `currentSources[idx]` and marks it in the switcher — shared by
+    // a manual switcher click and `sourceFailed`'s automatic fallback.
+    function mountSourceAt(idx) {
+      currentSourceIdx = idx;
+      mountSource(currentSources[idx]);
+      switchEl.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(i === idx)));
     }
 
     function mount(entryId, sources, title, opts) {
       const firstPlay = !currentEntryId;
+      if (entryId !== currentEntryId) fillEditions(dockEditionsEl, [], null);
       currentEntryId = entryId;
       currentTitle = title;
       onEndedCallback = (opts && opts.onEnded) || null;
@@ -5132,9 +5176,9 @@
       document.body.classList.add("has-player");
       // Ordered by the user's Settings-mode source preference, not
       // playable-sources' own (DB-row) order — see `sortByProviderPreference`.
-      const ordered = sortByProviderPreference(sources);
-      renderSwitcher(ordered);
-      mountSource(ordered[0]);
+      currentSources = sortByProviderPreference(sources);
+      renderSwitcher(currentSources);
+      mountSourceAt(0);
       setExpanded(firstPlay ? true : expanded);
     }
 
@@ -5244,6 +5288,15 @@
       return currentEntryId === entryId;
     }
 
+    /// Fills the dock's edition switcher for `entryId` (ignored if a
+    /// different track has been mounted since the caller's lookup started).
+    /// `onPick` gets the chosen `EditionRef` — swapping what's playing is
+    /// the queue's business, not the dock's.
+    function setEditions(entryId, editions, onPick) {
+      if (entryId !== currentEntryId) return;
+      fillEditions(dockEditionsEl, editions, onPick);
+    }
+
     prevBtn.addEventListener("click", () => onPrevHandler?.());
     nextBtn.addEventListener("click", () => onNextHandler?.());
     playPauseBtn.addEventListener("click", togglePlay);
@@ -5259,6 +5312,7 @@
       mount,
       togglePlay,
       isPlayingEntry,
+      setEditions,
       setTransportHandlers,
       setQueueHandlers,
       setQueueUI,
@@ -5367,6 +5421,14 @@
       return repeatMode === "one" ? current() : next();
     }
 
+    // Swaps the item at the current position (the dock's edition switcher)
+    // without moving `pos` or touching the rest of the play order.
+    function replaceCurrent(item) {
+      if (pos < 0 || pos >= order.length) return;
+      items = items.slice();
+      items[order[pos]] = item;
+    }
+
     function jumpTo(orderIndex) {
       if (orderIndex < 0 || orderIndex >= order.length) return null;
       pos = orderIndex;
@@ -5463,6 +5525,7 @@
       next,
       advanceOnEnded,
       jumpTo,
+      replaceCurrent,
       removeAt,
       toggleShuffle,
       cycleRepeat,
@@ -5557,6 +5620,29 @@
     syncTransport();
     refreshPlayIndicators();
     refreshPlayerStageVisibility();
+    api(`/api/entries/${entryId}`)
+      .then((entry) => Player.setEditions(entryId, entry.editions, switchEdition))
+      .catch(() => {});
+  }
+
+  // The dock's edition switcher: swaps the playing queue item for another
+  // edition of it (e.g. the instrumental) in place, keeping the rest of the
+  // queue as-is. Editions aren't all playable, so look before replacing.
+  async function switchEdition(ed) {
+    const item = Queue.current();
+    if (!item) return;
+    let sources = [];
+    try {
+      sources = (await api(`/api/entries/${ed.entry_id}/playable-sources`)).sources;
+    } catch {}
+    if (Queue.current() !== item) return;
+    if (!sources.length) {
+      setStatus(`No playable source for the ${friendlyType(ed.transformation || ed.kind || "original")} edition.`);
+      return;
+    }
+    const replacement = { entry_id: ed.entry_id, title: ed.title || item.title };
+    Queue.replaceCurrent(replacement);
+    mountQueueItem(replacement.entry_id, replacement.title, sources);
   }
 
   // Natural end-of-track: advance within the queue as already built. The
@@ -5749,7 +5835,7 @@
   // solo entry. Shared by `viewEntry` (initial render) and `refreshAfterEdit`
   // (a manual relate/unrelate can change which editions this entry belongs
   // to without a full card reload).
-  function fillEditions(host, editionsList) {
+  function fillEditions(host, editionsList, onPick = (ed) => viewEntry(ed.entry_id)) {
     host.innerHTML = "";
     const list = editionsList || [];
     host.hidden = list.length <= 1;
@@ -5761,7 +5847,7 @@
           "aria-current": String(!!ed.is_current),
           disabled: ed.is_current,
           text: friendlyType(ed.transformation || ed.kind || (ed.is_default ? "original" : "edition")),
-          onclick: ed.is_current ? null : () => viewEntry(ed.entry_id),
+          onclick: ed.is_current ? null : () => onPick(ed),
         })
       );
     }
