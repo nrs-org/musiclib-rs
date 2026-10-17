@@ -1489,6 +1489,24 @@
     border-top: 1px solid var(--rail);
   }
 
+  .graph-detail-edition {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--rail);
+  }
+
+  .graph-detail-edition .graph-detail-relate {
+    flex-wrap: wrap;
+    margin-top: 4px;
+    padding-top: 0;
+    border-top: none;
+  }
+
+  .graph-detail-edition .graph-detail-relate-select:first-child {
+    flex-basis: 100%;
+    min-height: 32px;
+  }
+
   .graph-detail-relate-select {
     flex: 1;
     font-family: var(--mono);
@@ -5011,6 +5029,14 @@
   // ---------- now-playing drawer: score, NRS relations, library fixes ----------
   //
   // Follows the session's current track (`track`, called on every snapshot).
+  // `version_tokens` markers an edition can carry (the now-playing drawer's
+  // Library tab, the graph's edition editor). The first group folds into
+  // the original (`DEGENERATE_MARKERS` server-side).
+  const TRANSFORMATIONS = [
+    ["Scores its original", [["instrumental", "Instrumental"], ["short_ver", "Short version"], ["tv_size", "TV size"], ["game_ver", "Game version"]]],
+    ["Its own work", [["cover", "Cover"], ["remix", "Remix"], ["arrangement", "Arrangement"], ["live", "Live"], ["acoustic", "Acoustic"], ["", "Other version"]]],
+  ];
+
   // Score and Relations talk to the server's NRS extension (`/api/nrs/*`,
   // see `nrs_bridge.rs`); they're hidden when the server was built without
   // it or the NRS app isn't reachable, and nothing else in the player waits
@@ -5043,12 +5069,6 @@
       ["nei", "NEI"],
       ["aei", "AEI"],
       ["cry", "Cry"],
-    ];
-    // `version_tokens` markers the Library tab can set. The first group
-    // folds into the original (`DEGENERATE_MARKERS` server-side).
-    const TRANSFORMATIONS = [
-      ["Scores its original", [["instrumental", "Instrumental"], ["short_ver", "Short version"], ["tv_size", "TV size"], ["game_ver", "Game version"]]],
-      ["Its own work", [["cover", "Cover"], ["remix", "Remix"], ["arrangement", "Arrangement"], ["live", "Live"], ["acoustic", "Acoustic"], ["", "Other version"]]],
     ];
 
     let tab = "score";
@@ -7607,6 +7627,12 @@
   // since these rows never mean the two entries are the same recording/edit.
   const PRIMITIVE_RELATION_KINDS = ["member_of", "derived_from", "participates_in", "facet_of"];
   const PRIMITIVE_RELATION_KIND_SET = new Set(PRIMITIVE_RELATION_KINDS);
+  // The ones a person may remove and restore, though not create (the
+  // server's `TOGGLE_KINDS`; the now-playing drawer derives new ones).
+  const TOGGLE_RELATION_KIND_SET = new Set(["derived_from"]);
+  // `musicdb::EDITION_KINDS`: rows that make two entries editions of one
+  // work, which `/api/relations/derive` rewrites (see `editionEditor`).
+  const EDITION_KIND_SET = new Set(["derived_from", "alt_version", "live", "remix", "instrumental", "cover", "arrangement"]);
 
   // "active" mirrors the live component (same_identity/variant, enabled).
   // "suggested" is a plain-unlinked edge: disabled, but the row survives —
@@ -8664,15 +8690,25 @@
 
     // Buttons for whatever's actually valid on this edge's kind — a
     // RELATE_KINDS edge only ever offers removal (it's an independent row,
-    // not a toggle), a dedup-v2 primitive-relation edge offers nothing
-    // (pipeline-only assertion — `/api/relations/relate`+`unrelate` reject
-    // these kinds server-side, see `RELATE_KINDS` in `src/bin/server/player.rs`),
-    // while same_identity/different_identity/variant get the same
-    // link/unlink/force-block/soften-block moves the old raw click and
+    // not a toggle), a `derived_from` edge removal or restore (it keeps the
+    // pipeline's direction; `TOGGLE_KINDS` in `src/bin/server/player.rs`),
+    // the other dedup-v2 primitive-relation edges nothing (pipeline-only
+    // assertions — `/api/relations/relate`+`unrelate` reject them
+    // server-side), while same_identity/different_identity/variant get the
+    // same link/unlink/force-block/soften-block moves the old raw click and
     // shift-click used to perform directly.
     function edgeDetailActions(d) {
       const actions = el("div", { className: "graph-detail-actions" });
       const button = (text, onclick) => el("button", { className: "ghost-btn", type: "button", text, onclick });
+      if (TOGGLE_RELATION_KIND_SET.has(d.kind)) {
+        const pair = { a: d.entry_a, b: d.entry_b, kind: d.kind };
+        actions.appendChild(
+          d.state === "cleared"
+            ? button("Restore relation", () => afterEdit(postJson("/api/relations/restore", pair)))
+            : button("Remove relation", () => afterEdit(postJson("/api/relations/unrelate", pair)))
+        );
+        return actions;
+      }
       if (PRIMITIVE_RELATION_KIND_SET.has(d.kind)) {
         return actions;
       }
@@ -8743,6 +8779,63 @@
       return wrap;
     }
 
+    // Rewrites an edition edge as "the other side is a <kind> of <original>"
+    // through `/api/relations/derive`, the now-playing drawer's fix for any
+    // pair. Saving replaces the pair's `derived_from` row (manual, full
+    // confidence) and tombstones its other non-provider edition rows, so
+    // it also turns a mislabeled `cover` guess into the right kind.
+    // Provider rows (MusicBrainz covers, remixes) aren't offered: derive
+    // leaves those as they are.
+    function editionEditor(d) {
+      const extra = d.extra && typeof d.extra === "object" ? d.extra : {};
+      const known = TRANSFORMATIONS.flatMap(([, opts]) => opts.map(([v]) => v));
+      const marker = [extra.transformation].flat()[0];
+      const currentKind = known.includes(marker) ? marker : known.includes(d.kind) ? d.kind : "";
+      const kind = el(
+        "select",
+        { className: "graph-detail-relate-select", "aria-label": "Edition kind" },
+        TRANSFORMATIONS.map(([group, opts]) =>
+          el(
+            "optgroup",
+            { label: group },
+            opts.map(([v, label]) => el("option", { value: v, text: label, selected: v === currentKind }))
+          )
+        )
+      );
+      // Which side is the original, when the row records it; otherwise
+      // the user has to say, rather than the editor guessing a direction.
+      const sourceId = [d.entry_a, d.entry_b].includes(extra.source_entry) ? extra.source_entry : null;
+      const nameOf = (id) => `${endpointLabel(currentNodesById.get(String(id)))} (${catalogNo(id)})`;
+      const original = el("select", { className: "graph-detail-relate-select", "aria-label": "Original" }, [
+        sourceId == null ? el("option", { value: "", text: "Which is the original?", selected: true, disabled: true }) : null,
+        ...[d.entry_a, d.entry_b].map((id) =>
+          el("option", { value: String(id), text: `${nameOf(id)} is the original`, selected: id === sourceId })
+        ),
+      ]);
+      const save = () => {
+        const from = Number(original.value);
+        if (!from) {
+          showError("Pick which entry is the original.");
+          return;
+        }
+        afterEdit(
+          postJson("/api/relations/derive", {
+            original: from,
+            derived: from === d.entry_a ? d.entry_b : d.entry_a,
+            transformation: kind.value || null,
+          })
+        );
+      };
+      return el("div", { className: "graph-detail-edition" }, [
+        el("p", { className: "graph-detail-empty", text: "Edit as an edition:" }),
+        el("div", { className: "graph-detail-relate" }, [
+          original,
+          kind,
+          el("button", { className: "ghost-btn", type: "button", text: "Save", onclick: save }),
+        ]),
+      ]);
+    }
+
     function endpointLabel(node) {
       return node ? node.title || catalogNo(node.entry_id) : "?";
     }
@@ -8780,7 +8873,7 @@
           detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: line }));
         }
       }
-      if (PRIMITIVE_RELATION_KIND_SET.has(d.kind)) {
+      if (PRIMITIVE_RELATION_KIND_SET.has(d.kind) && !TOGGLE_RELATION_KIND_SET.has(d.kind)) {
         detailPanel.appendChild(
           el("p", {
             className: "graph-detail-empty",
@@ -8789,6 +8882,9 @@
         );
       }
       detailPanel.appendChild(edgeDetailActions(d));
+      if (EDITION_KIND_SET.has(d.kind) && d.origin !== "provider" && d.state !== "cleared") {
+        detailPanel.appendChild(editionEditor(d));
+      }
       detailPanel.appendChild(relateKindPicker(d.entry_a, d.entry_b));
     }
 

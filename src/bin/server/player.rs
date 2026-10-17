@@ -23,7 +23,7 @@ use bytes::Bytes;
 use hyper::{Method, StatusCode};
 use musiclib_rs::{
     app_dirs,
-    musicdb::{Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback},
+    musicdb::{DERIVED_FROM, Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback},
     pipeline::ingest::ingest_entry,
     providers::backends::soundcloud,
 };
@@ -113,7 +113,10 @@ pub async fn route(
         "/api/relations/unlink" if *method == Method::POST => unlink_relation(state, &body).await,
         "/api/relations/relate" if *method == Method::POST => relate_entries(state, &body).await,
         "/api/relations/unrelate" if *method == Method::POST => {
-            unrelate_entries(state, &body).await
+            set_relation_enabled(state, &body, false).await
+        }
+        "/api/relations/restore" if *method == Method::POST => {
+            set_relation_enabled(state, &body, true).await
         }
         "/api/relations/derive" if *method == Method::POST => derive_edition(state, &body).await,
         p if p.starts_with("/api/entries/") && p.ends_with("/playable-sources") => {
@@ -158,6 +161,7 @@ pub async fn route(
         | "/api/relations/unlink"
         | "/api/relations/relate"
         | "/api/relations/unrelate"
+        | "/api/relations/restore"
         | "/api/relations/derive" => respond::method_not_allowed(),
         _ => respond::not_found(),
     }
@@ -914,6 +918,7 @@ async fn unlink_relation(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
 /// `derived_from`), read-only in the player UI (`entry_relations` still
 /// returns them; see `PRIMITIVE_RELATION_KIND_SET` in the frontend). Add a
 /// kind here only once manual curation for it has actually been designed.
+/// `derived_from` can still be removed and restored (`TOGGLE_KINDS`).
 const RELATE_KINDS: &[&str] = &[
     "alt_version",
     "live",
@@ -926,6 +931,14 @@ const RELATE_KINDS: &[&str] = &[
     "same_artist",
 ];
 
+/// Primitive-relation kinds a person may tombstone and re-enable, though
+/// not create. A tombstoned `derived_from` row stays down: softmatch skips
+/// pairs with a rejected edition row (`KnownRelations::already_related`),
+/// and the edition/identity projections read enabled rows only. New
+/// `derived_from` rows come from `/api/relations/derive`, which records
+/// their direction.
+const TOGGLE_KINDS: &[&str] = &[DERIVED_FROM];
+
 #[derive(Deserialize)]
 struct RelateRequest {
     a: i64,
@@ -933,7 +946,7 @@ struct RelateRequest {
     kind: String,
 }
 
-fn parse_relate_body(body: &[u8]) -> Result<RelateRequest, HyperResponse> {
+fn parse_relate_body(body: &[u8], toggle: bool) -> Result<RelateRequest, HyperResponse> {
     let req: RelateRequest = serde_json::from_slice(body)
         .map_err(|e| respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()))?;
     if req.a == req.b {
@@ -943,7 +956,8 @@ fn parse_relate_body(body: &[u8]) -> Result<RelateRequest, HyperResponse> {
             "relation endpoints must differ",
         ));
     }
-    if !RELATE_KINDS.contains(&req.kind.as_str()) {
+    let kind = req.kind.as_str();
+    if !RELATE_KINDS.contains(&kind) && !(toggle && TOGGLE_KINDS.contains(&kind)) {
         return Err(respond::error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
@@ -964,7 +978,7 @@ fn parse_relate_body(body: &[u8]) -> Result<RelateRequest, HyperResponse> {
 /// `soft_identity_projection` (only `same_identity` and, for display,
 /// `"variant"` do).
 async fn relate_entries(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
-    let req = match parse_relate_body(body) {
+    let req = match parse_relate_body(body, false) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -981,18 +995,20 @@ async fn relate_entries(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
 /// `POST /api/relations/unrelate` — the inverse of `relate`: tombstones
 /// (disables, doesn't delete) the one exact `(a, b, kind)` row via
 /// `MusicDb::set_relation_enabled`, mirroring how `unlink` never deletes
-/// provenance either. Requesting an unknown `kind` or a pair with no such
-/// row is a no-op (`ok: true` either way) rather than an error — the UI
-/// only ever offers "remove" for a relation it just showed, so a mismatch
-/// here would mean the graph view and the DB had already drifted apart.
-async fn unrelate_entries(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
-    let req = match parse_relate_body(body) {
+/// provenance either. `POST /api/relations/restore` re-enables it, keeping
+/// its origin and metadata (a `derived_from` row's direction). Both also
+/// take `TOGGLE_KINDS`. A pair with no such row is a no-op (`ok: true`
+/// either way) rather than an error — the UI only ever offers these for a
+/// relation it just showed, so a mismatch here would mean the graph view
+/// and the DB had already drifted apart.
+async fn set_relation_enabled(state: &Arc<AppState>, body: &[u8], enabled: bool) -> HyperResponse {
+    let req = match parse_relate_body(body, true) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
     if let Err(e) = state
         .db
-        .set_relation_enabled(req.a, req.b, &req.kind, false)
+        .set_relation_enabled(req.a, req.b, &req.kind, enabled)
         .await
     {
         return db_error_response(e);
