@@ -20,7 +20,10 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -79,8 +82,22 @@ pub struct NrsPool {
     pub unresolved: Vec<UnresolvedEntry>,
     /// Edition groups reached but dropped for having no playable source.
     pub unplayable: usize,
+    /// Every URL-bound NRS music entry the library holds, scored or not,
+    /// by the library entry its URL resolved to (see `nrs_bridge`).
+    #[serde(skip)]
+    pub bound: HashMap<i64, BoundEntry>,
     #[serde(skip)]
     built: Option<Instant>,
+    /// Set by `invalidate`: rebuild on the next `get` regardless of age.
+    #[serde(skip)]
+    stale: AtomicBool,
+}
+
+/// An NRS entry bound to a library entry.
+#[derive(Clone, Serialize)]
+pub struct BoundEntry {
+    pub nrs_id: String,
+    pub title: String,
 }
 
 #[derive(Serialize)]
@@ -114,7 +131,9 @@ impl NrsPool {
 pub async fn get(state: &Arc<AppState>, refresh: bool) -> anyhow::Result<Arc<NrsPool>> {
     if !refresh {
         let cached = state.nrs_pool.lock().expect("pool lock").clone();
-        if let Some(pool) = cached.filter(|p| p.built.is_some_and(|b| b.elapsed() < MAX_AGE)) {
+        if let Some(pool) = cached.filter(|p| {
+            !p.stale.load(Ordering::Relaxed) && p.built.is_some_and(|b| b.elapsed() < MAX_AGE)
+        }) {
             return Ok(pool);
         }
     }
@@ -127,6 +146,34 @@ pub async fn get(state: &Arc<AppState>, refresh: bool) -> anyhow::Result<Arc<Nrs
 /// exclusions, which shouldn't wait on (or fail with) an NRS round trip.
 pub fn cached(state: &AppState) -> Option<Arc<NrsPool>> {
     state.nrs_pool.lock().expect("pool lock").clone()
+}
+
+/// Marks the cached pool stale, so the next `get` rebuilds it (after a
+/// write that changes what's bound or scored).
+pub fn invalidate(state: &AppState) {
+    if let Some(pool) = cached(state) {
+        pool.stale.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The shuffle's `exclude=track,album,artist` (any subset): pool entry ids
+/// reached any of those ways, from the last-built pool. No pool built yet
+/// means nothing excluded.
+pub fn excluded_for(state: &AppState, exclude: Option<&String>) -> HashSet<i64> {
+    let vias: Vec<Via> = exclude
+        .into_iter()
+        .flat_map(|s| s.split(','))
+        .filter_map(|v| match v {
+            "track" => Some(Via::Track),
+            "album" => Some(Via::Album),
+            "artist" => Some(Via::Artist),
+            _ => None,
+        })
+        .collect();
+    match cached(state) {
+        Some(pool) if !vias.is_empty() => pool.entry_ids_via(&vias),
+        _ => HashSet::new(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -155,10 +202,10 @@ struct ScoreRow {
     value: f64,
 }
 
-/// NRS entries that could be music in this library, with their scores:
-/// URL-bound, and of a music kind (or no kind yet — the library's own entry
-/// type decides below).
-async fn fetch_nrs(base: &str) -> anyhow::Result<Vec<(NrsEntry, f64)>> {
+/// NRS entries that could be music in this library, with their scores
+/// (`None` for an entry not scored yet): URL-bound, and of a music kind (or
+/// no kind yet — the library's own entry type decides below).
+async fn fetch_nrs(base: &str) -> anyhow::Result<Vec<(NrsEntry, Option<f64>)>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()?;
@@ -198,9 +245,9 @@ async fn fetch_nrs(base: &str) -> anyhow::Result<Vec<(NrsEntry, f64)>> {
                 .as_deref()
                 .is_none_or(|k| matches!(k, "track" | "album" | "artist"))
         })
-        .filter_map(|e| {
-            let score = *scores.get(&e.id)?;
-            Some((e, score))
+        .map(|e| {
+            let score = scores.get(&e.id).copied();
+            (e, score)
         })
         .collect())
 }
@@ -208,7 +255,7 @@ async fn fetch_nrs(base: &str) -> anyhow::Result<Vec<(NrsEntry, f64)>> {
 async fn build(state: &Arc<AppState>) -> anyhow::Result<NrsPool> {
     let db = &state.db;
     let nrs = fetch_nrs(&state.nrs_url).await?;
-    let nrs_entries = nrs.len();
+    let nrs_entries = nrs.iter().filter(|(_, score)| score.is_some()).count();
 
     // URL -> library entry, batched over canonical pairs; raw-identifier
     // fallback one by one for the rest (local files, unknown URL shapes).
@@ -228,13 +275,23 @@ async fn build(state: &Arc<AppState>) -> anyhow::Result<NrsPool> {
         .collect();
     let mut resolved: Vec<(usize, i64)> = Vec::new();
     let mut unresolved = Vec::new();
-    for (i, ((entry, _), pair)) in nrs.iter().zip(&canonical).enumerate() {
+    let mut bound = HashMap::new();
+    for (i, ((entry, score), pair)) in nrs.iter().zip(&canonical).enumerate() {
         let mut id = pair.as_ref().and_then(|p| by_pair.get(p).copied());
         if id.is_none() {
             id = db
                 .find_entry_by_identifier(&entry.store_id)
                 .await?
                 .map(|(_, id)| id);
+        }
+        if let Some(id) = id {
+            bound.entry(id).or_insert_with(|| BoundEntry {
+                nrs_id: entry.id.clone(),
+                title: entry.title.clone(),
+            });
+        }
+        if score.is_none() {
+            continue;
         }
         match id {
             Some(id) => resolved.push((i, id)),
@@ -274,6 +331,7 @@ async fn build(state: &Arc<AppState>) -> anyhow::Result<NrsPool> {
     let mut by_member: Vec<(usize, Vec<i64>)> = Vec::new();
     for &(i, id) in &resolved {
         let (entry, score) = &nrs[i];
+        let score = score.expect("only scored entries resolve");
         let via = match types.get(&id).map(String::as_str) {
             Some("track") => Via::Track,
             Some("release" | "release_group") => Via::Album,
@@ -285,7 +343,7 @@ async fn build(state: &Arc<AppState>) -> anyhow::Result<NrsPool> {
             nrs_id: entry.id.clone(),
             title: entry.title.clone(),
             via,
-            score: *score,
+            score,
             entry_id: id,
         });
         match via {
@@ -436,7 +494,9 @@ async fn build(state: &Arc<AppState>) -> anyhow::Result<NrsPool> {
         nrs_entries,
         unresolved,
         unplayable,
+        bound,
         built: Some(Instant::now()),
+        stale: AtomicBool::new(false),
     })
 }
 
