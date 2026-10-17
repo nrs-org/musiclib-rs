@@ -15,6 +15,8 @@ Endpoint:
 Usage:
   PORT=9001 uv run src/bin/ytmusicapi_server.py
 
+HOST picks the address to bind (default 0.0.0.0, every interface).
+
 The musiclib-rs youtube_api channel provider reads YTMUSICAPI_SERVER_URL and calls
 this server to supplement the Data API v3 channel fetch with YTMusic discography
 (albums and singles) that the official API does not expose.
@@ -106,9 +108,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", 9001))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    print(f"[ytmusicapi_server] listening on http://0.0.0.0:{port}", file=sys.stderr)
+    server = HTTPServer((host, port), Handler)
+    print(f"[ytmusicapi_server] listening on http://{host}:{port}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
