@@ -191,10 +191,11 @@ fn entry_path(nrs_id: &str, rest: &str) -> String {
     format!("entries/{}{rest}", urlencoding::encode(nrs_id))
 }
 
+/// A browser link to the entry's NRS page, through `nrs_public_url`.
 fn entry_link(state: &AppState, nrs_id: &str) -> String {
     format!(
         "{}/entries/{}",
-        state.nrs_url.trim_end_matches('/'),
+        state.nrs_public_url.trim_end_matches('/'),
         urlencoding::encode(nrs_id)
     )
 }

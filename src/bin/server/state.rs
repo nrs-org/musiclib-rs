@@ -50,6 +50,10 @@ pub struct AppState {
     /// `nrs_bridge`).
     #[cfg(feature = "nrs")]
     pub nrs_url: String,
+    /// Where browsers reach the NRS app: the base of the links the bridge
+    /// hands out (`nrs_url` unless configured otherwise).
+    #[cfg(feature = "nrs")]
+    pub nrs_public_url: String,
     #[cfg(feature = "nrs")]
     pub nrs_pool: Mutex<Option<Arc<crate::nrs_pool::NrsPool>>>,
     /// The player's one playback session (queue, devices, position) — see

@@ -105,6 +105,12 @@ struct Args {
     #[cfg(feature = "nrs")]
     #[arg(long)]
     nrs_url: Option<String>,
+    /// Where browsers reach the NRS app, for the player's "Open in NRS"
+    /// links — e.g. a tailnet HTTPS name when `--nrs-url` is loopback.
+    /// Defaults to `$NRS_APP_PUBLIC_URL`, then the NRS URL itself.
+    #[cfg(feature = "nrs")]
+    #[arg(long)]
+    nrs_public_url: Option<String>,
     #[command(flatten)]
     dirs: musiclib_rs::app_dirs::DirArgs,
 }
@@ -272,6 +278,18 @@ async fn main() -> anyhow::Result<()> {
         info!("No <config_dir>/match.rhai; online soft-dedup disabled for ingest jobs");
     }
 
+    #[cfg(feature = "nrs")]
+    let nrs_url = args
+        .nrs_url
+        .or_else(|| std::env::var("NRS_APP_URL").ok())
+        .unwrap_or_else(|| "http://127.0.0.1:3737".to_owned());
+    #[cfg(feature = "nrs")]
+    let nrs_public_url = args
+        .nrs_public_url
+        .or_else(|| std::env::var("NRS_APP_PUBLIC_URL").ok())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| nrs_url.clone());
+
     let state = Arc::new(AppState {
         db,
         providers,
@@ -284,10 +302,9 @@ async fn main() -> anyhow::Result<()> {
         activity,
         youtube_quota,
         #[cfg(feature = "nrs")]
-        nrs_url: args
-            .nrs_url
-            .or_else(|| std::env::var("NRS_APP_URL").ok())
-            .unwrap_or_else(|| "http://127.0.0.1:3737".to_owned()),
+        nrs_url,
+        #[cfg(feature = "nrs")]
+        nrs_public_url,
         #[cfg(feature = "nrs")]
         nrs_pool: Default::default(),
         // Next to the DB, so a `--db` scratch library gets its own session.
