@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,7 +14,7 @@ use musiclib_rs::{
     pipeline::{
         dedup::{DedupConfig, merge_configs},
         progress,
-        softmatch::{SoftMatchConfig, match_db},
+        softmatch::{SoftMatchConfig, match_db, match_entries, print_summary},
     },
     providers::registry::{RegistryConfig, build_providers},
 };
@@ -75,6 +76,11 @@ struct Args {
     /// Print every suggested merge/relation and its sources to stdout.
     #[arg(long)]
     verbose_decisions: bool,
+    /// Score only pairs involving these entries (a file of whitespace-separated
+    /// entry ids), against the whole library, instead of a full scan. Same
+    /// focused path the import runs after each flush.
+    #[arg(long)]
+    entries: Option<PathBuf>,
 }
 
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
@@ -194,7 +200,29 @@ async fn main() -> anyhow::Result<()> {
         http_client: Some(http_for_script),
     };
 
-    match_db(&db, &merged_dedup, providers.as_slice(), &soft_cfg).await?;
+    match args.entries {
+        Some(path) => {
+            let text = tokio::fs::read_to_string(&path)
+                .await
+                .with_context(|| format!("reading {}", path.display()))?;
+            let ids = text
+                .split_whitespace()
+                .map(|id| {
+                    id.parse::<i64>()
+                        .with_context(|| format!("bad entry id {id:?}"))
+                })
+                .collect::<anyhow::Result<HashSet<i64>>>()?;
+            println!(
+                "Scoring pairs involving {} entr(y/ies) from {}",
+                ids.len(),
+                path.display()
+            );
+            let stats =
+                match_entries(&db, &ids, &merged_dedup, providers.as_slice(), &soft_cfg).await?;
+            print_summary(&stats, &soft_cfg);
+        }
+        None => match_db(&db, &merged_dedup, providers.as_slice(), &soft_cfg).await?,
+    }
 
     Ok(())
 }

@@ -3030,6 +3030,14 @@ pub async fn match_db(
     println!("  script load  : {t_script:.2?}");
     println!("  scoring      : {t_score:.2?}");
     println!("  total        : {t_total:.2?}");
+    print_summary(&stats, config);
+
+    Ok(())
+}
+
+/// Prints the per-type `[merge, relate, distinct, defer]` counts a scan
+/// returned, and whether its decisions were written.
+pub fn print_summary(stats: &HashMap<String, [usize; 4]>, config: &SoftMatchConfig) {
     println!("=== Summary ===");
     for t in ["track", "release", "release_group", "artist"] {
         if let Some(c) = stats.get(t) {
@@ -3044,8 +3052,6 @@ pub async fn match_db(
     } else {
         info!("Dry-run complete. Pass --apply to write decisions to the DB.");
     }
-
-    Ok(())
 }
 
 /// Incremental scan: only compare pairs involving one of `new_entry_ids`.
@@ -3064,8 +3070,23 @@ pub async fn match_new_entries(
     providers: &[Arc<dyn FetchProvider>],
     config: &SoftMatchConfig,
 ) -> anyhow::Result<()> {
+    match_entries(db, new_entry_ids, dedup, providers, config).await?;
+    Ok(())
+}
+
+/// [`match_new_entries`], returning the per-type `[merge, relate, distinct,
+/// defer]` counts. The `softmatch --entries` batch path uses it to re-score a
+/// chosen set of existing entries (e.g. ones ingested while the matcher was
+/// unavailable) without a full-library scan.
+pub async fn match_entries(
+    db: &MusicDb,
+    new_entry_ids: &HashSet<i64>,
+    dedup: &DedupConfig,
+    providers: &[Arc<dyn FetchProvider>],
+    config: &SoftMatchConfig,
+) -> anyhow::Result<HashMap<String, [usize; 4]>> {
     if new_entry_ids.is_empty() {
-        return Ok(());
+        return Ok(HashMap::new());
     }
     let focus_ids: Vec<i64> = new_entry_ids.iter().copied().collect();
     let focus_entries = entry_infos_by_ids(db, &focus_ids).await?;
@@ -3105,8 +3126,7 @@ pub async fn match_new_entries(
         embed_cache.as_deref(),
         Some(candidate_channels),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Runs [`match_new_entries`] on a dedicated OS thread with its own
