@@ -58,6 +58,9 @@ default = ["store_protocol", "player"]
 # match script. Off by default — enabling it pulls libffi (built from source via
 # autotools). See learned-matcher's rhai/match.learned.rhai for a cdylib binding.
 ffi = ["dep:libffi", "dep:libc"]
+# `ffi` linked against a system libffi (`-lffi`, e.g. Nix's prebuilt
+# `pkgs.libffi`) instead of building the vendored copy with autotools.
+ffi-system = ["ffi", "libffi/system"]
 # `server` binary route groups (see src/bin/server/). No extra dependencies —
 # both are gated purely to let a deployment build one without the other, e.g.
 # `cargo build --bin server --no-default-features --features store_protocol`.
