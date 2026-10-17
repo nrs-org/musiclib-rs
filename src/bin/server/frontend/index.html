@@ -4399,104 +4399,138 @@
       return b64url(digest);
     }
 
+    // The login lives on the server (`spotify_auth.rs`), shared by every
+    // device: this tab knows only the Client ID and whether it's connected,
+    // and borrows short-lived access tokens from `/api/spotify/token`.
+    let status = { client_id: "", connected: false };
+    let statusLoaded = false;
+    let access = null;
+    let accessRequest = null;
+
     function getClientId() {
-      return localStorage.getItem("spotify_client_id") || "";
-    }
-
-    function getTokens() {
-      try {
-        return JSON.parse(localStorage.getItem("spotify_tokens") || "null");
-      } catch {
-        return null;
-      }
-    }
-
-    function setTokens(t) {
-      localStorage.setItem("spotify_tokens", JSON.stringify(t));
-    }
-
-    function clearTokens() {
-      localStorage.removeItem("spotify_tokens");
+      return status.client_id;
     }
 
     function isConnected() {
-      return !!getTokens();
+      return status.connected;
     }
 
-    // The other half of handleRedirect()'s 127.0.0.1 → localhost bounce:
-    // tokens can't cross that origin boundary via localStorage, so they ride
-    // in the URL fragment instead. Runs synchronously at module init, before
-    // the caller's first render(), so "Connected" is correct on first paint.
-    (function pickUpCarriedTokens() {
-      const prefix = "#spotify_tokens=";
-      if (!location.hash.startsWith(prefix)) return;
+    async function loadStatus() {
       try {
-        setTokens(JSON.parse(decodeURIComponent(location.hash.slice(prefix.length))));
-      } catch {
-        // Malformed fragment — nothing to recover, just drop it below.
+        status = await api("/api/spotify/status");
+      } catch (e) {
+        lastError = `Couldn't reach the server's Spotify login: ${e.message}`;
       }
-      history.replaceState({}, "", location.pathname + location.search);
+      statusLoaded = true;
+      if (!status.connected) access = null;
+    }
+
+    async function sendJson(method, path, payload) {
+      const res = await fetch(path, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: payload === undefined ? undefined : JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        let message = res.statusText;
+        try {
+          message = (await res.json()).message || message;
+        } catch {}
+        throw new Error(message);
+      }
+    }
+
+    // A browser that logged in before the server held the login still has
+    // it in localStorage: hand it over once, then forget it here.
+    async function adoptBrowserLogin() {
+      let tokens = null;
+      try {
+        tokens = JSON.parse(localStorage.getItem("spotify_tokens") || "null");
+      } catch {}
+      const clientId = localStorage.getItem("spotify_client_id");
+      const forget = () => {
+        localStorage.removeItem("spotify_tokens");
+        localStorage.removeItem("spotify_client_id");
+      };
+      if (!tokens?.refresh_token || !clientId) {
+        if (!tokens) localStorage.removeItem("spotify_tokens");
+        return;
+      }
+      if (status.connected) return forget();
+      try {
+        await sendJson("POST", "/api/spotify/import", { client_id: clientId, refresh_token: tokens.refresh_token });
+        forget();
+      } catch (e) {
+        // Spotify no longer honors it: nothing worth keeping.
+        if (/refused/i.test(e.message)) forget();
+      }
+      await loadStatus();
+    }
+
+    /// Resolves once this tab knows the server's login (and has handed over
+    /// any old browser-held one), so playback mounting on load sees the real
+    /// `isConnected()`.
+    const ready = (async () => {
+      await loadStatus();
+      try {
+        await adoptBrowserLogin();
+      } catch {}
+      render();
     })();
 
-    // The other other half: connect() stores its PKCE verifier/state under
-    // whatever origin it runs on, but the callback is forced to land on
-    // 127.0.0.1 (REDIRECT_URI is pinned there — see above) since that's
-    // where the Spotify app's redirect URI is registered. If connect() ran
-    // on localhost, the callback would look for a verifier that only exists
-    // in localhost's localStorage and never find it — a silent "state
-    // mismatch" with no visible error, since handleRedirect()'s own bounce
-    // then wipes the in-memory error message too. So: hop to 127.0.0.1
-    // *before* generating the verifier, carrying the client id along (it's
-    // not secret — Spotify's own /authorize URL exposes it anyway), and
-    // resume the real connect() once actually there.
+    // Another device may connect or disconnect while this tab sits idle.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") loadStatus().then(render);
+    });
+
+    // connect() stores its PKCE verifier/state under whatever origin it
+    // runs on, but the callback is forced to land on 127.0.0.1 (REDIRECT_URI
+    // is pinned there — see above) since that's where the Spotify app's
+    // redirect URI is registered. If connect() ran on localhost, the
+    // callback would look for a verifier that only exists in localhost's
+    // localStorage and never find it — a silent "state mismatch". So: hop to
+    // 127.0.0.1 *before* generating the verifier, and resume the real
+    // connect() once actually there.
     (function resumeConnectIfRequested() {
-      const clientId = new URLSearchParams(location.search).get("spotify_connect");
-      if (!clientId) return;
-      localStorage.setItem("spotify_client_id", clientId);
+      if (!new URLSearchParams(location.search).has("spotify_connect")) return;
       history.replaceState({}, "", location.pathname);
-      connect();
+      ready.then(connect);
     })();
 
     function startConnect() {
-      if (location.hostname === "127.0.0.1") {
+      // Any other host (a tailnet name, say) is its own redirect URI.
+      if (location.hostname !== "localhost") {
         connect();
         return;
       }
       const port = location.port ? ":" + location.port : "";
-      const cid = encodeURIComponent(getClientId());
-      location.href =
-        location.protocol + "//127.0.0.1" + port + location.pathname + "?spotify_connect=" + cid;
-    }
-
-    async function exchangeToken(body) {
-      const res = await fetch("https://accounts.spotify.com/api/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      });
-      if (!res.ok) return null;
-      const json = await res.json();
-      return {
-        access_token: json.access_token,
-        refresh_token: json.refresh_token || getTokens()?.refresh_token,
-        expires_at: Date.now() + json.expires_in * 1000,
-      };
+      location.href = location.protocol + "//127.0.0.1" + port + location.pathname + "?spotify_connect=1";
     }
 
     async function getValidAccessToken() {
-      let tokens = getTokens();
-      if (!tokens) return null;
-      if (tokens.expires_at - Date.now() > 60000) return tokens.access_token;
-      const clientId = getClientId();
-      const refreshed = await exchangeToken(
-        new URLSearchParams({ client_id: clientId, grant_type: "refresh_token", refresh_token: tokens.refresh_token })
-      );
-      if (!refreshed) {
-        clearTokens();
-        return null;
-      }
-      setTokens(refreshed);
-      return refreshed.access_token;
+      if (access && access.expires_at - Date.now() > 60000) return access.access_token;
+      if (!status.connected) return null;
+      accessRequest ||= (async () => {
+        try {
+          const res = await fetch("/api/spotify/token");
+          if (res.status === 409) {
+            // Spotify revoked the login, or another device disconnected it.
+            await loadStatus();
+            render();
+            return null;
+          }
+          if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || res.statusText);
+          access = await res.json();
+          return access.access_token;
+        } catch (e) {
+          lastError = `Spotify token: ${e.message}`;
+          render();
+          return null;
+        } finally {
+          accessRequest = null;
+        }
+      })();
+      return accessRequest;
     }
 
     async function connect() {
@@ -4519,12 +4553,18 @@
       location.href = `https://accounts.spotify.com/authorize?${params}`;
     }
 
-    function disconnect() {
-      clearTokens();
+    async function disconnect() {
+      try {
+        await sendJson("DELETE", "/api/spotify/token");
+      } catch (e) {
+        lastError = e.message;
+      }
+      access = null;
       player?.disconnect();
       player = null;
       playerReady = null;
       deviceId = null;
+      await loadStatus();
       render();
     }
 
@@ -4549,35 +4589,23 @@
       } else if (!verifier || state !== expectedState) {
         lastError = "Spotify connection failed (state mismatch). Try again.";
       } else {
-        const tokens = await exchangeToken(
-          new URLSearchParams({
-            client_id: getClientId(),
-            grant_type: "authorization_code",
-            code,
-            redirect_uri: REDIRECT_URI,
-            code_verifier: verifier,
-          })
-        );
-        if (tokens) {
-          setTokens(tokens);
-        } else {
-          lastError = "Spotify connection failed while exchanging the code.";
+        // The server makes the exchange and keeps the tokens.
+        try {
+          await sendJson("POST", "/api/spotify/connect", { code, code_verifier: verifier, redirect_uri: REDIRECT_URI });
+        } catch (e) {
+          lastError = `Spotify connection failed: ${e.message}`;
         }
       }
 
       // The callback had to land on 127.0.0.1 (REDIRECT_URI is pinned to
       // it), but the rest of the app wants localhost — bounce now that the
-      // token exchange is done. localStorage doesn't cross that origin
-      // boundary, so whatever we just stored has to ride along in the URL
-      // fragment for the localhost side to pick up (see the top of this
-      // module) — otherwise the tokens exist but "Connected" never shows.
-      if (location.hostname === "127.0.0.1") {
+      // server holds the login. Nothing needs to cross the origin boundary.
+      if (location.hostname === "127.0.0.1" && !lastError) {
         const port = location.port ? ":" + location.port : "";
-        const tokens = getTokens();
-        const carry = tokens ? "#spotify_tokens=" + encodeURIComponent(JSON.stringify(tokens)) : "";
-        location.replace(location.protocol + "//localhost" + port + location.pathname + location.search + carry);
+        location.replace(location.protocol + "//localhost" + port + location.pathname + location.search);
         return;
       }
+      await loadStatus();
       render();
     }
 
@@ -4611,9 +4639,11 @@
           render();
         });
         p.addListener("authentication_error", ({ message }) => {
+          // Drop this tab's borrowed token; the server decides whether the
+          // login itself is gone (its next refresh tells).
           lastError = message;
-          clearTokens();
-          render();
+          access = null;
+          loadStatus().then(render);
         });
         p.addListener("account_error", () => {
           lastError = "Spotify Premium is required for in-app playback.";
@@ -4735,11 +4765,17 @@
           className: "ghost-btn",
           type: "button",
           text: "Save",
-          onclick: () => {
+          onclick: async () => {
             const id = input.value.trim();
             if (!id) return;
-            localStorage.setItem("spotify_client_id", id);
-            editingClientId = false;
+            try {
+              await sendJson("PUT", "/api/spotify/client", { client_id: id });
+              lastError = "";
+              editingClientId = false;
+            } catch (e) {
+              lastError = e.message;
+            }
+            await loadStatus();
             render();
           },
         }),
@@ -4783,10 +4819,17 @@
       const dot = el("span", { className: "dot" + (isConnected() ? " on" : "") });
       const label = el("span", { text: isConnected() ? "Spotify connected" : "Spotify" });
       panelEl.appendChild(el("p", { className: "rail-foot-label" }, [dot, label]));
+      if (!statusLoaded) return;
 
       if (isConnected()) {
         panelEl.appendChild(
-          el("button", { className: "ghost-btn", type: "button", onclick: disconnect, text: "Disconnect" })
+          el("button", {
+            className: "ghost-btn",
+            type: "button",
+            onclick: disconnect,
+            text: "Disconnect",
+            title: "Logs Spotify out on every device: the login is shared through this server.",
+          })
         );
       } else if (getClientId() && !editingClientId) {
         panelEl.appendChild(
@@ -4813,6 +4856,7 @@
     }
 
     return {
+      ready,
       render,
       handleRedirect,
       isConnected,
@@ -6695,7 +6739,9 @@
       const opts = { startAt, autoplay: s.playing };
       progress = { pos: startAt, at: performance.now(), playing: false, duration: (s.duration_ms || 0) / 1000 };
       renderPlayPause();
-      loadSources(s.current.entry_id).then((list) => {
+      // `Spotify.ready`: a reload resuming a Spotify track must know the
+      // server's login before `mountSource` checks `isConnected()`.
+      Promise.all([loadSources(s.current.entry_id), Spotify.ready]).then(([list]) => {
         if (mountedKey !== key) return;
         // Ordered by this device's Settings-mode source preference, not
         // playable-sources' own (DB-row) order — see

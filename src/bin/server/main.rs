@@ -35,6 +35,8 @@ mod player;
 #[cfg(feature = "player")]
 mod plays;
 mod respond;
+#[cfg(feature = "player")]
+mod spotify_auth;
 mod state;
 #[cfg(feature = "store_protocol")]
 mod store_protocol;
@@ -158,6 +160,10 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
     #[cfg(feature = "nrs")]
     if nrs_bridge::handles(&path) {
         return Ok(nrs_bridge::route(&state, &method, &path, &query, body).await);
+    }
+    #[cfg(feature = "player")]
+    if spotify_auth::handles(&path) {
+        return Ok(spotify_auth::route(&state, &method, &path, body).await);
     }
     #[cfg(feature = "player")]
     if plays::handles(&path) {
@@ -287,6 +293,8 @@ async fn main() -> anyhow::Result<()> {
         // Next to the DB, so a `--db` scratch library gets its own session.
         #[cfg(feature = "player")]
         playback: playback::PlaybackHub::load(db_path.with_file_name("playback.json")),
+        #[cfg(feature = "player")]
+        spotify: spotify_auth::SpotifyAuth::load(db_path.with_file_name("spotify.json")),
         #[cfg(feature = "nrs")]
         nrs_bridge: Default::default(),
     });
