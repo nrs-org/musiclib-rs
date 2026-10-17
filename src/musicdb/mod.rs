@@ -2662,6 +2662,23 @@ impl MusicDb {
         .collect())
     }
 
+    /// `(entry_id, run_id)` of every pair held by `ids`, keyed by pair.
+    /// `run_id` is `None` for rows written before import runs were tracked.
+    pub async fn pair_run_ids_by_entry_ids(
+        &self,
+        ids: &[i64],
+    ) -> Result<HashMap<(String, String), (i64, Option<i64>)>, Error> {
+        Ok(chunked_id_query(ids, |chunk| {
+            entry_source::Entity::find()
+                .filter(entry_source::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(|m| ((m.source, m.identifier), (m.entry_id, m.run_id)))
+        .collect())
+    }
+
     /// entry_source rows for exactly `pairs` (primary-key lookup).
     pub async fn source_rows_for_pairs(
         &self,
