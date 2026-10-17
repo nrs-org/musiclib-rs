@@ -2443,13 +2443,27 @@
 
   .np-list li.is-done .t { color: var(--ink-faint); }
 
+  /* An MV thumbnail: YouTube's `hqdefault` is 4:3 with the 16:9 frame
+     letterboxed inside, so cropping to 16:9 shows exactly the video. */
   .np-media {
     display: block;
     width: 100%;
-    max-height: 180px;
+    aspect-ratio: 16 / 9;
     object-fit: cover;
     border: 1px solid var(--rail);
     margin: 4px 0 6px;
+  }
+
+  .np-media[hidden] { display: none; }
+
+  /* Album art is graded as it is: full width at its own aspect ratio,
+     uncropped; unusually tall art is capped and centered instead. */
+  .np-media.np-art {
+    height: auto;
+    max-height: 420px;
+    aspect-ratio: auto;
+    object-fit: contain;
+    background: var(--paper-deep);
   }
 
   .np-album {
@@ -5497,7 +5511,7 @@
       ]);
       const nodes = [head, el("p", { className: "np-sub", text: album.id ? scoreLine(album) : "Not in NRS yet. Grading its art adds it." })];
       if (album.id) {
-        const img = el("img", { className: "np-media", alt: "", loading: "lazy", hidden: true });
+        const img = el("img", { className: "np-media np-art", alt: "", loading: "lazy", hidden: true });
         nodes.push(img);
         api(`/api/nrs/v1/entries/${encodeURIComponent(album.id)}/media`)
           .then((m) => {
