@@ -25,6 +25,19 @@ your system config dir, look it up). See [docs/CONFIG_REFERENCE.md](docs/CONFIG_
 for a full reference of all config files, and [docs/DEV.md](docs/DEV.md) for
 setup instructions, binary usage, and development workflow.
 
+### Nix packages
+
+The flake provides three packages, one for each service:
+
+| Package | Executables |
+| --- | --- |
+| `musiclib` (default) | Every binary except `update_fixtures`, prefixed `musiclib-` (for example `musiclib-server`, `musiclib-import`), built with `ffi-system` |
+| `ytdlp-server` | `ytdlp-server`; `YTDLP_PATH` defaults to the locked yt-dlp |
+| `ytmusicapi-server` | `ytmusicapi-server`, with ytmusicapi from Nixpkgs |
+
+yt-dlp often needs a newer release than the lock provides. Set `YTDLP_PATH`
+to use another yt-dlp without rebuilding.
+
 ### Self-hosting
 
 Default fetching can be very slow. One major bottleneck is Musicbrainz

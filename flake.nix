@@ -3,6 +3,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     systems.url = "github:nix-systems/default";
     git-hooks.url = "github:cachix/git-hooks.nix";
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
@@ -11,12 +12,26 @@
       nixpkgs,
       systems,
       git-hooks,
+      crane,
       ...
     }:
     let
       forEachSystem = nixpkgs.lib.genAttrs (import systems);
     in
     {
+      packages = forEachSystem (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        rec {
+          musiclib = pkgs.callPackage ./nix/musiclib.nix { craneLib = crane.mkLib pkgs; };
+          ytdlp-server = pkgs.callPackage ./nix/ytdlp-server.nix { inherit musiclib; };
+          ytmusicapi-server = pkgs.callPackage ./nix/ytmusicapi-server.nix { };
+          default = musiclib;
+        }
+      );
+
       checks = forEachSystem (system: {
         pre-commit-check = git-hooks.lib.${system}.run {
           src = ./.;
