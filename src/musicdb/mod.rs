@@ -307,6 +307,74 @@ mod entry_dedup {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// The player's listening history: one row per time a track started
+/// playing, with how much of it was actually heard (`listened_seconds`
+/// counts audible playback only — seeks and pauses add nothing). The
+/// player reports a play as it goes, so an in-progress play's row grows.
+/// `entry_id` is the edition that played, not its edition group's default.
+mod play_event {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "play_event")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        #[sea_orm(indexed)]
+        pub entry_id: i64,
+        /// Unix seconds.
+        #[sea_orm(indexed)]
+        pub started_at: i64,
+        pub listened_seconds: f64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// How much of each play has been handed to an external consumer of the
+/// play log (`target`, e.g. `"nrs"` for the server's NRS bridge), so an
+/// exporter that runs repeatedly only ever sends the growth since its last
+/// run. The play log itself knows nothing about its consumers.
+mod play_export {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "play_export")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub play_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub target: String,
+        pub exported_seconds: f64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Plays shorter than this are skips: kept in the log, but neither counted
+/// as a play nor exported.
+pub const MIN_COUNTED_PLAY_SECONDS: f64 = 10.0;
+
+/// One `play_event` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayRow {
+    pub id: i64,
+    pub entry_id: i64,
+    pub started_at: i64,
+    pub listened_seconds: f64,
+}
+
+/// A counted play with listening time not yet exported to some target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingExport {
+    pub play_id: i64,
+    pub entry_id: i64,
+    pub listened_seconds: f64,
+    pub exported_seconds: f64,
+}
+
 #[derive(Clone)]
 pub struct MusicDb {
     db: DatabaseConnection,
@@ -534,6 +602,9 @@ pub struct EditionProjection {
     /// "instrumental"). Absent for pairs related only transitively through a
     /// third member.
     edge_labels: HashMap<(i64, i64), (String, Option<String>)>,
+    /// Degenerate edition (see `DEGENERATE_MARKERS`) -> the edition it
+    /// derives from. See `rank_target`.
+    fold_to: HashMap<i64, i64>,
 }
 
 impl EditionProjection {
@@ -569,6 +640,25 @@ impl EditionProjection {
             .get(&ordered_pair(a, b))
             .map(|(kind, transformation)| (kind.as_str(), transformation.as_deref()))
     }
+
+    /// The edition that is ranked as its own work when `identity_canonical`
+    /// plays. Degenerate editions (instrumental, TV size, ... — see
+    /// `DEGENERATE_MARKERS`) aren't works of their own, so they fold into the
+    /// edition they derive from, repeatedly. Every other edition (a cover, a
+    /// remix, an arrangement, a live or alternate version) is its own work
+    /// and is its own target; so is a degenerate edition whose original is
+    /// unknown (an edge without a recorded direction).
+    pub fn rank_target(&self, identity_canonical: i64) -> i64 {
+        let mut current = identity_canonical;
+        let mut seen = HashSet::new();
+        while let Some(&next) = self.fold_to.get(&current) {
+            if !seen.insert(current) {
+                break;
+            }
+            current = next;
+        }
+        current
+    }
 }
 
 /// Builds an `EditionProjection` over `identity`'s canonical ids from raw
@@ -587,6 +677,7 @@ fn build_edition_projection(
     let mut is_derived_side: HashSet<i64> = HashSet::new();
     let mut is_degenerate_side: HashSet<i64> = HashSet::new();
     let mut edge_labels: HashMap<(i64, i64), (String, Option<String>)> = HashMap::new();
+    let mut fold_to: HashMap<i64, i64> = HashMap::new();
 
     for relation in relations
         .into_iter()
@@ -635,11 +726,22 @@ fn build_edition_projection(
                 .component_of(derived_entry)
                 .unwrap_or(derived_entry);
             is_derived_side.insert(derived_canonical);
-            if transformation.as_deref().is_some_and(|t| {
-                t.split_whitespace()
-                    .any(|tok| DEGENERATE_MARKERS.contains(&tok))
-            }) {
+            let degenerate = relation.kind == "instrumental"
+                || transformation.as_deref().is_some_and(|t| {
+                    t.split_whitespace()
+                        .any(|tok| DEGENERATE_MARKERS.contains(&tok))
+                });
+            if degenerate {
                 is_degenerate_side.insert(derived_canonical);
+                let original = if derived_canonical == a { b } else { a };
+                if derived_canonical == a || derived_canonical == b {
+                    // Lowest original wins, so the fold doesn't depend on
+                    // relation row order.
+                    fold_to
+                        .entry(derived_canonical)
+                        .and_modify(|o| *o = (*o).min(original))
+                        .or_insert(original);
+                }
             }
         }
         edge_labels
@@ -686,6 +788,7 @@ fn build_edition_projection(
         members_by_group,
         default_by_group,
         edge_labels,
+        fold_to,
     }
 }
 
@@ -3008,6 +3111,235 @@ impl MusicDb {
             .map(RelationRow::from)
             .collect())
     }
+
+    /// Records, as a manual judgment, that `derived` is an edition of
+    /// `original` made by `transformation` (a `version_tokens` marker such as
+    /// `"instrumental"` or `"live"`; `None` for an unspecified alternate
+    /// version). Upserts the pair's `derived_from` row with that direction,
+    /// replacing its `extra`. The pair's other non-provider edition-kind rows
+    /// are tombstoned, since this supersedes them; provider rows (cover,
+    /// remix, arrangement) stay, as they never mark a degenerate edition.
+    pub async fn set_edition_derivation(
+        &self,
+        original: i64,
+        derived: i64,
+        transformation: Option<&str>,
+    ) -> Result<(), Error> {
+        if original == derived {
+            return Err(Error::InvalidInput(
+                "an entry can't be an edition of itself".into(),
+            ));
+        }
+        let mut extra = serde_json::json!({
+            "derived_entry": derived,
+            "source_entry": original,
+        });
+        if let Some(t) = transformation.filter(|t| !t.trim().is_empty()) {
+            extra["transformation"] = t.trim().into();
+        }
+        let (a, b) = ordered_pair(original, derived);
+        let _guard = self.write_lock.lock().await;
+        let txn = self.db.begin().await?;
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(a),
+            entry_b: Set(b),
+            kind: Set(DERIVED_FROM.to_string()),
+            confidence: Set(1.0),
+            origin: Set("manual".to_string()),
+            enabled: Set(true),
+            extra: Set(Some(extra.to_string())),
+        })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                entry_relation::Column::EntryA,
+                entry_relation::Column::EntryB,
+                entry_relation::Column::Kind,
+            ])
+            .update_columns([
+                entry_relation::Column::Confidence,
+                entry_relation::Column::Origin,
+                entry_relation::Column::Enabled,
+                entry_relation::Column::Extra,
+            ])
+            .to_owned(),
+        )
+        .exec(&txn)
+        .await?;
+        let superseded: Vec<&str> = EDITION_KINDS
+            .iter()
+            .copied()
+            .filter(|k| *k != DERIVED_FROM)
+            .collect();
+        entry_relation::Entity::update_many()
+            .col_expr(entry_relation::Column::Enabled, false.into())
+            .filter(entry_relation::Column::EntryA.eq(a))
+            .filter(entry_relation::Column::EntryB.eq(b))
+            .filter(entry_relation::Column::Kind.is_in(superseded))
+            .filter(entry_relation::Column::Origin.ne(PROVIDER_ORIGIN))
+            .exec(&txn)
+            .await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Starts a play of `entry_id` at `started_at` (unix seconds), with
+    /// nothing heard yet. Returns the play's id.
+    pub async fn start_play(&self, entry_id: i64, started_at: i64) -> Result<i64, Error> {
+        let _guard = self.write_lock.lock().await;
+        let result = play_event::Entity::insert(play_event::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            entry_id: Set(entry_id),
+            started_at: Set(started_at),
+            listened_seconds: Set(0.0),
+        })
+        .exec(&self.db)
+        .await?;
+        Ok(result.last_insert_id)
+    }
+
+    /// Raises a play's listened time to `listened_seconds`. Never lowers
+    /// it, so a late or reordered report can't undo a newer one. Returns
+    /// false for an unknown play.
+    pub async fn set_play_listened(
+        &self,
+        play_id: i64,
+        listened_seconds: f64,
+    ) -> Result<bool, Error> {
+        // A play reported for longer than a day is a client bug, not a song.
+        if !(0.0..=86_400.0).contains(&listened_seconds) {
+            return Err(Error::InvalidInput(format!(
+                "listened_seconds out of range: {listened_seconds}"
+            )));
+        }
+        let _guard = self.write_lock.lock().await;
+        let result = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "UPDATE play_event SET listened_seconds = MAX(listened_seconds, ?) WHERE id = ?",
+                [listened_seconds.into(), play_id.into()],
+            ))
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Each entry's latest counted play (`MIN_COUNTED_PLAY_SECONDS`) started
+    /// at or after `since`: `(entry_id, started_at)`, unix seconds.
+    pub async fn last_counted_plays(&self, since: i64) -> Result<Vec<(i64, i64)>, Error> {
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT entry_id, MAX(started_at) AS last FROM play_event
+                 WHERE started_at >= ? AND listened_seconds >= ?
+                 GROUP BY entry_id",
+                [since.into(), MIN_COUNTED_PLAY_SECONDS.into()],
+            ))
+            .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("", "entry_id")?, row.try_get("", "last")?)))
+            .collect()
+    }
+
+    /// Counted plays whose listened time has grown past what was last
+    /// exported to `target` (see `play_export`), oldest first.
+    pub async fn plays_pending_export(&self, target: &str) -> Result<Vec<PendingExport>, Error> {
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT p.id, p.entry_id, p.listened_seconds,
+                        COALESCE(x.exported_seconds, 0.0) AS exported_seconds
+                 FROM play_event p
+                 LEFT JOIN play_export x ON x.play_id = p.id AND x.target = ?
+                 WHERE p.listened_seconds >= ?
+                   AND p.listened_seconds > COALESCE(x.exported_seconds, 0.0)
+                 ORDER BY p.id",
+                [target.into(), MIN_COUNTED_PLAY_SECONDS.into()],
+            ))
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(PendingExport {
+                    play_id: row.try_get("", "id")?,
+                    entry_id: row.try_get("", "entry_id")?,
+                    listened_seconds: row.try_get("", "listened_seconds")?,
+                    exported_seconds: row.try_get("", "exported_seconds")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Marks `(play_id, exported_seconds)` as exported to `target`. Like
+    /// `set_play_listened`, an export mark only ever grows.
+    pub async fn record_play_exports(
+        &self,
+        target: &str,
+        exports: &[(i64, f64)],
+    ) -> Result<(), Error> {
+        if exports.is_empty() {
+            return Ok(());
+        }
+        let _guard = self.write_lock.lock().await;
+        let txn = self.db.begin().await?;
+        for &(play_id, seconds) in exports {
+            txn.execute_raw(Statement::from_sql_and_values(
+                txn.get_database_backend(),
+                "INSERT INTO play_export (play_id, target, exported_seconds) VALUES (?, ?, ?)
+                 ON CONFLICT (play_id, target) DO UPDATE
+                 SET exported_seconds = MAX(exported_seconds, excluded.exported_seconds)",
+                [play_id.into(), target.into(), seconds.into()],
+            ))
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Counted plays of any of `entry_ids`, with their listened time and
+    /// how much of it was exported to `target`.
+    pub async fn play_totals(&self, entry_ids: &[i64], target: &str) -> Result<PlayTotals, Error> {
+        if entry_ids.is_empty() {
+            return Ok(PlayTotals::default());
+        }
+        let row = self
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT COUNT(*) AS plays,
+                        COALESCE(SUM(p.listened_seconds), 0.0) AS listened,
+                        COALESCE(SUM(MIN(COALESCE(x.exported_seconds, 0.0), p.listened_seconds)), 0.0)
+                          AS exported
+                 FROM play_event p
+                 LEFT JOIN play_export x ON x.play_id = p.id AND x.target = ?
+                 WHERE p.entry_id IN (SELECT value FROM json_each(?))
+                   AND p.listened_seconds >= ?",
+                [
+                    target.into(),
+                    serde_json::to_string(entry_ids)
+                        .expect("ids serialize")
+                        .into(),
+                    MIN_COUNTED_PLAY_SECONDS.into(),
+                ],
+            ))
+            .await?;
+        let Some(row) = row else {
+            return Ok(PlayTotals::default());
+        };
+        Ok(PlayTotals {
+            plays: row.try_get("", "plays")?,
+            listened_seconds: row.try_get("", "listened")?,
+            exported_seconds: row.try_get("", "exported")?,
+        })
+    }
+}
+
+/// See `MusicDb::play_totals`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct PlayTotals {
+    pub plays: i64,
+    pub listened_seconds: f64,
+    pub exported_seconds: f64,
 }
 
 // ── Public data structs for bulk queries ──────────────────────────────────────
@@ -3584,6 +3916,234 @@ mod tests {
         let (kind, transformation) = projection.edge_label(1, 2).unwrap();
         assert_eq!(kind, DERIVED_FROM);
         assert_eq!(transformation, Some("instrumental named:long"));
+    }
+
+    async fn insert_edition_rel(db: &DatabaseConnection, a: i64, b: i64, kind: &str, extra: &str) {
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(a.min(b)),
+            entry_b: Set(a.max(b)),
+            kind: Set(kind.to_string()),
+            confidence: Set(0.9),
+            origin: Set("heuristic".to_string()),
+            enabled: Set(true),
+            extra: Set(Some(extra.to_string())),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    /// Instrumentals (and other degenerate editions) fold into their
+    /// original, through a chain of them; a cover is its own target, and so
+    /// is anything derived from it only by a non-degenerate change.
+    #[tokio::test]
+    async fn rank_target_folds_degenerate_editions_only() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=6 {
+            insert_entry(db, id).await;
+        }
+        // 2 = instrumental of 1; 3 = TV size of 2 (folds through to 1).
+        insert_edition_rel(
+            db,
+            1,
+            2,
+            DERIVED_FROM,
+            r#"{"derived_entry":2,"source_entry":1,"transformation":"instrumental"}"#,
+        )
+        .await;
+        insert_edition_rel(
+            db,
+            2,
+            3,
+            DERIVED_FROM,
+            r#"{"derived_entry":3,"source_entry":2,"transformation":["tv_size","named:x"]}"#,
+        )
+        .await;
+        // 4 = cover of 1; 5 = live of 1: both their own works.
+        insert_edition_rel(db, 1, 4, "cover", r#"{"derived_entry":4,"source_entry":1}"#).await;
+        insert_edition_rel(
+            db,
+            1,
+            5,
+            DERIVED_FROM,
+            r#"{"derived_entry":5,"source_entry":1,"transformation":"live"}"#,
+        )
+        .await;
+        // 6 = instrumental of the cover: folds into the cover, not into 1.
+        insert_edition_rel(
+            db,
+            4,
+            6,
+            "instrumental",
+            r#"{"derived_entry":6,"source_entry":4}"#,
+        )
+        .await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.rank_target(1), 1);
+        assert_eq!(projection.rank_target(2), 1);
+        assert_eq!(projection.rank_target(3), 1);
+        assert_eq!(projection.rank_target(4), 4, "a cover is its own work");
+        assert_eq!(
+            projection.rank_target(5),
+            5,
+            "a live version is its own work"
+        );
+        assert_eq!(projection.rank_target(6), 4);
+    }
+
+    /// A degenerate-marked edge with no recorded direction can't fold, and
+    /// a direction cycle stops instead of looping.
+    #[tokio::test]
+    async fn rank_target_without_direction_or_with_cycle() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=4 {
+            insert_entry(db, id).await;
+        }
+        insert_rel(db, 1, 2, "instrumental", 1.0).await;
+        insert_edition_rel(
+            db,
+            3,
+            4,
+            DERIVED_FROM,
+            r#"{"derived_entry":4,"source_entry":3,"transformation":"instrumental"}"#,
+        )
+        .await;
+        insert_edition_rel(
+            db,
+            3,
+            4,
+            "instrumental",
+            r#"{"derived_entry":3,"source_entry":4}"#,
+        )
+        .await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.rank_target(2), 2);
+        let t = projection.rank_target(4);
+        assert!(t == 3 || t == 4);
+    }
+
+    /// The manual setter replaces a wrong heuristic transformation (here
+    /// unfolding a mislabelled instrumental), adds a direction to a manual
+    /// edge that had none, and tombstones the superseded manual row.
+    #[tokio::test]
+    async fn set_edition_derivation_overrides_heuristic_and_manual_rows() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=4 {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(
+            db,
+            1,
+            2,
+            DERIVED_FROM,
+            r#"{"derived_entry":2,"source_entry":1,"transformation":"instrumental"}"#,
+        )
+        .await;
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(3),
+            entry_b: Set(4),
+            kind: Set("instrumental".to_string()),
+            confidence: Set(1.0),
+            origin: Set("manual".to_string()),
+            enabled: Set(true),
+            extra: Set(None),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        assert_eq!(
+            mdb.edition_projection_for_display()
+                .await
+                .unwrap()
+                .rank_target(2),
+            1
+        );
+
+        mdb.set_edition_derivation(1, 2, Some("live"))
+            .await
+            .unwrap();
+        mdb.set_edition_derivation(4, 3, Some("instrumental"))
+            .await
+            .unwrap();
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.rank_target(2), 2, "no longer an instrumental");
+        assert_eq!(projection.rank_target(3), 4);
+        assert_eq!(
+            projection.edge_label(1, 2),
+            Some((DERIVED_FROM, Some("live")))
+        );
+        let manual = entry_relation::Entity::find_by_id((3, 4, "instrumental".to_string()))
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!manual.enabled, "superseded by the derivation");
+        assert!(mdb.set_edition_derivation(1, 1, None).await.is_err());
+    }
+
+    /// Listened time only grows; skips (under `MIN_COUNTED_PLAY_SECONDS`)
+    /// are neither counted nor exported; an export only sends growth.
+    #[tokio::test]
+    async fn play_log_counts_and_exports_growth() {
+        let mdb = mem_db().await;
+        let skip = mdb.start_play(7, 100).await.unwrap();
+        let play = mdb.start_play(7, 200).await.unwrap();
+        let other = mdb.start_play(8, 300).await.unwrap();
+        assert!(mdb.set_play_listened(skip, 4.0).await.unwrap());
+        assert!(mdb.set_play_listened(play, 60.0).await.unwrap());
+        assert!(
+            mdb.set_play_listened(play, 30.0).await.unwrap(),
+            "stale report"
+        );
+        assert!(mdb.set_play_listened(other, 15.0).await.unwrap());
+        assert!(!mdb.set_play_listened(999, 15.0).await.unwrap());
+        assert!(mdb.set_play_listened(play, -1.0).await.is_err());
+
+        let mut last = mdb.last_counted_plays(0).await.unwrap();
+        last.sort_unstable();
+        assert_eq!(last, vec![(7, 200), (8, 300)]);
+        assert_eq!(mdb.last_counted_plays(250).await.unwrap(), vec![(8, 300)]);
+
+        let pending = mdb.plays_pending_export("nrs").await.unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| (p.play_id, p.listened_seconds))
+                .collect::<Vec<_>>(),
+            vec![(play, 60.0), (other, 15.0)]
+        );
+        mdb.record_play_exports("nrs", &[(play, 60.0)])
+            .await
+            .unwrap();
+        mdb.record_play_exports("nrs", &[(play, 20.0)])
+            .await
+            .unwrap();
+        mdb.set_play_listened(play, 90.0).await.unwrap();
+        let pending = mdb.plays_pending_export("nrs").await.unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| (p.play_id, p.exported_seconds))
+                .collect::<Vec<_>>(),
+            vec![(play, 60.0), (other, 0.0)]
+        );
+        assert_eq!(mdb.plays_pending_export("other").await.unwrap().len(), 2);
+
+        let totals = mdb.play_totals(&[7], "nrs").await.unwrap();
+        assert_eq!(
+            totals,
+            PlayTotals {
+                plays: 1,
+                listened_seconds: 90.0,
+                exported_seconds: 60.0,
+            }
+        );
     }
 
     /// Endpoint order is normalized: a relation stored as (loser, x) with
