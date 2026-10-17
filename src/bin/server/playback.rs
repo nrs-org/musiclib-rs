@@ -56,6 +56,10 @@ pub struct QueueItem {
     pub entry_id: i64,
     #[serde(default)]
     pub title: Option<String>,
+    /// The album a tracklist was played from (the now-playing drawer scores
+    /// it alongside the track).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_id: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -978,6 +982,7 @@ mod tests {
         QueueItem {
             entry_id: id,
             title: None,
+            release_id: None,
         }
     }
 

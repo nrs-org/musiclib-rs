@@ -86,6 +86,10 @@ pub struct EditionRef {
     /// highlight "you are here" even when `entry_id` isn't itself the
     /// identity's canonical id.
     pub is_current: bool,
+    /// The edition ranked as a work when this one plays — itself, or the
+    /// original a degenerate edition (instrumental, TV size, ...) folds into
+    /// (`EditionProjection::rank_target`).
+    pub rank_target: i64,
 }
 
 /// Edition switcher order: the original first, then full alternate versions,
@@ -295,6 +299,7 @@ pub async fn entry_summaries_with(
                     transformation,
                     is_default: sib == default_canonical,
                     is_current: sib == canonical,
+                    rank_target: editions.rank_target(sib),
                 }
             })
             .collect();

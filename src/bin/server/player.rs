@@ -32,7 +32,7 @@ use serde_json::json;
 
 use crate::{
     entries::{component_members, dedupe_by_edition, entry_summaries, entry_summaries_with},
-    fetch_options, nrs_pool, playback,
+    fetch_options, playback,
     respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
@@ -86,6 +86,7 @@ pub async fn route(
         "/api/library/shuffle" if *method == Method::GET => {
             shuffle_library(state, &parse_query(query)).await
         }
+        #[cfg(feature = "nrs")]
         "/api/library/nrs-pool" if *method == Method::GET => {
             nrs_pool_json(state, &parse_query(query)).await
         }
@@ -114,6 +115,7 @@ pub async fn route(
         "/api/relations/unrelate" if *method == Method::POST => {
             unrelate_entries(state, &body).await
         }
+        "/api/relations/derive" if *method == Method::POST => derive_edition(state, &body).await,
         p if p.starts_with("/api/entries/") && p.ends_with("/playable-sources") => {
             if *method != Method::GET {
                 return respond::method_not_allowed();
@@ -155,7 +157,8 @@ pub async fn route(
         | "/api/relations/link"
         | "/api/relations/unlink"
         | "/api/relations/relate"
-        | "/api/relations/unrelate" => respond::method_not_allowed(),
+        | "/api/relations/unrelate"
+        | "/api/relations/derive" => respond::method_not_allowed(),
         _ => respond::not_found(),
     }
 }
@@ -314,21 +317,10 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(1, 500);
-    let vias: Vec<nrs_pool::Via> = query
-        .get("exclude")
-        .into_iter()
-        .flat_map(|s| s.split(','))
-        .filter_map(|v| match v {
-            "track" => Some(nrs_pool::Via::Track),
-            "album" => Some(nrs_pool::Via::Album),
-            "artist" => Some(nrs_pool::Via::Artist),
-            _ => None,
-        })
-        .collect();
-    let mut excluded: HashSet<i64> = match nrs_pool::cached(state) {
-        Some(pool) if !vias.is_empty() => pool.entry_ids_via(&vias),
-        _ => HashSet::new(),
-    };
+    #[cfg(feature = "nrs")]
+    let mut excluded = crate::nrs_pool::excluded_for(state, query.get("exclude"));
+    #[cfg(not(feature = "nrs"))]
+    let mut excluded: HashSet<i64> = HashSet::new();
     excluded.extend(
         query
             .get("skip")
@@ -419,10 +411,13 @@ async fn shuffle_round(
 
 /// `GET /api/library/nrs-pool[?refresh=1]` — the shuffle mix's familiar
 /// pool (see `nrs_pool`): `available: false` with the reason when the NRS
-/// app can't be read, so the player falls back to a plain shuffle.
+/// app can't be read, so the player falls back to a plain shuffle. Absent
+/// (404) in a build without the `nrs` feature, which the player treats the
+/// same way.
+#[cfg(feature = "nrs")]
 async fn nrs_pool_json(state: &Arc<AppState>, query: &HashMap<String, String>) -> HyperResponse {
     let refresh = query.get("refresh").is_some_and(|v| v == "1");
-    match nrs_pool::get(state, refresh).await {
+    match crate::nrs_pool::get(state, refresh).await {
         Ok(pool) => respond::json(
             StatusCode::OK,
             json!({ "available": true, "nrs_url": state.nrs_url, "pool": &*pool }),
@@ -998,6 +993,35 @@ async fn unrelate_entries(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     if let Err(e) = state
         .db
         .set_relation_enabled(req.a, req.b, &req.kind, false)
+        .await
+    {
+        return db_error_response(e);
+    }
+    respond::json(StatusCode::OK, json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct DeriveRequest {
+    original: i64,
+    derived: i64,
+    transformation: Option<String>,
+}
+
+/// `POST /api/relations/derive` `{"original", "derived", "transformation"}`
+/// — records that `derived` is an edition of `original` made by
+/// `transformation` (`"instrumental"`, `"live"`, ...; null for an
+/// unspecified alternate version), replacing whatever the pair's
+/// `derived_from` edge said (see `MusicDb::set_edition_derivation`). This is
+/// how the now-playing drawer fixes which editions fold into their original
+/// (`EditionProjection::rank_target`).
+async fn derive_edition(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let req: DeriveRequest = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    if let Err(e) = state
+        .db
+        .set_edition_derivation(req.original, req.derived, req.transformation.as_deref())
         .await
     {
         return db_error_response(e);

@@ -53,7 +53,7 @@ name = "repair_multi_work"
 path = "src/bin/repair_multi_work.rs"
 
 [features]
-default = ["store_protocol", "player"]
+default = ["store_protocol", "player", "nrs"]
 # Generic C-ABI FFI rhai module (`pipeline::ffi`): bind/call any cdylib from a
 # match script. Off by default — enabling it pulls libffi (built from source via
 # autotools). See learned-matcher's rhai/match.learned.rhai for a cdylib binding.
@@ -66,6 +66,10 @@ ffi-system = ["ffi", "libffi/system"]
 # `cargo build --bin server --no-default-features --features store_protocol`.
 store_protocol = []
 player = []
+# The player's NRS extension: the shuffle mix's familiar pool, the
+# now-playing scoring drawer and listening-time export (`nrs_pool`,
+# `nrs_bridge`). The player works the same without it, minus those.
+nrs = ["player"]
 
 [dependencies]
 libloading = "0.9"

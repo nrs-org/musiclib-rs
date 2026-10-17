@@ -6,6 +6,10 @@
 //!   entry type — this is what an `nrs-app` talks to.
 //! - `player`: musiclib-rs's own read-only library/playback API plus a
 //!   minimal static frontend — docs/plan-video-player.md Phase 1/2.
+//! - `nrs` (needs `player`): the player's optional NRS extension — scores
+//!   for the shuffle mix, the now-playing scoring drawer, and listening
+//!   time exported to NRS (docs/plan-listen-and-score.md). Without it, or
+//!   with no NRS app running, the player works the same minus those.
 //!
 //! Both share one `MusicDb` connection so exactly one process owns writes to
 //! `musiclib.db`; hand-rolled hyper (no framework), matching the existing
@@ -20,11 +24,16 @@ mod entries;
 mod fetch_options;
 mod ingest_progress;
 mod jobs;
-#[cfg(feature = "player")]
+#[cfg(feature = "nrs")]
+mod nrs_bridge;
+#[cfg(feature = "nrs")]
 mod nrs_pool;
+#[cfg(feature = "player")]
 mod playback;
 #[cfg(feature = "player")]
 mod player;
+#[cfg(feature = "player")]
+mod plays;
 mod respond;
 mod state;
 #[cfg(feature = "store_protocol")]
@@ -88,9 +97,10 @@ struct Args {
     /// Listen address.
     #[arg(long, default_value = "127.0.0.1:4600")]
     listen: String,
-    /// NRS app whose scores weight the player's shuffle mix. Defaults to
-    /// `$NRS_APP_URL`, then http://127.0.0.1:3737. Only read when the
-    /// player asks for its score pool.
+    /// NRS app the player's NRS extension talks to. Defaults to
+    /// `$NRS_APP_URL`, then http://127.0.0.1:3737. Nothing waits on it: the
+    /// player works without it running.
+    #[cfg(feature = "nrs")]
     #[arg(long)]
     nrs_url: Option<String>,
     #[command(flatten)]
@@ -144,6 +154,14 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
     #[cfg(feature = "store_protocol")]
     if store_protocol::handles(&path) {
         return Ok(store_protocol::route(&state, &method, &path, &query, body).await);
+    }
+    #[cfg(feature = "nrs")]
+    if nrs_bridge::handles(&path) {
+        return Ok(nrs_bridge::route(&state, &method, &path, &query, body).await);
+    }
+    #[cfg(feature = "player")]
+    if plays::handles(&path) {
+        return Ok(plays::route(&state, &method, &path, &query, body).await);
     }
     #[cfg(feature = "player")]
     if player::handles(&path) {
@@ -259,16 +277,18 @@ async fn main() -> anyhow::Result<()> {
         jobs: JobManager::new(),
         activity,
         youtube_quota,
-        #[cfg(feature = "player")]
+        #[cfg(feature = "nrs")]
         nrs_url: args
             .nrs_url
             .or_else(|| std::env::var("NRS_APP_URL").ok())
             .unwrap_or_else(|| "http://127.0.0.1:3737".to_owned()),
-        #[cfg(feature = "player")]
+        #[cfg(feature = "nrs")]
         nrs_pool: Default::default(),
         // Next to the DB, so a `--db` scratch library gets its own session.
         #[cfg(feature = "player")]
         playback: playback::PlaybackHub::load(db_path.with_file_name("playback.json")),
+        #[cfg(feature = "nrs")]
+        nrs_bridge: Default::default(),
     });
 
     let addr: SocketAddr = args.listen.parse()?;
@@ -278,10 +298,17 @@ async fn main() -> anyhow::Result<()> {
     info!("store protocol mounted at /nrs-store/v1");
     #[cfg(feature = "player")]
     info!("player API mounted at /api (frontend at /)");
+    #[cfg(feature = "nrs")]
+    info!(
+        "NRS extension mounted at /api/nrs (NRS app: {})",
+        state.nrs_url
+    );
 
     let local = tokio::task::LocalSet::new();
     #[cfg(feature = "player")]
     local.spawn_local(Arc::clone(&state.playback).persist_loop());
+    #[cfg(feature = "nrs")]
+    local.spawn_local(nrs_bridge::export_listening_loop(Arc::clone(&state)));
     local
         .run_until(async move {
             loop {
