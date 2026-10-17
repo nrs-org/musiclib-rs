@@ -361,8 +361,8 @@ async fn now_playing(
     Ok(out)
 }
 
-/// One NRS entry as the drawer shows it: id, link, score, impacts, and the
-/// profile slots it's expected to fill.
+/// One NRS entry as the drawer shows it: id, link, score, impacts, the
+/// profile slots it's expected to fill, and the checks it still fails.
 async fn nrs_entry_view(state: &AppState, nrs_id: &str) -> anyhow::Result<Value> {
     let detail = nrs_get(state, &entry_path(nrs_id, "")).await?;
     // Unscored entries still have a score breakdown (V = 0); a failure here
@@ -388,6 +388,7 @@ async fn nrs_entry_view(state: &AppState, nrs_id: &str) -> anyhow::Result<Value>
         "score": score,
         "impacts": detail["impacts"],
         "profile": detail["checks"]["profile"],
+        "issues": detail["checks"]["issues"],
     }))
 }
 

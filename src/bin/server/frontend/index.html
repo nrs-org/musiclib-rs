@@ -2183,6 +2183,30 @@
 
   .bar-btn[aria-pressed="true"] { color: var(--brass-ink); }
 
+  /* The score button's dot (`NowPlaying.renderBadge`): filled when the
+     playing track is unranked in NRS, a ring when it fails NRS checks. */
+  #player-bar-np { position: relative; }
+
+  .bar-btn-badge {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 9px;
+    height: 9px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: var(--brass);
+    box-shadow: 0 0 0 2px var(--paper-deeper);
+    pointer-events: none;
+  }
+
+  .bar-btn-badge[hidden] { display: none; }
+
+  .bar-btn-badge[data-state="incomplete"] {
+    background: var(--paper-deeper);
+    border: 2px solid var(--brass);
+  }
+
   .bar-btn-toggle {
     width: 26px;
     height: 26px;
@@ -4988,6 +5012,10 @@
     const barBtn = document.getElementById("player-bar-np");
     closeBtn.innerHTML = svgIcon("x", 13);
     barBtn.innerHTML = svgIcon("star", 16);
+    const badgeEl = el("span", { className: "bar-btn-badge", hidden: true });
+    barBtn.appendChild(badgeEl);
+    const BAR_TITLE = barBtn.title;
+    const BAR_LABEL = barBtn.getAttribute("aria-label");
 
     const TABS = [
       ["score", "Score"],
@@ -5020,6 +5048,9 @@
     let nrs = null;
     // `/api/nrs/now/{entryId}` for the playing track, once loaded.
     let now = null;
+    // That request while in flight, shared by the drawer and the bar badge
+    // so a track change asks NRS once.
+    let nowRequest = null;
     let palette = null;
     let token = 0;
     // The Score tab's unsaved inputs, so a re-render doesn't lose them.
@@ -5144,9 +5175,63 @@
       if (id === entryId && release === releaseId) return;
       entryId = id;
       releaseId = release;
-      now = null;
       draft = null;
+      forget();
       if (isOpen()) load();
+    }
+
+    /// Loads `now` for the playing track, joining a request already made.
+    function fetchNow() {
+      if (!nowRequest) {
+        const q = releaseId != null ? `?release=${releaseId}` : "";
+        const req = api(`/api/nrs/now/${entryId}${q}`).then(
+          (data) => {
+            if (nowRequest === req) {
+              now = data;
+              renderBadge();
+            }
+            return data;
+          },
+          (e) => {
+            if (nowRequest === req) nowRequest = null;
+            throw e;
+          }
+        );
+        nowRequest = req;
+      }
+      return nowRequest;
+    }
+
+    /// Drops `now` (the track changed, or a write changed its NRS entry)
+    /// and asks again, so the badge stays current with the drawer closed.
+    function forget() {
+      now = null;
+      nowRequest = null;
+      renderBadge();
+      if (entryId != null && !nrs?.absent) fetchNow().catch(() => {});
+    }
+
+    /// The star's dot: filled when the playing track is unranked in NRS
+    /// (not in it, or nothing scored), a ring when its entry still fails
+    /// NRS checks. Nothing while NRS is out or `now` is loading.
+    function renderBadge() {
+      const entry = now?.nrs?.available ? now.nrs.entry : undefined;
+      let state = null;
+      let note = null;
+      if (entry === null) {
+        state = "unranked";
+        note = "Not in NRS yet";
+      } else if (entry?.score && !Number(entry.score.value)) {
+        state = "unranked";
+        note = "Not scored in NRS yet";
+      } else if (entry?.issues?.length) {
+        state = "incomplete";
+        note = `Incomplete in NRS: ${entry.issues.map((i) => i.message).join(", ")}`;
+      }
+      badgeEl.hidden = !state;
+      if (state) badgeEl.dataset.state = state;
+      barBtn.title = note ? `${note} — score and fix it (n)` : BAR_TITLE;
+      barBtn.setAttribute("aria-label", note ? `${BAR_LABEL}. ${note}` : BAR_LABEL);
     }
 
     async function load() {
@@ -5165,16 +5250,15 @@
           return;
         }
         if (!now) {
-          const q = releaseId != null ? `?release=${releaseId}` : "";
-          const data = await api(`/api/nrs/now/${entryId}${q}`);
+          await fetchNow();
           if (my !== token) return;
-          now = data;
         }
         if (stale()) return;
         if (!now.nrs.available) {
           // NRS went away since the status check: fall back to Library.
           nrs = { available: false, error: now.nrs.error };
           now = null;
+          nowRequest = null;
           renderTabs();
           load();
           return;
@@ -5192,8 +5276,8 @@
 
     /// Reload after a write: the score, rank and bindings may all change.
     function refresh() {
-      now = null;
       draft = null;
+      forget();
       load();
     }
 
@@ -5259,6 +5343,9 @@
         sub.append("Not in NRS yet. Saving a score adds it.");
       }
       nodes.push(sub);
+      if (entry?.issues?.length) {
+        nodes.push(el("p", { className: "np-sub np-issues", text: `NRS checks: ${entry.issues.map((i) => i.message).join(" · ")}` }));
+      }
       const l = data.listening;
       const pending = l.listened_seconds - l.exported_seconds;
       nodes.push(
@@ -5560,9 +5647,7 @@
           derived: current.entry_id,
           transformation: kind.value || null,
         });
-        now = null;
-        draft = null;
-        load();
+        refresh();
         return "Saved.";
       });
       nodes.push(
