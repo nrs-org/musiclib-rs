@@ -58,4 +58,8 @@ pub struct AppState {
     pub playback: Arc<PlaybackHub>,
     #[cfg(feature = "nrs")]
     pub nrs_bridge: crate::nrs_bridge::BridgeState,
+    /// The player's Spotify login, shared by every device — see
+    /// `spotify_auth`.
+    #[cfg(feature = "player")]
+    pub spotify: crate::spotify_auth::SpotifyAuth,
 }
