@@ -1,4 +1,4 @@
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
 use musiclib_rs::{
     musicdb::MusicDb,
@@ -42,4 +42,10 @@ pub struct AppState {
     /// mirrors the `import` CLI's end-of-run "quota used" line, but kept
     /// running and surfaced live through `ingest_progress::JobProgressSink`.
     pub youtube_quota: Arc<AtomicU64>,
+    /// The NRS app the player's shuffle mix reads scores from (see
+    /// `nrs_pool`).
+    #[cfg(feature = "player")]
+    pub nrs_url: String,
+    #[cfg(feature = "player")]
+    pub nrs_pool: Mutex<Option<Arc<crate::nrs_pool::NrsPool>>>,
 }

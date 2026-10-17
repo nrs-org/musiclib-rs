@@ -32,7 +32,7 @@ use serde_json::json;
 
 use crate::{
     entries::{component_members, dedupe_by_edition, entry_summaries, entry_summaries_with},
-    fetch_options,
+    fetch_options, nrs_pool,
     respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
@@ -86,6 +86,9 @@ pub async fn route(
         "/api/library/shuffle" if *method == Method::GET => {
             shuffle_library(state, &parse_query(query)).await
         }
+        "/api/library/nrs-pool" if *method == Method::GET => {
+            nrs_pool_json(state, &parse_query(query)).await
+        }
         "/api/fetch-options/files" if *method == Method::GET => fetch_options_files(),
         "/api/fetch-options/entry-points" if *method == Method::GET => {
             fetch_options_entry_points(&parse_query(query)).await
@@ -135,6 +138,7 @@ pub async fn route(
         "/"
         | "/api/library/search"
         | "/api/library/shuffle"
+        | "/api/library/nrs-pool"
         | "/api/fetch-options/files"
         | "/api/fetch-options/entry-points"
         | "/api/ingest"
@@ -187,7 +191,10 @@ fn frontend() -> HyperResponse {
 /// `frontend/index.html`) rather than the plain IFrame Player API YouTube
 /// uses, but the embed URL shape is still just a static transform of the
 /// canonical identifier, computed here the same as the other two.
-fn embed_for(source: &str, identifier: &str) -> Option<(String, &'static [&'static str])> {
+pub(crate) fn embed_for(
+    source: &str,
+    identifier: &str,
+) -> Option<(String, &'static [&'static str])> {
     match source {
         "youtube" => {
             let id = identifier.strip_prefix("https://youtu.be/")?;
@@ -285,6 +292,11 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
 /// often. Unplayable groups (same soft-identity + `embed_for` check
 /// `release_tracks` uses) are rejected too, and rounds repeat until `limit`
 /// rows are found or `MAX_ROUNDS` runs out on a mostly-unplayable library.
+///
+/// `exclude=track,album,artist` (any subset) skips rows the last-built NRS
+/// pool (`nrs_pool`) reaches that way, so the shuffle mix's "new" share
+/// doesn't redraw familiar tracks. No pool built yet means nothing excluded.
+/// `skip=1,2,3` skips those entry ids (rows already queued).
 async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>) -> HyperResponse {
     const MAX_ROUNDS: usize = 8;
     let limit = query
@@ -292,6 +304,28 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(1, 500);
+    let vias: Vec<nrs_pool::Via> = query
+        .get("exclude")
+        .into_iter()
+        .flat_map(|s| s.split(','))
+        .filter_map(|v| match v {
+            "track" => Some(nrs_pool::Via::Track),
+            "album" => Some(nrs_pool::Via::Album),
+            "artist" => Some(nrs_pool::Via::Artist),
+            _ => None,
+        })
+        .collect();
+    let mut excluded: HashSet<i64> = match nrs_pool::cached(state) {
+        Some(pool) if !vias.is_empty() => pool.entry_ids_via(&vias),
+        _ => HashSet::new(),
+    };
+    excluded.extend(
+        query
+            .get("skip")
+            .into_iter()
+            .flat_map(|s| s.split(','))
+            .filter_map(|id| id.parse::<i64>().ok()),
+    );
 
     // Every round pays for the edition groups its draws land in (one huge
     // group gets hit almost every round), so size each round from the
@@ -312,7 +346,7 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
             (kept as f64 / drawn as f64).max(0.01)
         };
         let draws = (((limit - tracks.len()) as f64 / rate * 1.5) as usize).clamp(32, MAX_DRAWS);
-        match shuffle_round(state, draws, &mut seen_groups).await {
+        match shuffle_round(state, draws, &mut seen_groups, &excluded).await {
             Ok(round) => {
                 drawn += draws;
                 kept += round.len();
@@ -333,11 +367,13 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
 
 /// One `shuffle_library` round over `draws` random ids: the accepted,
 /// playable rows, in draw order. `seen_groups` (edition-group roots) carries
-/// across rounds so a group is never returned twice.
+/// across rounds so a group is never returned twice; `excluded` default
+/// editions are never returned.
 async fn shuffle_round(
     state: &Arc<AppState>,
     draws: usize,
     seen_groups: &mut HashSet<i64>,
+    excluded: &HashSet<i64>,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let candidates = state.db.sample_track_entry_ids(draws).await?;
     let (identity, editions) = state.db.display_projections_around(&candidates).await?;
@@ -352,8 +388,9 @@ async fn shuffle_round(
         if fastrand::usize(..group_size) != 0 {
             continue;
         }
-        if seen_groups.insert(editions.group_of(canonical)) {
-            accepted.push(editions.default_member_of(canonical));
+        let default = editions.default_member_of(canonical);
+        if !excluded.contains(&default) && seen_groups.insert(editions.group_of(canonical)) {
+            accepted.push(default);
         }
     }
     let summaries = entry_summaries_with(&state.db, &accepted, &identity, &editions).await?;
@@ -368,6 +405,23 @@ async fn shuffle_round(
             playable.then(|| json!({ "entry_id": id, "title": summary.title }))
         })
         .collect())
+}
+
+/// `GET /api/library/nrs-pool[?refresh=1]` — the shuffle mix's familiar
+/// pool (see `nrs_pool`): `available: false` with the reason when the NRS
+/// app can't be read, so the player falls back to a plain shuffle.
+async fn nrs_pool_json(state: &Arc<AppState>, query: &HashMap<String, String>) -> HyperResponse {
+    let refresh = query.get("refresh").is_some_and(|v| v == "1");
+    match nrs_pool::get(state, refresh).await {
+        Ok(pool) => respond::json(
+            StatusCode::OK,
+            json!({ "available": true, "nrs_url": state.nrs_url, "pool": &*pool }),
+        ),
+        Err(e) => respond::json(
+            StatusCode::OK,
+            json!({ "available": false, "nrs_url": state.nrs_url, "error": format!("{e:#}") }),
+        ),
+    }
 }
 
 /// `GET /api/fetch-options/files` — the import form's file picker: every

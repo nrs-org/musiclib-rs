@@ -16,6 +16,8 @@ mod fetch_options;
 mod ingest_progress;
 mod jobs;
 #[cfg(feature = "player")]
+mod nrs_pool;
+#[cfg(feature = "player")]
 mod player;
 mod respond;
 mod state;
@@ -80,6 +82,11 @@ struct Args {
     /// Listen address.
     #[arg(long, default_value = "127.0.0.1:4600")]
     listen: String,
+    /// NRS app whose scores weight the player's shuffle mix. Defaults to
+    /// `$NRS_APP_URL`, then http://127.0.0.1:3737. Only read when the
+    /// player asks for its score pool.
+    #[arg(long)]
+    nrs_url: Option<String>,
 }
 
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
@@ -243,6 +250,13 @@ async fn main() -> anyhow::Result<()> {
         jobs: JobManager::new(),
         activity,
         youtube_quota,
+        #[cfg(feature = "player")]
+        nrs_url: args
+            .nrs_url
+            .or_else(|| std::env::var("NRS_APP_URL").ok())
+            .unwrap_or_else(|| "http://127.0.0.1:3737".to_owned()),
+        #[cfg(feature = "player")]
+        nrs_pool: Default::default(),
     });
 
     let addr: SocketAddr = args.listen.parse()?;
