@@ -17,7 +17,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -897,7 +896,7 @@ async fn ingest(state: &Arc<AppState>, body: Bytes) -> HyperResponse {
         .status(StatusCode::ACCEPTED)
         .header("Content-Type", "application/json")
         .header("Location", format!("{PREFIX}/jobs/{job_id}"))
-        .body(Full::new(Bytes::from(body.to_string())))
+        .body(respond::full(body.to_string()))
         .expect("response builder")
 }
 

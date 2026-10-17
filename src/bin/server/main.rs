@@ -11,10 +11,17 @@
 //! `musiclib.db`; hand-rolled hyper (no framework), matching the existing
 //! `src/bin/ytdlp_server.rs`.
 
+// Handlers return a ready `HyperResponse` as their error type; boxing the
+// body (for SSE, see `respond::HyperResponse`) pushed it past clippy's size
+// threshold, and these are one-per-request values, not hot-path ones.
+#![allow(clippy::result_large_err)]
+
 mod entries;
 mod fetch_options;
 mod ingest_progress;
 mod jobs;
+#[cfg(feature = "player")]
+mod playback;
 #[cfg(feature = "player")]
 mod player;
 mod respond;
@@ -243,6 +250,9 @@ async fn main() -> anyhow::Result<()> {
         jobs: JobManager::new(),
         activity,
         youtube_quota,
+        // Next to the DB, so a `--db` scratch library gets its own session.
+        #[cfg(feature = "player")]
+        playback: playback::PlaybackHub::load(db_path.with_file_name("playback.json")),
     });
 
     let addr: SocketAddr = args.listen.parse()?;
@@ -254,6 +264,8 @@ async fn main() -> anyhow::Result<()> {
     info!("player API mounted at /api (frontend at /)");
 
     let local = tokio::task::LocalSet::new();
+    #[cfg(feature = "player")]
+    local.spawn_local(Arc::clone(&state.playback).persist_loop());
     local
         .run_until(async move {
             loop {

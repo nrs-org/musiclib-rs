@@ -10,6 +10,8 @@ use musiclib_rs::{
 };
 
 use crate::jobs::JobManager;
+#[cfg(feature = "player")]
+use crate::playback::PlaybackHub;
 
 /// Shared server state, handed to every request handler behind one `Arc`.
 /// Both route groups (`store_protocol`, `player`) read from the same
@@ -42,4 +44,8 @@ pub struct AppState {
     /// mirrors the `import` CLI's end-of-run "quota used" line, but kept
     /// running and surfaced live through `ingest_progress::JobProgressSink`.
     pub youtube_quota: Arc<AtomicU64>,
+    /// The player's one playback session (queue, devices, position) — see
+    /// `playback`.
+    #[cfg(feature = "player")]
+    pub playback: Arc<PlaybackHub>,
 }

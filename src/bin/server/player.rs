@@ -33,6 +33,7 @@ use serde_json::json;
 use crate::{
     entries::{component_members, dedupe_by_edition, entry_summaries, entry_summaries_with},
     fetch_options,
+    playback::{self, QueueItem},
     respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
@@ -86,6 +87,12 @@ pub async fn route(
         "/api/library/shuffle" if *method == Method::GET => {
             shuffle_library(state, &parse_query(query)).await
         }
+        "/api/playback" if *method == Method::GET => playback::snapshot(state),
+        "/api/playback/events" if *method == Method::GET => {
+            playback::events(state, &parse_query(query))
+        }
+        "/api/playback/command" if *method == Method::POST => playback::command(state, &body).await,
+        "/api/playback/report" if *method == Method::POST => playback::report(state, &body),
         "/api/fetch-options/files" if *method == Method::GET => fetch_options_files(),
         "/api/fetch-options/entry-points" if *method == Method::GET => {
             fetch_options_entry_points(&parse_query(query)).await
@@ -135,6 +142,10 @@ pub async fn route(
         "/"
         | "/api/library/search"
         | "/api/library/shuffle"
+        | "/api/playback"
+        | "/api/playback/events"
+        | "/api/playback/command"
+        | "/api/playback/report"
         | "/api/fetch-options/files"
         | "/api/fetch-options/entry-points"
         | "/api/ingest"
@@ -165,7 +176,7 @@ fn frontend() -> HyperResponse {
         .status(StatusCode::OK)
         .header("Content-Type", "text/html; charset=utf-8")
         .header("Cache-Control", "no-cache")
-        .body(http_body_util::Full::new(body))
+        .body(respond::full(body))
         .expect("response builder")
 }
 
@@ -286,12 +297,28 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
 /// `release_tracks` uses) are rejected too, and rounds repeat until `limit`
 /// rows are found or `MAX_ROUNDS` runs out on a mostly-unplayable library.
 async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>) -> HyperResponse {
-    const MAX_ROUNDS: usize = 8;
     let limit = query
         .get("limit")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(1, 500);
+    match shuffle_tracks(state, limit).await {
+        Ok(tracks) => respond::json(StatusCode::OK, json!({ "tracks": tracks })),
+        Err(e) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &e.to_string(),
+        ),
+    }
+}
+
+/// The sampler behind `shuffle_library`, also used by `playback` for
+/// "Shuffle all" and the auto-recommend top-up.
+pub(crate) async fn shuffle_tracks(
+    state: &Arc<AppState>,
+    limit: usize,
+) -> anyhow::Result<Vec<QueueItem>> {
+    const MAX_ROUNDS: usize = 8;
 
     // Every round pays for the edition groups its draws land in (one huge
     // group gets hit almost every round), so size each round from the
@@ -312,23 +339,13 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
             (kept as f64 / drawn as f64).max(0.01)
         };
         let draws = (((limit - tracks.len()) as f64 / rate * 1.5) as usize).clamp(32, MAX_DRAWS);
-        match shuffle_round(state, draws, &mut seen_groups).await {
-            Ok(round) => {
-                drawn += draws;
-                kept += round.len();
-                tracks.extend(round);
-            }
-            Err(e) => {
-                return respond::error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal",
-                    &e.to_string(),
-                );
-            }
-        }
+        let round = shuffle_round(state, draws, &mut seen_groups).await?;
+        drawn += draws;
+        kept += round.len();
+        tracks.extend(round);
     }
     tracks.truncate(limit);
-    respond::json(StatusCode::OK, json!({ "tracks": tracks }))
+    Ok(tracks)
 }
 
 /// One `shuffle_library` round over `draws` random ids: the accepted,
@@ -338,7 +355,7 @@ async fn shuffle_round(
     state: &Arc<AppState>,
     draws: usize,
     seen_groups: &mut HashSet<i64>,
-) -> anyhow::Result<Vec<serde_json::Value>> {
+) -> anyhow::Result<Vec<QueueItem>> {
     let candidates = state.db.sample_track_entry_ids(draws).await?;
     let (identity, editions) = state.db.display_projections_around(&candidates).await?;
     let mut accepted = Vec::new();
@@ -365,7 +382,10 @@ async fn shuffle_round(
                 .sources
                 .iter()
                 .any(|s| embed_for(&s.source, &s.identifier).is_some());
-            playable.then(|| json!({ "entry_id": id, "title": summary.title }))
+            playable.then(|| QueueItem {
+                entry_id: *id,
+                title: summary.title.clone(),
+            })
         })
         .collect())
 }
