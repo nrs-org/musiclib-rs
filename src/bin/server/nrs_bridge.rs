@@ -223,14 +223,14 @@ async fn proxy(
     query: &str,
     body: Bytes,
 ) -> HyperResponse {
-    let Ok(method) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
+    let Ok(nrs_method) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
         return respond::method_not_allowed();
     };
     let mut url = nrs_url(state, rest);
     if !query.is_empty() {
         url = format!("{url}?{query}");
     }
-    let mut request = state.nrs_bridge.client.request(method, url);
+    let mut request = state.nrs_bridge.client.request(nrs_method, url);
     if !body.is_empty() {
         request = request
             .header("Content-Type", "application/json")
@@ -242,6 +242,11 @@ async fn proxy(
     };
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    // A write may bind entries (approving a suggestion adds its target), so
+    // the pool's bindings can't be trusted until it's rebuilt.
+    if *method != Method::GET && status.is_success() {
+        nrs_pool::invalidate(state);
+    }
     match response.bytes().await {
         Ok(bytes) => hyper::Response::builder()
             .status(status)
@@ -341,6 +346,18 @@ async fn now_playing(
             json!({ "available": false, "nrs_url": state.nrs_url, "error": format!("{e:#}") })
         }
     };
+    // The MV to grade: NRS's pick when it has one, else the target's own
+    // YouTube videos (an entry not in NRS yet has no NRS media at all).
+    let no_videos = out["nrs"]["videos"].as_array().is_none_or(|v| v.is_empty());
+    if out["nrs"]["available"] == true && no_videos {
+        out["nrs"]["videos"] = target_summary
+            .into_iter()
+            .flat_map(|s| &s.sources)
+            .filter(|s| s.source == "youtube")
+            .filter_map(|s| s.identifier.strip_prefix("https://youtu.be/"))
+            .map(|id| json!({ "youtube": id, "label": "YouTube" }))
+            .collect();
+    }
     Ok(out)
 }
 

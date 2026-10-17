@@ -1950,7 +1950,7 @@
     bottom: 0;
     height: var(--player-bar-h);
     display: grid;
-    grid-template-columns: auto 1fr auto auto auto;
+    grid-template-columns: auto 1fr auto auto auto auto;
     align-items: center;
     gap: 16px;
     padding: 0 16px;
@@ -2143,6 +2143,200 @@
     cursor: default;
   }
 
+  /* ---------- now-playing drawer: score, NRS relations, library fixes ---------- */
+  /*
+   * Floats over the left of the page above the bar (the video dock owns the
+   * right). Like the dock it lives outside `.app`, so browsing never
+   * re-renders it.
+   */
+
+  .np-drawer {
+    position: fixed;
+    left: 20px;
+    bottom: calc(var(--player-bar-h) + 20px);
+    width: min(380px, calc(100vw - 40px));
+    max-height: calc(100vh - var(--player-bar-h) - 40px);
+    display: flex;
+    flex-direction: column;
+    z-index: 60;
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    box-shadow: 0 20px 44px rgba(0, 0, 0, 0.25);
+  }
+
+  .np-drawer[hidden] { display: none; }
+
+  .np-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 8px 8px 12px;
+    border-bottom: 1px solid var(--rail);
+    background: var(--paper-deep);
+  }
+
+  .np-head .mix-seg { flex: 1; min-width: 0; }
+  .np-head .mix-seg button { flex: 1; }
+  .np-head .mix-seg button[hidden] { display: none; }
+
+  .np-body {
+    overflow-y: auto;
+    padding: 12px 14px 14px;
+    font-size: 13px;
+  }
+
+  .np-title {
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.25;
+    margin: 0 0 4px;
+    overflow-wrap: anywhere;
+  }
+
+  .np-sub {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    margin: 0 0 10px;
+  }
+
+  .np-sub a { color: var(--brass-ink); }
+
+  .np-fold {
+    font-size: 12px;
+    color: var(--verdigris);
+    margin: 0 0 6px;
+  }
+
+  .np-section {
+    border-top: 1px solid var(--rail);
+    padding-top: 10px;
+    margin-top: 12px;
+  }
+
+  .np-section-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--verdigris);
+    margin: 0 0 6px;
+  }
+
+  .np-body .mix-row { grid-template-columns: 74px minmax(0, 1fr) 44px; padding: 3px 0; }
+
+  .np-body select {
+    font: inherit;
+    font-size: 12px;
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--rail);
+    padding: 3px 4px;
+    min-width: 0;
+  }
+
+  .np-anchors {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 64px;
+    gap: 4px 8px;
+    margin: 4px 0 0;
+  }
+
+  .np-anchors input { width: 100%; }
+
+  .np-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+
+  .np-actions .ghost-btn[aria-busy="true"] { opacity: 0.6; cursor: progress; }
+
+  .np-status {
+    font-size: 12px;
+    color: var(--ink-faint);
+  }
+
+  .np-status.is-error { color: var(--danger); }
+
+  .np-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .np-list li {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--rail);
+  }
+
+  .np-list li:last-child { border-bottom: 0; }
+
+  .np-list .t {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .np-list .k {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    white-space: nowrap;
+  }
+
+  .np-list li.is-done .t { color: var(--ink-faint); }
+
+  .np-media {
+    display: block;
+    width: 100%;
+    max-height: 180px;
+    object-fit: cover;
+    border: 1px solid var(--rail);
+    margin: 4px 0 6px;
+  }
+
+  .np-album {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--rail);
+  }
+
+  .np-album:last-child { border-bottom: 0; }
+
+  .np-link {
+    background: none;
+    border: 0;
+    padding: 0;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+  }
+
+  .np-link:hover { text-decoration: underline; }
+
+  .np-album-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .np-album-head .t { flex: 1; min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+
+  .np-hint {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-faint);
+    margin: 12px 0 0;
+  }
+
+  @media (max-width: 760px) {
+    .np-drawer { left: 10px; right: 10px; width: auto; }
+  }
+
   @media (max-width: 900px) {
     .player-bar-volume { display: none; }
   }
@@ -2220,6 +2414,13 @@
     <div id="player-dock-switch" class="player-dock-switch"></div>
     <div id="player-dock-queue" class="player-dock-queue" hidden></div>
   </div>
+  <aside id="np-drawer" class="np-drawer" hidden aria-label="Score and fix what's playing">
+    <div class="np-head">
+      <div id="np-tabs" class="mix-seg" role="tablist"></div>
+      <button id="np-close" class="bar-btn bar-btn-toggle" type="button" aria-label="Close"></button>
+    </div>
+    <div id="np-body" class="np-body"></div>
+  </aside>
   <footer id="player-bar" class="player-bar" hidden aria-label="Now playing">
     <button id="player-bar-art" class="player-bar-art" type="button" aria-label="Toggle player">
       <img id="player-bar-thumb" alt="" hidden />
@@ -2254,6 +2455,7 @@
         <input id="player-bar-volume-global-slider" class="player-bar-volume-slider" type="range" min="0" max="100" value="80" step="1" aria-label="Global volume" title="Global volume — scales everything" />
       </div>
     </div>
+    <button id="player-bar-np" class="bar-btn" type="button" aria-label="Score and fix (n)" title="Score and fix what's playing (n)" aria-pressed="false"></button>
     <button id="player-bar-expand" class="bar-btn" type="button" aria-label="Collapse player" aria-pressed="true">
       <span id="player-bar-expand-icon"></span>
     </button>
@@ -2478,6 +2680,7 @@
       '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M19 5a10 10 0 0 1 0 14"></path>',
     "volume-x":
       '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>',
+    star: '<polygon points="12 2 15.1 8.6 22 9.3 16.8 14 18.2 21 12 17.3 5.8 21 7.2 14 2 9.3 8.9 8.6 12 2"></polygon>',
     headphones:
       '<path d="M4 13v-1a8 8 0 0 1 16 0v1"></path><rect x="2" y="13" width="5" height="7" rx="2"></rect><rect x="17" y="13" width="5" height="7" rx="2"></rect>',
     // Simplified, hand-drawn nods to each provider's mark (rounded-rect +
@@ -3003,13 +3206,16 @@
   // an album or artist (`/api/library/nrs-pool`, see `nrs_pool.rs`); new
   // tracks come from the server's uniform sampler with the familiar pool
   // excluded. The settings decide the split and how NRS scores become draw
-  // odds. They live in localStorage like this player's other preferences,
-  // as does the play log the cooldown reads. Without a reachable NRS app
-  // every batch is new, which is the plain library shuffle.
+  // odds; they live in localStorage like this player's other preferences.
+  // The cooldown reads the server's play log (`/api/plays/last`, see
+  // `PlayLog`), plus plays noted since it was last read. Without a
+  // reachable NRS app every batch is new, which is the plain library
+  // shuffle.
   const ShuffleMix = (() => {
     const SETTINGS_KEY = "shuffle_mix";
-    const PLAYS_KEY = "shuffle_mix_plays";
-    const MAX_PLAYS = 3000;
+    // When "Clear" last reset the cooldown (ms): plays before it are ignored.
+    const PLAYS_CLEARED_KEY = "shuffle_mix_plays_cleared";
+    const PLAYS_MAX_AGE_MS = 10 * 60 * 1000;
     const POOL_MAX_AGE_MS = 10 * 60 * 1000;
     const SIM_RUNS = 150;
     const TIERS = ["direct", "album", "artist"];
@@ -3073,8 +3279,35 @@
     }
 
     let settings = loadSettings();
-    // entry id -> last time it started playing (ms).
-    let plays = readJson(PLAYS_KEY, {});
+    // entry id -> last time it started a counted play (ms).
+    let plays = {};
+    let playsLoadedAt = 0;
+    // The old localStorage play log had no durations; it isn't migrated.
+    try {
+      localStorage.removeItem("shuffle_mix_plays");
+    } catch {}
+
+    // The longest cooldown window (two half-lives of the longest choice).
+    const PLAYS_WINDOW_MS = 2 * HALF_LIVES[HALF_LIVES.length - 1] * 3.6e6;
+
+    async function loadPlays(force) {
+      if (!force && Date.now() - playsLoadedAt < PLAYS_MAX_AGE_MS) return;
+      playsLoadedAt = Date.now();
+      const since = Math.max(Date.now() - PLAYS_WINDOW_MS, readJson(PLAYS_CLEARED_KEY, 0));
+      try {
+        const res = await api(`/api/plays/last?since=${Math.floor(since / 1000)}`);
+        const loaded = {};
+        for (const [id, at] of res.plays) loaded[id] = at * 1000;
+        // Keep plays noted here that the server answer may predate.
+        for (const [id, at] of Object.entries(plays)) {
+          if (!(loaded[id] >= at)) loaded[id] = at;
+        }
+        plays = loaded;
+        schedule();
+      } catch {
+        playsLoadedAt = 0;
+      }
+    }
 
     function set(patch) {
       settings = { ...settings, ...patch };
@@ -3083,14 +3316,10 @@
       schedule();
     }
 
+    /// A play just became a counted one (see `PlayLog`); the server has it
+    /// too, this just doesn't wait for the next `loadPlays`.
     function notePlayed(entryId) {
       plays[entryId] = Date.now();
-      const ids = Object.keys(plays);
-      if (ids.length > MAX_PLAYS) {
-        ids.sort((a, b) => plays[a] - plays[b]);
-        for (const id of ids.slice(0, ids.length - MAX_PLAYS)) delete plays[id];
-      }
-      writeJson(PLAYS_KEY, plays);
       schedule();
     }
 
@@ -3287,7 +3516,7 @@
     /// queued) are never drawn.
     async function generate(n, { skip = [] } = {}) {
       const s = settings;
-      await loadPool();
+      await Promise.all([loadPool(), loadPlays()]);
       const skipSet = new Set(skip.map(Number));
       const { rows } = weigh(s);
       const want = pool ? Math.round(n * s.familiar) : 0;
@@ -3549,9 +3778,10 @@
               className: "ghost-btn",
               type: "button",
               text: "Clear",
+              title: "Reset the cooldown. The play log itself is kept.",
               onclick: () => {
                 plays = {};
-                writeJson(PLAYS_KEY, plays);
+                writeJson(PLAYS_CLEARED_KEY, Date.now());
                 schedule();
               },
             }),
@@ -3603,6 +3833,7 @@
       ]);
       syncControls();
       loadPool();
+      loadPlays(true);
       schedule();
       return sectionEl;
     }
@@ -3701,8 +3932,6 @@
         return s.sharpness > 0 ? Math.pow(base, s.sharpness) : 1;
       };
       const pts = [];
-              setPlayPauseUI(false, false);
-              if (willSkip) setTimeout(() => onEndedCallback?.(), 1800);
       for (let i = 0; i <= 80; i++) {
         const v = (i / 80) * vmax;
         pts.push(`${x(v).toFixed(1)},${(pad.t + ih - curveAt(v) * ih).toFixed(1)}`);
@@ -3802,7 +4031,7 @@
         )
       );
       const logged = Object.keys(plays).length;
-      refs.held.textContent = `${fmtNum(logged)} plays logged · ${fmtNum(held)} familiar tracks under half odds from cooldown`;
+      refs.held.textContent = `${fmtNum(logged)} tracks played recently · ${fmtNum(held)} familiar tracks under half odds from cooldown`;
 
       const likely = [...sim.hits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
       refs.likely.innerHTML = "";
@@ -4410,6 +4639,732 @@
   // Connect session) keeps running. The bar is always-visible transport
   // (title, prev/play-pause/next); the dock is the actual video/embed
   // surface, collapsible without tearing down what's mounted in it.
+  // ---------- play log: each track start reported to the server ----------
+  //
+  // One play per queue item mounted (`mountQueueItem`), reported to
+  // `/api/plays` (see `plays.rs`) with how much was actually heard: a
+  // position advance that keeps pace with the wall clock counts, a seek or
+  // a pause doesn't. Measuring against the wall clock rather than a fixed
+  // step keeps background tabs counted, whose timers the browser throttles
+  // to a tick a minute. Reports go out every REPORT_EVERY_S of new
+  // listening, when the track changes, and by beacon when the page closes.
+  // A play under MIN_COUNTED_S is a skip: logged, not noted for the shuffle
+  // cooldown. The server owns the log; the NRS extension reads it there.
+  const PlayLog = (() => {
+    const MIN_COUNTED_S = 10;
+    const REPORT_EVERY_S = 30;
+    let cur = null;
+    const listeners = new Set();
+
+    function report(play, useBeacon) {
+      if (!play || play.playId == null || play.listened <= play.reported) return;
+      const listened = Math.round(play.listened * 10) / 10;
+      const body = JSON.stringify({ listened_seconds: listened });
+      const url = `/api/plays/${play.playId}`;
+      const previous = play.reported;
+      play.reported = play.listened;
+      if (useBeacon && navigator.sendBeacon) {
+        navigator.sendBeacon(url, new Blob([body], { type: "application/json" }));
+        return;
+      }
+      fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body })
+        .then((res) => {
+          if (!res.ok) throw new Error(res.statusText);
+        })
+        .catch(() => {
+          play.reported = previous;
+        });
+    }
+
+    function start(entryId) {
+      finish();
+      const play = { entryId, playId: null, listened: 0, reported: 0, lastPos: null, lastAt: 0, counted: false };
+      cur = play;
+      postJson("/api/plays", { entry_id: entryId })
+        .then((res) => {
+          play.playId = res.play_id;
+          // Heard before the id arrived, or already replaced: report now.
+          if (play !== cur || play.listened - play.reported >= REPORT_EVERY_S) report(play);
+        })
+        .catch(() => {});
+    }
+
+    /// Fed every progress poll of whichever provider is mounted.
+    function progress(position) {
+      const play = cur;
+      if (!play || !Number.isFinite(position)) return;
+      const now = performance.now() / 1000;
+      if (play.lastPos != null) {
+        const step = position - play.lastPos;
+        const wall = now - play.lastAt;
+        if (step > 0 && step <= wall * 1.5 + 1) play.listened += step;
+      }
+      play.lastPos = position;
+      play.lastAt = now;
+      if (!play.counted && play.listened >= MIN_COUNTED_S) {
+        play.counted = true;
+        ShuffleMix.notePlayed(play.entryId);
+      }
+      if (play.listened - play.reported >= REPORT_EVERY_S) report(play);
+      for (const fn of listeners) fn(play);
+    }
+
+    /// A different source of the same track was mounted: its position
+    /// starts over, which isn't a step.
+    function sourceChanged() {
+      if (cur) cur.lastPos = null;
+    }
+
+    function finish() {
+      if (cur) report(cur);
+      cur = null;
+    }
+
+    window.addEventListener("pagehide", () => report(cur, true));
+
+    return {
+      start,
+      progress,
+      sourceChanged,
+      current: () => cur,
+      onProgress: (fn) => listeners.add(fn),
+    };
+  })();
+
+  // ---------- now-playing drawer: score, NRS relations, library fixes ----------
+  //
+  // Follows the playing track (`track`, called from `mountQueueItem`).
+  // Score and Relations talk to the server's NRS extension (`/api/nrs/*`,
+  // see `nrs_bridge.rs`); they're hidden when the server was built without
+  // it or the NRS app isn't reachable, and nothing else in the player waits
+  // on them. Library edits musiclib's own edition data and always works.
+  // What a play scores is the server's call
+  // (`EditionProjection::rank_target`): an instrumental or a TV-size cut
+  // scores its original, a cover is its own entry.
+  const NowPlaying = (() => {
+    const drawerEl = document.getElementById("np-drawer");
+    const tabsEl = document.getElementById("np-tabs");
+    const bodyEl = document.getElementById("np-body");
+    const closeBtn = document.getElementById("np-close");
+    const barBtn = document.getElementById("player-bar-np");
+    closeBtn.innerHTML = svgIcon("x", 13);
+    barBtn.innerHTML = svgIcon("star", 16);
+
+    const TABS = [
+      ["score", "Score"],
+      ["relations", "Relations"],
+      ["library", "Library"],
+    ];
+    const NRS_TABS = new Set(["score", "relations"]);
+    const TAB_KEY = "now_playing_tab";
+    const RESPONSES = [
+      ["", "None"],
+      ["nei", "NEI"],
+      ["aei", "AEI"],
+      ["cry", "Cry"],
+    ];
+    // `version_tokens` markers the Library tab can set. The first group
+    // folds into the original (`DEGENERATE_MARKERS` server-side).
+    const TRANSFORMATIONS = [
+      ["Scores its original", [["instrumental", "Instrumental"], ["short_ver", "Short version"], ["tv_size", "TV size"], ["game_ver", "Game version"]]],
+      ["Its own work", [["cover", "Cover"], ["remix", "Remix"], ["arrangement", "Arrangement"], ["live", "Live"], ["acoustic", "Acoustic"], ["", "Other version"]]],
+    ];
+
+    let tab = "score";
+    try {
+      tab = localStorage.getItem(TAB_KEY) || "score";
+    } catch {}
+    let entryId = null;
+    let releaseId = null;
+    // `/api/nrs/status`: null until asked, `{ available: false, absent }`
+    // when the server has no NRS extension.
+    let nrs = null;
+    // `/api/nrs/now/{entryId}` for the playing track, once loaded.
+    let now = null;
+    let palette = null;
+    let token = 0;
+    // The Score tab's unsaved inputs, so a re-render doesn't lose them.
+    let draft = null;
+    // The Score tab's music slider and save action, for the shortcuts.
+    let musicInput = null;
+    let saveScore = null;
+
+    const isOpen = () => !drawerEl.hidden;
+    const nrsOn = () => !!(nrs && nrs.available);
+    // The tab to show: the chosen one, unless it needs NRS and NRS is out.
+    const shownTab = () => (NRS_TABS.has(tab) && !nrsOn() ? "library" : tab);
+    const fmtMin = (s) => (s < 60 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
+
+    function status(text, isError) {
+      return el("p", { className: "np-status" + (isError ? " is-error" : ""), text });
+    }
+
+    function section(label, children) {
+      return el("div", { className: "np-section" }, [el("p", { className: "np-section-label", text: label }), ...children]);
+    }
+
+    function slider(label, value, onInput) {
+      const out = el("output", { text: `${value}%` });
+      const input = el("input", { type: "range", min: "0", max: "100", step: "1", value: String(value), "aria-label": label });
+      input.addEventListener("input", () => {
+        out.textContent = `${input.value}%`;
+        onInput(Number(input.value));
+      });
+      return { row: el("div", { className: "mix-row" }, [el("span", { className: "mix-label", text: label }), input, out]), input, out };
+    }
+
+    function seg(options, current, onPick) {
+      const wrap = el("div", { className: "mix-seg" });
+      for (const [value, label] of options) {
+        wrap.appendChild(
+          el("button", {
+            type: "button",
+            text: label,
+            "aria-pressed": value === current,
+            onclick: () => onPick(value),
+          })
+        );
+      }
+      return wrap;
+    }
+
+    /// A button running `run` (async; its result is the status text), with
+    /// the status shown next to it.
+    function actionButton(text, run) {
+      const statusEl = status("");
+      const btn = el("button", { className: "ghost-btn", type: "button", text });
+      const go = async () => {
+        if (btn.getAttribute("aria-busy") === "true") return;
+        btn.setAttribute("aria-busy", "true");
+        statusEl.className = "np-status";
+        statusEl.textContent = "Saving…";
+        try {
+          statusEl.textContent = (await run()) || "Saved.";
+        } catch (e) {
+          statusEl.className = "np-status is-error";
+          statusEl.textContent = e.message;
+        } finally {
+          btn.removeAttribute("aria-busy");
+        }
+      };
+      btn.onclick = go;
+      return { btn, statusEl, run: go };
+    }
+
+    async function nrsStatus() {
+      try {
+        const res = await fetch("/api/nrs/status");
+        nrs = res.status === 404 ? { available: false, absent: true } : await res.json();
+      } catch (e) {
+        nrs = { available: false, error: e.message };
+      }
+      return nrs;
+    }
+
+    function renderTabs() {
+      tabsEl.innerHTML = "";
+      const shown = shownTab();
+      for (const [id, label] of TABS) {
+        tabsEl.appendChild(
+          el("button", {
+            type: "button",
+            role: "tab",
+            text: label,
+            hidden: NRS_TABS.has(id) && !nrsOn(),
+            "aria-pressed": id === shown,
+            onclick: () => setTab(id),
+          })
+        );
+      }
+    }
+
+    function setTab(id) {
+      tab = id;
+      try {
+        localStorage.setItem(TAB_KEY, id);
+      } catch {}
+      renderTabs();
+      load();
+    }
+
+    function toggle(force) {
+      const open = force ?? !isOpen();
+      drawerEl.hidden = !open;
+      barBtn.setAttribute("aria-pressed", String(open));
+      if (!open) return;
+      // Asked on every open, so starting NRS later brings its tabs back.
+      renderTabs();
+      bodyEl.replaceChildren(status("Loading…"));
+      nrsStatus().then(() => {
+        renderTabs();
+        load();
+      });
+    }
+
+    function track(id, release) {
+      if (id === entryId && release === releaseId) return;
+      entryId = id;
+      releaseId = release;
+      now = null;
+      draft = null;
+      if (isOpen()) load();
+    }
+
+    async function load() {
+      const my = ++token;
+      const stale = () => my !== token || !isOpen();
+      if (entryId == null) {
+        bodyEl.replaceChildren(status("Nothing playing."));
+        return;
+      }
+      const view = shownTab();
+      if (!now || view === "library") bodyEl.replaceChildren(status("Loading…"));
+      try {
+        if (view === "library") {
+          const entry = await api(`/api/entries/${entryId}`);
+          if (!stale()) bodyEl.replaceChildren(...renderLibrary(entry));
+          return;
+        }
+        if (!now) {
+          const q = releaseId != null ? `?release=${releaseId}` : "";
+          const data = await api(`/api/nrs/now/${entryId}${q}`);
+          if (my !== token) return;
+          now = data;
+        }
+        if (stale()) return;
+        if (!now.nrs.available) {
+          // NRS went away since the status check: fall back to Library.
+          nrs = { available: false, error: now.nrs.error };
+          now = null;
+          renderTabs();
+          load();
+          return;
+        }
+        if (view === "score") {
+          bodyEl.replaceChildren(...renderScore(now));
+        } else {
+          const nodes = await renderRelations(now, stale);
+          if (!stale()) bodyEl.replaceChildren(...nodes);
+        }
+      } catch (e) {
+        if (!stale()) bodyEl.replaceChildren(status(e.message, true));
+      }
+    }
+
+    /// Reload after a write: the score, rank and bindings may all change.
+    function refresh() {
+      now = null;
+      draft = null;
+      load();
+    }
+
+    // ---- Score ----
+
+    function impactOf(entry, kind) {
+      const all = (entry?.impacts || []).filter((i) => i.kind === kind);
+      return all.find((i) => !i.shared) || all[0] || null;
+    }
+
+    function numParam(impact, key, fallback) {
+      const v = Number(impact?.params?.[key]);
+      return Number.isFinite(v) ? v : fallback;
+    }
+
+    function scoreLine(entry) {
+      const s = entry?.score;
+      if (!s || s.value == null) return "Not scored yet";
+      const parts = [`V ${Number(s.value).toFixed(2)}`];
+      if (s.rank != null) parts.push(`#${s.rank} of ${s.total}`);
+      if (s.kind_rank != null) parts.push(`#${s.kind_rank} of ${s.kind_total} ${s.kind}s`);
+      return parts.join(" · ");
+    }
+
+    function newDraft(data) {
+      const entry = data.nrs.entry;
+      const music = impactOf(entry, "music");
+      const visual = impactOf(entry, "visual");
+      return {
+        music: Math.round(numParam(music, "music_base", 0.5) * 100),
+        musicSet: !!music,
+        musicDirty: false,
+        response: "",
+        factor: 50,
+        sign: "1",
+        anchors: [
+          { id: "", weight: 1 },
+          { id: "", weight: 1 },
+        ],
+        visualBase: Math.round(numParam(visual, "base", 0.5) * 100),
+        visualUnique: Math.round(numParam(visual, "unique", 0.5) * 100),
+        visualDirty: false,
+        albums: {},
+      };
+    }
+
+    function renderScore(data) {
+      if (!draft) draft = newDraft(data);
+      const d = draft;
+      const target = data.target;
+      const entry = data.nrs.entry;
+      const nodes = [el("p", { className: "np-title", text: target.title || "(untitled)" })];
+      if (target.folded) {
+        const playing = data.playing.title || "another edition";
+        const how = (target.transformation || "").replaceAll("_", " ");
+        const label = how && !playing.toLowerCase().includes(how.toLowerCase()) ? ` (${how})` : "";
+        nodes.push(el("p", { className: "np-fold", text: `Playing ${playing}${label}, which scores its original.` }));
+      }
+      const sub = el("p", { className: "np-sub" });
+      if (entry) {
+        sub.append(scoreLine(entry), " · ", el("a", { href: entry.link, target: "_blank", rel: "noopener", text: "Open in NRS ↗" }));
+      } else {
+        sub.append("Not in NRS yet. Saving a score adds it.");
+      }
+      nodes.push(sub);
+      const l = data.listening;
+      const pending = l.listened_seconds - l.exported_seconds;
+      nodes.push(
+        el("p", {
+          className: "np-sub",
+          text:
+            `${l.plays} play${l.plays === 1 ? "" : "s"} · ${fmtMin(l.listened_seconds)} listened` +
+            (pending >= 30 ? (entry ? ` · ${fmtMin(pending)} not sent yet` : " · sent once it's in NRS") : ""),
+        })
+      );
+
+      // Music quality.
+      const music = slider("Music", d.music, (v) => {
+        d.music = v;
+        d.musicDirty = true;
+      });
+      if (!d.musicSet && !d.musicDirty) music.out.textContent = "—";
+      musicInput = music;
+      nodes.push(section("Music", [music.row]));
+
+      // One response.
+      const responseBox = el("div");
+      const drawResponse = () => {
+        responseBox.replaceChildren(
+          seg(RESPONSES, d.response, (v) => {
+            d.response = v;
+            drawResponse();
+          })
+        );
+        if (!d.response) return;
+        if (d.response !== "cry") {
+          responseBox.appendChild(slider("Factor", d.factor, (v) => (d.factor = v)).row);
+          responseBox.appendChild(
+            el("div", { className: "mix-row" }, [
+              el("span", { className: "mix-label", text: "Sign" }),
+              seg(
+                [
+                  ["1", "+"],
+                  ["-1", "−"],
+                ],
+                d.sign,
+                (v) => {
+                  d.sign = v;
+                  drawResponse();
+                }
+              ),
+            ])
+          );
+        }
+        const grid = el("div", { className: "np-anchors" });
+        for (const a of d.anchors) {
+          const select = el("select", { "aria-label": "Anchor" }, [
+            el("option", { value: "", text: "— anchor —" }),
+            ...(palette || []).map((p) => el("option", { value: p.id, text: p.label || p.id, selected: p.id === a.id })),
+          ]);
+          select.onchange = () => (a.id = select.value);
+          const weight = el("input", { type: "number", min: "0", step: "0.1", value: String(a.weight), "aria-label": "Weight" });
+          weight.oninput = () => (a.weight = Number(weight.value) || 0);
+          grid.append(select, weight);
+        }
+        responseBox.appendChild(grid);
+        if (!palette) {
+          api("/api/nrs/v1/palette")
+            .then((res) => {
+              palette = res.anchors || [];
+              if (responseBox.isConnected) drawResponse();
+            })
+            .catch(() => {});
+        }
+      };
+      drawResponse();
+      const given = (entry?.impacts || []).filter((i) => i.section === "responses");
+      const responseNodes = [responseBox];
+      if (given.length) {
+        responseNodes.unshift(
+          el(
+            "ul",
+            { className: "np-list" },
+            given.map((i) => el("li", {}, [el("span", { className: "t", text: i.title }), el("span", { className: "k", text: i.metric?.value || "" })]))
+          )
+        );
+      }
+      nodes.push(section("Response", responseNodes));
+
+      // The MV, graded as the track's visual.
+      if (data.nrs.videos?.length) {
+        const v = data.nrs.videos[0];
+        nodes.push(
+          section("MV", [
+            el("img", { className: "np-media", src: `https://i.ytimg.com/vi/${v.youtube}/hqdefault.jpg`, alt: v.label || "", loading: "lazy" }),
+            slider("Base", d.visualBase, (x) => {
+              d.visualBase = x;
+              d.visualDirty = true;
+            }).row,
+            slider("Unique", d.visualUnique, (x) => {
+              d.visualUnique = x;
+              d.visualDirty = true;
+            }).row,
+          ])
+        );
+      }
+
+      const save = actionButton("Save score", async () => {
+        const set = [];
+        const add = [];
+        if (d.musicDirty) set.push({ kind: "music", music_base: (d.music / 100).toFixed(2) });
+        if (d.visualDirty) set.push({ kind: "visual", base: (d.visualBase / 100).toFixed(2), unique: (d.visualUnique / 100).toFixed(2) });
+        if (d.response) {
+          const anchors = d.anchors.filter((a) => a.id && a.weight > 0);
+          if (!anchors.length) throw new Error("Pick an anchor for the response.");
+          const r = { kind: d.response };
+          if (d.response !== "cry") {
+            r.factor = (d.factor / 100).toFixed(2);
+            r.sign = d.sign;
+          }
+          anchors.forEach((a, i) => {
+            r[`anchor${i + 1}`] = a.id;
+            r[`weight${i + 1}`] = String(a.weight);
+          });
+          add.push(r);
+        }
+        if (!set.length && !add.length) throw new Error("Nothing changed.");
+        await postJson("/api/nrs/score", { ...(entry ? { nrs_id: entry.id } : { entry_id: target.entry_id }), set, add });
+        refresh();
+        return "Saved.";
+      });
+      saveScore = save.run;
+      nodes.push(el("div", { className: "np-actions" }, [save.btn, save.statusEl]));
+
+      // Albums: the one it's playing from first, then the ones NRS has.
+      if (data.nrs.albums?.length) {
+        nodes.push(section("Albums", data.nrs.albums.map((a) => renderAlbum(a))));
+      }
+      nodes.push(el("p", { className: "np-hint", text: "n toggles · 1–9, 0 set music · s saves" }));
+      return nodes;
+    }
+
+    function renderAlbum(album) {
+      const key = album.id || `lib:${album.entry_id}`;
+      const visual = impactOf(album, "visual");
+      const d = (draft.albums[key] ||= {
+        base: Math.round(numParam(visual, "base", 0.5) * 100),
+        unique: Math.round(numParam(visual, "unique", 0.5) * 100),
+      });
+      const head = el("div", { className: "np-album-head" }, [
+        el("span", { className: "t", text: album.title || "(untitled)" }),
+        album.from_release ? el("span", { className: "k", text: "playing from" }) : null,
+        album.link ? el("a", { href: album.link, target: "_blank", rel: "noopener", text: "NRS ↗" }) : null,
+      ]);
+      const nodes = [head, el("p", { className: "np-sub", text: album.id ? scoreLine(album) : "Not in NRS yet. Grading its art adds it." })];
+      if (album.id) {
+        const img = el("img", { className: "np-media", alt: "", loading: "lazy", hidden: true });
+        nodes.push(img);
+        api(`/api/nrs/v1/entries/${encodeURIComponent(album.id)}/media`)
+          .then((m) => {
+            if (m.images?.length) {
+              img.src = m.images[0].url;
+              img.hidden = false;
+            }
+          })
+          .catch(() => {});
+      }
+      nodes.push(slider("Art base", d.base, (x) => (d.base = x)).row, slider("Unique", d.unique, (x) => (d.unique = x)).row);
+      const save = actionButton("Save album art", async () => {
+        await postJson("/api/nrs/score", {
+          ...(album.id ? { nrs_id: album.id } : { entry_id: album.entry_id }),
+          set: [{ kind: "visual", base: (d.base / 100).toFixed(2), unique: (d.unique / 100).toFixed(2) }],
+        });
+        refresh();
+        return "Saved.";
+      });
+      nodes.push(el("div", { className: "np-actions" }, [save.btn, save.statusEl]));
+      return el("div", { className: "np-album" }, nodes);
+    }
+
+    // ---- Relations ----
+
+    function relationLabel(s) {
+      const incoming = s.direction === "incoming";
+      if (s.kind === "contains") return incoming ? "On" : "Contains";
+      return `${s.kind} ${incoming ? "from" : "of"}`;
+    }
+
+    async function renderRelations(data, stale) {
+      const target = data.target;
+      const entry = data.nrs.entry;
+      const nodes = [el("p", { className: "np-title", text: target.title || "(untitled)" })];
+      if (!entry) {
+        const add = actionButton("Add to NRS", async () => {
+          await postJson("/api/nrs/score", { entry_id: target.entry_id });
+          refresh();
+          return "Added.";
+        });
+        nodes.push(status("Not in NRS yet, so it has no relations there."), el("div", { className: "np-actions" }, [add.btn, add.statusEl]));
+        return nodes;
+      }
+      const path = `/api/nrs/v1/entries/${encodeURIComponent(entry.id)}/related`;
+      const related = await api(path);
+      if (stale()) return [];
+      const suggestions = related.suggestions || [];
+      const pending = suggestions.filter((s) => !s.relation_exists);
+      const approve = async (picked) => {
+        await postJson(path, { items: picked.map((s) => ({ store_id: s.target.store_id, kind: s.kind, direction: s.direction })) });
+        refresh();
+        return "Added to NRS.";
+      };
+      if (!suggestions.length) {
+        nodes.push(status("No relations suggested."));
+        return nodes;
+      }
+      const list = el("ul", { className: "np-list" });
+      for (const s of suggestions) {
+        const li = el("li", { className: s.relation_exists ? "is-done" : "" }, [
+          el("span", { className: "k", text: relationLabel(s) }),
+          el("span", { className: "t", text: s.target.title }),
+        ]);
+        if (s.relation_exists) {
+          li.appendChild(el("span", { className: "k", text: "in NRS" }));
+        } else {
+          li.appendChild(actionButton("Approve", () => approve([s])).btn);
+        }
+        list.appendChild(li);
+      }
+      nodes.push(el("p", { className: "np-sub", text: `${pending.length} to review · suggested by the music store` }), list);
+      if (pending.length > 1) {
+        const all = actionButton(`Approve all ${pending.length}`, () => approve(pending));
+        nodes.push(el("div", { className: "np-actions" }, [all.btn, all.statusEl]));
+      }
+      return nodes;
+    }
+
+    // ---- Library ----
+
+    function editionLabel(ed) {
+      if (ed.is_default) return "original";
+      return (ed.transformation || ed.kind || "edition").replaceAll("_", " ");
+    }
+
+    function renderLibrary(entry) {
+      const nodes = [el("p", { className: "np-title", text: entry.title || "(untitled)" })];
+      if (nrs && !nrs.available && !nrs.absent) {
+        nodes.push(status(`NRS isn't reachable${nrs.nrs_url ? ` at ${nrs.nrs_url}` : ""}, so only library fixes are shown.`));
+      }
+      const open = el("button", { className: "ghost-btn", type: "button", text: "Open in library", onclick: () => viewEntry(entryId) });
+      const editions = entry.editions || [];
+      if (editions.length <= 1) {
+        nodes.push(status("No other editions of this track."), el("div", { className: "np-actions" }, [open]));
+        return nodes;
+      }
+      const titleOf = new Map(editions.map((e) => [e.entry_id, e.title]));
+      const list = el("ul", { className: "np-list" });
+      for (const ed of editions) {
+        const scores = ed.rank_target === ed.entry_id ? "own work" : `scores as ${titleOf.get(ed.rank_target) || ed.rank_target}`;
+        list.appendChild(
+          el("li", {}, [
+            el("span", { className: "k", text: editionLabel(ed) }),
+            el("button", {
+              className: "t np-link",
+              type: "button",
+              text: (ed.title || "(untitled)") + (ed.is_current ? " (playing)" : ""),
+              onclick: () => viewEntry(ed.entry_id),
+            }),
+            el("span", { className: "k", text: scores }),
+          ])
+        );
+      }
+      nodes.push(section("Editions", [list]));
+
+      // The original has nothing to fix from here; its editions are fixed
+      // from their own side, while they play.
+      const current = editions.find((e) => e.is_current);
+      const others = editions.filter((e) => !e.is_current);
+      if (!current || current.is_default || !others.length) {
+        nodes.push(el("div", { className: "np-actions" }, [open]));
+        return nodes;
+      }
+      const known = TRANSFORMATIONS.flatMap(([, opts]) => opts.map(([v]) => v));
+      const currentKind = known.includes(current.transformation) ? current.transformation : "";
+      const kind = el(
+        "select",
+        { "aria-label": "Edition kind" },
+        TRANSFORMATIONS.map(([group, opts]) =>
+          el(
+            "optgroup",
+            { label: group },
+            opts.map(([v, label]) => el("option", { value: v, text: label, selected: v === currentKind }))
+          )
+        )
+      );
+      const fallback = others.find((e) => e.is_default) || others[0];
+      const original = el(
+        "select",
+        { "aria-label": "Original" },
+        others.map((e) => el("option", { value: String(e.entry_id), text: e.title || String(e.entry_id), selected: e === fallback }))
+      );
+      const save = actionButton("Save", async () => {
+        await postJson("/api/relations/derive", {
+          original: Number(original.value),
+          derived: current.entry_id,
+          transformation: kind.value || null,
+        });
+        now = null;
+        draft = null;
+        load();
+        return "Saved.";
+      });
+      nodes.push(
+        section("Fix the playing edition", [
+          el("div", { className: "np-actions" }, [el("span", { text: "Playing edition:" }), kind, el("span", { text: "of" }), original]),
+          el("div", { className: "np-actions" }, [save.btn, open, save.statusEl]),
+        ])
+      );
+      return nodes;
+    }
+
+    // ---- keyboard ----
+
+    document.addEventListener("keydown", (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const active = document.activeElement;
+      const typing =
+        active && (active.tagName === "TEXTAREA" || active.tagName === "SELECT" || (active.tagName === "INPUT" && active.type !== "range"));
+      if (typing || !Player.hasTrack()) return;
+      if (e.key === "n") {
+        e.preventDefault();
+        toggle();
+        return;
+      }
+      if (!isOpen() || shownTab() !== "score" || !musicInput?.input.isConnected) return;
+      if (/^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        musicInput.input.value = String(e.key === "0" ? 100 : Number(e.key) * 10);
+        musicInput.input.dispatchEvent(new Event("input"));
+      } else if (e.key === "s") {
+        e.preventDefault();
+        saveScore?.();
+      }
+    });
+
+    barBtn.addEventListener("click", () => toggle());
+    closeBtn.addEventListener("click", () => toggle(false));
+
+    return { track, toggle };
+  })();
+
   const Player = (() => {
     const barEl = document.getElementById("player-bar");
     const dockEl = document.getElementById("player-dock");
@@ -4513,6 +5468,7 @@
     }
 
     function updateProgressUI(position, duration) {
+      PlayLog.progress(position);
       if (seeking) return;
       seekInput.max = String(Math.max(1, Math.round(duration)));
       seekInput.value = String(Math.round(position));
@@ -5035,6 +5991,7 @@
     }
 
     function mountSource(source) {
+      PlayLog.sourceChanged();
       const isSpotify =
         source.provider === "spotify" && Spotify.isConnected() && source.identifier.startsWith(SPOTIFY_TRACK_PREFIX);
       // Spotify plays via a Connect device, not the DOM — clearing/replacing
@@ -5553,7 +6510,8 @@
 
   function mountQueueItem(entryId, title, sources) {
     Player.mount(entryId, sources, title, { onEnded: handleTrackEnded });
-    ShuffleMix.notePlayed(entryId);
+    PlayLog.start(entryId);
+    NowPlaying.track(entryId, Queue.current()?.release_id ?? null);
     syncTransport();
     refreshPlayIndicators();
     refreshPlayerStageVisibility();
@@ -7658,9 +8616,11 @@
         // (so the tracklist reads as the complete release) but their play
         // button is disabled, per their own `playable` flag from the
         // server. The row itself always navigates to the track's page.
+        // `release_id` tells the now-playing drawer which album a track
+        // is being played from.
         const playableTracks = tracks.tracks
           .filter((t) => t.playable)
-          .map((t) => ({ entry_id: t.entry_id, title: t.title }));
+          .map((t) => ({ entry_id: t.entry_id, title: t.title, release_id: entryId }));
 
         detail.appendChild(el("p", { className: "manifest-label", text: "Tracklist" }));
         const list = el("ul", { className: "manifest" });
