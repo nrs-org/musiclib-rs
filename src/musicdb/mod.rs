@@ -3362,6 +3362,62 @@ impl MusicDb {
             .collect())
     }
 
+    /// The relations graph the player draws around `entry_id`: every row,
+    /// enabled or not, touching any member of its edition group (each
+    /// edition's whole soft-identity component, so `relations_around`'s
+    /// anchors and more), plus every row between two entries those rows
+    /// reach. The second pass is what shows how the neighbors relate to
+    /// each other, e.g. that two suggested editions are already an
+    /// instrumental and its original.
+    pub async fn relation_graph_around(&self, entry_id: i64) -> Result<Vec<RelationRow>, Error> {
+        let (identity, editions) = self.display_projections_around(&[entry_id]).await?;
+        let canonical = identity.component_of(entry_id).unwrap_or(entry_id);
+        let mut anchors: HashSet<i64> = editions
+            .members_of(canonical)
+            .into_iter()
+            .flat_map(|edition| {
+                identity
+                    .members_by_component
+                    .get(&edition)
+                    .cloned()
+                    .unwrap_or_else(|| vec![edition])
+            })
+            .collect();
+        anchors.insert(entry_id);
+
+        let mut rows: Vec<RelationRow> = entry_relation::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(entry_relation::Column::EntryA.is_in(anchors.iter().copied()))
+                    .add(entry_relation::Column::EntryB.is_in(anchors.iter().copied())),
+            )
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect();
+        let nodes: BTreeSet<i64> = anchors
+            .iter()
+            .copied()
+            .chain(rows.iter().flat_map(|r| [r.entry_a, r.entry_b]))
+            .collect();
+        let mut seen: HashSet<(i64, i64, String)> = rows
+            .iter()
+            .map(|r| (r.entry_a, r.entry_b, r.kind.clone()))
+            .collect();
+        let between = entry_relation::Entity::find()
+            .filter(entry_relation::Column::EntryA.is_in(nodes.iter().copied()))
+            .filter(entry_relation::Column::EntryB.is_in(nodes.iter().copied()))
+            .all(&self.db)
+            .await?;
+        for row in between.into_iter().map(RelationRow::from) {
+            if seen.insert((row.entry_a, row.entry_b, row.kind.clone())) {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
     /// All enabled relation rows, for reporting.
     pub async fn all_relations(&self) -> Result<Vec<RelationRow>, Error> {
         Ok(entry_relation::Entity::find()
@@ -4128,6 +4184,50 @@ mod tests {
         let (kind, transformation) = projection.edge_label(1, 2).unwrap();
         assert_eq!(kind, DERIVED_FROM);
         assert_eq!(transformation, Some("instrumental"));
+    }
+
+    #[tokio::test]
+    async fn relation_graph_around_spans_edition_group_and_neighbor_edges() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1i64..=6 {
+            insert_entry(db, id).await;
+        }
+        for (a, b, enabled) in [
+            // 4 is an edition of the anchor 1; 4–5 is a rejected suggestion.
+            (1i64, 4i64, true),
+            (4, 5, false),
+            // Rejected suggestions from the anchor to 2 and 3, which are an
+            // edition pair of their own.
+            (1, 2, false),
+            (1, 3, false),
+            (2, 3, true),
+            // Two hops out from the anchor's group: not part of the graph.
+            (3, 6, true),
+        ] {
+            entry_relation::Entity::insert(entry_relation::ActiveModel {
+                entry_a: Set(a),
+                entry_b: Set(b),
+                kind: Set(DERIVED_FROM.to_string()),
+                confidence: Set(0.8),
+                origin: Set("heuristic".to_string()),
+                enabled: Set(enabled),
+                extra: Set(None),
+            })
+            .exec(db)
+            .await
+            .unwrap();
+        }
+
+        let mut pairs: Vec<(i64, i64)> = mdb
+            .relation_graph_around(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.entry_a, r.entry_b))
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(1, 2), (1, 3), (1, 4), (2, 3), (4, 5)]);
     }
 
     /// Regression test for the pre-existing gate bug this feature exposed:

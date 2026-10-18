@@ -863,21 +863,24 @@ async fn structural_edges_around(
     Ok((edges, new_ids))
 }
 
-/// The soft-identity graph around `id`'s component: every relation row
-/// (enabled or not) touching it or a live member (`MusicDb::relations_around`),
+/// The relations graph around `id`'s edition group: every relation row
+/// (enabled or not) touching an edition or a soft-identity member, and the
+/// rows between the entries those reach (`MusicDb::relation_graph_around`),
 /// plus a display node — own sources only, not the component-wide union —
 /// for every entry any of those edges references. A disabled edge still
 /// needs its far endpoint rendered as a node even though that entry dropped
 /// out of the *live* component, or a plain "Unlink" would make the
 /// downgraded edge (and the undo it's supposed to offer) vanish outright.
-/// Also folds in `id`'s direct structural (`entry_child`) neighbors as
-/// read-only nodes/edges — see `structural_edges_around`.
+/// Each node carries its edition role (`edition_group`, `edition_size`,
+/// `default_edition`, `folds_into` — see `EditionProjection`). Also folds
+/// in `id`'s direct structural (`entry_child`) neighbors as read-only
+/// nodes/edges — see `structural_edges_around`.
 async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
     let entry_id = match parse_entry_id(id) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    let edges = match state.db.relations_around(entry_id).await {
+    let edges = match state.db.relation_graph_around(entry_id).await {
         Ok(e) => e,
         Err(e) => {
             return respond::error(
@@ -906,7 +909,11 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
     node_ids.extend(structural_ids);
     node_ids.sort_unstable();
     node_ids.dedup();
-    let summaries = match entry_summaries(&state.db, &node_ids).await {
+    let (identity, editions) = match state.db.display_projections_around(&node_ids).await {
+        Ok(v) => v,
+        Err(e) => return db_error_response(e),
+    };
+    let summaries = match entry_summaries_with(&state.db, &node_ids, &identity, &editions).await {
         Ok(s) => s,
         Err(e) => {
             return respond::error(
@@ -921,6 +928,8 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
         .map(|&nid| {
             let summary = summaries.get(&nid);
             let own_member = summary.and_then(|s| s.members.iter().find(|m| m.entry_id == nid));
+            let canonical = identity.component_of(nid).unwrap_or(nid);
+            let rank_target = editions.rank_target(canonical);
             json!({
                 "entry_id": nid,
                 // This node's own title, not the soft-dedup-merged
@@ -930,6 +939,10 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
                 "title": own_member.and_then(|m| m.title.clone()),
                 "entry_type": summary.map(|s| s.entry_type.clone()),
                 "sources": own_member.map(|m| m.sources.clone()).unwrap_or_default(),
+                "edition_group": editions.group_of(canonical),
+                "edition_size": editions.members_of(canonical).len(),
+                "default_edition": editions.default_member_of(canonical) == canonical,
+                "folds_into": (rank_target != canonical).then_some(rank_target),
             })
         })
         .collect();

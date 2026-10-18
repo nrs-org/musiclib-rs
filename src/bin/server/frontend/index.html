@@ -1334,9 +1334,17 @@
     flex: 1;
     min-height: 0;
     margin-bottom: 0;
-    /* Positioning context for `.graph-detail-panel` below, which floats
-       over the canvas rather than sitting in the flex flow. */
+  }
+
+  /* The canvas plus the detail panel floating over its bottom edge — the
+     panel's positioning context. Kept apart from the toolbar and pickers
+     above it, so the panel only ever covers the canvas, never a button. */
+  #view-graph .graph-stage {
     position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
   }
 
   #view-graph .dedup-graph {
@@ -1348,6 +1356,7 @@
     flex: 1;
     min-height: 0;
     height: auto;
+    margin-bottom: 0;
   }
 
   #view-graph .graph-detail-panel {
@@ -1427,6 +1436,41 @@
     stroke-width: 3px;
   }
 
+  /* The default edition of a group of several (`default_edition`): a
+     brass dot on the node. Scoped under `.nodes` to outrank the node
+     shape rules above, which would otherwise restyle it as a shape. */
+  .nodes .node circle.edition-badge {
+    display: none;
+    fill: var(--brass);
+    stroke: var(--paper-deep);
+    stroke-width: 1.5px;
+    pointer-events: none;
+  }
+  .nodes .node.edition-default circle.edition-badge {
+    display: inline;
+  }
+
+  /* An edition that scores its original when played (instrumental, TV
+     size, ...; `folds_into`): dashed outline, faded fill. */
+  .node.edition-folded > :first-child {
+    stroke-dasharray: 3 2;
+    fill-opacity: 0.55;
+  }
+
+  /* One blob behind each edition group's nodes: the group's hull, drawn
+     with a thick round-joined stroke so two nodes make a capsule and
+     three or more a rounded polygon. Opacity sits on the element, not
+     fill/stroke separately, so the two don't stack where they overlap. */
+  .edition-hull {
+    fill: var(--brass);
+    stroke: var(--brass);
+    stroke-width: 46px;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    opacity: 0.1;
+    pointer-events: none;
+  }
+
   /* `paint-order: stroke` + a wide stroke in the page background color fakes
      a label background halo without measuring text width for a real <rect>
      behind it — the text itself is unaffected since fill paints on top.
@@ -1477,7 +1521,8 @@
     cursor: pointer;
   }
 
-  /* active: a live link. hover hints "click unlinks" (red). */
+  /* active: a live identity link (same_identity/variant). hover hints
+     "unlink" (red). */
   .edge.dedup.active-manual {
     stroke: var(--verdigris);
   }
@@ -1494,17 +1539,6 @@
     stroke: var(--danger);
   }
 
-  /* suggested: plain-unlinked, disabled but the row survives — dashed,
-     faint, one click from being restored. hover hints "click re-links". */
-  .edge.dedup.suggested {
-    stroke-dasharray: 3 4;
-    opacity: 0.6;
-  }
-  .edge-item:hover .edge.dedup.suggested {
-    stroke: var(--verdigris);
-    opacity: 1;
-  }
-
   /* blocked: force-unlinked (different_identity) — a hard "no", shown
      solid red. hover hints "click softens it back", not "click restores". */
   .edge.dedup.blocked {
@@ -1515,9 +1549,18 @@
     stroke: var(--brass);
   }
 
-  /* related: a RELATE_KINDS version-kind annotation (cover/remix/same_artist/…)
-     — a real connection, but not an identity assertion, so it gets its own
-     hue (brass) rather than borrowing active's verdigris. */
+  /* edition: an enabled `EDITION_KINDS` row — two editions of one work.
+     Solid brass, with an arrowhead on the derived side when the row
+     records which side is the original. */
+  .edge.dedup.edition {
+    stroke: var(--brass-ink);
+  }
+  .edge-item:hover .edge.dedup.edition {
+    stroke: var(--brass);
+  }
+
+  /* related: any other enabled row (medley, same_artist, ...) — a real
+     connection, but neither identity nor edition. */
   .edge.dedup.related {
     stroke: var(--brass-ink);
     stroke-dasharray: 2 3;
@@ -1526,16 +1569,16 @@
     stroke: var(--brass);
   }
 
-  /* cleared: a disabled different_identity or RELATE_KINDS row — asserts
-     nothing right now, but the row survives and is one click from being
-     restored, so it still gets a (very faint) line rather than vanishing. */
-  .edge.dedup.cleared {
+  /* removed: a disabled row — an unlinked link, a softened block, a
+     rejected suggestion. Only drawn with "Show removed links" on, or
+     after an edit this session, so an undo is still one click away. */
+  .edge.dedup.removed {
     stroke-dasharray: 1 4;
-    opacity: 0.35;
+    opacity: 0.45;
   }
-  .edge-item:hover .edge.dedup.cleared {
-    stroke: var(--ink-faint);
-    opacity: 0.8;
+  .edge-item:hover .edge.dedup.removed {
+    stroke: var(--ink-soft);
+    opacity: 0.9;
   }
 
   .edge.structural {
@@ -1562,6 +1605,48 @@
 
   .graph-arrowhead path {
     fill: var(--ink-faint);
+  }
+  .graph-arrowhead.edition path {
+    fill: var(--brass-ink);
+  }
+
+  .graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin: 0 0 10px;
+    padding: 0;
+    list-style: none;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-soft);
+  }
+  .graph-legend li {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .graph-legend svg {
+    flex: none;
+    overflow: visible;
+  }
+
+  .graph-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    margin-bottom: 10px;
+  }
+  .graph-toolbar label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    cursor: pointer;
   }
 
   .graph-hover-label {
@@ -1636,6 +1721,16 @@
   .graph-detail-edition .graph-detail-relate-select:first-child {
     flex-basis: 100%;
     min-height: 32px;
+  }
+
+  .graph-detail-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .graph-detail-fields .graph-detail-relate-select {
+    min-width: 180px;
+    min-height: 28px;
   }
 
   .graph-detail-relate-select {
@@ -7980,12 +8075,11 @@
     };
   }
 
-  // The RELATE-tier version-kind taxonomy (`docs/CONFIG_REFERENCE.md`'s
-  // `relate(kind, conf, reason)`) — "related but not the same entry",
-  // separate from the same_identity/different_identity/variant trio that
-  // drives the soft-identity graph itself. Mirrors the server's own
-  // `RELATE_KINDS` allowlist (`src/bin/server/player.rs`) so the picker
-  // below only ever offers a kind the server will accept.
+  // The kinds `/api/relations/relate` accepts — mirrors the server's
+  // `RELATE_KINDS` allowlist (`src/bin/server/player.rs`). `unrelate` and
+  // `restore` also take `derived_from` (the server's `TOGGLE_KINDS`).
+  // Every other kind (provider `arrangement` rows, pipeline-only
+  // predicates) is read-only here.
   const RELATE_KINDS = [
     "alt_version",
     "live",
@@ -7998,41 +8092,104 @@
     "same_artist",
   ];
   const RELATE_KIND_SET = new Set(RELATE_KINDS);
-
-  // The dedup-v2 primitive-relation predicates (docs/dedup-v2.md; constants
-  // `MEMBER_OF`/`DERIVED_FROM`/`PARTICIPATES_IN`/`FACET_OF` in
-  // `src/musicdb/mod.rs`) — asserted only by the pipeline (e.g. `decide_track`
-  // relating a track to its instrumental via `derived_from`), never through
-  // `/api/relations/relate`, so unlike `RELATE_KINDS` this isn't an allowlist
-  // the server accepts from the UI. A `different_identity` pair with one of
-  // these edges is exactly the v2 ontology's "relate" policy outcome — same
-  // display bucket as `RELATE_KINDS`, not the same-identity "active" one,
-  // since these rows never mean the two entries are the same recording/edit.
-  const PRIMITIVE_RELATION_KINDS = ["member_of", "derived_from", "participates_in", "facet_of"];
-  const PRIMITIVE_RELATION_KIND_SET = new Set(PRIMITIVE_RELATION_KINDS);
-  // The ones a person may remove and restore, though not create (the
-  // server's `TOGGLE_KINDS`; the now-playing drawer derives new ones).
   const TOGGLE_RELATION_KIND_SET = new Set(["derived_from"]);
+  // The soft-identity ledger's own kinds, owned by link/unlink.
+  const IDENTITY_KIND_SET = new Set(["same_identity", "variant"]);
   // `musicdb::EDITION_KINDS`: rows that make two entries editions of one
-  // work, which `/api/relations/derive` rewrites (see `editionEditor`).
+  // work. New ones go through `/api/relations/derive` (see
+  // `connectionControls`), which records which side is the original —
+  // what the edition projection needs for the default edition and the
+  // rank target.
   const EDITION_KIND_SET = new Set(["derived_from", "alt_version", "live", "remix", "instrumental", "cover", "arrangement"]);
+  // What's left to offer as a plain relation once editions go through
+  // derive.
+  const OTHER_RELATE_KINDS = RELATE_KINDS.filter((kind) => !EDITION_KIND_SET.has(kind));
 
-  // "active" mirrors the live component (same_identity/variant, enabled).
-  // "suggested" is a plain-unlinked edge: disabled, but the row survives —
-  // shown dashed, one click restores it. "blocked" is a force-unlinked
-  // (different_identity) edge — shown distinctly, one click softens it back
-  // to neutral rather than trivially restoring it. "cleared" is a disabled
-  // different_identity/relate-kind row with nothing currently asserted —
-  // not rendered, it carries no actionable meaning. "related" is a
-  // RELATE_KINDS row (cover/remix/same_artist/…) or a dedup-v2 primitive
-  // relation (`derived_from`/…) — annotates a connection between two
-  // distinct entries, doesn't affect the identity graph at all.
+  // "active" is a live identity link, "blocked" an enabled
+  // different_identity row, "edition" an enabled edition row, "related"
+  // any other enabled row. "removed" is any disabled row — an unlinked
+  // link, a softened block, a rejected suggestion — which the graph hides
+  // unless asked (see `showRemoved`). Classified by rule rather than by
+  // listing every kind, so a kind this file doesn't know yet can never
+  // pass for an identity link.
   function dedupEdgeState(edge) {
-    if (edge.kind === "different_identity") return edge.enabled ? "blocked" : "cleared";
-    if (RELATE_KIND_SET.has(edge.kind) || PRIMITIVE_RELATION_KIND_SET.has(edge.kind)) {
-      return edge.enabled ? "related" : "cleared";
+    if (!edge.enabled) return "removed";
+    if (IDENTITY_KIND_SET.has(edge.kind)) return "active";
+    if (edge.kind === "different_identity") return "blocked";
+    if (EDITION_KIND_SET.has(edge.kind)) return "edition";
+    return "related";
+  }
+
+  // The original and derived side of an edition row, from its `extra`
+  // (`source_entry`/`derived_entry`); either one alone is enough, the
+  // other being the row's other endpoint — `build_edition_projection`
+  // reads `derived_entry` the same way. Null when the row records neither,
+  // or names an entry that isn't one of its endpoints.
+  function editionDirection(edge) {
+    if (!EDITION_KIND_SET.has(edge.kind)) return null;
+    const ends = [edge.entry_a, edge.entry_b];
+    let { source_entry: original, derived_entry: derived } = edge.extra || {};
+    if (ends.includes(derived) && !ends.includes(original)) original = ends.find((id) => id !== derived);
+    if (ends.includes(original) && !ends.includes(derived)) derived = ends.find((id) => id !== original);
+    if (!ends.includes(original) || !ends.includes(derived) || original === derived) return null;
+    return { original, derived };
+  }
+
+  // `extra.transformation` as one label — the match script emits an array
+  // when a track carries several markers.
+  function transformationOf(extra) {
+    return [extra?.transformation].flat().filter(Boolean).join(" ") || null;
+  }
+
+  function pairKey(a, b) {
+    return a < b ? `${a}-${b}` : `${b}-${a}`;
+  }
+
+  // Kind — and, for an edition, which side is the original — for a new
+  // connection between two entries: the graph's "New connection" panel and
+  // the "Relate as…" picker. Editions are recorded through
+  // `/api/relations/derive`, other kinds through `/api/relations/relate`,
+  // and identity through `/api/relations/link`. `nameOf("a"|"b")` labels
+  // each side in the original picker; `request(a, b)` sends the choice.
+  function connectionControls(nameOf, { identity = false } = {}) {
+    const kind = el("select", { className: "graph-detail-relate-select", "aria-label": "Connection kind" }, [
+      identity ? el("option", { value: "identity", text: "Same identity (link)" }) : null,
+      ...TRANSFORMATIONS.map(([group, opts]) =>
+        el(
+          "optgroup",
+          { label: `Edition: ${group.toLowerCase()}` },
+          opts.map(([value, label]) => el("option", { value: `edition:${value}`, text: label }))
+        )
+      ),
+      OTHER_RELATE_KINDS.length
+        ? el(
+            "optgroup",
+            { label: "Other relation" },
+            OTHER_RELATE_KINDS.map((k) => el("option", { value: k, text: friendlyType(k) }))
+          )
+        : null,
+    ]);
+    const original = el("select", { className: "graph-detail-relate-select", "aria-label": "Original" }, [
+      el("option", { value: "", text: "Which is the original?", selected: true, disabled: true }),
+      el("option", { value: "a", text: `${nameOf("a")} is the original` }),
+      el("option", { value: "b", text: `${nameOf("b")} is the original` }),
+    ]);
+    const sync = () => {
+      original.hidden = !kind.value.startsWith("edition:");
+    };
+    kind.addEventListener("change", sync);
+    sync();
+    function request(a, b) {
+      if (kind.value === "identity") return postJson("/api/relations/link", { a, b });
+      if (kind.value.startsWith("edition:")) {
+        if (!original.value) return Promise.reject(new Error("Pick which entry is the original."));
+        const [from, to] = original.value === "a" ? [a, b] : [b, a];
+        const transformation = kind.value.slice("edition:".length) || null;
+        return postJson("/api/relations/derive", { original: from, derived: to, transformation });
+      }
+      return postJson("/api/relations/relate", { a, b, kind: kind.value });
     }
-    return edge.enabled ? "active" : "suggested";
+    return { elements: [kind, original], request };
   }
 
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -8089,6 +8246,59 @@
   // looking at, then the things you can actually act on (dedup links),
   // then read-only structural context last.
   const GRAPH_LABEL_PRIORITY = { self: 0, member: 1, structural: 2 };
+  // Arrowheads: release → track structure, and original → derived edition.
+  const STRUCTURAL_MARKER_ID = "graph-arrow-main";
+  const EDITION_MARKER_ID = "graph-arrow-edition";
+
+  // The key under the hint. Swatches reuse the graph's own classes and
+  // arrow markers (a marker id resolves across inline SVGs in one
+  // document), so the legend can't drift from what the graph draws.
+  function buildGraphLegend() {
+    const lineSwatch = (cls, marker) => {
+      const swatch = svgEl("svg", { width: 28, height: 10, "aria-hidden": "true" });
+      swatch.appendChild(
+        svgEl("line", {
+          class: cls,
+          x1: 1,
+          y1: 5,
+          x2: marker ? 22 : 27,
+          y2: 5,
+          "marker-end": marker ? `url(#${marker})` : null,
+        })
+      );
+      return swatch;
+    };
+    const nodeSwatch = (cls) => {
+      const swatch = svgEl("svg", { width: 16, height: 16, "aria-hidden": "true" });
+      const layer = svgEl("g", { class: "nodes", transform: "translate(8,8) scale(0.6)" });
+      const node = svgEl("g", { class: `node type-track ${cls}` });
+      node.appendChild(svgEl("circle", { r: GRAPH_NODE_RADIUS }));
+      node.appendChild(svgEl("circle", { class: "edition-badge", cx: 8, cy: -8, r: 4 }));
+      layer.appendChild(node);
+      swatch.appendChild(layer);
+      return swatch;
+    };
+    const hullSwatch = svgEl("svg", { width: 18, height: 12, "aria-hidden": "true" });
+    hullSwatch.appendChild(
+      svgEl("rect", { class: "edition-hull", x: 1, y: 1, width: 16, height: 10, rx: 5, style: "stroke-width:0;opacity:0.3" })
+    );
+    const items = [
+      [lineSwatch("edge dedup active-manual"), "same identity"],
+      [lineSwatch("edge dedup edition", EDITION_MARKER_ID), "edition, arrow to derived"],
+      [lineSwatch("edge dedup related"), "other relation"],
+      [lineSwatch("edge dedup blocked"), "blocked"],
+      [lineSwatch("edge dedup removed"), "removed"],
+      [lineSwatch("edge structural", STRUCTURAL_MARKER_ID), "release to track"],
+      [hullSwatch, "edition group"],
+      [nodeSwatch("edition-default"), "default edition"],
+      [nodeSwatch("edition-folded"), "scores its original"],
+    ];
+    return el(
+      "ul",
+      { className: "graph-legend" },
+      items.map(([swatch, text]) => el("li", {}, [swatch, el("span", { text })]))
+    );
+  }
 
   // The relations graph is built exactly once (see `graphEditor` below) and
   // its DOM/simulation/node-position state is reused across every entry
@@ -8119,20 +8329,32 @@
     const hintEl = el("p", {
       className: "merge-picker-hint",
       text:
-        "Click one entry, then another, to start a connection — pick its kind before it's created. Click empty space to " +
-        "cancel. Shift+click an entry to focus the graph on it. Click a line for its details and actions (unlink, " +
-        "force-block, or remove/add a relation kind); hover it for a quick peek. Drag an entry in from the library to " +
-        "add it here. Dashed arrows are release/track structure and aren't editable.",
+        "Click one entry, then another, to connect them. Shift+click an entry to focus the graph on it. Click a " +
+        "line for its details and actions. Drag an entry in from the search results to add it here.",
     });
     const graphHost = el("div", { className: "dedup-graph" });
     const detailPanel = el("div", { className: "graph-detail-panel" }, [
       el("p", { className: "graph-detail-empty", text: "Click a node for details." }),
     ]);
     const errorEl = el("p", { className: "merge-picker-error", hidden: true });
+    // Disabled rows stay hidden unless this is on, or their pair was edited
+    // since the anchor last changed (`touchedPairs`) — so a link someone
+    // just unlinked stays on screen with its one-click undo.
+    let showRemoved = false;
+    const touchedPairs = new Set();
+    const removedToggle = el("input", { type: "checkbox" });
+    const removedToggleText = el("span", { text: "Show removed links" });
+    removedToggle.addEventListener("change", () => {
+      showRemoved = removedToggle.checked;
+      resetSelection();
+      if (lastData) buildGraph(lastData);
+    });
+    const toolbar = el("div", { className: "graph-toolbar" }, [el("label", {}, [removedToggle, removedToggleText])]);
+    const stage = el("div", { className: "graph-stage" }, [graphHost, detailPanel]);
     section.appendChild(labelEl);
     section.appendChild(hintEl);
-    section.appendChild(graphHost);
-    section.appendChild(detailPanel);
+    section.appendChild(buildGraphLegend());
+    section.appendChild(toolbar);
 
     function showError(message) {
       errorEl.hidden = false;
@@ -8153,6 +8375,27 @@
       } else {
         detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: "No sources." }));
       }
+      const roles = [];
+      if (data.editionSize > 1) {
+        roles.push(data.defaultEdition ? `Default edition of ${data.editionSize}.` : `One of ${data.editionSize} editions.`);
+      }
+      if (data.foldsInto != null) {
+        const target = currentNodesById.get(String(data.foldsInto));
+        roles.push(`Plays score ${target ? endpointLabel(target) : catalogNo(data.foldsInto)}.`);
+      }
+      for (const text of roles) detailPanel.appendChild(el("p", { className: "graph-detail-empty", text }));
+      if (data.entry_id !== currentEntryId) {
+        detailPanel.appendChild(
+          el("div", { className: "graph-detail-actions" }, [
+            el("button", {
+              className: "ghost-btn",
+              type: "button",
+              text: "Focus graph here",
+              onclick: () => viewGraph(data.entry_id),
+            }),
+          ])
+        );
+      }
     }
 
     // ---- SVG skeleton, built once — renderGraph()/update() below only
@@ -8161,23 +8404,32 @@
       class: "graph-svg",
       viewBox: `0 0 ${GRAPH_CANVAS_WIDTH} ${GRAPH_CANVAS_HEIGHT}`,
     });
-    // A single persistent graph editor only ever needs one marker id — no
-    // per-entry suffix needed now that this SVG isn't rebuilt per entry.
-    const markerId = "graph-arrow-main";
+    // A single persistent graph editor only ever needs one id per marker —
+    // no per-entry suffix needed now that this SVG isn't rebuilt per entry.
     const defs = svgEl("defs");
-    const marker = svgEl("marker", {
-      id: markerId,
-      viewBox: "0 0 10 10",
-      refX: 9,
-      refY: 5,
-      markerWidth: 6,
-      markerHeight: 6,
-      orient: "auto-start-reverse",
-      class: "graph-arrowhead",
-    });
-    marker.appendChild(svgEl("path", { d: "M0,0 L10,5 L0,10 Z" }));
-    defs.appendChild(marker);
+    for (const [id, cls] of [
+      [STRUCTURAL_MARKER_ID, "graph-arrowhead"],
+      [EDITION_MARKER_ID, "graph-arrowhead edition"],
+    ]) {
+      const marker = svgEl("marker", {
+        id,
+        viewBox: "0 0 10 10",
+        refX: 9,
+        refY: 5,
+        // Fixed size: in the default stroke-width units an edition arrow
+        // would grow with its confidence-scaled stroke (`edgeStrokeWidth`).
+        markerUnits: "userSpaceOnUse",
+        markerWidth: 9,
+        markerHeight: 9,
+        orient: "auto-start-reverse",
+        class: cls,
+      });
+      marker.appendChild(svgEl("path", { d: "M0,0 L10,5 L0,10 Z" }));
+      defs.appendChild(marker);
+    }
     const viewport = svgEl("g", { class: "viewport" });
+    // Edition-group blobs, painted under everything else (see `updateHulls`).
+    const hullLayer = svgEl("g", { class: "hulls" });
     const edgeLayer = svgEl("g", { class: "edges" });
     const nodeLayer = svgEl("g", { class: "nodes" });
     // Labels live in their own layer, stacked above every node — SVG paints
@@ -8197,6 +8449,7 @@
     // positions/zoom-pan; appended last so it always paints over every
     // node/edge it crosses. See `updatePendingLine`.
     const pendingLine = svgEl("line", { class: "pending-link-line" });
+    viewport.appendChild(hullLayer);
     viewport.appendChild(edgeLayer);
     viewport.appendChild(nodeLayer);
     viewport.appendChild(labelLayer);
@@ -8291,10 +8544,22 @@
         }
         return parts.join(" · ");
       }
-      const parts = [d.kind, d.origin, d.state];
+      const parts = [edgeKindLabel(d)];
+      if (d.directed) parts[0] += ` of ${truncateLabel(endpointLabel(d.source), 28)}`;
+      else if (EDITION_KIND_SET.has(d.kind)) parts.push("original unknown");
+      parts.push(d.origin, EDGE_STATE_LABEL[d.state]);
       if (typeof d.confidence === "number") parts.push(`${Math.round(d.confidence * 100)}% confidence`);
       return parts.filter(Boolean).join(" · ");
     }
+    // What an edge says, most specific first: the edition's transformation
+    // ("instrumental"), else its kind.
+    function edgeKindLabel(d) {
+      if (d.transformation) return friendlyType(d.transformation);
+      return d.kind === "derived_from" ? "other version" : friendlyType(d.kind);
+    }
+    // Only the states that change what an edge means; an edition or a
+    // relation is just that.
+    const EDGE_STATE_LABEL = { active: "linked", blocked: "blocked", removed: "removed" };
     function showEdgeHoverLabel(event, d) {
       const [x, y] = d3.pointer(event, graphHost);
       hoverLabel.textContent = edgeHoverText(d);
@@ -8353,6 +8618,9 @@
     // has since navigated away from) checks this before touching the DOM, so
     // it can't clobber a more recent render with stale data.
     let loadToken = 0;
+    // The last relations response, rebuilt without a refetch when "Show
+    // removed links" is toggled.
+    let lastData = null;
 
     // Positions/hides the dangling "creating a link" line every frame it
     // could plausibly need to move: on `mousemove` (pointer moved, node
@@ -8453,7 +8721,7 @@
     // interpolated ones, so it takes plain `{x,y}` points rather than
     // reading `d.source`/`d.target` itself.
     function edgeLineCoords(d, source, target) {
-      if (d.edgeType === "structural") {
+      if (d.edgeType === "structural" || d.directed) {
         // Shorten the line short of the target node's edge so the
         // arrowhead is visible instead of hiding under the node shape.
         const dx = target.x - source.x;
@@ -8480,8 +8748,30 @@
           const { x1, y1, x2, y2 } = edgeLineCoords(d, d.source, d.target);
           d3.select(this).selectAll("line").attr("x1", x1).attr("y1", y1).attr("x2", x2).attr("y2", y2);
         });
+      updateHulls();
       updateLabelVisibility();
       updatePendingLine();
+    }
+
+    // One blob per edition group with two or more nodes on screen (see
+    // `.edition-hull`); a group's nodes all carry its `editionGroup`.
+    function updateHulls() {
+      const groups = new Map();
+      for (const n of currentNodesById.values()) {
+        if (n.editionGroup == null || !(n.editionSize > 1)) continue;
+        if (!groups.has(n.editionGroup)) groups.set(n.editionGroup, []);
+        groups.get(n.editionGroup).push([n.x, n.y]);
+      }
+      const hulls = Array.from(groups, ([group, points]) => ({ group, points })).filter((h) => h.points.length > 1);
+      d3.select(hullLayer)
+        .selectAll(".edition-hull")
+        .data(hulls, (h) => h.group)
+        .join("path")
+        .attr("class", "edition-hull")
+        .attr("d", (h) => {
+          const ring = (h.points.length > 2 && d3.polygonHull(h.points)) || h.points;
+          return `M${ring.map((point) => point.join(",")).join("L")}Z`;
+        });
     }
 
     // Greedy priority-based label culling — the same idea map apps use:
@@ -8534,6 +8824,8 @@
         d.kind,
         `type-${d.entry_type || "unknown"}`,
         d.entry_id === selected ? "selected-for-link" : "",
+        d.editionSize > 1 && d.defaultEdition ? "edition-default" : "",
+        d.foldsInto != null ? "edition-folded" : "",
       ]
         .filter(Boolean)
         .join(" ");
@@ -8557,6 +8849,10 @@
     // certain than others" instead of forty identical spokes. `null` leaves
     // the CSS class's own stroke-width alone (structural edges, or any
     // dedup edge missing a confidence value).
+    function edgeMarker(d) {
+      if (d.edgeType === "structural") return `url(#${STRUCTURAL_MARKER_ID})`;
+      return d.directed && d.enabled ? `url(#${EDITION_MARKER_ID})` : null;
+    }
     function edgeStrokeWidth(d) {
       if (d.edgeType !== "dedup" || typeof d.confidence !== "number") return null;
       return `${(1 + d.confidence * 2.5).toFixed(2)}px`;
@@ -8742,6 +9038,7 @@
               .attr("opacity", 0)
               .call(dragBehavior);
             g.append((d) => svgEl(d.kind === "structural" ? "rect" : "circle"));
+            g.append(() => svgEl("circle", { class: "edition-badge", cx: 8, cy: -8, r: 4 }));
             g.on("mouseenter", (event, d) => showHoverLabel(d));
             g.on("mouseleave", hideHoverLabel);
             return g;
@@ -8801,8 +9098,7 @@
             // without changing how anything actually looks. Both lines get
             // identical coordinates every tick — see `ticked()`.
             g.append("line").attr("class", "edge-hit");
-            const visible = g.append("line").attr("class", edgeClass);
-            visible.filter((d) => d.edgeType === "structural").attr("marker-end", `url(#${markerId})`);
+            g.append("line").attr("class", edgeClass);
             // Click used to act immediately on a dedup edge (unlink, or
             // force-block on shift-click) — with only two outcomes that was
             // fine, but RELATE_KINDS adds a whole taxonomy of possible
@@ -8824,7 +9120,14 @@
           (update) => update,
           (exit) => exit.transition().duration(200).attr("opacity", 0).remove()
         );
-      edgeJoinSel.select("line:last-child").attr("class", edgeClass).style("stroke-width", edgeStrokeWidth);
+      // Set on every update, not just on enter: a refetch can give an
+      // existing edge a direction (derive) or take it away (removed).
+      edgeJoinSel
+        .select("line:last-child")
+        .attr("class", edgeClass)
+        .attr("marker-end", edgeMarker)
+        .style("stroke-width", edgeStrokeWidth);
+      updateHulls();
 
       simulation.nodes(nodes);
       linkForce.links(links);
@@ -8934,28 +9237,71 @@
         return;
       }
       if (myToken !== loadToken) return;
-      const dedupEdges = data.edges;
+      lastData = data;
+      buildGraph(data);
+    }
+
+    // Turns a relations response into nodes and links and joins them in.
+    // Disabled rows are left out unless `showRemoved` is on or this session
+    // edited the pair, and so is everything no longer connected to the
+    // anchor without them. An edition row with a known direction runs
+    // original → derived (`directed`), the way structural edges run
+    // release → track.
+    function buildGraph(data) {
+      const removedCount = data.edges.filter((e) => !e.enabled).length;
+      removedToggleText.textContent = removedCount ? `Show removed links (${removedCount})` : "Show removed links";
+      const shownEdges = data.edges.filter(
+        (e) => e.enabled || showRemoved || touchedPairs.has(pairKey(e.entry_a, e.entry_b))
+      );
       const structuralEdges = data.structural_edges || [];
+      const neighbors = new Map();
+      const connect = (a, b) => {
+        if (!neighbors.has(a)) neighbors.set(a, []);
+        if (!neighbors.has(b)) neighbors.set(b, []);
+        neighbors.get(a).push(b);
+        neighbors.get(b).push(a);
+      };
+      for (const e of shownEdges) connect(e.entry_a, e.entry_b);
+      for (const e of structuralEdges) connect(e.parent_entry_id, e.child_entry_id);
+      const reachable = new Set([currentEntryId]);
+      const queue = [currentEntryId];
+      while (queue.length) {
+        for (const next of neighbors.get(queue.pop()) || []) {
+          if (!reachable.has(next)) {
+            reachable.add(next);
+            queue.push(next);
+          }
+        }
+      }
+      const dedupEdges = shownEdges.filter((e) => reachable.has(e.entry_a) && reachable.has(e.entry_b));
       const memberIds = new Set();
       for (const e of dedupEdges) {
         memberIds.add(e.entry_a);
         memberIds.add(e.entry_b);
       }
 
-      const nodes = data.nodes.map((n) => ({
-        id: String(n.entry_id),
-        entry_id: n.entry_id,
-        title: n.title,
-        entry_type: n.entry_type,
-        sources: n.sources,
-        kind: n.entry_id === currentEntryId ? "self" : memberIds.has(n.entry_id) ? "member" : "structural",
-      }));
+      const nodes = data.nodes
+        .filter((n) => reachable.has(n.entry_id))
+        .map((n) => ({
+          id: String(n.entry_id),
+          entry_id: n.entry_id,
+          title: n.title,
+          entry_type: n.entry_type,
+          sources: n.sources,
+          editionGroup: n.edition_group,
+          editionSize: n.edition_size,
+          defaultEdition: n.default_edition,
+          foldsInto: n.folds_into,
+          kind: n.entry_id === currentEntryId ? "self" : memberIds.has(n.entry_id) ? "member" : "structural",
+        }));
       const links = [];
       for (const e of dedupEdges) {
+        const direction = editionDirection(e);
         links.push({
           id: `dedup-${e.entry_a}-${e.entry_b}-${e.kind}`,
-          source: String(e.entry_a),
-          target: String(e.entry_b),
+          source: String(direction ? direction.original : e.entry_a),
+          target: String(direction ? direction.derived : e.entry_b),
+          directed: Boolean(direction),
           edgeType: "dedup",
           entry_a: e.entry_a,
           entry_b: e.entry_b,
@@ -8964,6 +9310,7 @@
           enabled: e.enabled,
           confidence: e.confidence,
           extra: e.extra,
+          transformation: transformationOf(e.extra),
           state: dedupEdgeState(e),
         });
       }
@@ -8985,7 +9332,11 @@
     // here — refresh just the graph and the card fields that can actually
     // change as a result (title/date/stamps are a union across soft-linked
     // members, see `refreshAfterEdit`), never the whole detail view.
-    function afterEdit(promise) {
+    //
+    // `a`/`b` is the pair edited: it stays drawn even once disabled (see
+    // `touchedPairs`), so the edit can be undone from the same edge.
+    function afterEdit(promise, a, b) {
+      touchedPairs.add(pairKey(a, b));
       promise
         .then(() => {
           refreshAfterEdit(currentEntryId);
@@ -9025,13 +9376,10 @@
     }
 
     // The kind-picking half: both endpoints are already fixed, so this is
-    // just "what is this connection" — same identity (the old default
-    // behavior) or one of the RELATE_KINDS version-kind annotations, shown
-    // in the same detail panel an existing node/edge click would use.
-    // Mirrors `relateKindPicker`'s options list but can't reuse it directly:
-    // that one always posts to `/api/relations/relate` for an edge that
-    // already exists, while this also has to cover the same-identity `link`
-    // path for a pair that doesn't have an edge yet.
+    // just "what is this connection" — same identity, an edition (with
+    // which side is the original), or another relation kind — shown in the
+    // same detail panel an existing node/edge click would use. See
+    // `connectionControls`.
     function showCreateLinkPicker(a, b) {
       pickerOpen = true;
       const nodeA = currentNodesById.get(String(a));
@@ -9041,28 +9389,18 @@
       detailPanel.appendChild(
         el("p", { className: "graph-detail-type", text: `${endpointLabel(nodeA)} ↔ ${endpointLabel(nodeB)}` })
       );
-      const select = el(
-        "select",
-        { className: "graph-detail-relate-select" },
-        [el("option", { value: "same_identity", text: "Same identity (link)" })].concat(
-          RELATE_KINDS.map((kind) => el("option", { value: kind, text: friendlyType(kind) }))
-        )
+      const connection = connectionControls(
+        (side) => `${truncateLabel(endpointLabel(side === "a" ? nodeA : nodeB), 32)} (${catalogNo(side === "a" ? a : b)})`,
+        { identity: true }
       );
-      detailPanel.appendChild(select);
+      detailPanel.appendChild(el("div", { className: "graph-detail-fields" }, connection.elements));
       const actions = el("div", { className: "graph-detail-actions" });
       actions.appendChild(
         el("button", {
           className: "ghost-btn",
           type: "button",
           text: "Create",
-          onclick: () => {
-            const kind = select.value;
-            afterEdit(
-              kind === "same_identity"
-                ? postJson("/api/relations/link", { a, b })
-                : postJson("/api/relations/relate", { a, b, kind })
-            );
-          },
+          onclick: () => afterEdit(connection.request(a, b), a, b),
         })
       );
       actions.appendChild(
@@ -9071,95 +9409,85 @@
       detailPanel.appendChild(actions);
     }
 
-    // Buttons for whatever's actually valid on this edge's kind — a
-    // RELATE_KINDS edge only ever offers removal (it's an independent row,
-    // not a toggle), a `derived_from` edge removal or restore (it keeps the
-    // pipeline's direction; `TOGGLE_KINDS` in `src/bin/server/player.rs`),
-    // the other dedup-v2 primitive-relation edges nothing (pipeline-only
-    // assertions — `/api/relations/relate`+`unrelate` reject them
-    // server-side), while same_identity/different_identity/variant get the
-    // same link/unlink/force-block/soften-block moves the old raw click and
-    // shift-click used to perform directly.
+    // Buttons for whatever the server accepts on this edge's kind: the
+    // identity ledger's link/unlink/force-block/soften-block for
+    // same_identity/variant/different_identity; remove or restore for a
+    // `derived_from` row (`TOGGLE_KINDS`) or a `RELATE_KINDS` row; nothing
+    // for any other kind (provider `arrangement`, pipeline-only rows).
     function edgeDetailActions(d) {
       const actions = el("div", { className: "graph-detail-actions" });
       const button = (text, onclick) => el("button", { className: "ghost-btn", type: "button", text, onclick });
-      if (TOGGLE_RELATION_KIND_SET.has(d.kind)) {
-        const pair = { a: d.entry_a, b: d.entry_b, kind: d.kind };
+      const edit = (promise) => afterEdit(promise, d.entry_a, d.entry_b);
+      const pair = { a: d.entry_a, b: d.entry_b, kind: d.kind };
+      if (IDENTITY_KIND_SET.has(d.kind) || d.kind === "different_identity") {
+        const linked = d.state === "active";
+        const blocked = d.state === "blocked";
+        if (!linked) {
+          actions.appendChild(
+            button(blocked ? "Link anyway (same identity)" : "Link (same identity)", () =>
+              edit(postJson("/api/relations/link", { a: d.entry_a, b: d.entry_b }))
+            )
+          );
+        }
+        if (linked) {
+          actions.appendChild(
+            button("Unlink", () => edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false })))
+          );
+        }
         actions.appendChild(
-          d.state === "cleared"
-            ? button("Restore relation", () => afterEdit(postJson("/api/relations/restore", pair)))
-            : button("Remove relation", () => afterEdit(postJson("/api/relations/unrelate", pair)))
-        );
-        return actions;
-      }
-      if (PRIMITIVE_RELATION_KIND_SET.has(d.kind)) {
-        return actions;
-      }
-      if (RELATE_KIND_SET.has(d.kind)) {
-        actions.appendChild(
-          d.state === "cleared"
-            ? button("Restore relation", () =>
-                afterEdit(postJson("/api/relations/relate", { a: d.entry_a, b: d.entry_b, kind: d.kind }))
+          blocked
+            ? button("Soften block", () =>
+                edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false }))
               )
-            : button("Remove relation", () =>
-                afterEdit(postJson("/api/relations/unrelate", { a: d.entry_a, b: d.entry_b, kind: d.kind }))
+            : button("Force block", () =>
+                edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: true }))
               )
         );
-        return actions;
-      }
-      if (d.state !== "active") {
+      } else if (TOGGLE_RELATION_KIND_SET.has(d.kind)) {
         actions.appendChild(
-          button(d.state === "blocked" ? "Link anyway (same identity)" : "Restore link", () =>
-            afterEdit(postJson("/api/relations/link", { a: d.entry_a, b: d.entry_b }))
-          )
+          d.enabled
+            ? button("Remove relation", () => edit(postJson("/api/relations/unrelate", pair)))
+            : button("Restore relation", () => edit(postJson("/api/relations/restore", pair)))
         );
-      }
-      if (d.state === "active" || d.state === "suggested") {
+      } else if (RELATE_KIND_SET.has(d.kind)) {
         actions.appendChild(
-          button("Unlink", () =>
-            afterEdit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false }))
-          )
-        );
-      }
-      if (d.state === "blocked") {
-        actions.appendChild(
-          button("Soften block", () =>
-            afterEdit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false }))
-          )
-        );
-      } else {
-        actions.appendChild(
-          button("Force block", () =>
-            afterEdit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: true }))
-          )
+          d.enabled
+            ? button("Remove relation", () => edit(postJson("/api/relations/unrelate", pair)))
+            : button("Restore relation", () => edit(postJson("/api/relations/relate", pair)))
         );
       }
       return actions;
     }
 
-    // Both endpoints are already known for an edge (unlike the node picker's
-    // "Relate as…" flow, which still has to search for the other side), so
-    // this is just a kind + a submit button — tags the same pair with an
-    // additional RELATE_KINDS row rather than replacing whatever's already
-    // there, since a pair can legitimately be e.g. both `cover` and `live`
-    // at once.
-    function relateKindPicker(entryA, entryB) {
-      const wrap = el("div", { className: "graph-detail-relate" });
+    function isEditableKind(kind) {
+      return (
+        IDENTITY_KIND_SET.has(kind) ||
+        kind === "different_identity" ||
+        TOGGLE_RELATION_KIND_SET.has(kind) ||
+        RELATE_KIND_SET.has(kind)
+      );
+    }
+
+    // Tags the pair with an additional non-edition relation (medley,
+    // same_artist, ...) on top of whatever it already has. Edition kinds
+    // live in `editionEditor`, which records a direction.
+    function otherRelationPicker(entryA, entryB) {
+      if (!OTHER_RELATE_KINDS.length) return null;
       const select = el(
         "select",
-        { className: "graph-detail-relate-select" },
-        RELATE_KINDS.map((kind) => el("option", { value: kind, text: friendlyType(kind) }))
+        { className: "graph-detail-relate-select", "aria-label": "Other relation" },
+        OTHER_RELATE_KINDS.map((kind) => el("option", { value: kind, text: friendlyType(kind) }))
       );
-      wrap.appendChild(select);
-      wrap.appendChild(
+      return el("div", { className: "graph-detail-relate" }, [
+        select,
         el("button", {
           className: "ghost-btn",
           type: "button",
           text: "Add relation",
-          onclick: () => afterEdit(postJson("/api/relations/relate", { a: entryA, b: entryB, kind: select.value })),
-        })
-      );
-      return wrap;
+          onclick: () =>
+            afterEdit(postJson("/api/relations/relate", { a: entryA, b: entryB, kind: select.value }), entryA, entryB),
+        }),
+      ]);
     }
 
     // Rewrites an edition edge as "the other side is a <kind> of <original>"
@@ -9206,11 +9534,13 @@
             original: from,
             derived: from === d.entry_a ? d.entry_b : d.entry_a,
             transformation: kind.value || null,
-          })
+          }),
+          d.entry_a,
+          d.entry_b
         );
       };
       return el("div", { className: "graph-detail-edition" }, [
-        el("p", { className: "graph-detail-empty", text: "Edit as an edition:" }),
+        el("p", { className: "graph-detail-empty", text: d.enabled ? "Edit as an edition:" : "Accept as an edition:" }),
         el("div", { className: "graph-detail-relate" }, [
           original,
           kind,
@@ -9238,17 +9568,21 @@
         );
         return;
       }
-      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: friendlyType(d.kind) }));
-      const bits = [`${endpointLabel(d.source)} ↔ ${endpointLabel(d.target)}`, d.origin, d.state];
+      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: edgeKindLabel(d) }));
+      // `d.source` is the original for a directed edge (see `buildGraph`).
+      const ends = d.directed
+        ? `${endpointLabel(d.source)} (original) → ${endpointLabel(d.target)}`
+        : `${endpointLabel(d.source)} ↔ ${endpointLabel(d.target)}`;
+      const bits = [ends, EDITION_KIND_SET.has(d.kind) && !d.directed ? "original unknown" : null];
+      if (d.transformation) bits.push(friendlyType(d.kind));
+      bits.push(d.origin, EDGE_STATE_LABEL[d.state]);
       if (typeof d.confidence === "number") bits.push(`${Math.round(d.confidence * 100)}% confidence`);
       detailPanel.appendChild(el("p", { className: "graph-detail-type", text: bits.filter(Boolean).join(" · ") }));
-      // `extra` (entry_relation.extra) carries the RELATE reason and, for
-      // dedup-v2 primitive-relation kinds, the script's metadata map (e.g.
-      // `transformation`/`derived_side` for `derived_from` — see
-      // config/match.example.rhai). Surfaced as plain "key: value" lines,
-      // `reason` first since it's the one field every relate() call sets.
+      // `extra` (entry_relation.extra) carries the RELATE reason and the
+      // script's metadata map. `reason` goes first; the direction and
+      // transformation fields are already in the lines above.
       if (d.extra && typeof d.extra === "object") {
-        const { reason, ...rest } = d.extra;
+        const { reason, source_entry, derived_entry, transformation, ...rest } = d.extra;
         const lines = [];
         if (reason) lines.push(reason);
         for (const [k, v] of Object.entries(rest)) lines.push(`${friendlyType(k)}: ${v}`);
@@ -9256,19 +9590,23 @@
           detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: line }));
         }
       }
-      if (PRIMITIVE_RELATION_KIND_SET.has(d.kind) && !TOGGLE_RELATION_KIND_SET.has(d.kind)) {
+      if (!isEditableKind(d.kind)) {
         detailPanel.appendChild(
           el("p", {
             className: "graph-detail-empty",
-            text: "Asserted by the dedup pipeline — not manually editable here.",
+            text:
+              d.origin === "provider"
+                ? "Asserted by a provider (e.g. MusicBrainz) — not editable here."
+                : "Asserted by the dedup pipeline — not editable here.",
           })
         );
       }
       detailPanel.appendChild(edgeDetailActions(d));
-      if (EDITION_KIND_SET.has(d.kind) && d.origin !== "provider" && d.state !== "cleared") {
+      if (EDITION_KIND_SET.has(d.kind) && d.origin !== "provider") {
         detailPanel.appendChild(editionEditor(d));
       }
-      detailPanel.appendChild(relateKindPicker(d.entry_a, d.entry_b));
+      const other = otherRelationPicker(d.entry_a, d.entry_b);
+      if (other) detailPanel.appendChild(other);
     }
 
     graphHost.addEventListener("dragover", (e) => {
@@ -9316,7 +9654,7 @@
         mountMergePicker(pickerHost, currentEntryId, currentEntryType, new Set(currentSoftLinkedIds), showError);
       }
     });
-    section.appendChild(mergeBtn);
+    toolbar.appendChild(mergeBtn);
     section.appendChild(pickerHost);
 
     const relateBtn = el("button", { className: "ghost-btn", type: "button", text: "Relate as…" });
@@ -9327,10 +9665,11 @@
         mountRelatePicker(relatePickerHost, currentEntryId, currentEntryType, showError);
       }
     });
-    section.appendChild(relateBtn);
+    toolbar.appendChild(relateBtn);
     section.appendChild(relatePickerHost);
 
     section.appendChild(errorEl);
+    section.appendChild(stage);
 
     // Back to the placeholder state and a clean selection — used when
     // switching to a different anchor entry, after an edit settles, and to
@@ -9354,6 +9693,7 @@
     // on `entryId` and re-fetches/re-joins onto the live node/link data,
     // which is what produces the morph described above.
     function load(entryId, entryType, softLinkedIds) {
+      if (entryId !== currentEntryId) touchedPairs.clear();
       currentEntryId = entryId;
       currentEntryType = entryType;
       currentSoftLinkedIds = softLinkedIds || [];
@@ -9623,12 +9963,8 @@
         text: "Pick a relation kind, then the other entry — reversible any time from that edge's details.",
       })
     );
-    const kindSelect = el(
-      "select",
-      { className: "graph-detail-relate-select" },
-      RELATE_KINDS.map((kind) => el("option", { value: kind, text: friendlyType(kind) }))
-    );
-    host.appendChild(kindSelect);
+    const connection = connectionControls((side) => (side === "a" ? "This entry" : "The picked entry"));
+    host.appendChild(el("div", { className: "graph-detail-fields" }, connection.elements));
     const input = el("input", {
       type: "search",
       className: "merge-picker-input",
@@ -9674,7 +10010,7 @@
               text: `${catalogNo(r.entry_id)} — ${r.title || "(untitled)"}`,
               onclick: async () => {
                 try {
-                  await postJson("/api/relations/relate", { a: entryId, b: r.entry_id, kind: kindSelect.value });
+                  await connection.request(entryId, r.entry_id);
                   refreshAfterEdit(entryId);
                 } catch (err) {
                   showError(err.message);
