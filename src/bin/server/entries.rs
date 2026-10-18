@@ -26,6 +26,9 @@ pub struct EntrySummary {
     pub entry_id: i64,
     pub entry_type: String,
     pub title: Option<String>,
+    /// True when `title` is a name the user chose (`entry_display_name`)
+    /// rather than one picked from the sources' aliases.
+    pub renamed: bool,
     pub release_date: Option<String>,
     /// Union of sources across this entry and every entry it's soft-linked
     /// with (see `soft_linked_ids`) — not just this one row's own sources.
@@ -181,6 +184,116 @@ fn pick_title(
     })
 }
 
+/// The name the user chose for any of a component's `members`, which wins
+/// over `pick_title`. `set_display_name` keeps at most one per component;
+/// if soft dedup later joins two named entries, the first member's wins.
+fn chosen_name(members: &[i64], display_names: &HashMap<i64, String>) -> Option<String> {
+    members.iter().find_map(|m| display_names.get(m).cloned())
+}
+
+/// The name the user chose for crediting `artist` on an entry whose
+/// soft-identity component is `entry_members`, out of `overrides`
+/// (`MusicDb::credit_display_names` for those members).
+pub fn credit_name<'a>(
+    overrides: &'a [(i64, i64, String)],
+    entry_members: &[i64],
+    artist: &EntrySummary,
+) -> Option<&'a str> {
+    overrides
+        .iter()
+        .find(|(entry, credited, _)| {
+            entry_members.contains(entry)
+                && (*credited == artist.entry_id || artist.soft_linked_ids.contains(credited))
+        })
+        .map(|(_, _, name)| name.as_str())
+}
+
+/// One artist credited on an entry, for renaming the credit.
+#[derive(Serialize)]
+pub struct Credit {
+    pub artist_id: i64,
+    /// What the entry credits the artist as: `credit_name`, else
+    /// `artist_name`.
+    pub name: String,
+    /// The artist's own display name.
+    pub artist_name: String,
+    pub renamed: bool,
+    /// The artist's aliases (`entry_aliases`).
+    pub aliases: Vec<String>,
+}
+
+/// The main artists any source credits on `entry_id`'s component, one per
+/// artist identity, in the order the sources list them.
+pub async fn entry_credits(db: &MusicDb, entry_id: i64) -> anyhow::Result<Vec<Credit>> {
+    let members = component_members(db, entry_id).await?;
+    let mut artist_ids: Vec<i64> = Vec::new();
+    for &m in &members {
+        for c in db.main_artist_credits(m).await? {
+            if !artist_ids.contains(&c.artist_entry_id) {
+                artist_ids.push(c.artist_entry_id);
+            }
+        }
+    }
+    let artists = entry_summaries(db, &artist_ids).await?;
+    let overrides = db.credit_display_names(&members).await?;
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut out = Vec::new();
+    for id in artist_ids {
+        let Some(artist) = artists.get(&id) else {
+            continue;
+        };
+        if artist.entry_type != "artist" || seen.contains(&id) {
+            continue;
+        }
+        seen.insert(id);
+        seen.extend(&artist.soft_linked_ids);
+        let artist_name = artist.title.clone().unwrap_or_default();
+        let chosen = credit_name(&overrides, &members, artist);
+        out.push(Credit {
+            artist_id: id,
+            name: chosen.map_or_else(|| artist_name.clone(), str::to_owned),
+            artist_name,
+            renamed: chosen.is_some(),
+            aliases: entry_aliases(db, id).await?,
+        });
+    }
+    Ok(out)
+}
+
+/// Every distinct alias across `entry_id`'s soft-identity component, in
+/// `pick_title`'s order of preference: the names a user can choose between
+/// when renaming it.
+pub async fn entry_aliases(db: &MusicDb, entry_id: i64) -> anyhow::Result<Vec<String>> {
+    let members = component_members(db, entry_id).await?;
+    let mut sources = db.source_rows_by_entry_ids(&members).await?;
+    sources.sort_by_key(|s| s.source == "youtube");
+    let pairs: Vec<(String, String)> = sources
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let aliases = db.alias_rows_for_pairs(&pairs).await?;
+    let rank: HashMap<&(String, String), usize> =
+        pairs.iter().enumerate().map(|(i, p)| (p, i)).collect();
+    let mut ordered: Vec<_> = aliases
+        .iter()
+        .map(|a| {
+            let pair_rank = rank
+                .get(&(a.source.clone(), a.identifier.clone()))
+                .copied()
+                .unwrap_or(usize::MAX);
+            (!a.primary_alias, pair_rank, a.name.as_str())
+        })
+        .collect();
+    ordered.sort();
+    let mut names: Vec<String> = Vec::new();
+    for (_, _, name) in ordered {
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
 /// Resolve `ids` to display-ready summaries in a handful of batch queries
 /// (not one round trip per id, nor one per soft-identity component). Title
 /// picks a primary alias if any member's source has one, else the first
@@ -237,6 +350,7 @@ pub async fn entry_summaries_with(
         .map(|s| (s.source.clone(), s.identifier.clone()))
         .collect();
     let alias_rows = db.alias_rows_for_pairs(&pairs).await?;
+    let display_names = db.display_names(&expanded_ids).await?;
 
     let mut aliases_by_pair: HashMap<(String, String), Vec<&musiclib_rs::musicdb::AliasRow>> =
         HashMap::new();
@@ -271,7 +385,9 @@ pub async fn entry_summaries_with(
             .flat_map(|m| sources_by_entry.get(m).cloned().unwrap_or_default())
             .collect();
 
-        let title = pick_title(&member_sources, &aliases_by_pair);
+        let chosen = chosen_name(members, &display_names);
+        let renamed = chosen.is_some();
+        let title = chosen.or_else(|| pick_title(&member_sources, &aliases_by_pair));
         let release_date = member_sources.iter().find_map(|s| s.release_date.clone());
 
         let default_canonical = editions.default_member_of(canonical);
@@ -279,10 +395,8 @@ pub async fn entry_summaries_with(
             .members_of(canonical)
             .into_iter()
             .map(|sib| {
-                let sib_sources: Vec<&musiclib_rs::musicdb::SourceRow> = components
-                    .get(&sib)
-                    .cloned()
-                    .unwrap_or_else(|| vec![sib])
+                let sib_members = components.get(&sib).cloned().unwrap_or_else(|| vec![sib]);
+                let sib_sources: Vec<&musiclib_rs::musicdb::SourceRow> = sib_members
                     .iter()
                     .flat_map(|m| sources_by_entry.get(m).cloned().unwrap_or_default())
                     .collect();
@@ -294,7 +408,8 @@ pub async fn entry_summaries_with(
                     .unwrap_or((None, None));
                 EditionRef {
                     entry_id: sib,
-                    title: pick_title(&sib_sources, &aliases_by_pair),
+                    title: chosen_name(&sib_members, &display_names)
+                        .or_else(|| pick_title(&sib_sources, &aliases_by_pair)),
                     kind,
                     transformation,
                     is_default: sib == default_canonical,
@@ -311,6 +426,7 @@ pub async fn entry_summaries_with(
                 entry_id: id,
                 entry_type: entry_type.to_string(),
                 title,
+                renamed,
                 release_date,
                 sources: member_sources
                     .iter()

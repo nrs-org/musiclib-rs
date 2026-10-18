@@ -24,6 +24,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use http_body_util::{BodyExt as _, StreamBody};
 use hyper::{Response, StatusCode, body::Frame};
+use musiclib_rs::musicdb::{MainCredit, MusicDb};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::watch;
@@ -309,6 +310,10 @@ struct Mounted {
     identifier: String,
     #[serde(default)]
     art: Option<String>,
+    /// What the source says about the artist (a YouTube channel, Spotify's
+    /// artists): the queue item only has a title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artist: Option<String>,
     /// False for a bare embed the device can't drive (no play/pause/volume),
     /// e.g. a Spotify preview iframe on a device not connected to Spotify.
     #[serde(default = "default_true")]
@@ -368,6 +373,24 @@ struct Session {
     /// Set when a track ended with nothing after it: once a recommendation
     /// lands, advance if this is still the track.
     advance_after_recommend: Option<u64>,
+    /// The library's artist line for a track (`artist_loop`).
+    credited: Option<Credited>,
+}
+
+/// `artists`, as credited for `entry_id` with `source` mounted.
+struct Credited {
+    entry_id: i64,
+    source: Option<String>,
+    artists: Vec<CreditedArtist>,
+    /// Set by `recredit`: look the names up again.
+    stale: bool,
+}
+
+/// One name on the artist line, with the artist entry it opens.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct CreditedArtist {
+    entry_id: i64,
+    name: String,
 }
 
 impl Session {
@@ -434,6 +457,8 @@ impl Session {
             "devices": devices,
             "active_device": self.active_device,
             "current": self.queue.current(),
+            "artist": self.artist(),
+            "artists": self.artists(),
             "track_seq": self.track_seq,
             "source": self.source,
             "mounted": self.mounted,
@@ -449,6 +474,38 @@ impl Session {
             "wants_recommend": self.needs_recommend(),
             "volume": self.volume,
         })
+    }
+
+    /// The current track's credited artists from the library, kept from
+    /// the last mounted source until the new one's are looked up.
+    fn artists(&self) -> &[CreditedArtist] {
+        match (&self.credited, self.queue.current()) {
+            (Some(c), Some(current)) if c.entry_id == current.entry_id => &c.artists,
+            _ => &[],
+        }
+    }
+
+    /// `artists` as one line, for the OS media controls.
+    fn artist(&self) -> Option<String> {
+        let names: Vec<&str> = self.artists().iter().map(|a| a.name.as_str()).collect();
+        (!names.is_empty()).then(|| names.join(", "))
+    }
+
+    /// What `artist_loop` should look up next, if the current track or its
+    /// mounted source changed since the last lookup.
+    fn uncredited(&self) -> Option<(i64, Option<String>)> {
+        let entry_id = self.queue.current()?.entry_id;
+        let source = self.mounted.as_ref().map(|m| m.identifier.clone());
+        match &self.credited {
+            Some(c)
+                if !c.stale
+                    && c.entry_id == entry_id
+                    && (c.source == source || source.is_none()) =>
+            {
+                None
+            }
+            _ => Some((entry_id, source)),
+        }
     }
 
     fn persisted(&self) -> Persisted {
@@ -506,6 +563,43 @@ impl PlaybackHub {
         self.session.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Every snapshot from now on, starting with the current one.
+    pub fn subscribe(&self) -> watch::Receiver<Arc<str>> {
+        self.tx.subscribe()
+    }
+
+    /// A command from the OS media controls (`media_controls`). They aren't
+    /// a device and can't play anything, so they act as the device that
+    /// last played: play resumes there while it's connected. With no such
+    /// device, only pausing and seeking apply.
+    #[cfg(feature = "media_controls")]
+    pub fn media_key(&self, key: MediaKey) {
+        let mut s = self.lock();
+        let device = s
+            .active_device
+            .clone()
+            .or_else(|| s.last_active_device.clone())
+            .filter(|d| s.devices.contains_key(d));
+        let command = match key {
+            MediaKey::Pause | MediaKey::Stop => Command::Pause,
+            MediaKey::SeekTo(ms) => Command::Seek { position_ms: ms },
+            MediaKey::SeekBy(delta) => {
+                let target = s.position_now().saturating_add_signed(delta);
+                Command::Seek {
+                    position_ms: s.duration_ms.map_or(target, |d| target.min(d)),
+                }
+            }
+            _ if device.is_none() => return,
+            MediaKey::Play => Command::Play,
+            MediaKey::Toggle => Command::Toggle,
+            MediaKey::Next => Command::Next,
+            MediaKey::Prev => Command::Prev,
+        };
+        if apply(&mut s, device.as_deref().unwrap_or(""), command).is_ok() {
+            self.publish(&mut s);
+        }
+    }
+
     fn publish(&self, s: &mut Session) {
         s.version += 1;
         self.tx.send_replace(Arc::from(s.snapshot().to_string()));
@@ -538,6 +632,69 @@ impl PlaybackHub {
                 tracing::warn!("saving {}: {e}", self.path.display());
             }
         }
+    }
+
+    /// Fills in the current track's artist line from the library's credits
+    /// (`artist_line`) whenever the track or its mounted source changes.
+    /// Runs for the life of the server.
+    pub async fn artist_loop(self: Arc<Self>, db: MusicDb) {
+        let mut snapshots = self.subscribe();
+        loop {
+            let wanted = self.lock().uncredited();
+            if let Some((entry_id, source)) = wanted {
+                let artists = match artist_line(&db, entry_id, source.as_deref()).await {
+                    Ok(artists) => artists,
+                    Err(e) => {
+                        tracing::warn!("looking up the artists of entry {entry_id}: {e}");
+                        Vec::new()
+                    }
+                };
+                let mut s = self.lock();
+                let changed = s.queue.current().map(|c| c.entry_id) == Some(entry_id)
+                    && s.credited.as_ref().is_none_or(|c| c.artists != artists);
+                s.credited = Some(Credited {
+                    entry_id,
+                    source,
+                    artists,
+                    stale: false,
+                });
+                if changed {
+                    self.publish(&mut s);
+                }
+                // Something else may have changed during the lookup.
+                continue;
+            }
+            if snapshots.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Shows queued `entry_ids` as `title` (the entry was renamed).
+    pub fn retitle(&self, entry_ids: &[i64], title: &str) {
+        let mut s = self.lock();
+        let mut changed = false;
+        for item in &mut s.queue.items {
+            if entry_ids.contains(&item.entry_id) && item.title.as_deref() != Some(title) {
+                item.title = Some(title.to_owned());
+                changed = true;
+            }
+        }
+        if changed {
+            self.publish(&mut s);
+        }
+    }
+
+    /// Looks the current track's artists up again (an artist was renamed),
+    /// keeping the old line until the new one is in.
+    pub fn recredit(&self) {
+        let mut s = self.lock();
+        let Some(c) = s.credited.as_mut() else {
+            return;
+        };
+        c.stale = true;
+        // Wakes `artist_loop`.
+        self.publish(&mut s);
     }
 
     fn connect(&self, device: &str, name: &str) {
@@ -587,6 +744,75 @@ impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.hub.disconnect(&self.device);
     }
+}
+
+/// The artist line for a track from its library credits: the artists one
+/// of the sources of its soft-identity component credits (`credited_artists`), each by the name the user
+/// credits it as on this track, else the canonical name of its artist
+/// identity — so an auto-generated YouTube "… - Topic" channel linked to the
+/// artist reads as the artist.
+async fn artist_line(
+    db: &MusicDb,
+    entry_id: i64,
+    mounted: Option<&str>,
+) -> anyhow::Result<Vec<CreditedArtist>> {
+    // Every entry soft-linked to the track: its sources are spread over
+    // them (a Discogs track, the MusicBrainz recording, the YouTube upload).
+    let members = crate::entries::component_members(db, entry_id).await?;
+    let mut credits = Vec::new();
+    for &m in &members {
+        credits.extend(db.main_artist_credits(m).await?);
+    }
+    let ids = credited_artists(&credits, mounted);
+    let summaries = crate::entries::entry_summaries(db, &ids).await?;
+    let overrides = db.credit_display_names(&members).await?;
+    let mut artists: Vec<CreditedArtist> = Vec::new();
+    for id in &ids {
+        let name = summaries.get(id).and_then(|s| {
+            crate::entries::credit_name(&overrides, &members, s).or(s.title.as_deref())
+        });
+        if let Some(name) = name
+            && !artists.iter().any(|a| a.name == name)
+        {
+            artists.push(CreditedArtist {
+                entry_id: *id,
+                name: name.to_owned(),
+            });
+        }
+    }
+    Ok(artists)
+}
+
+/// The artists one source credits as main artists, in credit order. The
+/// mounted source's own credits win, then MusicBrainz's, then any other
+/// source's; an uploader only when nothing lists artists.
+fn credited_artists(credits: &[MainCredit], mounted: Option<&str>) -> Vec<i64> {
+    let mut by_source: BTreeMap<(&str, &str), Vec<&MainCredit>> = BTreeMap::new();
+    for c in credits {
+        by_source
+            .entry((&c.source, &c.identifier))
+            .or_default()
+            .push(c);
+    }
+    let Some((_, best)) = by_source
+        .into_iter()
+        .min_by_key(|((source, identifier), list)| {
+            (
+                list.iter().all(|c| c.role == "uploader"),
+                Some(*identifier) != mounted,
+                *source != "musicbrainz",
+            )
+        })
+    else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for c in best {
+        if !ids.contains(&c.artist_entry_id) {
+            ids.push(c.artist_entry_id);
+        }
+    }
+    ids
 }
 
 /// `GET /api/playback` — the current snapshot (debugging; the frontend
@@ -645,6 +871,22 @@ pub fn events(
         .header("X-Accel-Buffering", "no")
         .body(body.boxed_unsync())
         .expect("response builder")
+}
+
+/// What the OS media controls can ask of the session
+/// (`PlaybackHub::media_key`).
+#[cfg(feature = "media_controls")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKey {
+    Play,
+    Pause,
+    Toggle,
+    Stop,
+    Next,
+    Prev,
+    SeekTo(u64),
+    /// Milliseconds, either way, clamped to the track.
+    SeekBy(i64),
 }
 
 #[derive(Deserialize)]
@@ -1091,6 +1333,123 @@ mod tests {
         apply(&mut s, "b", Command::Next).unwrap();
         assert_eq!(s.active_device.as_deref(), Some("a"));
         assert_eq!(s.track_seq, 2);
+    }
+
+    #[test]
+    fn the_artists_come_from_one_source_preferring_the_mounted_one() {
+        let credit = |source: &str, identifier: &str, role: &str, artist: i64| MainCredit {
+            source: source.into(),
+            identifier: identifier.into(),
+            role: role.into(),
+            artist_entry_id: artist,
+        };
+        let credits = [
+            credit("musicbrainz", "mb", "listed_artist", 1),
+            credit("spotify", "sp", "listed_artist", 2),
+            credit("spotify", "sp", "listed_artist", 3),
+            credit("youtube", "yt", "uploader", 4),
+        ];
+        assert_eq!(credited_artists(&credits, Some("sp")), [2, 3]);
+        // Not the mounted source's (or it credits nobody): MusicBrainz first.
+        assert_eq!(credited_artists(&credits, Some("other")), [1]);
+        // An uploader only when nothing lists artists.
+        assert_eq!(credited_artists(&credits, Some("yt")), [1]);
+        assert_eq!(credited_artists(&credits[3..], Some("yt")), [4]);
+        assert!(credited_artists(&[], None).is_empty());
+    }
+
+    #[test]
+    fn the_credited_artist_follows_the_track_and_its_source() {
+        let mut s = session_with_device("d");
+        s.queue.set(vec![item(1), item(2)], 0);
+        assert_eq!(s.uncredited(), Some((1, None)));
+        s.credited = Some(Credited {
+            entry_id: 1,
+            source: None,
+            artists: vec![CreditedArtist {
+                entry_id: 9,
+                name: "Ado".into(),
+            }],
+            stale: false,
+        });
+        assert_eq!((s.artist(), s.uncredited()), (Some("Ado".into()), None));
+        // A rename looks it up again; the old line stays meanwhile.
+        s.credited.as_mut().unwrap().stale = true;
+        assert_eq!(
+            (s.artist(), s.uncredited()),
+            (Some("Ado".into()), Some((1, None)))
+        );
+        s.credited.as_mut().unwrap().stale = false;
+        // A mounted source has credits of its own; the old line stays meanwhile.
+        s.mounted = Some(Mounted {
+            provider: "spotify".into(),
+            identifier: "sp".into(),
+            art: None,
+            artist: None,
+            controllable: true,
+        });
+        assert_eq!(
+            (s.artist(), s.uncredited()),
+            (Some("Ado".into()), Some((1, Some("sp".into()))))
+        );
+        // Never another track's.
+        apply(&mut s, "d", Command::Next).unwrap();
+        assert_eq!((s.artist(), s.uncredited()), (None, Some((2, None))));
+        assert!(s.artists().is_empty());
+    }
+
+    /// A hub with a two-track queue, `device` connected and having played
+    /// it last, and nothing active (as after a reload).
+    #[cfg(feature = "media_controls")]
+    fn idle_hub(device: &str) -> (tempfile::TempDir, Arc<PlaybackHub>) {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = PlaybackHub::load(dir.path().join("playback.json"));
+        {
+            let mut s = hub.lock();
+            *s = session_with_device(device);
+            s.queue.set(vec![item(1), item(2)], 0);
+            s.last_active_device = Some(device.into());
+            s.duration_ms = Some(60_000);
+        }
+        (dir, hub)
+    }
+
+    #[cfg(feature = "media_controls")]
+    #[test]
+    fn media_keys_resume_on_the_device_that_last_played() {
+        let (_dir, hub) = idle_hub("a");
+        hub.media_key(MediaKey::Play);
+        let s = hub.lock();
+        assert_eq!(s.active_device.as_deref(), Some("a"));
+        assert!(s.playing);
+    }
+
+    #[cfg(feature = "media_controls")]
+    #[test]
+    fn media_keys_without_a_device_only_pause_and_seek() {
+        let (_dir, hub) = idle_hub("a");
+        hub.lock().devices.clear();
+        for key in [MediaKey::Play, MediaKey::Toggle, MediaKey::Next] {
+            hub.media_key(key);
+        }
+        {
+            let s = hub.lock();
+            assert!(!s.playing);
+            assert_eq!(s.active_device, None);
+            assert_eq!(s.queue.current().unwrap().entry_id, 1);
+        }
+        hub.media_key(MediaKey::SeekTo(5_000));
+        assert_eq!(hub.lock().position_ms, 5_000);
+    }
+
+    #[cfg(feature = "media_controls")]
+    #[test]
+    fn relative_media_seeks_stay_inside_the_track() {
+        let (_dir, hub) = idle_hub("a");
+        hub.media_key(MediaKey::SeekBy(-10_000));
+        assert_eq!(hub.lock().position_ms, 0);
+        hub.media_key(MediaKey::SeekBy(90_000));
+        assert_eq!(hub.lock().position_ms, 60_000);
     }
 
     #[test]

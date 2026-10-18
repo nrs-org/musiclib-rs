@@ -1086,6 +1086,137 @@
     margin: 0 0 20px;
   }
 
+  /* ---------- renaming (`nameEditor`) ---------- */
+  .rename {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .card-rename { margin: -4px 0 14px; }
+
+  .rename-toggle {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    cursor: pointer;
+  }
+
+  .rename-toggle:hover,
+  .rename-toggle:focus-visible {
+    color: var(--ink);
+    text-decoration: underline;
+  }
+
+  .rename-toggle[hidden] { display: none; }
+
+  .rename-mark {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--brass-ink);
+  }
+
+  .rename-form {
+    flex: 1 1 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+    padding: 10px;
+  }
+
+  .rename-input {
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 14px;
+    min-width: 0;
+  }
+
+  .rename-input:focus { outline: none; border-color: var(--brass); }
+
+  .rename-aliases {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: 132px;
+    overflow-y: auto;
+  }
+
+  .rename-alias {
+    border: 1px solid var(--rail);
+    background: transparent;
+    color: var(--ink-soft);
+    padding: 3px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+
+  .rename-alias:hover { border-color: var(--ink-soft); color: var(--ink); }
+
+  .rename-alias[aria-pressed="true"] { border-color: var(--brass); color: var(--brass-ink); }
+
+  .rename-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .rename-status {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+
+  /* ---------- an entry's credited artists ---------- */
+  .credits { margin-bottom: 20px; }
+
+  .credits[hidden] { display: none; }
+
+  .credits h2 {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--rail);
+  }
+
+  .credit {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    padding: 4px 0;
+  }
+
+  .credit-name {
+    color: var(--ink);
+    text-decoration: none;
+  }
+
+  .credit-name:hover,
+  .credit-name:focus-visible { text-decoration: underline; }
+
+  .credit-artist {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
   .stamps {
     display: flex;
     flex-wrap: wrap;
@@ -2164,6 +2295,19 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* A credited artist on the bar's sub line: opens its entry. */
+  .player-bar-artist {
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .player-bar-artist:hover,
+  .player-bar-artist:focus-visible {
+    color: var(--ink);
+    text-decoration: underline;
   }
 
   .player-bar-center {
@@ -5930,6 +6074,18 @@
     let lastSpotifyPlaying = false;
     let lastSpotifyPosition = 0;
 
+    // The OS media controls' state (see `syncMediaSession`).
+    const mediaSession = "mediaSession" in navigator ? navigator.mediaSession : null;
+    // What the playing source says about the artist (YouTube's channel,
+    // Spotify's artists); the session itself only knows the title.
+    let engineArtist = "";
+    // The last `mounted` report (provider, identifier, art), resent when
+    // the artist arrives.
+    let lastMounted = null;
+    let mediaMetaKey = null;
+    let mediaPositionAt = 0;
+    const mediaActions = {};
+
     function formatTime(seconds) {
       if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
       const m = Math.floor(seconds / 60);
@@ -5968,6 +6124,7 @@
       if (localPlaying === null) return;
       progress = { pos: position, at: performance.now(), playing: localPlaying, duration };
       renderProgress();
+      syncMediaSession();
       const now = performance.now();
       if (now - lastReportAt < 2000) return;
       lastReportAt = now;
@@ -5986,6 +6143,7 @@
       localPlaying = isPlaying;
       localControllable = controllable;
       renderPlayPause();
+      syncMediaSession(true);
       if (changed) report({ playing: isPlaying, position_ms: Math.round(progress.pos * 1000) });
     }
 
@@ -6051,14 +6209,21 @@
       timeElapsedEl.textContent = formatTime(Number(seekInput.value));
     });
     seekInput.addEventListener("change", () => {
-      const value = Number(seekInput.value);
-      // Shown right away; the active device seeks once the server bumps
-      // `seek_seq` (see `reconcileEngine`), wherever the drag happened.
-      progress = { ...progress, pos: value, at: performance.now() };
       seeking = false;
-      renderProgress();
-      Remote.command({ type: "seek", position_ms: Math.round(value * 1000) }).catch(() => {});
+      seekToSeconds(Number(seekInput.value));
     });
+
+    // A seek from this device (the bar, the OS media controls). Shown right
+    // away; the active device seeks once the server bumps `seek_seq` (see
+    // `reconcileEngine`), wherever the seek came from.
+    function seekToSeconds(seconds) {
+      const d = progress.duration;
+      const value = Math.max(0, d > 0 ? Math.min(seconds, d) : seconds);
+      progress = { ...progress, pos: value, at: performance.now() };
+      renderProgress();
+      syncMediaSession(true);
+      Remote.command({ type: "seek", position_ms: Math.round(value * 1000) }).catch(() => {});
+    }
 
     function engineSeek(seconds) {
       if (provider === "youtube" && ytPlayer?.seekTo) ytPlayer.seekTo(seconds, true);
@@ -6327,9 +6492,27 @@
     // switch between a video and the compact Spotify surface).
     new ResizeObserver(syncStagePosition).observe(dockEl);
 
-    function updateBarMeta(title, sub, thumbUrl) {
+    // `artists` are the library's credited artists (`{ entry_id, name }`),
+    // each a link to its entry; `rest` is plain text after them.
+    let barSubKey = null;
+    function updateBarMeta(title, artists, rest, thumbUrl) {
       titleBtn.textContent = title || "(untitled)";
-      subEl.textContent = sub || "";
+      // Snapshots arrive often; rebuilding only on change keeps a hovered
+      // or focused artist link in place.
+      const subKey = JSON.stringify([artists, rest]);
+      if (subKey !== barSubKey) {
+        barSubKey = subKey;
+        const nodes = [];
+        artists.forEach((a, i) => {
+          if (i) nodes.push(", ");
+          nodes.push(entryLink(a.entry_id, a.name, "player-bar-artist"));
+        });
+        for (const text of rest) {
+          if (nodes.length) nodes.push(" · ");
+          nodes.push(text);
+        }
+        subEl.replaceChildren(...nodes);
+      }
       if (thumbUrl) {
         if (thumbImg.getAttribute("src") !== thumbUrl) thumbImg.src = thumbUrl;
         thumbImg.hidden = false;
@@ -6395,6 +6578,7 @@
             onReady: (e) => {
               if (token !== mountToken) return;
               localControllable = true;
+              setEngineArtist(e.target.getVideoData?.()?.author);
               renderPlayPause();
               applyVolume();
               if (!autoplay) {
@@ -6413,6 +6597,8 @@
             },
             onStateChange: (e) => {
               if (token !== mountToken) return;
+              // The video's details can land after `onReady`.
+              if (!engineArtist) setEngineArtist(e.target.getVideoData?.()?.author);
               if (e.data === YT.PlayerState.PLAYING) engineState(true, true);
               else if (e.data === YT.PlayerState.PAUSED) engineState(false, true);
               else if (e.data === YT.PlayerState.ENDED) reportEnded(token);
@@ -6473,6 +6659,7 @@
         if (!state || token !== mountToken) return;
         const playingThis = state.track_window?.current_track?.id === spotifyId;
         if (!playingThis) return;
+        setEngineArtist((state.track_window.current_track.artists || []).map((a) => a.name).join(", "));
         engineState(!state.paused, true);
         status.textContent = state.paused ? "Paused" : "Playing via your Spotify account";
       });
@@ -6630,6 +6817,8 @@
       nicoIframe = null;
       spotifyPending = null;
       provider = null;
+      engineArtist = "";
+      lastMounted = null;
       stopProgressPolling();
     }
 
@@ -6652,15 +6841,15 @@
       // The source's own provider (a Spotify track without a Spotify
       // connection is still "Spotify" to a remote, just as a bare preview
       // embed), plus whether this engine can actually control it.
-      const mounted = (art) =>
-        report({
-          mounted: {
-            provider: source.provider,
-            identifier: source.identifier,
-            art: art || null,
-            controllable: provider !== "other",
-          },
-        });
+      const mounted = (art) => {
+        lastMounted = {
+          provider: source.provider,
+          identifier: source.identifier,
+          art: art || null,
+          controllable: provider !== "other",
+        };
+        reportMounted();
+      };
       surfaceEl.className = "player-dock-surface " + (isSpotify ? "compact" : "video");
       if (isSpotify) {
         provider = "spotify";
@@ -7158,11 +7347,12 @@
       renderRemoteSurface();
       if (has) {
         const p = s.mounted?.provider;
-        const parts = [p ? providerLabel(p) : null];
+        const artists = s.artists || [];
+        const rest = artists.length ? [] : [currentArtist() || (p ? providerLabel(p) : null)];
         if (!isActive()) {
-          parts.push(s.active_device ? `on ${deviceLabel(s.active_device)}` : "not playing");
+          rest.push(s.active_device ? `on ${deviceLabel(s.active_device)}` : "not playing");
         }
-        updateBarMeta(currentTitle, parts.filter(Boolean).join(" · "), s.mounted?.art || null);
+        updateBarMeta(currentTitle, artists, rest.filter(Boolean), s.mounted?.art || null);
       }
       prevBtn.disabled = !s.has_prev;
       nextBtn.disabled = !s.has_next;
@@ -7175,6 +7365,7 @@
       );
       renderPlayPause();
       renderProgress();
+      syncMediaSession(true);
       setVolumeUI();
       renderSwitcher();
       renderEditions();
@@ -7207,6 +7398,153 @@
     playPauseBtn.addEventListener("click", togglePlay);
     shuffleBtn.addEventListener("click", () => Remote.command({ type: "toggle_shuffle" }).catch(() => {}));
     repeatBtn.addEventListener("click", () => Remote.command({ type: "cycle_repeat" }).catch(() => {}));
+
+    // ---- Media Session: the OS media controls of this device (a phone's
+    // lock screen and notification, headset keys) ----
+    //
+    // Describes the session's track from the library rather than the
+    // embed's own idea of it (a YouTube embed publishes its video title and
+    // channel), and routes the OS buttons through the bar's paths. Which
+    // session the OS shows when the audio comes from a cross-origin iframe
+    // is still the browser's call. On the machine running the server, the
+    // server publishes the session itself (`media_controls.rs`), whichever
+    // device plays.
+    function isPlayingNow() {
+      return isActive() ? !!localPlaying : !!snap?.playing;
+    }
+
+    // Browsers hand the OS controls to a frame that's playing audio, and
+    // the audio is in the embed's cross-origin iframe, whose own session
+    // (the video's title, no queue) wins over this frame's. A looping,
+    // effectively silent clip here, playing while the engine plays, makes
+    // this frame a playing one too.
+    let silentAudio = null;
+
+    function silentClipUrl() {
+      const rate = 8000;
+      const samples = rate;
+      const buf = new ArrayBuffer(44 + samples * 2);
+      const v = new DataView(buf);
+      const ascii = (at, s) => [...s].forEach((c, i) => v.setUint8(at + i, c.charCodeAt(0)));
+      ascii(0, "RIFF");
+      v.setUint32(4, 36 + samples * 2, true);
+      ascii(8, "WAVE");
+      ascii(12, "fmt ");
+      v.setUint32(16, 16, true);
+      v.setUint16(20, 1, true); // PCM
+      v.setUint16(22, 1, true); // mono
+      v.setUint32(24, rate, true);
+      v.setUint32(28, rate * 2, true);
+      v.setUint16(32, 2, true);
+      v.setUint16(34, 16, true);
+      ascii(36, "data");
+      v.setUint32(40, samples * 2, true);
+      // ±1 LSB rather than zeros: about −90 dBFS, inaudible, but a browser
+      // that treats digitally silent media as not playing still counts it.
+      for (let i = 0; i < samples; i++) v.setInt16(44 + i * 2, i % 2 ? 1 : -1, true);
+      return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+    }
+
+    function syncSilentAudio() {
+      if (!(isActive() && localPlaying)) {
+        silentAudio?.pause();
+        return;
+      }
+      if (!silentAudio) {
+        silentAudio = new Audio(silentClipUrl());
+        silentAudio.loop = true;
+      }
+      // Refused without a user gesture yet; a later sync retries.
+      if (silentAudio.paused) silentAudio.play().catch(() => {});
+    }
+
+    // The library's credits, else what the playing source says (this
+    // device's embed first: it knows before the session does).
+    function currentArtist() {
+      return snap?.artist || engineArtist || snap?.mounted?.artist || "";
+    }
+
+    function setEngineArtist(artist) {
+      if ((artist || "") === engineArtist) return;
+      engineArtist = artist || "";
+      reportMounted();
+      syncMediaSession();
+    }
+
+    /// What this device mounted, with the source's artist once it's known
+    /// (often after mounting): the session hands it on to remotes and the
+    /// server's OS media controls.
+    function reportMounted() {
+      if (lastMounted) report({ mounted: { ...lastMounted, artist: engineArtist || null } });
+    }
+
+    /// Sets an action's handler only when it changes, so the OS's buttons
+    /// enable and disable with the bar's.
+    function setMediaAction(action, fn) {
+      if (mediaActions[action] === fn) return;
+      mediaActions[action] = fn;
+      try {
+        mediaSession.setActionHandler(action, fn);
+      } catch {
+        // An action this browser doesn't support.
+      }
+    }
+
+    const mediaPrev = () => Remote.command({ type: "prev" }).catch(() => {});
+    const mediaNext = () => Remote.command({ type: "next" }).catch(() => {});
+
+    /// `force` sends the position now; otherwise at most every few seconds,
+    /// since the OS extrapolates it between updates.
+    function syncMediaSession(force) {
+      if (!mediaSession) return;
+      syncSilentAudio();
+      if (!hasTrack()) {
+        mediaSession.metadata = null;
+        mediaSession.playbackState = "none";
+        mediaMetaKey = null;
+        return;
+      }
+      const art = snap.mounted?.art || null;
+      const artist = currentArtist();
+      const key = JSON.stringify([snap.current.entry_id, currentTitle, artist, art]);
+      if (key !== mediaMetaKey) {
+        mediaMetaKey = key;
+        mediaSession.metadata = new MediaMetadata({
+          title: currentTitle || "(untitled)",
+          artist,
+          artwork: art ? [{ src: art }] : [],
+        });
+        force = true;
+      }
+      mediaSession.playbackState = isPlayingNow() ? "playing" : "paused";
+      setMediaAction("previoustrack", snap.has_prev ? mediaPrev : null);
+      setMediaAction("nexttrack", snap.has_next ? mediaNext : null);
+      const now = performance.now();
+      if (!force && now - mediaPositionAt < 5000) return;
+      mediaPositionAt = now;
+      const duration = progress.duration;
+      if (!(duration > 0) || !mediaSession.setPositionState) return;
+      try {
+        mediaSession.setPositionState({ duration, position: Math.min(progressNow(), duration), playbackRate: 1 });
+      } catch {}
+    }
+
+    if (mediaSession) {
+      const pauseIfPlaying = () => {
+        if (isPlayingNow()) togglePlay();
+      };
+      const handlers = {
+        play: () => {
+          if (!isPlayingNow()) togglePlay();
+        },
+        pause: pauseIfPlaying,
+        stop: pauseIfPlaying,
+        seekto: (d) => seekToSeconds(d.seekTime),
+        seekbackward: (d) => seekToSeconds(progressNow() - (d.seekOffset || 10)),
+        seekforward: (d) => seekToSeconds(progressNow() + (d.seekOffset || 10)),
+      };
+      for (const [action, fn] of Object.entries(handlers)) setMediaAction(action, fn);
+    }
     expandBtn.addEventListener("click", () => setExpanded(!expanded));
     artBtn.addEventListener("click", () => setExpanded(!expanded));
     titleBtn.addEventListener("click", () => {
@@ -9088,6 +9426,159 @@
   // are a union across soft-linked members and so can shift on link/unlink
   // (see `entries.rs`). Tracklist/play-CTA are untouched — dedup edits
   // don't affect release structure or playable sources.
+  // A link to an entry's page: a plain click opens it in place, a modified
+  // or middle click leaves it to the browser (a new tab).
+  function entryLink(entryId, text, className) {
+    const link = el("a", { className, href: `/entry/${entryId}`, text });
+    link.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      viewEntry(entryId);
+    });
+    return link;
+  }
+
+  // An inline editor for a display name: type one, or pick one of the
+  // `aliases` its sources know. `onSave(name)` gets `null` for "go back to
+  // `resetLabel`'s name" and resolves to the new `{ value, aliases, renamed }`,
+  // or `null` when the caller has re-rendered this editor away; a throw
+  // keeps the form open with the error.
+  function nameEditor({ label, value, aliases, renamed, resetLabel, className, onSave }) {
+    let state = { value, aliases, renamed };
+    const root = el("div", { className: `rename ${className || ""}` });
+    const toggle = el("button", { className: "rename-toggle", type: "button", text: label });
+    const mark = el("span", { className: "rename-mark", text: "renamed" });
+    root.append(toggle, mark);
+    let form = null;
+
+    function sync() {
+      mark.hidden = !state.renamed;
+    }
+
+    function close() {
+      form?.remove();
+      form = null;
+      toggle.hidden = false;
+      sync();
+      if (toggle.isConnected) toggle.focus();
+    }
+
+    function open() {
+      toggle.hidden = true;
+      mark.hidden = true;
+      const input = el("input", {
+        type: "text",
+        className: "rename-input",
+        "aria-label": "Name",
+        spellcheck: "false",
+        autocomplete: "off",
+      });
+      input.value = state.value;
+      const chips = state.aliases.map((alias) =>
+        el("button", {
+          type: "button",
+          className: "rename-alias",
+          text: alias,
+          title: "Use this name",
+          onclick: () => {
+            input.value = alias;
+            markChosen();
+            input.focus();
+          },
+        })
+      );
+      function markChosen() {
+        for (const chip of chips) {
+          chip.setAttribute("aria-pressed", String(chip.textContent === input.value.trim()));
+        }
+      }
+      input.addEventListener("input", markChosen);
+      markChosen();
+
+      const status = el("span", { className: "rename-status", role: "status" });
+      const buttons = [];
+      async function save(name) {
+        for (const b of buttons) b.disabled = true;
+        status.textContent = "Saving…";
+        try {
+          const next = await onSave(name);
+          if (!next) return;
+          state = next;
+          close();
+        } catch (err) {
+          status.textContent = err.message;
+          for (const b of buttons) b.disabled = false;
+        }
+      }
+      const saveBtn = el("button", { type: "button", className: "ghost-btn", text: "Save", onclick: () => save(input.value.trim() || null) });
+      buttons.push(saveBtn);
+      if (state.renamed) {
+        buttons.push(el("button", { type: "button", className: "ghost-btn", text: resetLabel, onclick: () => save(null) }));
+      }
+      buttons.push(el("button", { type: "button", className: "ghost-btn", text: "Cancel", onclick: close }));
+
+      form = el("div", { className: "rename-form" }, [
+        input,
+        chips.length ? el("div", { className: "rename-aliases", role: "group", "aria-label": "Known names" }, chips) : null,
+        el("div", { className: "rename-actions" }, [...buttons, status]),
+      ]);
+      form.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          close();
+        } else if (e.key === "Enter" && e.target === input) {
+          e.preventDefault();
+          saveBtn.click();
+        }
+      });
+      root.appendChild(form);
+      input.focus();
+      input.select();
+    }
+
+    toggle.addEventListener("click", open);
+    sync();
+    return root;
+  }
+
+  // The artists `entryId` credits, each a link to the artist with a rename
+  // for how this entry credits them.
+  async function loadCredits(entryId, container) {
+    let credits;
+    try {
+      ({ credits } = await api(`/api/entries/${entryId}/credits`));
+    } catch {
+      return;
+    }
+    if (activeId === entryId) fillCredits(entryId, container, credits);
+  }
+
+  function fillCredits(entryId, container, credits) {
+    container.replaceChildren();
+    container.hidden = credits.length === 0;
+    if (!credits.length) return;
+    container.appendChild(el("h2", { text: "Credited artists" }));
+    for (const c of credits) {
+      const row = el("div", { className: "credit" }, [entryLink(c.artist_id, c.name, "credit-name")]);
+      if (c.renamed) row.appendChild(el("span", { className: "credit-artist", text: c.artist_name }));
+      row.appendChild(
+        nameEditor({
+          label: "rename here",
+          value: c.name,
+          aliases: c.aliases,
+          renamed: c.renamed,
+          resetLabel: `Use “${c.artist_name}”`,
+          onSave: async (name) => {
+            const next = await postJson(`/api/entries/${entryId}/credits/${c.artist_id}/display-name`, { name });
+            fillCredits(entryId, container, next.credits);
+            return null;
+          },
+        })
+      );
+      container.appendChild(row);
+    }
+  }
+
   async function refreshAfterEdit(entryId) {
     refreshSearchIfActive();
     graphEditor.refresh();
@@ -9348,10 +9839,32 @@
     );
     const titleEl = el("h1", { className: "card-title", text: entry.title || "(untitled)" });
     detail.appendChild(titleEl);
+    detail.appendChild(
+      nameEditor({
+        label: "rename",
+        className: "card-rename",
+        value: entry.title || "",
+        aliases: entry.aliases || [],
+        renamed: entry.renamed,
+        resetLabel: "Use the sources' name",
+        onSave: async (name) => {
+          const next = await postJson(`/api/entries/${entryId}/display-name`, { name });
+          titleEl.textContent = next.title || "(untitled)";
+          refreshSearchIfActive();
+          return { value: next.title || "", aliases: next.aliases || [], renamed: next.renamed };
+        },
+      })
+    );
 
     const date = friendlyDate(entry.release_date);
     const metaEl = el("p", { className: "card-meta", text: date ? `Released ${date}` : "Release date unknown" });
     detail.appendChild(metaEl);
+
+    if (entry.entry_type !== "artist") {
+      const creditsEl = el("div", { className: "credits", hidden: true });
+      detail.appendChild(creditsEl);
+      loadCredits(entryId, creditsEl);
+    }
 
     // A track and its instrumental (or other `EDITION_KINDS` relation, see
     // `musicdb::EDITION_KINDS`) are distinct identities, unlike `members`

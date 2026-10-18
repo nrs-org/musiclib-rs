@@ -26,7 +26,7 @@ use musiclib_rs::{
 };
 
 use crate::{
-    entries::{EntrySummary, SourceRef, entry_summaries},
+    entries::{EntrySummary, SourceRef, credit_name, entry_summaries},
     respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
@@ -301,7 +301,8 @@ async fn edition_groups(
 }
 
 /// Each non-artist entry's main artists, comma-joined: its `listed_artist`
-/// credits, else its other main-artist credits (a YouTube uploader). Only
+/// credits, else its other main-artist credits (a YouTube uploader), each
+/// by the name the entry credits it as (`credit_name`). Only
 /// credits naming an artist entry count; some release credits name a
 /// recording or release instead.
 async fn artist_subtitles(
@@ -344,9 +345,16 @@ async fn artist_subtitles(
         .map(|e| e.id)
         .collect();
     let artists = entry_summaries(db, &artist_ids).await?;
+    let credited_ids: Vec<i64> = credited
+        .iter()
+        .flat_map(|e| &e.members)
+        .map(|m| m.entry_id)
+        .collect();
+    let overrides = db.credit_display_names(&credited_ids).await?;
 
     let mut out = HashMap::new();
     for entry in credited {
+        let members: Vec<i64> = entry.members.iter().map(|m| m.entry_id).collect();
         let own: HashSet<(&str, &str)> = entry
             .sources
             .iter()
@@ -363,7 +371,7 @@ async fn artist_subtitles(
                 let name = artist_of_pair
                     .get(&(c.artist_source.clone(), c.artist_identifier.clone()))
                     .and_then(|id| artists.get(id))
-                    .and_then(|a| a.title.as_deref());
+                    .and_then(|a| credit_name(&overrides, &members, a).or(a.title.as_deref()));
                 if let Some(name) = name.filter(|n| !names.contains(n)) {
                     names.push(name);
                 }

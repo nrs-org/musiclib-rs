@@ -31,7 +31,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    entries::{component_members, dedupe_by_edition, entry_summaries, entry_summaries_with},
+    entries::{
+        component_members, dedupe_by_edition, entry_aliases, entry_credits, entry_summaries,
+        entry_summaries_with,
+    },
     fetch_options, playback,
     respond::{self, HyperResponse, parse_query},
     state::AppState,
@@ -109,22 +112,51 @@ pub async fn route(
                 _ => respond::method_not_allowed(),
             }
         }
-        "/api/relations/link" if *method == Method::POST => link_relation(state, &body).await,
-        "/api/relations/unlink" if *method == Method::POST => unlink_relation(state, &body).await,
-        "/api/relations/relate" if *method == Method::POST => relate_entries(state, &body).await,
+        "/api/relations/link" if *method == Method::POST => {
+            recredit_after(state, link_relation(state, &body).await)
+        }
+        "/api/relations/unlink" if *method == Method::POST => {
+            recredit_after(state, unlink_relation(state, &body).await)
+        }
+        "/api/relations/relate" if *method == Method::POST => {
+            recredit_after(state, relate_entries(state, &body).await)
+        }
         "/api/relations/unrelate" if *method == Method::POST => {
-            set_relation_enabled(state, &body, false).await
+            recredit_after(state, set_relation_enabled(state, &body, false).await)
         }
         "/api/relations/restore" if *method == Method::POST => {
-            set_relation_enabled(state, &body, true).await
+            recredit_after(state, set_relation_enabled(state, &body, true).await)
         }
-        "/api/relations/derive" if *method == Method::POST => derive_edition(state, &body).await,
+        "/api/relations/derive" if *method == Method::POST => {
+            recredit_after(state, derive_edition(state, &body).await)
+        }
         p if p.starts_with("/api/entries/") && p.ends_with("/playable-sources") => {
             if *method != Method::GET {
                 return respond::method_not_allowed();
             }
             let id = &p["/api/entries/".len()..p.len() - "/playable-sources".len()];
             playable_sources(state, id).await
+        }
+        p if p.starts_with("/api/entries/") && p.contains("/credits") => {
+            let rest = &p["/api/entries/".len()..];
+            let parts: Vec<&str> = rest.split('/').collect();
+            match (method, parts.as_slice()) {
+                (&Method::GET, &[id, "credits"]) => credits(state, id).await,
+                (&Method::POST, &[id, "credits", artist, "display-name"]) => {
+                    set_credit_display_name(state, id, artist, &body).await
+                }
+                (_, &[_, "credits"] | &[_, "credits", _, "display-name"]) => {
+                    respond::method_not_allowed()
+                }
+                _ => respond::not_found(),
+            }
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/display-name") => {
+            if *method != Method::POST {
+                return respond::method_not_allowed();
+            }
+            let id = &p["/api/entries/".len()..p.len() - "/display-name".len()];
+            set_display_name(state, id, &body).await
         }
         p if p.starts_with("/api/entries/") && p.ends_with("/relations") => {
             if *method != Method::GET {
@@ -165,6 +197,15 @@ pub async fn route(
         | "/api/relations/derive" => respond::method_not_allowed(),
         _ => respond::not_found(),
     }
+}
+
+/// A relation edit can join or split artist identities, changing the name
+/// the playing track's artist line uses: once it succeeds, look it up again.
+fn recredit_after(state: &Arc<AppState>, response: HyperResponse) -> HyperResponse {
+    if response.status().is_success() {
+        state.playback.recredit();
+    }
+    response
 }
 
 /// Debug builds re-read `frontend/index.html` from the source tree on every
@@ -602,10 +643,125 @@ async fn entry_details(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
-    match summaries.get(&entry_id) {
-        Some(s) => respond::json_typed(StatusCode::OK, s),
-        None => respond::not_found(),
+    let Some(summary) = summaries.get(&entry_id) else {
+        return respond::not_found();
+    };
+    let aliases = match entry_aliases(&state.db, entry_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            return respond::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            );
+        }
+    };
+    let mut body = json!(summary);
+    body["aliases"] = json!(aliases);
+    respond::json(StatusCode::OK, body)
+}
+
+#[derive(Deserialize)]
+struct DisplayNameRequest {
+    name: Option<String>,
+}
+
+/// `POST /api/entries/{id}/display-name` — `{"name": "…"}` shows the entry
+/// (its whole soft-identity component) by that name everywhere instead of
+/// the one its aliases give it; `{"name": null}` or a blank name goes back
+/// to the aliases.
+async fn set_display_name(state: &Arc<AppState>, id: &str, body: &[u8]) -> HyperResponse {
+    let entry_id = match parse_entry_id(id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let req: DisplayNameRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    let name = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let members = match component_members(&state.db, entry_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            return respond::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            );
+        }
+    };
+    if let Err(e) = state.db.set_display_name(entry_id, &members, name).await {
+        return db_error_response(e);
     }
+    // Queued copies of a track carry its title; the playing track's artist
+    // line may use this name.
+    if let Ok(summaries) = entry_summaries(&state.db, &[entry_id]).await
+        && let Some(title) = summaries.get(&entry_id).and_then(|s| s.title.clone())
+    {
+        state.playback.retitle(&members, &title);
+    }
+    state.playback.recredit();
+    entry_details(state, id).await
+}
+
+/// `GET /api/entries/{id}/credits` — the artists the entry credits, each
+/// with the name it credits them as (`entries::entry_credits`).
+async fn credits(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    let entry_id = match parse_entry_id(id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match entry_credits(&state.db, entry_id).await {
+        Ok(credits) => respond::json(StatusCode::OK, json!({ "credits": credits })),
+        Err(e) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &e.to_string(),
+        ),
+    }
+}
+
+/// `POST /api/entries/{id}/credits/{artist}/display-name` — `{"name": "…"}`
+/// credits the artist by that name on this entry only; `{"name": null}` or
+/// a blank name goes back to the artist's own name. Answers with the
+/// entry's credits.
+async fn set_credit_display_name(
+    state: &Arc<AppState>,
+    id: &str,
+    artist: &str,
+    body: &[u8],
+) -> HyperResponse {
+    let (entry_id, artist_id) = match (parse_entry_id(id), parse_entry_id(artist)) {
+        (Ok(e), Ok(a)) => (e, a),
+        (Err(resp), _) | (_, Err(resp)) => return resp,
+    };
+    let req: DisplayNameRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    let name = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let members = match (
+        component_members(&state.db, entry_id).await,
+        component_members(&state.db, artist_id).await,
+    ) {
+        (Ok(e), Ok(a)) => (e, a),
+        (Err(e), _) | (_, Err(e)) => {
+            return respond::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            );
+        }
+    };
+    if let Err(e) = state
+        .db
+        .set_credit_display_name(entry_id, &members.0, artist_id, &members.1, name)
+        .await
+    {
+        return db_error_response(e);
+    }
+    state.playback.recredit();
+    credits(state, id).await
 }
 
 fn parse_entry_id(id: &str) -> Result<i64, HyperResponse> {

@@ -24,6 +24,8 @@ mod entries;
 mod fetch_options;
 mod ingest_progress;
 mod jobs;
+#[cfg(feature = "media_controls")]
+mod media_controls;
 #[cfg(feature = "nrs")]
 mod nrs_bridge;
 #[cfg(feature = "nrs")]
@@ -111,6 +113,11 @@ struct Args {
     #[cfg(feature = "nrs")]
     #[arg(long)]
     nrs_public_url: Option<String>,
+    /// Don't publish the player session to the OS media controls (MPRIS),
+    /// e.g. for a second server on the same desktop.
+    #[cfg(feature = "media_controls")]
+    #[arg(long)]
+    no_media_controls: bool,
     #[command(flatten)]
     dirs: musiclib_rs::app_dirs::DirArgs,
 }
@@ -332,6 +339,12 @@ async fn main() -> anyhow::Result<()> {
     let local = tokio::task::LocalSet::new();
     #[cfg(feature = "player")]
     local.spawn_local(Arc::clone(&state.playback).persist_loop());
+    #[cfg(feature = "player")]
+    local.spawn_local(Arc::clone(&state.playback).artist_loop(state.db.clone()));
+    #[cfg(feature = "media_controls")]
+    if !args.no_media_controls {
+        local.spawn_local(media_controls::run(Arc::clone(&state.playback)));
+    }
     #[cfg(feature = "nrs")]
     local.spawn_local(nrs_bridge::export_listening_loop(Arc::clone(&state)));
     local
