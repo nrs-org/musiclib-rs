@@ -1183,7 +1183,9 @@
 
   .credits[hidden] { display: none; }
 
-  .credits h2 {
+  /* The heading over each section of an entry's page (credits, editions,
+     sources). */
+  .section-label {
     font-family: var(--mono);
     font-size: 11px;
     font-weight: 500;
@@ -1194,6 +1196,16 @@
     padding-bottom: 4px;
     border-bottom: 1px solid var(--rail);
   }
+
+  .card-byline:not(:empty)::after {
+    content: "·";
+    margin: 0 8px;
+    color: var(--ink-faint);
+  }
+
+  .card-byline .credit-name { color: var(--ink); }
+
+  .byline-edit { margin-left: 8px; }
 
   .credit {
     display: flex;
@@ -1257,6 +1269,142 @@
   .relations-link {
     display: inline-block;
     margin-bottom: 28px;
+  }
+
+  /* ---------- an entry's editions (`fillEditionList`) ---------- */
+  .edition-list { margin-bottom: 28px; }
+
+  .edition-list[hidden] { display: none; }
+
+  .edition-group + .edition-group { margin-top: 10px; }
+
+  .edition-group-label {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ink-soft);
+    margin: 8px 0 2px;
+  }
+
+  .edition-group-count { color: var(--ink-faint); }
+
+  .edition-rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .edition-rows li[hidden] { display: none; }
+
+  .edition-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    border: none;
+    border-left: 2px solid transparent;
+    background: none;
+    color: var(--ink);
+    font: inherit;
+    text-align: left;
+    padding: 5px 6px 5px 8px;
+    cursor: pointer;
+  }
+
+  .edition-row:hover { background: var(--paper-deep); }
+
+  .edition-row[aria-current="true"] {
+    border-left-color: var(--verdigris);
+    background: var(--paper-deep);
+    cursor: default;
+  }
+
+  .edition-body {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 10px;
+  }
+
+  .edition-who { overflow-wrap: anywhere; }
+
+  .edition-row[aria-current="true"] .edition-who { color: var(--verdigris); }
+
+  .edition-title {
+    font-size: 12px;
+    color: var(--ink-soft);
+    overflow-wrap: anywhere;
+  }
+
+  .edition-dots {
+    display: flex;
+    gap: 4px;
+    flex: none;
+  }
+
+  .edition-dots .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+  }
+
+  .edition-date {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    min-width: 10ch;
+    text-align: right;
+  }
+
+  .edition-more {
+    background: none;
+    border: none;
+    padding: 4px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    cursor: pointer;
+  }
+
+  .edition-more:hover,
+  .edition-more:focus-visible { color: var(--ink); text-decoration: underline; }
+
+  /* ---------- an entry's sources (`fillSources`) ---------- */
+  .sources { margin-bottom: 20px; }
+
+  .sources[hidden] { display: none; }
+
+  .source-section {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 8px;
+  }
+
+  .source-section-label {
+    flex: none;
+    width: 6em;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  .source-section .stamps { margin-bottom: 0; }
+
+  .stamp-tag { color: var(--ink-faint); }
+
+  .stamp.is-via { border-style: dashed; }
+
+  @media (max-width: 520px) {
+    .source-section { flex-direction: column; gap: 4px; }
   }
 
   .editions {
@@ -5896,8 +6044,7 @@
     // ---- Library ----
 
     function editionLabel(ed) {
-      if (ed.is_default) return "original";
-      return (ed.transformation || ed.kind || "edition").replaceAll("_", " ");
+      return friendlyType(editionKind(ed));
     }
 
     function renderLibrary(entry) {
@@ -7288,7 +7435,7 @@
       const sources = await loadSources(ed.entry_id);
       if (snap?.current?.entry_id !== current.entry_id) return;
       if (!sources.length) {
-        setStatus(`No playable source for the ${friendlyType(ed.transformation || ed.kind || "original")} edition.`);
+        setStatus(`No playable source for the ${friendlyType(editionKind(ed))} edition.`);
         return;
       }
       const item = { entry_id: ed.entry_id, title: ed.title || current.title || null };
@@ -7858,27 +8005,163 @@
     return (t || "unknown").replace(/_/g, " ");
   }
 
-  // Fills the edition switcher (`EntrySummary.editions`, see
-  // `musicdb::EDITION_KINDS`) into `host`, or leaves it empty/hidden for a
-  // solo entry. Shared by `viewEntry` (initial render) and `refreshAfterEdit`
-  // (a manual relate/unrelate can change which editions this entry belongs
-  // to without a full card reload).
+  // What kind of edition `ed` is: the `derived_from` edge's transformation
+  // (cover, instrumental, ...), else the relation kind itself — the importer
+  // files a cover either way (`kind: "cover"`, or `derived_from` with
+  // `transformation: "cover"`), and both must read and group the same.
+  // `transformation` may carry extra `key:value` markers after the kind.
+  // An edition related only transitively (through a third one) has neither.
+  function editionKind(ed) {
+    if (ed.is_default) return "original";
+    const marker = (ed.transformation || "").split(/\s+/).find((t) => t && !t.includes(":"));
+    if (marker) return marker;
+    if (ed.kind && ed.kind !== "derived_from") return ed.kind;
+    return "version";
+  }
+
+  const EDITION_GROUP_LABEL = {
+    original: "Original",
+    cover: "Covers",
+    remix: "Remixes",
+    arrangement: "Arrangements",
+    live: "Live",
+    edit: "Edits",
+    medley: "Medleys",
+    alt_version: "Alternate versions",
+    instrumental: "Instrumentals",
+    short_ver: "Short versions",
+    tv_size: "TV size",
+    game_ver: "Game versions",
+    version: "Other versions",
+  };
+
+  // Groups with more rows than this show only the first few (and the
+  // current edition) behind a "show all".
+  const EDITION_GROUP_PREVIEW = 5;
+
+  // The dock's compact edition strip (`EntrySummary.editions`, see
+  // `musicdb::EDITION_KINDS`) for the playing track, or empty/hidden for a
+  // solo entry. Each pill names its performer, so a strip of covers isn't
+  // just "cover" over and over.
   function fillEditions(host, editionsList, onPick = (ed) => viewEntry(ed.entry_id)) {
     host.innerHTML = "";
     const list = editionsList || [];
     host.hidden = list.length <= 1;
     for (const ed of list) {
+      const who = ed.artists?.length ? ` · ${ed.artists.join(", ")}` : "";
       host.appendChild(
         el("button", {
           className: "edition-btn",
           type: "button",
           "aria-current": String(!!ed.is_current),
           disabled: ed.is_current,
-          text: friendlyType(ed.transformation || ed.kind || (ed.is_default ? "original" : "edition")),
+          text: friendlyType(editionKind(ed)) + who,
+          title: ed.title || null,
           onclick: ed.is_current ? null : () => onPick(ed),
         })
       );
     }
+  }
+
+  // The entry page's edition list: editions grouped by kind (in the
+  // server's order — original, full versions, then degenerate ones), each
+  // group by release date, each row led by who performs it. Shared by
+  // `viewEntry` and `refreshAfterEdit` (a relate/unrelate edit can change
+  // the edition set without a full card reload).
+  function fillEditionList(host, editionsList) {
+    host.replaceChildren();
+    const list = editionsList || [];
+    host.hidden = list.length <= 1;
+    if (list.length <= 1) return;
+    host.appendChild(el("h2", { className: "section-label", text: `Editions · ${list.length}` }));
+
+    const original = list.find((ed) => ed.is_default);
+    const originalTitle = (original?.title || "").trim().toLowerCase();
+    // Performers only tell editions apart when they differ — the same
+    // artist's remix and instrumental read better by title.
+    const originalArtists = (original?.artists || []).join(", ");
+    const showArtists = list.some((ed) => (ed.artists || []).join(", ") !== originalArtists);
+    const groups = new Map();
+    for (const ed of list) {
+      const kind = editionKind(ed);
+      if (!groups.has(kind)) groups.set(kind, []);
+      groups.get(kind).push(ed);
+    }
+    for (const [kind, eds] of groups) {
+      eds.sort(
+        (a, b) =>
+          (a.release_date || "￿").localeCompare(b.release_date || "￿") || a.entry_id - b.entry_id
+      );
+      const rows = el("ul", { className: "edition-rows" });
+      const collapse = eds.length > EDITION_GROUP_PREVIEW + 1;
+      const hiddenRows = [];
+      eds.forEach((ed, i) => {
+        const row = editionRow(ed, originalTitle, showArtists);
+        if (collapse && i >= EDITION_GROUP_PREVIEW && !ed.is_current) {
+          row.hidden = true;
+          hiddenRows.push(row);
+        }
+        rows.appendChild(row);
+      });
+      const group = el("div", { className: "edition-group" }, [
+        el("h3", { className: "edition-group-label" }, [
+          el("span", { text: EDITION_GROUP_LABEL[kind] || friendlyType(kind) }),
+          eds.length > 1 ? el("span", { className: "edition-group-count", text: String(eds.length) }) : null,
+        ]),
+        rows,
+      ]);
+      if (hiddenRows.length) {
+        const more = el("button", {
+          className: "edition-more",
+          type: "button",
+          text: `Show ${hiddenRows.length} more`,
+          onclick: () => {
+            for (const row of hiddenRows) row.hidden = false;
+            more.remove();
+          },
+        });
+        group.appendChild(more);
+      }
+      host.appendChild(group);
+    }
+  }
+
+  // One edition row: its performers (the thing that tells covers apart)
+  // when `showArtists`, its own title when that says more than the
+  // original's, the platforms it plays on, and its date.
+  function editionRow(ed, originalTitle, showArtists) {
+    const who = showArtists && ed.artists?.length ? ed.artists.join(", ") : null;
+    const title = ed.title || "(untitled)";
+    const titleSaysMore = title.trim().toLowerCase() !== originalTitle;
+    const dots = el("span", { className: "edition-dots" });
+    for (const kind of ed.source_kinds || []) {
+      if (!PLATFORM_COLOR[kind]) continue;
+      const dot = el("span", { className: "dot", title: providerLabel(kind) });
+      dot.style.background = PLATFORM_COLOR[kind];
+      dots.appendChild(dot);
+    }
+    const body = el("span", { className: "edition-body" }, [
+      el("span", { className: "edition-who", text: who || title }),
+      who && titleSaysMore ? el("span", { className: "edition-title", text: title }) : null,
+    ]);
+    return el("li", {}, [
+      el(
+        "button",
+        {
+          className: "edition-row",
+          type: "button",
+          "aria-current": String(!!ed.is_current),
+          disabled: ed.is_current,
+          title: `${catalogNo(ed.entry_id)} — ${title}`,
+          onclick: ed.is_current ? null : () => viewEntry(ed.entry_id),
+        },
+        [
+          body,
+          dots,
+          el("span", { className: "edition-date", text: friendlyDate(ed.release_date) || "—" }),
+        ]
+      ),
+    ]);
   }
 
   // ---------- search ----------
@@ -8017,6 +8300,154 @@
       return el("a", { className: "stamp", href, target: "_blank", rel: "noopener noreferrer" }, [dot, label]);
     }
     return el("span", { className: "stamp" }, [dot, label]);
+  }
+
+  const SOURCE_LABEL = {
+    ...PROVIDER_LABEL,
+    apple_music: "Apple Music",
+    deezer: "Deezer",
+    tidal: "TIDAL",
+    musicbrainz: "MusicBrainz",
+    discogs: "Discogs",
+    vgmdb: "VGMdb",
+    lastfm: "Last.fm",
+    local: "Local file",
+    isrc: "ISRC",
+    upc: "UPC",
+  };
+
+  // Stores that hold the audio but that this player can't mount; listed
+  // after the playable providers.
+  const STORE_SOURCES = ["apple_music", "deezer", "tidal"];
+  const CATALOG_ORDER = ["musicbrainz", "discogs", "vgmdb", "lastfm"];
+  const CODE_SOURCES = ["isrc", "upc"];
+  const LINK_SOURCES = ["unknown_url", "url"];
+
+  // The entry page's source sections, in display order.
+  const SOURCE_SECTIONS = [
+    ["listen", "Listen"],
+    ["catalog", "Catalog"],
+    ["codes", "Codes"],
+    ["links", "Links"],
+  ];
+
+  function sourceSection(source) {
+    if (source in PLATFORM_COLOR || STORE_SOURCES.includes(source)) return "listen";
+    if (CODE_SOURCES.includes(source)) return "codes";
+    if (LINK_SOURCES.includes(source)) return "links";
+    return "catalog";
+  }
+
+  // Sort rank of `source` within its section: playable providers in the
+  // Settings preference order (so the first is what Play mounts), then
+  // stores; known catalogs first; anything else after, by name.
+  function sourceRank(source) {
+    const order = [...getProviderPreference(), ...STORE_SOURCES, ...CATALOG_ORDER, ...CODE_SOURCES];
+    const i = order.indexOf(source);
+    return i === -1 ? order.length : i;
+  }
+
+  // A short tag telling apart two sources of one provider: the last path
+  // segment of its URL (a YouTube video id, a MusicBrainz MBID's first
+  // block), or the start of a bare identifier.
+  function shortSourceId(identifier) {
+    try {
+      const url = new URL(identifier);
+      const last = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
+      const id = decodeURIComponent(last);
+      return id.length > 14 ? id.slice(0, 8) : id;
+    } catch {
+      return identifier.slice(0, 10);
+    }
+  }
+
+  function urlPath(identifier) {
+    try {
+      const url = new URL(identifier);
+      return decodeURIComponent(url.pathname.replace(/^\/+/, "")) + url.search;
+    } catch {
+      return identifier;
+    }
+  }
+
+  function hostOf(identifier) {
+    try {
+      return new URL(identifier).hostname.replace(/^www\./, "");
+    } catch {
+      return identifier;
+    }
+  }
+
+  // The entry page's sources, grouped by what they're for (listen, look up,
+  // codes, other links) and sorted within each. A provider's label gets a
+  // short id only when it appears more than once; codes always show their
+  // value, plain links their host. Sources that come from a soft-linked
+  // duplicate rather than this entry itself sort after its own, and say so
+  // in their tooltip.
+  function fillSources(host, entry) {
+    host.replaceChildren();
+    const sources = entry.sources || [];
+    host.hidden = sources.length === 0;
+    const memberOf = new Map();
+    for (const m of entry.members || []) {
+      for (const s of m.sources) memberOf.set(`${s.source}\u0000${s.identifier}`, m.entry_id);
+    }
+    const counts = new Map();
+    for (const s of sources) counts.set(s.source, (counts.get(s.source) || 0) + 1);
+    const rows = sources.map((s, i) => {
+      const member = memberOf.get(`${s.source}\u0000${s.identifier}`);
+      return { s, i, via: member != null && member !== entry.entry_id ? member : null };
+    });
+    rows.sort(
+      (a, b) =>
+        sourceRank(a.s.source) - sourceRank(b.s.source) ||
+        a.s.source.localeCompare(b.s.source) ||
+        (a.via != null) - (b.via != null) ||
+        a.i - b.i
+    );
+
+    for (const r of rows) {
+      if (CODE_SOURCES.includes(r.s.source)) r.tag = r.s.identifier;
+      else if (LINK_SOURCES.includes(r.s.source)) r.tag = hostOf(r.s.identifier);
+      else if (counts.get(r.s.source) > 1) r.tag = shortSourceId(r.s.identifier);
+    }
+    // Two URLs for one id (Apple Music's `us/` and `jp/` storefronts) give
+    // the same short id; their paths tell them apart instead.
+    for (const r of rows) {
+      if (r.tag && !LINK_SOURCES.includes(r.s.source)
+          && rows.some((o) => o !== r && o.s.source === r.s.source && o.tag === r.tag)) {
+        r.collides = true;
+      }
+    }
+    for (const r of rows) if (r.collides) r.tag = urlPath(r.s.identifier);
+
+    for (const [section, label] of SOURCE_SECTIONS) {
+      const inSection = rows.filter((r) => sourceSection(r.s.source) === section);
+      if (!inSection.length) continue;
+      const stamps = el("div", { className: "stamps" });
+      for (const { s, tag, via } of inSection) stamps.appendChild(sourceStamp(s, tag, via));
+      host.appendChild(
+        el("div", { className: "source-section" }, [el("span", { className: "source-section-label", text: label }), stamps])
+      );
+    }
+  }
+
+  function sourceStamp(s, tag, via) {
+    const href = s.identifier.startsWith("http") ? s.identifier : null;
+    const dot = el("span", { className: "dot" });
+    dot.style.background = PLATFORM_COLOR[s.source] || "var(--verdigris)";
+    const name = LINK_SOURCES.includes(s.source) ? null : SOURCE_LABEL[s.source] || friendlyType(s.source);
+    const children = [
+      dot,
+      name ? el("span", { text: name }) : null,
+      tag ? el("span", { className: "stamp-tag", text: tag }) : null,
+    ];
+    const title = s.identifier + (via != null ? `\nvia ${catalogNo(via)}` : "");
+    const className = "stamp" + (via != null ? " is-via" : "");
+    if (href) {
+      return el("a", { className, href, target: "_blank", rel: "noopener noreferrer", title }, children);
+    }
+    return el("span", { className, title }, children);
   }
 
   // ---------- relations graph (dedup calibration + structure browsing) ----------
@@ -9883,21 +10314,44 @@
 
   // The artists `entryId` credits, each a link to the artist with a rename
   // for how this entry credits them.
-  async function loadCredits(entryId, container) {
+  async function loadCredits(entryId, container, byline) {
     let credits;
     try {
       ({ credits } = await api(`/api/entries/${entryId}/credits`));
     } catch {
       return;
     }
-    if (activeId === entryId) fillCredits(entryId, container, credits);
+    if (activeId === entryId) fillCredits(entryId, container, credits, byline);
   }
 
-  function fillCredits(entryId, container, credits) {
+  // `byline` (the card meta's "by …" span) gets the credited names as
+  // links plus a toggle for `container`, the rename editors, which stay
+  // closed until asked for.
+  function fillCredits(entryId, container, credits, byline) {
+    byline.replaceChildren();
+    if (credits.length) {
+      byline.appendChild(document.createTextNode("by "));
+      credits.forEach((c, i) => {
+        if (i) byline.appendChild(document.createTextNode(", "));
+        byline.appendChild(entryLink(c.artist_id, c.name, "credit-name"));
+      });
+      byline.appendChild(
+        el("button", {
+          className: "rename-toggle byline-edit",
+          type: "button",
+          text: "edit credits",
+          onclick: () => {
+            container.hidden = !container.hidden;
+          },
+        })
+      );
+    }
     container.replaceChildren();
-    container.hidden = credits.length === 0;
-    if (!credits.length) return;
-    container.appendChild(el("h2", { text: "Credited artists" }));
+    if (!credits.length) {
+      container.hidden = true;
+      return;
+    }
+    container.appendChild(el("h2", { className: "section-label", text: "Credited artists" }));
     for (const c of credits) {
       const row = el("div", { className: "credit" }, [entryLink(c.artist_id, c.name, "credit-name")]);
       if (c.renamed) row.appendChild(el("span", { className: "credit-artist", text: c.artist_name }));
@@ -9910,7 +10364,7 @@
           resetLabel: `Use “${c.artist_name}”`,
           onSave: async (name) => {
             const next = await postJson(`/api/entries/${entryId}/credits/${c.artist_id}/display-name`, { name });
-            fillCredits(entryId, container, next.credits);
+            fillCredits(entryId, container, next.credits, byline);
             return null;
           },
         })
@@ -9936,14 +10390,14 @@
     }
     if (activeId !== entryId || !cardEls) return;
     cardEls.title.textContent = entry.title || "(untitled)";
-    const date = friendlyDate(entry.release_date);
-    cardEls.meta.textContent = date ? `Released ${date}` : "Release date unknown";
-    fillEditions(cardEls.editions, entry.editions);
-    cardEls.stamps.innerHTML = "";
-    for (const s of entry.sources) {
-      cardEls.stamps.appendChild(stamp(s.source, s.identifier, s.source in PLATFORM_COLOR));
-    }
-    cardEls.stamps.hidden = entry.sources.length === 0;
+    if (entry.entry_type !== "artist" || entry.release_date) cardEls.date.textContent = releasedText(entry.release_date);
+    fillEditionList(cardEls.editions, entry.editions);
+    fillSources(cardEls.sources, entry);
+  }
+
+  function releasedText(raw) {
+    const date = friendlyDate(raw);
+    return date ? `Released ${date}` : "Release date unknown";
   }
 
   // Same search-and-pick shell as `mountMergePicker`, but for a
@@ -10132,7 +10586,8 @@
     );
     const row = el("div", { className: "play-cta-row" }, [btn, queueBtn]);
     if (sources.length > 1) {
-      row.appendChild(el("span", { className: "play-cta-hint", text: sources.map((s) => s.provider).join(" · ") }));
+      const providers = [...new Set(sortByProviderPreference(sources).map((s) => providerLabel(s.provider)))];
+      row.appendChild(el("span", { className: "play-cta-hint", text: providers.join(" · ") }));
     }
     return row;
   }
@@ -10192,49 +10647,34 @@
       })
     );
 
-    const date = friendlyDate(entry.release_date);
-    const metaEl = el("p", { className: "card-meta", text: date ? `Released ${date}` : "Release date unknown" });
-    detail.appendChild(metaEl);
+    // "by <credits> · Released <date>" — the credits fill in once loaded.
+    const bylineEl = el("span", { className: "card-byline" });
+    // Artists have no release date; don't announce its absence.
+    const dateEl = el("span", {
+      className: "card-date",
+      text: entry.entry_type === "artist" && !entry.release_date ? "" : releasedText(entry.release_date),
+    });
+    detail.appendChild(el("p", { className: "card-meta" }, [bylineEl, dateEl]));
 
     if (entry.entry_type !== "artist") {
       const creditsEl = el("div", { className: "credits", hidden: true });
       detail.appendChild(creditsEl);
-      loadCredits(entryId, creditsEl);
+      loadCredits(entryId, creditsEl, bylineEl);
     }
 
     // A track and its instrumental (or other `EDITION_KINDS` relation, see
     // `musicdb::EDITION_KINDS`) are distinct identities, unlike `members`
-    // below — the library list already collapsed them into this one row
-    // (`dedupe_by_edition`), so switching here just navigates to the other
-    // identity's own entry page instead of merging anything. Always mounted
-    // (like `stampsEl` below) so `refreshAfterEdit` has a stable element to
-    // refill if a manual relate/unrelate edit changes the edition set of the
-    // entry already on screen.
-    const editionsEl = el("div", { className: "editions" });
-    fillEditions(editionsEl, entry.editions);
-    detail.appendChild(editionsEl);
-
-    // Always mounted (just hidden when empty) rather than conditionally
-    // appended, so `refreshAfterEdit` has a stable element to refill in
-    // place if a dedup edit changes the source union from empty to
-    // non-empty (or vice versa) without a full re-render.
-    const stampsEl = el("div", { className: "stamps", hidden: entry.sources.length === 0 });
-    for (const s of entry.sources) {
-      stampsEl.appendChild(stamp(s.source, s.identifier, s.source in PLATFORM_COLOR));
-    }
-    detail.appendChild(stampsEl);
-    cardEls = { title: titleEl, meta: metaEl, stamps: stampsEl, editions: editionsEl };
-
-    // Relations/dedup calibration lives in its own full-screen mode now
-    // (see `viewGraph`) rather than embedded here — just a way in.
-    detail.appendChild(
-      el("button", {
-        className: "ghost-btn relations-link",
-        type: "button",
-        text: "View relations →",
-        onclick: () => viewGraph(entryId),
-      })
-    );
+    // — the library list already collapsed them into this one row
+    // (`dedupe_by_edition`), so picking one here just navigates to the other
+    // identity's own entry page instead of merging anything. Editions and
+    // sources are always mounted (just hidden when empty) so
+    // `refreshAfterEdit` has stable elements to refill in place when a
+    // relate or dedup edit changes them.
+    const editionsEl = el("section", { className: "edition-list" });
+    fillEditionList(editionsEl, entry.editions);
+    const sourcesEl = el("section", { className: "sources" });
+    fillSources(sourcesEl, entry);
+    cardEls = { title: titleEl, date: dateEl, sources: sourcesEl, editions: editionsEl };
 
     if (entry.entry_type === "artist") {
       detail.appendChild(
@@ -10251,11 +10691,25 @@
         detail.appendChild(
           el("p", {
             className: "note",
-            text: "No playable source for this track yet — see the stamps above for where it lives.",
+            text: "No playable source for this track yet — see its sources below for where it lives.",
           })
         );
       }
     }
+
+    detail.appendChild(editionsEl);
+    detail.appendChild(sourcesEl);
+
+    // Relations/dedup calibration lives in its own full-screen mode now
+    // (see `viewGraph`) rather than embedded here — just a way in.
+    detail.appendChild(
+      el("button", {
+        className: "ghost-btn relations-link",
+        type: "button",
+        text: "View relations →",
+        onclick: () => viewGraph(entryId),
+      })
+    );
 
     if (entry.entry_type === "release" || entry.entry_type === "release_group") {
       const tracks = await api(`/api/releases/${entryId}/tracks`).catch(() => ({ tracks: [] }));

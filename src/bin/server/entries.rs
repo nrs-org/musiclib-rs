@@ -93,6 +93,16 @@ pub struct EditionRef {
     /// original a degenerate edition (instrumental, TV size, ...) folds into
     /// (`EditionProjection::rank_target`).
     pub rank_target: i64,
+    /// Earliest release date across this edition's own sources.
+    pub release_date: Option<String>,
+    /// Distinct `source` keys across this edition's own sources, in source
+    /// order — enough for a switcher to show where each edition lives.
+    pub source_kinds: Vec<String>,
+    /// The edition's credited artists (`playback::artist_line`) — what tells
+    /// twenty covers of one song apart. Only `GET /api/entries/{id}` fills
+    /// this; `entry_summaries` leaves it empty, since search and the queue
+    /// summarize far more entries than they show editions for.
+    pub artists: Vec<String>,
 }
 
 /// Edition switcher order: the original first, then full alternate versions,
@@ -182,6 +192,13 @@ fn pick_title(
             .first()
             .map(|s| format!("{}:{}", s.source, s.identifier))
     })
+}
+
+/// The earliest release date any of `sources` carries. Dates are ISO-ish
+/// strings of varying precision (`2022`, `2022-01-17 03:00:11`), which
+/// still order correctly as plain strings.
+fn earliest_release(sources: &[&musiclib_rs::musicdb::SourceRow]) -> Option<String> {
+    sources.iter().filter_map(|s| s.release_date.clone()).min()
 }
 
 /// The name the user chose for any of a component's `members`, which wins
@@ -388,7 +405,7 @@ pub async fn entry_summaries_with(
         let chosen = chosen_name(members, &display_names);
         let renamed = chosen.is_some();
         let title = chosen.or_else(|| pick_title(&member_sources, &aliases_by_pair));
-        let release_date = member_sources.iter().find_map(|s| s.release_date.clone());
+        let release_date = earliest_release(&member_sources);
 
         let default_canonical = editions.default_member_of(canonical);
         let mut edition_list: Vec<EditionRef> = editions
@@ -415,6 +432,14 @@ pub async fn entry_summaries_with(
                     is_default: sib == default_canonical,
                     is_current: sib == canonical,
                     rank_target: editions.rank_target(sib),
+                    release_date: earliest_release(&sib_sources),
+                    source_kinds: sib_sources.iter().fold(Vec::new(), |mut kinds, s| {
+                        if !kinds.contains(&s.source) {
+                            kinds.push(s.source.clone());
+                        }
+                        kinds
+                    }),
+                    artists: Vec::new(),
                 }
             })
             .collect();

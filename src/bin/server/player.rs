@@ -20,6 +20,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use futures::future::join_all;
 use hyper::{Method, StatusCode};
 use musiclib_rs::{
     app_dirs,
@@ -646,6 +647,23 @@ async fn entry_details(state: &Arc<AppState>, id: &str) -> HyperResponse {
     let Some(summary) = summaries.get(&entry_id) else {
         return respond::not_found();
     };
+    let mut summary = summary.clone();
+    if summary.editions.len() > 1 {
+        let lines = join_all(
+            summary
+                .editions
+                .iter()
+                .map(|ed| crate::playback::artist_line(&state.db, ed.entry_id, None)),
+        )
+        .await;
+        for (ed, line) in summary.editions.iter_mut().zip(lines) {
+            // A missing artist line just leaves the edition unlabelled —
+            // never worth failing the whole entry page over.
+            ed.artists = line
+                .map(|artists| artists.into_iter().map(|a| a.name).collect())
+                .unwrap_or_default();
+        }
+    }
     let aliases = match entry_aliases(&state.db, entry_id).await {
         Ok(a) => a,
         Err(e) => {

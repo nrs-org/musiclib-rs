@@ -388,9 +388,9 @@ struct Credited {
 
 /// One name on the artist line, with the artist entry it opens.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct CreditedArtist {
-    entry_id: i64,
-    name: String,
+pub(crate) struct CreditedArtist {
+    pub(crate) entry_id: i64,
+    pub(crate) name: String,
 }
 
 impl Session {
@@ -751,7 +751,7 @@ impl Drop for ConnectionGuard {
 /// credits it as on this track, else the canonical name of its artist
 /// identity — so an auto-generated YouTube "… - Topic" channel linked to the
 /// artist reads as the artist.
-async fn artist_line(
+pub(crate) async fn artist_line(
     db: &MusicDb,
     entry_id: i64,
     mounted: Option<&str>,
