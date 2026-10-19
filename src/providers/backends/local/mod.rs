@@ -220,6 +220,7 @@ fn build_child_ref(child: &LocalChild, base: &Path, resolver: &Resolver<'_>) -> 
     });
 
     ChildRef {
+        image: None,
         entry_type: child.entry_type,
         external_type: EXTERNAL_TYPE_ENTRY.into(),
         sources,
@@ -275,6 +276,7 @@ fn entry_to_entity_result(
         .collect::<Vec<_>>();
 
     EntityResult {
+        image: None,
         release_date: entry.release_date,
         sources,
         extra: serde_json::Value::Null,
@@ -340,6 +342,7 @@ impl FetchProvider for Provider {
             .collect::<Result<Vec<_>, Error>>()?;
 
         Ok(EntityResult {
+            image: result.image,
             children,
             release_date: result.release_date,
             sources: result.sources,

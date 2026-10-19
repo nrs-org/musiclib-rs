@@ -107,6 +107,7 @@ pub async fn get_series(client: Arc<YtdlpClient>, url: &str) -> Result<EntityRes
     });
 
     Ok(EntityResult {
+        image: crate::providers::backends::ytdlp::info_thumbnail(&meta.extra),
         release_date: None,
         sources,
         extra: meta.extra,

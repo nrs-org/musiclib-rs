@@ -191,6 +191,7 @@ impl PageFetcher for ChannelPlaylistsPageFetcher {
             .map(|p| ChildRef {
                 entry_type: EntryType::Release,
                 sources: [(SOURCE.into(), HashSet::from([playlist_url(&p.id)]))].into(),
+                image: super::snippet_thumbnail(&p.snippet.extra),
                 name: p.snippet.title,
                 external_type: EXTERNAL_TYPE_PLAYLIST.into(),
                 ..Default::default()
@@ -243,6 +244,7 @@ impl PageFetcher for ChannelUploadsPageFetcher {
                 Some(ChildRef {
                     entry_type: EntryType::Track,
                     sources: [(SOURCE.into(), HashSet::from([video_url(&video_id)]))].into(),
+                    image: super::snippet_thumbnail(&item.snippet.extra),
                     name: item.snippet.title,
                     external_type: EXTERNAL_TYPE_VIDEO.into(),
                     ..Default::default()
@@ -527,6 +529,7 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
                 }
 
                 Ok(EntityResult {
+                    image: super::snippet_thumbnail(&c.snippet.extra),
                     release_date: None,
                     sources: [(SOURCE.into(), source_set)].into(),
                     extra: serde_json::to_value(&c).unwrap_or_default(),
@@ -842,6 +845,12 @@ mod tests {
         assert!(matches!(channel.specific_data, EntrySpecificData::Artist));
         assert_eq!(channel.aliases.len(), 1);
         assert_eq!(channel.aliases[0].name, "Watame Ch. 角巻わため");
+        assert!(
+            channel
+                .image
+                .as_ref()
+                .is_some_and(|i| i.url.contains("=s800-") && i.width == Some(800))
+        );
         assert!(channel.aliases[0].primary);
 
         // Sources: channel ID URL + custom URL

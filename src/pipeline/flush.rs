@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::musicdb::{MusicDb, PROVIDER_ORIGIN};
+use crate::musicdb::{ImageOrigin, MusicDb, PROVIDER_ORIGIN};
 use crate::providers::FetchProvider;
 use crate::providers::std_values::{StandardProviderKeys, normalize_isrc};
 use crate::providers::types::EntryType;
@@ -147,9 +147,11 @@ pub async fn flush(
             entry_type: info.entry_type,
             name: None,
             duration_ms: None,
+            image: None,
         });
         entry.name = entry.name.take().or(info.name);
         entry.duration_ms = entry.duration_ms.or(info.duration_ms);
+        entry.image = entry.image.take().or(info.image);
     }
     let stubs = canon_stubs;
 
@@ -425,7 +427,15 @@ pub async fn flush(
                 run_id,
             )
             .await?;
+            if let Some(image) = &meta.image {
+                db.set_pair_image(&pair.0, &pair.1, image, ImageOrigin::Fetch, run_id)
+                    .await?;
+            }
         } else {
+            if let Some(image) = stubs.get(pair).and_then(|s| s.image.as_ref()) {
+                db.set_pair_image(&pair.0, &pair.1, image, ImageOrigin::Listing, run_id)
+                    .await?;
+            }
             let duration_ms = stubs.get(pair).and_then(|s| s.duration_ms);
             if existing[pair].is_none() || duration_ms.is_some() {
                 // New stub row, or a duration for an existing stub that had
@@ -1011,6 +1021,7 @@ mod tests {
 
     fn track_metadata() -> PairMetadata {
         PairMetadata {
+            image: None,
             entry_type: EntryType::Track,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Track {
@@ -1287,6 +1298,7 @@ mod tests {
 
     fn release_metadata() -> PairMetadata {
         PairMetadata {
+            image: None,
             entry_type: EntryType::Release,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Release {
@@ -1310,6 +1322,7 @@ mod tests {
         state.insert_stub(
             child.clone(),
             StubInfo {
+                image: None,
                 entry_type: EntryType::Track,
                 name: Some(name.to_string()),
                 duration_ms: Some(180_000),
@@ -1391,6 +1404,73 @@ mod tests {
         Ok(())
     }
 
+    /// A fetched pair's own image is stored as `fetch`; a stub's image from
+    /// its parent's listing as `listing`, and a later fetch replaces it.
+    #[tokio::test]
+    async fn images_are_stored_with_their_origin() -> anyhow::Result<()> {
+        use crate::providers::types::Image;
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let album = p("album");
+        let track = p("track");
+        let images = |db: &MusicDb| {
+            let db = db.clone();
+            let pairs = vec![album.clone(), track.clone()];
+            async move {
+                let mut rows: Vec<(String, String, bool)> = db
+                    .pair_image_rows(&pairs)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| (r.identifier, r.url, r.fetched))
+                    .collect();
+                rows.sort();
+                rows
+            }
+        };
+
+        let state = State::new();
+        state.insert_metadata(
+            album.clone(),
+            PairMetadata {
+                image: Some(Image::new("cover.jpg", Some(300), Some(300))),
+                ..release_metadata()
+            },
+        );
+        listed_track(&state, &album, &track, "Song");
+        state.insert_stub(
+            track.clone(),
+            StubInfo {
+                image: Some(Image::new("thumb.jpg", None, None)),
+                entry_type: EntryType::Track,
+                name: None,
+                duration_ms: None,
+            },
+        );
+        flush_final(&db, state).await?;
+        assert_eq!(
+            images(&db).await,
+            vec![
+                (album.1.clone(), "cover.jpg".into(), true),
+                (track.1.clone(), "thumb.jpg".into(), false),
+            ]
+        );
+
+        let state = State::new();
+        state.insert_metadata(
+            track.clone(),
+            PairMetadata {
+                image: Some(Image::new("own.jpg", None, None)),
+                ..track_metadata()
+            },
+        );
+        flush_final(&db, state).await?;
+        assert_eq!(
+            images(&db).await[1],
+            (track.1.clone(), "own.jpg".into(), true)
+        );
+        Ok(())
+    }
+
     /// Stub info is recorded when a child is listed, but the edge only once
     /// the whole listing finished, so it can reach a periodic flush first. It
     /// must survive until the flush that writes the pair.
@@ -1404,6 +1484,7 @@ mod tests {
         state.insert_stub(
             track.clone(),
             StubInfo {
+                image: None,
                 entry_type: EntryType::Track,
                 name: Some("Song".to_string()),
                 duration_ms: Some(180_000),
@@ -1458,6 +1539,7 @@ mod tests {
 
     fn artist_metadata() -> PairMetadata {
         PairMetadata {
+            image: None,
             entry_type: EntryType::Artist,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Artist,

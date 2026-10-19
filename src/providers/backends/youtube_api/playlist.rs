@@ -167,6 +167,7 @@ impl PageFetcher for PlaylistItemsPageFetcher {
                     sources: [(SOURCE.into(), HashSet::from([video_url(&video_id)]))].into(),
                     name: item.snippet.title.clone(),
                     external_type: EXTERNAL_TYPE_VIDEO.into(),
+                    image: super::snippet_thumbnail(&item.snippet.extra),
                     ..Default::default()
                 })
             })
@@ -222,6 +223,7 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
                         )
                     });
                 Ok(EntityResult {
+                    image: super::snippet_thumbnail(&p.snippet.extra),
                     release_date,
                     sources: [(SOURCE.into(), HashSet::from([url.to_string()]))].into(),
                     extra: serde_json::to_value(&p).unwrap_or_default(),

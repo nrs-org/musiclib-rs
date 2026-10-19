@@ -235,6 +235,7 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
                     synthetic: true,
                 });
                 ChildRef {
+                    image: None,
                     entry_type: EntryType::Track,
                     external_type: EXTERNAL_TYPE_TRACK.into(),
                     sources: [(
@@ -280,6 +281,7 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
         }
 
         let result = Ok(EntityResult {
+            image: super::types::primary_image(&r.extra),
             release_date,
             sources,
             extra: r.extra.clone(),
@@ -345,6 +347,13 @@ mod tests {
         assert_eq!(rel.aliases.len(), 1);
         assert_eq!(rel.aliases[0].name, "Hop Step Sheep");
         assert!(rel.aliases[0].primary);
+        let image = rel.image.as_ref().expect("primary image");
+        assert!(
+            image
+                .url
+                .starts_with("https://i.discogs.com/7lpbDEydCa_eaOeHtE_A1VbVCUP12nx0r4P2CT")
+        );
+        assert_eq!((image.width, image.height), (Some(600), Some(530)));
 
         // Sources
         assert_eq!(

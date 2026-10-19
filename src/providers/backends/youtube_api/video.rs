@@ -127,6 +127,7 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                 .as_deref()
                 .and_then(parse_iso_duration_ms);
             Ok(EntityResult {
+                image: super::snippet_thumbnail(&v.snippet.extra),
                 release_date,
                 sources: [(SOURCE.into(), HashSet::from([url]))].into(),
                 extra: serde_json::to_value(&v).unwrap_or_default(),
@@ -245,6 +246,10 @@ mod tests {
         assert!(child_next(&mut children_cursor).await?.is_none());
 
         assert_eq!(video.aliases.len(), 1);
+        assert_eq!(
+            video.image.as_ref().map(|i| i.url.as_str()),
+            Some("https://i.ytimg.com/vi/ahFZQ_lDoQ4/mqdefault.jpg")
+        );
         let alias = &video.aliases[0];
         assert_eq!(
             alias.name,
