@@ -317,8 +317,6 @@ struct Volume {
 struct Mounted {
     provider: String,
     identifier: String,
-    #[serde(default)]
-    art: Option<String>,
     /// What the source says about the artist (a YouTube channel, Spotify's
     /// artists): the queue item only has a title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1422,7 +1420,6 @@ mod tests {
         s.mounted = Some(Mounted {
             provider: "spotify".into(),
             identifier: "sp".into(),
-            art: None,
             artist: None,
             controllable: true,
         });

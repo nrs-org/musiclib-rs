@@ -140,6 +140,7 @@ pub async fn get_track(client: &SpotifyClient, url: &str) -> Result<EntityResult
         });
 
         let result = Ok(EntityResult {
+            image: None,
             release_date: None,
             sources,
             extra: t.extra.clone(),

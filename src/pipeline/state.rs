@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::musicdb::ParentEdges;
-use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType, OptionsId};
+use crate::providers::types::{
+    Alias, Contribution, EntrySpecificData, EntryType, Image, OptionsId,
+};
 
 /// A `(source_key, identifier)` pair. The only unit of identity during import.
 pub type Pair = (String, String);
@@ -16,6 +18,7 @@ pub struct PairMetadata {
     pub release_date: Option<String>,
     pub specific_data: EntrySpecificData,
     pub aliases: Vec<Alias>,
+    pub image: Option<Image>,
 }
 
 /// What a parent's listing said about a child (from its `ChildRef`). Kept so a
@@ -27,6 +30,7 @@ pub struct StubInfo {
     pub entry_type: EntryType,
     pub name: Option<String>,
     pub duration_ms: Option<i64>,
+    pub image: Option<Image>,
 }
 
 #[derive(Default)]
@@ -221,6 +225,13 @@ impl State {
                 if existing.duration_ms.is_none() {
                     existing.duration_ms = info.duration_ms;
                 }
+                if existing.image.is_none()
+                    && let Some(image) = info.image
+                {
+                    self.approx_bytes
+                        .fetch_add(image.url.len(), Ordering::Relaxed);
+                    existing.image = Some(image);
+                }
             }
         }
     }
@@ -313,7 +324,7 @@ fn specific_data_bytes(d: &EntrySpecificData) -> usize {
 }
 
 pub(super) fn stub_bytes(s: &StubInfo) -> usize {
-    32 + s.name.as_ref().map_or(0, |n| n.len())
+    32 + s.name.as_ref().map_or(0, |n| n.len()) + s.image.as_ref().map_or(0, |i| i.url.len())
 }
 
 pub(super) fn alias_bytes(a: &Alias) -> usize {

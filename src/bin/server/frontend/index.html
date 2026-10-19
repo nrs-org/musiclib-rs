@@ -201,7 +201,9 @@
   }
 
   .result {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 10px;
     width: 100%;
     text-align: left;
     background: transparent;
@@ -234,8 +236,18 @@
 
   .result-title {
     display: block;
+    flex: 1;
+    min-width: 0;
     overflow-wrap: anywhere;
   }
+
+  .result-thumb {
+    width: 32px;
+    height: 32px;
+    border-radius: 3px;
+  }
+
+  .result-thumb .art-initial { font-size: 14px; }
 
   .result-group-label {
     padding: 10px 18px 4px;
@@ -2078,6 +2090,284 @@
     color: var(--verdigris);
   }
 
+  /* An artist's track rows: date, role and play count after the title. */
+  .manifest-role {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-faint);
+    border: 1px solid var(--rail);
+    padding: 0 5px;
+  }
+
+  .manifest-date,
+  .manifest-plays {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    text-align: right;
+  }
+
+  .manifest-date { min-width: 10ch; }
+  .manifest-plays { min-width: 7ch; }
+  .manifest-row[data-dim] .manifest-title { color: var(--ink-faint); }
+
+  /* ---------- an artist's page (`fillArtistPage`) ---------- */
+  .artist-aliases {
+    font-size: 13px;
+    color: var(--ink-faint);
+    margin: -6px 0 6px;
+    overflow-wrap: anywhere;
+  }
+
+  .artist-section { margin-bottom: 32px; }
+
+  .artist-section .section-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+  }
+
+  .disco-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 10px 0 14px;
+  }
+
+  .disco-filter {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    border: 1px solid var(--rail);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--ink-soft);
+    padding: 3px 11px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .disco-filter:hover { border-color: var(--ink-soft); color: var(--ink); }
+
+  .disco-filter[aria-pressed="true"] {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--paper);
+  }
+
+  .disco-filter-count {
+    font-family: var(--mono);
+    font-size: 10px;
+    opacity: 0.7;
+  }
+
+  .track-filter {
+    flex: 1 1 140px;
+    max-width: 220px;
+    margin-left: auto;
+    border: 1px solid var(--rail);
+    background: transparent;
+    padding: 3px 10px;
+    font-size: 12px;
+    border-radius: 999px;
+  }
+
+  .track-filter:focus { outline: none; border-color: var(--brass); }
+
+  .release-grid {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+    gap: 10px;
+  }
+
+  .release-grid > li[hidden] { display: none; }
+
+  .release-tile {
+    --kind: var(--ink-faint);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .release-tile[data-kind="album"],
+  .release-tile[data-kind="compilation"] { --kind: var(--type-release-group); }
+  .release-tile[data-kind="ep"] { --kind: var(--type-release); }
+  .release-tile[data-kind="single"] { --kind: var(--type-track); }
+  .release-tile[data-kind="broadcast"] { --kind: var(--verdigris); }
+  .release-tile[data-kind="playlist"] { --kind: var(--brass); }
+
+  .release-open {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    border: none;
+    background: none;
+    color: var(--ink);
+    text-align: left;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .release-open:hover .release-title { text-decoration: underline; }
+  .release-open:hover .release-cover img { filter: brightness(1.06); }
+
+  .release-cover {
+    width: 100%;
+    aspect-ratio: 1;
+    margin-bottom: 4px;
+    background: color-mix(in srgb, var(--kind) 16%, var(--paper-deep));
+    color: var(--kind);
+    box-shadow: 0 1px 0 var(--rail), 0 6px 14px -10px rgb(0 0 0 / 0.5);
+  }
+
+  .release-cover .art-initial {
+    font-size: 60px;
+    opacity: 0.5;
+  }
+
+  .release-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
+  .release-kind {
+    color: var(--kind);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+  }
+
+  .release-title {
+    font-family: var(--serif);
+    font-size: 15px;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+
+  .release-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+
+  .release-also {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 2px 0 0;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-faint);
+  }
+
+  .release-also button {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: var(--ink-soft);
+    text-decoration: underline dotted;
+    cursor: pointer;
+  }
+
+  .release-also button:hover { color: var(--brass-ink); }
+
+  .list-more {
+    display: block;
+    margin: 10px auto 0;
+  }
+
+  .release-grid { row-gap: 18px; }
+
+  /* ---------- pictures (`artBox`) ---------- */
+  .art {
+    position: relative;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: var(--paper-deeper);
+    color: var(--ink-faint);
+  }
+
+  .art img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0;
+    transition: opacity 220ms ease-out;
+  }
+
+  .art.has-art img { opacity: 1; }
+
+  .art.has-art .art-initial { visibility: hidden; }
+
+  .art-initial {
+    font-family: var(--serif);
+    line-height: 1;
+  }
+
+  .track-thumb {
+    width: 34px;
+    height: 34px;
+    border-radius: 3px;
+  }
+
+  .track-thumb .art-initial { font-size: 15px; }
+
+  .entry-hero {
+    display: flex;
+    align-items: flex-end;
+    gap: 26px;
+  }
+
+  .entry-heading {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .hero-art {
+    width: 168px;
+    height: 168px;
+    margin-bottom: 20px;
+    box-shadow: 0 10px 24px -14px rgb(0 0 0 / 0.6);
+  }
+
+  .entry-hero[data-type="artist"] .hero-art { border-radius: 50%; }
+
+  .hero-art .art-initial { font-size: 72px; }
+
+  .artist-empty { margin-top: 8px; }
+
+  @media (max-width: 560px) {
+    .release-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    .manifest-date { display: none; }
+    .entry-hero { align-items: center; gap: 16px; }
+    .hero-art { width: 92px; height: 92px; }
+    .hero-art .art-initial { font-size: 40px; }
+  }
+
   .manifest-row.is-playing .manifest-title {
     font-weight: 500;
   }
@@ -2409,6 +2699,15 @@
   }
 
   .player-dock-queue-row:last-child { border-bottom: none; }
+
+  .queue-thumb {
+    width: 28px;
+    height: 28px;
+    margin-left: 6px;
+    border-radius: 3px;
+  }
+
+  .queue-thumb .art-initial { font-size: 12px; }
 
   .player-dock-queue-jump {
     flex: 1;
@@ -5175,30 +5474,6 @@
       if (player) await player.setVolume(volume);
     }
 
-    /// Looks up the track's album art for the player bar thumbnail — the
-    /// SDK's `player_state_changed` payload does carry `album.images`, but
-    /// only once playback has actually started, which is too late for the
-    /// bar to show art right away. A direct `/v1/tracks` lookup gets it
-    /// as soon as mounting starts. Returns null on any failure (not
-    /// connected, track not found, network error); callers fall back to
-    /// the existing icon placeholder.
-    async function getTrackArt(spotifyId) {
-      try {
-        const token = await getValidAccessToken();
-        const res = await fetch(`https://api.spotify.com/v1/tracks/${spotifyId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) return null;
-        const json = await res.json();
-        const images = json.album?.images || [];
-        // Spotify returns images largest-first (typically 640/300/64) —
-        // the middle size is the closest analogue to YouTube's mqdefault.
-        return images[1]?.url || images[0]?.url || null;
-      } catch {
-        return null;
-      }
-    }
-
     let editingClientId = false;
 
     function renderClientIdForm(cancelable) {
@@ -5319,7 +5594,6 @@
       getCurrentState,
       seek,
       setVolume,
-      getTrackArt,
     };
   })();
 
@@ -6821,12 +7095,15 @@
         }
         subEl.replaceChildren(...nodes);
       }
-      if (thumbUrl) {
-        if (thumbImg.getAttribute("src") !== thumbUrl) thumbImg.src = thumbUrl;
-        thumbImg.hidden = false;
-      } else {
+      // Shown once it loads: a 404 (no cover) leaves the placeholder icon.
+      if (!thumbUrl) {
         thumbImg.removeAttribute("src");
         thumbImg.hidden = true;
+      } else if (thumbImg.getAttribute("src") !== thumbUrl) {
+        thumbImg.hidden = true;
+        thumbImg.onload = () => (thumbImg.hidden = false);
+        thumbImg.onerror = () => (thumbImg.hidden = true);
+        thumbImg.src = thumbUrl;
       }
     }
 
@@ -7149,11 +7426,10 @@
       // The source's own provider (a Spotify track without a Spotify
       // connection is still "Spotify" to a remote, just as a bare preview
       // embed), plus whether this engine can actually control it.
-      const mounted = (art) => {
+      const mounted = () => {
         lastMounted = {
           provider: source.provider,
           identifier: source.identifier,
-          art: art || null,
           controllable: provider !== "other",
         };
         reportMounted();
@@ -7163,35 +7439,29 @@
         provider = "spotify";
         const spotifyId = source.identifier.slice(SPOTIFY_TRACK_PREFIX.length);
         mountSpotify(spotifyId, currentTitle, opts);
-        mounted(null);
-        Spotify.getTrackArt(spotifyId).then((art) => {
-          // Mounting may have moved on to a different source while this
-          // lookup was in flight — don't let a stale response clobber the
-          // bar's current thumbnail.
-          if (art && token === mountToken) mounted(art);
-        });
+        mounted();
         startSpotifyProgressPolling(token);
       } else if (source.provider === "youtube") {
         provider = "youtube";
         const videoId = source.embed_url.split("/").pop();
         mountYoutube(videoId, source.identifier, opts);
-        mounted(`https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`);
+        mounted();
         startYoutubeProgressPolling();
       } else if (source.provider === "soundcloud") {
         provider = "soundcloud";
         mountSoundcloud(source.embed_url, opts);
-        mounted(null);
+        mounted();
         startSoundcloudProgressPolling();
       } else if (source.provider === "nicovideo") {
         provider = "nicovideo";
         mountNicovideo(source.embed_url, opts);
-        mounted(null);
+        mounted();
       } else {
         provider = "other";
         surfaceEl.appendChild(
           el("iframe", { src: source.embed_url, allow: "autoplay; encrypted-media", allowFullscreen: true })
         );
-        mounted(null);
+        mounted();
         // No programmatic control over a bare embed at all — it has
         // whatever built-in controls it ships with, if any.
         engineState(true, false);
@@ -7308,15 +7578,14 @@
       const where = s.active_device
         ? `${s.playing ? "Playing" : "Paused"} on ${deviceLabel(s.active_device)}`
         : "Not playing on any device";
-      const art = s.mounted?.art || null;
-      const key = [s.current.entry_id, where, art].join("|");
+      const key = [s.current.entry_id, where].join("|");
       if (key === remoteCardKey) return;
       remoteCardKey = key;
       surfaceEl.className = "player-dock-surface compact";
       surfaceEl.innerHTML = "";
       surfaceEl.appendChild(
         el("div", { className: "player-dock-remote" }, [
-          art ? el("img", { src: art, alt: "" }) : null,
+          el("img", { src: coverUrl(s.current.entry_id), alt: "", onerror: (e) => e.target.remove() }),
           el("div", { className: "player-dock-remote-text" }, [
             el("p", { className: "player-dock-spotify-title", text: s.current.title || "(untitled)" }),
             el("p", { className: "player-dock-spotify-sub", text: where }),
@@ -7612,6 +7881,7 @@
         removeBtn.innerHTML = svgIcon("x", 12);
         dockQueueEl.appendChild(
           el("div", { className: "player-dock-queue-row" + (isCurrent ? " is-current" : "") }, [
+            artBox(item.entry_id, "queue-thumb", item.title),
             el("button", {
               type: "button",
               className: "player-dock-queue-jump",
@@ -7714,7 +7984,7 @@
         if (!isActive()) {
           rest.push(s.active_device ? `on ${deviceLabel(s.active_device)}` : "not playing");
         }
-        updateBarMeta(currentTitle, artists, rest.filter(Boolean), s.mounted?.art || null);
+        updateBarMeta(currentTitle, artists, rest.filter(Boolean), coverUrl(s.current.entry_id));
       }
       prevBtn.disabled = !s.has_prev;
       nextBtn.disabled = !s.has_next;
@@ -7866,7 +8136,7 @@
         mediaMetaKey = null;
         return;
       }
-      const art = snap.mounted?.art || null;
+      const art = new URL(coverUrl(snap.current.entry_id), location.href).href;
       const artist = currentArtist();
       const key = JSON.stringify([snap.current.entry_id, currentTitle, artist, art]);
       if (key !== mediaMetaKey) {
@@ -7874,7 +8144,7 @@
         mediaSession.metadata = new MediaMetadata({
           title: currentTitle || "(untitled)",
           artist,
-          artwork: art ? [{ src: art }] : [],
+          artwork: [{ src: art }],
         });
         force = true;
       }
@@ -8503,7 +8773,10 @@
                   // different entry.
                   onclick: () => (currentMode === "graph" ? viewGraph(r.entry_id) : viewEntry(r.entry_id)),
                 },
-                [el("span", { className: "result-title", text: r.title || "(untitled)" })]
+                [
+                  artBox(r.entry_id, "result-thumb", r.title),
+                  el("span", { className: "result-title", text: r.title || "(untitled)" }),
+                ]
               ),
             ]
           )
@@ -10815,6 +11088,355 @@
     return row;
   }
 
+  // ---------- pictures: `GET /api/entries/{id}/cover` (cover.rs) ----------
+  //
+  // The server picks each entry's picture and redirects to it, or answers
+  // 404 when there is none; the browser caches the answer for a day.
+
+  function coverUrl(entryId) {
+    return `/api/entries/${entryId}/cover`;
+  }
+
+  // A picture box: the entry's cover, faded in once loaded, over the title's
+  // first letter, which stays when there's no cover. `loading="lazy"`
+  // defers covers far down a long list.
+  function artBox(entryId, className, title) {
+    const initial = [...(title || "").trim()][0] || "♪";
+    const box = el("span", { className: `art ${className}`, "aria-hidden": "true" }, [
+      el("span", { className: "art-initial", text: initial }),
+    ]);
+    if (entryId == null) return box;
+    const img = el("img", { alt: "", loading: "lazy", decoding: "async" });
+    img.onload = () => box.classList.add("has-art");
+    img.onerror = () => img.remove();
+    img.src = coverUrl(entryId);
+    box.appendChild(img);
+    return box;
+  }
+
+  // ---------- an artist's page: what `GET /api/entries/{id}/discography`
+  // (discography.rs) ties to the artist, as a release grid and a track
+  // list, each with filter chips ----------
+
+  const RELEASE_FILTERS = [
+    { label: "All", test: (r) => r.main && r.kind !== "playlist" },
+    { label: "Albums", test: (r) => r.main && (r.kind === "album" || r.kind === "compilation") },
+    { label: "EPs", test: (r) => r.main && r.kind === "ep" },
+    { label: "Singles", test: (r) => r.main && r.kind === "single" },
+    { label: "Other", test: (r) => r.main && r.kind === "other" },
+    { label: "Live", test: (r) => r.main && r.kind === "broadcast" },
+    { label: "Appears on", test: (r) => !r.main && r.kind !== "playlist" },
+    { label: "Playlists", test: (r) => r.kind === "playlist" },
+  ];
+  const RELEASE_KIND_LABEL = {
+    album: "Album",
+    ep: "EP",
+    single: "Single",
+    compilation: "Compilation",
+    broadcast: "Live",
+    playlist: "Playlist",
+    other: "Other",
+  };
+  const RELEASE_KIND_RANK = ["album", "compilation", "ep", "single", "other", "broadcast", "playlist"];
+  const RELEASE_PREVIEW = 12;
+  const TRACK_PREVIEW = 15;
+  const TOP_TRACKS = 5;
+
+  function plural(n, one, many = one + "s") {
+    return `${n} ${n === 1 ? one : many}`;
+  }
+
+  // Release dates come at any precision (`2022`, `2022-XX-XX`, a full
+  // timestamp): the year is the part every one of them has.
+  function releaseYear(raw) {
+    return /^\d{4}/.test(raw || "") ? raw.slice(0, 4) : "—";
+  }
+
+  function sourceDots(kinds) {
+    const dots = el("span", { className: "edition-dots" });
+    for (const kind of kinds || []) {
+      if (!PLATFORM_COLOR[kind]) continue;
+      const dot = el("span", { className: "dot", title: providerLabel(kind) });
+      dot.style.background = PLATFORM_COLOR[kind];
+      dots.appendChild(dot);
+    }
+    return dots;
+  }
+
+  // A row of filter chips, each with its count; chips with nothing to show
+  // are left out. `onPick(index)` fires on click and once for the default.
+  function filterChips(filters, items, onPick) {
+    const host = el("div", { className: "disco-filters", role: "group" });
+    const buttons = [];
+    filters.forEach((f, i) => {
+      const count = items.filter(f.test).length;
+      if (!count) return;
+      const btn = el(
+        "button",
+        {
+          className: "disco-filter",
+          type: "button",
+          "aria-pressed": "false",
+          onclick: () => pick(i, btn),
+        },
+        [el("span", { text: f.label }), el("span", { className: "disco-filter-count", text: String(count) })]
+      );
+      buttons.push([i, btn]);
+      host.appendChild(btn);
+    });
+    function pick(i, btn) {
+      for (const [, b] of buttons) b.setAttribute("aria-pressed", String(b === btn));
+      onPick(i);
+    }
+    if (buttons.length) pick(...buttons[0]);
+    return host;
+  }
+
+  // Shows the first `preview` of `rows` (elements) in `list`, with a
+  // "Show all" button after it for the rest.
+  function fillPreviewList(list, rows, preview, noun) {
+    list.replaceChildren(...rows);
+    if (list.nextElementSibling?.classList.contains("list-more")) list.nextElementSibling.remove();
+    if (rows.length <= preview) return;
+    rows.slice(preview).forEach((r) => (r.hidden = true));
+    const more = el("button", {
+      className: "ghost-btn list-more",
+      type: "button",
+      text: `Show all ${plural(rows.length, noun)}`,
+      onclick: () => {
+        rows.forEach((r) => (r.hidden = false));
+        more.remove();
+      },
+    });
+    list.after(more);
+  }
+
+  function releaseTile(r) {
+    const meta = [];
+    if (r.track_count) meta.push(plural(r.track_count, "track"));
+    const tile = el("li", { className: "release-tile", "data-kind": r.kind }, [
+      el(
+        "button",
+        {
+          className: "release-open",
+          type: "button",
+          title: `${catalogNo(r.entry_id)} — ${r.title || "(untitled)"}`,
+          onclick: () => viewEntry(r.entry_id),
+        },
+        [
+          artBox(r.entry_id, "release-cover", r.title),
+          el("span", { className: "release-top" }, [
+            el("span", { className: "release-kind", text: RELEASE_KIND_LABEL[r.kind] || r.kind }),
+            el("span", { text: releaseYear(r.release_date) }),
+          ]),
+          el("span", { className: "release-title", text: r.title || "(untitled)" }),
+          el("span", { className: "release-meta" }, [el("span", { text: meta.join(" · ") }), sourceDots(r.source_kinds)]),
+        ]
+      ),
+    ]);
+    // Same-title entries the server folded in but the library doesn't link:
+    // reachable here so they can be opened (and merged) by hand.
+    if (r.also?.length) {
+      tile.appendChild(
+        el("div", { className: "release-also", title: "Same title, not linked in the library" }, [
+          el("span", { text: "also" }),
+          ...r.also.map((id) => el("button", { type: "button", text: catalogNo(id), onclick: () => viewEntry(id) })),
+        ])
+      );
+    }
+    return tile;
+  }
+
+  // One track row; `queue` is the list a click on its play button starts.
+  function artistTrackRow(t, queue, { showDate = true } = {}) {
+    const playing = Player.isPlayingEntry(t.entry_id);
+    const playIcon = el("span", { className: "manifest-play-icon" });
+    playIcon.innerHTML = svgIcon(playing ? "pause" : "play", 12);
+    const queueIcon = el("span", { className: "manifest-play-icon" });
+    queueIcon.innerHTML = svgIcon("plus", 12);
+    return el("li", {}, [
+      el(
+        "div",
+        {
+          className: "manifest-row" + (playing ? " is-playing" : ""),
+          "data-entry-id": String(t.entry_id),
+          "data-dim": t.playable ? null : "",
+        },
+        [
+          el("button", {
+            className: "manifest-play",
+            type: "button",
+            disabled: !t.playable,
+            "aria-label": playing ? "Pause" : "Play",
+            onclick: t.playable
+              ? () => {
+                  if (Player.isPlayingEntry(t.entry_id)) Player.togglePlay();
+                  else startQueue(queue, queue.findIndex((q) => q.entry_id === t.entry_id));
+                }
+              : null,
+          }, [playIcon]),
+          artBox(t.entry_id, "track-thumb", t.title),
+          el("button", {
+            className: "manifest-title",
+            type: "button",
+            text: t.title || "(untitled)",
+            onclick: () => viewEntry(t.entry_id),
+          }),
+          !t.main && t.roles.length ? el("span", { className: "manifest-role", text: t.roles.join(", ") }) : null,
+          showDate ? el("span", { className: "manifest-date", text: friendlyDate(t.release_date) || "—" }) : null,
+          el("span", { className: "manifest-plays", text: t.plays ? plural(t.plays, "play") : "" }),
+          el("button", {
+            className: "manifest-queue",
+            type: "button",
+            disabled: !t.playable,
+            "aria-label": "Add to queue",
+            onclick: t.playable ? () => queueTrack(t.entry_id, t.title) : null,
+          }, [queueIcon]),
+        ]
+      ),
+    ]);
+  }
+
+  function sectionLabel(text, aside) {
+    return el("h2", { className: "section-label" }, [
+      el("span", { text }),
+      aside ? el("span", { text: aside }) : null,
+    ]);
+  }
+
+  // Fills an artist's page: a summary into `metaEl`, then a shuffle button,
+  // most-played tracks, the release grid and the track list into `host`.
+  function fillArtistPage(host, metaEl, disco) {
+    const { releases, tracks } = disco;
+    const mainReleases = releases.filter((r) => r.main && r.kind !== "playlist");
+    const count = (kinds) => mainReleases.filter((r) => kinds.includes(r.kind)).length;
+    const totalPlays = tracks.reduce((n, t) => n + t.plays, 0);
+    metaEl.textContent = [
+      count(["album", "compilation"]) && plural(count(["album", "compilation"]), "album"),
+      count(["ep"]) && plural(count(["ep"]), "EP"),
+      count(["single"]) && plural(count(["single"]), "single"),
+      tracks.length && plural(tracks.length, "track"),
+      totalPlays && plural(totalPlays, "play"),
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    if (!releases.length && !tracks.length) {
+      host.appendChild(
+        el("p", {
+          className: "note artist-empty",
+          text: "Nothing by this artist is in the library yet — import their discography from Import.",
+        })
+      );
+      return;
+    }
+
+    const playable = tracks.filter((t) => t.playable).map((t) => ({ entry_id: t.entry_id, title: t.title }));
+    if (playable.length) {
+      const icon = el("span", { className: "play-cta-icon" });
+      icon.innerHTML = svgIcon("shuffle", 14);
+      const mainPlayable = tracks
+        .filter((t) => t.playable && t.main)
+        .map((t) => ({ entry_id: t.entry_id, title: t.title }));
+      host.appendChild(
+        el("div", { className: "play-cta-row" }, [
+          el(
+            "button",
+            {
+              className: "play-cta",
+              type: "button",
+              onclick: () => {
+                const pool = mainPlayable.length ? mainPlayable : playable;
+                startQueue(shuffleArray(pool), 0);
+              },
+            },
+            [icon, el("span", { text: "Shuffle" })]
+          ),
+          el("span", { className: "play-cta-hint", text: `${plural(playable.length, "playable track")}` }),
+        ])
+      );
+    }
+
+    const top = tracks
+      .filter((t) => t.plays > 0)
+      .sort((a, b) => b.plays - a.plays || (b.release_date || "").localeCompare(a.release_date || ""))
+      .slice(0, TOP_TRACKS);
+    if (top.length) {
+      const queue = top.filter((t) => t.playable).map((t) => ({ entry_id: t.entry_id, title: t.title }));
+      host.appendChild(
+        el("section", { className: "artist-section" }, [
+          sectionLabel("Most played"),
+          el("ul", { className: "manifest" }, top.map((t) => artistTrackRow(t, queue, { showDate: false }))),
+        ])
+      );
+    }
+
+    if (releases.length) {
+      const grid = el("ul", { className: "release-grid" });
+      const chips = filterChips(RELEASE_FILTERS, releases, (i) => {
+        const shown = releases.filter(RELEASE_FILTERS[i].test);
+        // "All" is the overview: albums first, then EPs, singles, ... —
+        // newest first within each (the server's order). The other chips
+        // hold one kind each and stay purely chronological.
+        if (i === 0) shown.sort((a, b) => RELEASE_KIND_RANK.indexOf(a.kind) - RELEASE_KIND_RANK.indexOf(b.kind));
+        fillPreviewList(grid, shown.map(releaseTile), RELEASE_PREVIEW, "release");
+      });
+      host.appendChild(
+        el("section", { className: "artist-section" }, [
+          sectionLabel("Discography", plural(releases.length, "release")),
+          chips,
+          grid,
+        ])
+      );
+    }
+
+    if (tracks.length) {
+      const filters = [
+        { label: "All", test: () => true },
+        { label: "Main", test: (t) => t.main },
+        { label: "Featured & credits", test: (t) => !t.main },
+      ];
+      // "Main" only says something next to a non-empty "Featured".
+      if (tracks.every((t) => t.main)) filters.splice(1, 2);
+      const list = el("ul", { className: "manifest" });
+      let filter = filters[0];
+      const search = el("input", {
+        className: "track-filter",
+        type: "search",
+        placeholder: "Filter tracks",
+        "aria-label": "Filter tracks",
+      });
+      const render = () => {
+        const q = search.value.trim().toLowerCase();
+        const shown = tracks.filter((t) => filter.test(t) && (!q || (t.title || "").toLowerCase().includes(q)));
+        const queue = shown.filter((t) => t.playable).map((t) => ({ entry_id: t.entry_id, title: t.title }));
+        fillPreviewList(list, shown.map((t) => artistTrackRow(t, queue)), q ? Infinity : TRACK_PREVIEW, "track");
+      };
+      search.addEventListener("input", render);
+      const chips = filterChips(filters, tracks, (i) => {
+        filter = filters[i];
+        render();
+      });
+      chips.appendChild(search);
+      host.appendChild(
+        el("section", { className: "artist-section" }, [
+          sectionLabel("Tracks", plural(tracks.length, "track")),
+          chips,
+          list,
+        ])
+      );
+    }
+  }
+
+  function shuffleArray(items) {
+    const a = items.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
   // `push` (default true): whether this navigation gets its own history
   // entry. A genuine navigation (search result, tracklist row, the player
   // bar's title) should; re-rendering the entry you're already on after a
@@ -10852,8 +11474,8 @@
       ])
     );
     const titleEl = el("h1", { className: "card-title", text: entry.title || "(untitled)" });
-    detail.appendChild(titleEl);
-    detail.appendChild(
+    const headingEl = el("div", { className: "entry-heading" }, [titleEl]);
+    headingEl.appendChild(
       nameEditor({
         label: "rename",
         className: "card-rename",
@@ -10877,7 +11499,19 @@
       className: "card-date",
       text: entry.entry_type === "artist" && !entry.release_date ? "" : releasedText(entry.release_date),
     });
-    detail.appendChild(el("p", { className: "card-meta" }, [bylineEl, dateEl]));
+    headingEl.appendChild(el("p", { className: "card-meta" }, [bylineEl, dateEl]));
+    // Artists and releases show their picture beside the heading (see
+    // `art.rs` for where it comes from); a track's lives in the player.
+    if (entry.entry_type === "track") {
+      detail.appendChild(headingEl);
+    } else {
+      detail.appendChild(
+        el("div", { className: "entry-hero", "data-type": entry.entry_type }, [
+          artBox(entry.entry_id, "hero-art", entry.title),
+          headingEl,
+        ])
+      );
+    }
 
     if (entry.entry_type !== "artist") {
       const creditsEl = el("div", { className: "credits", hidden: true });
@@ -10900,12 +11534,16 @@
     cardEls = { title: titleEl, date: dateEl, sources: sourcesEl, editions: editionsEl };
 
     if (entry.entry_type === "artist") {
-      detail.appendChild(
-        el("p", {
-          className: "note",
-          text: "Artists aren't playable directly — open a release or track instead.",
-        })
-      );
+      const others = (entry.aliases || []).filter((a) => a !== entry.title);
+      if (others.length) {
+        titleEl.after(el("p", { className: "artist-aliases", text: others.join(" · ") }));
+      }
+      const disco = await api(`/api/entries/${entryId}/discography`).catch(() => null);
+      if (disco) {
+        fillArtistPage(detail, dateEl, disco);
+      } else {
+        detail.appendChild(el("p", { className: "note", text: "Couldn't load this artist's discography." }));
+      }
     } else {
       const playable = await api(`/api/entries/${entryId}/playable-sources`).catch(() => ({ sources: [] }));
       if (playable.sources.length) {

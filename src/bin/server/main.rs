@@ -20,6 +20,8 @@
 // threshold, and these are one-per-request values, not hot-path ones.
 #![allow(clippy::result_large_err)]
 
+mod cover;
+mod discography;
 mod entries;
 mod fetch_options;
 mod ingest_progress;
@@ -345,7 +347,10 @@ async fn main() -> anyhow::Result<()> {
     local.spawn_local(Arc::clone(&state.playback).artist_loop(state.db.clone()));
     #[cfg(feature = "media_controls")]
     if !args.no_media_controls {
-        local.spawn_local(media_controls::run(Arc::clone(&state.playback)));
+        local.spawn_local(media_controls::run(
+            Arc::clone(&state.playback),
+            state.db.clone(),
+        ));
     }
     #[cfg(feature = "nrs")]
     local.spawn_local(nrs_bridge::export_listening_loop(Arc::clone(&state)));

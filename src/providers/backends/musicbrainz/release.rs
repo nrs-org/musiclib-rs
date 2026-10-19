@@ -79,6 +79,23 @@ pub(crate) const PARTS: &str = "recordings+artist-credits+url-rels";
 
 // --- Helpers ---
 
+/// The release's Cover Art Archive front image, when the lookup's
+/// `cover-art-archive` block (present whatever `inc=` asked for) says it has
+/// one. MusicBrainz itself has no images.
+fn cover_art_archive_front(
+    mbid: &str,
+    extra: &serde_json::Value,
+) -> Option<crate::providers::types::Image> {
+    let front = extra.get("cover-art-archive")?.get("front")?.as_bool()?;
+    front.then(|| {
+        crate::providers::types::Image::new(
+            format!("https://coverartarchive.org/release/{mbid}/front-250"),
+            Some(250),
+            Some(250),
+        )
+    })
+}
+
 fn parse_release_date(date_str: &str) -> Option<String> {
     // MB dates can be "YYYY", "YYYY-MM", or "YYYY-MM-DD".
     Some(match date_str.len() {
@@ -144,6 +161,7 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
                         Default::default()
                     };
                     ChildRef {
+                        image: None,
                         entry_type: EntryType::Track,
                         external_type: EXTERNAL_TYPE_RECORDING.into(),
                         sources,
@@ -203,6 +221,7 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
         }
 
         let result = Ok(EntityResult {
+            image: cover_art_archive_front(&r.id, &r.extra),
             release_date,
             sources,
             extra: r.extra.clone(),
@@ -353,6 +372,12 @@ mod tests {
         // Alias
         assert_eq!(rel.aliases.len(), 1);
         assert_eq!(rel.aliases[0].name, "Hop Step Sheep");
+        assert_eq!(
+            rel.image.as_ref().map(|i| i.url.as_str()),
+            Some(
+                "https://coverartarchive.org/release/c9496f63-4978-4008-b069-953e8fb1f8a6/front-250"
+            )
+        );
 
         // children[0] = artist credits, children[1] = tracks
         assert_eq!(rel.children.len(), 2);

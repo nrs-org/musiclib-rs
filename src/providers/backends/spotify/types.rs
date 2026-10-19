@@ -33,6 +33,15 @@ pub struct Image {
     pub height: Option<u32>,
 }
 
+/// The variant of a Spotify `images` list worth storing (`Image::pick`).
+pub(crate) fn pick_image(images: &[Image]) -> Option<crate::providers::types::Image> {
+    crate::providers::types::Image::pick(
+        images
+            .iter()
+            .map(|i| crate::providers::types::Image::new(&i.url, i.width, i.height)),
+    )
+}
+
 /// Generic Spotify paging object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paging<T> {

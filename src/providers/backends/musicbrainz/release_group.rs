@@ -139,6 +139,7 @@ pub async fn get_release_group(
         }
 
         let result = Ok(EntityResult {
+            image: None,
             release_date,
             sources,
             extra: rg.extra.clone(),

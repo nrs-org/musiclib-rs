@@ -247,6 +247,56 @@ mod entry_child {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// A pair's picture, one URL per pair (docs/plan-images.md). `origin` is
+/// `fetch` (the pair's own response) or `listing` (a parent's listing, for a
+/// pair not fetched itself); a `fetch` image replaces a `listing` one, never
+/// the reverse.
+mod pair_image {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "pair_image")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub url: String,
+        pub width: Option<i32>,
+        pub height: Option<i32>,
+        pub origin: String,
+        /// See `entry_source::Model::run_id`.
+        pub run_id: Option<i64>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Where a `pair_image` row came from. See `pair_image`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageOrigin {
+    Fetch,
+    Listing,
+}
+
+impl ImageOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            ImageOrigin::Fetch => "fetch",
+            ImageOrigin::Listing => "listing",
+        }
+    }
+}
+
+/// One `pair_image` row.
+pub struct PairImageRow {
+    pub source: String,
+    pub identifier: String,
+    pub url: String,
+    pub fetched: bool,
+}
+
 mod contribution {
     use sea_orm::entity::prelude::*;
 
@@ -2132,6 +2182,10 @@ impl MusicDb {
             .filter(contribution::Column::RunId.eq(run_id))
             .exec(&self.db)
             .await?;
+        pair_image::Entity::delete_many()
+            .filter(pair_image::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
         self.delete_orphan_entries().await?;
         import_run::Entity::update_many()
             .col_expr(
@@ -2274,6 +2328,67 @@ impl MusicDb {
         );
         self.db.execute_raw(stmt).await?;
         Ok(())
+    }
+
+    /// Store `image` as the pair's picture, unless the pair already has one
+    /// from a higher `origin` (a `listing` image never replaces a `fetch`
+    /// one). `run_id` tags the row on INSERT only, like `upsert_pair`.
+    pub async fn set_pair_image(
+        &self,
+        source: &str,
+        identifier: &str,
+        image: &crate::providers::types::Image,
+        origin: ImageOrigin,
+        run_id: Option<i64>,
+    ) -> Result<(), Error> {
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "INSERT INTO pair_image (source, identifier, url, width, height, origin, run_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (source, identifier) DO UPDATE \
+             SET url = excluded.url, width = excluded.width, height = excluded.height, \
+                 origin = excluded.origin \
+             WHERE excluded.origin = 'fetch' OR pair_image.origin = 'listing'",
+            [
+                source.into(),
+                identifier.into(),
+                image.url.as_str().into(),
+                image.width.map(|w| w as i32).into(),
+                image.height.map(|h| h as i32).into(),
+                origin.as_str().into(),
+                run_id.into(),
+            ],
+        );
+        self.db.execute_raw(stmt).await?;
+        Ok(())
+    }
+
+    /// The `pair_image` rows of `pairs`.
+    pub async fn pair_image_rows(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<PairImageRow>, Error> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(chunked_pair_query(pairs, |chunk| {
+            pair_image::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    pair_image::Column::Source,
+                    pair_image::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(|m| PairImageRow {
+            fetched: m.origin == ImageOrigin::Fetch.as_str(),
+            source: m.source,
+            identifier: m.identifier,
+            url: m.url,
+        })
+        .collect())
     }
 
     /// Record the name a parent's listing gave a stub pair, as a non-primary
@@ -3744,6 +3859,25 @@ impl MusicDb {
             .collect()
     }
 
+    /// Every entry's counted plays (`MIN_COUNTED_PLAY_SECONDS`), all time:
+    /// `(entry_id, plays)`. Keyed by the entry id each play was recorded on,
+    /// which may be any member of its soft-identity component.
+    pub async fn counted_plays_by_entry(&self) -> Result<Vec<(i64, i64)>, Error> {
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT entry_id, COUNT(*) AS plays FROM play_event
+                 WHERE listened_seconds >= ?
+                 GROUP BY entry_id",
+                [MIN_COUNTED_PLAY_SECONDS.into()],
+            ))
+            .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("", "entry_id")?, row.try_get("", "plays")?)))
+            .collect()
+    }
+
     /// Counted plays whose listened time has grown past what was last
     /// exported to `target` (see `play_export`), oldest first.
     pub async fn plays_pending_export(&self, target: &str) -> Result<Vec<PendingExport>, Error> {
@@ -4114,6 +4248,45 @@ mod tests {
 
     async fn mem_db() -> MusicDb {
         MusicDb::new("sqlite::memory:").await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn listing_image_never_replaces_fetched_one() {
+        use crate::providers::types::Image;
+        let db = mem_db().await;
+        let pair = [("spotify".to_owned(), "a".to_owned())];
+        let url = |db: &MusicDb| {
+            let db = db.clone();
+            let pair = pair.clone();
+            async move {
+                let rows = db.pair_image_rows(&pair).await.unwrap();
+                rows.into_iter().map(|r| (r.url, r.fetched)).next()
+            }
+        };
+        let img = |u: &str| Image::new(u, Some(300), Some(300));
+
+        db.set_pair_image("spotify", "a", &img("listed"), ImageOrigin::Listing, None)
+            .await
+            .unwrap();
+        assert_eq!(url(&db).await, Some(("listed".into(), false)));
+        db.set_pair_image("spotify", "a", &img("fetched"), ImageOrigin::Fetch, None)
+            .await
+            .unwrap();
+        assert_eq!(url(&db).await, Some(("fetched".into(), true)));
+        db.set_pair_image(
+            "spotify",
+            "a",
+            &img("listed again"),
+            ImageOrigin::Listing,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(url(&db).await, Some(("fetched".into(), true)));
+        db.set_pair_image("spotify", "a", &img("refetched"), ImageOrigin::Fetch, None)
+            .await
+            .unwrap();
+        assert_eq!(url(&db).await, Some(("refetched".into(), true)));
     }
 
     /// `recover_pending_import_runs` purges a "pending" run whose recorded

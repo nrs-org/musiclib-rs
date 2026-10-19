@@ -47,6 +47,9 @@ pub struct ArtistRelease {
     #[serde(rename = "type")]
     pub release_type: Option<String>,
     pub role: Option<String>,
+    /// A 150 px cover, empty when there is none.
+    #[serde(default)]
+    pub thumb: Option<String>,
 }
 
 // --- Constants ---
@@ -117,6 +120,10 @@ impl PageFetcher for ArtistReleasesPageFetcher {
                         rel.role.as_deref(),
                         Some("Appearance" | "TrackAppearance")
                     ),
+                    image: rel
+                        .thumb
+                        .filter(|t| !t.is_empty())
+                        .map(|t| crate::providers::types::Image::new(t, Some(150), Some(150))),
                     ..Default::default()
                 }
             })
@@ -254,6 +261,7 @@ pub async fn get_artist(client: &DiscogsClient, url: &str) -> Result<EntityResul
         }
 
         let result = Ok(EntityResult {
+            image: super::types::primary_image(&a.extra),
             release_date: None,
             sources,
             extra: a.extra.clone(),

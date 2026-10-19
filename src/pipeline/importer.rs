@@ -114,6 +114,7 @@ pub fn import(
             specific_data,
             children,
             aliases,
+            image,
         } = result;
         let entry_type = specific_data.entry_type();
 
@@ -125,6 +126,7 @@ pub fn import(
             release_date,
             specific_data,
             aliases,
+            image,
         };
 
         // 5b. Cross-link: ask every other provider to enrich `sources` with
@@ -240,6 +242,7 @@ pub fn import(
                                 entry_type: child_ref.entry_type,
                                 name: child_ref.name.clone(),
                                 duration_ms: child_ref.duration_ms,
+                                image: child_ref.image.clone(),
                             },
                         );
                         let pos = child_ref.position.as_ref();
@@ -493,6 +496,7 @@ mod tests {
                 }
             };
             Ok(EntityResult {
+                image: None,
                 release_date: None,
                 sources: Default::default(),
                 extra: Default::default(),
@@ -622,6 +626,7 @@ mod tests {
                 parent_type,
             )?;
             Ok(EntityResult {
+                image: None,
                 release_date: None,
                 sources: Default::default(),
                 extra: Default::default(),

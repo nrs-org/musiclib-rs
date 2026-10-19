@@ -119,3 +119,80 @@ impl<F: FnOnce(Value) -> Result<Vec<ChildRef>, Error> + Send> PageFetcher
         })
     }
 }
+/// The picture worth storing from a yt-dlp info dict's `thumbnails`.
+/// Signed URLs (with a query string, like Niconico's `?key=`) expire, so
+/// they're skipped. Among the rest, a sized variant chosen by `Image::pick`
+/// wins when it's at least 300 px; otherwise the unsized variant yt-dlp
+/// prefers most (Niconico's `.L`), else the largest sized one.
+pub(crate) fn info_thumbnail(info: &Value) -> Option<crate::providers::types::Image> {
+    use crate::providers::types::Image;
+    let thumbs: Vec<&Value> = info
+        .get("thumbnails")?
+        .as_array()?
+        .iter()
+        .filter(|t| {
+            t.get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.contains('?'))
+        })
+        .collect();
+    let num = |t: &Value, k: &str| t.get(k).and_then(Value::as_u64);
+    let url = |t: &Value| {
+        t.get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let sized = Image::pick(thumbs.iter().filter_map(|t| {
+        Some(Image::new(
+            url(t),
+            Some(num(t, "width")? as u32),
+            Some(num(t, "height")? as u32),
+        ))
+    }));
+    if let Some(img) = &sized
+        && img.width.max(img.height).is_some_and(|s| s >= 300)
+    {
+        return sized;
+    }
+    thumbs
+        .iter()
+        .filter(|t| num(t, "width").is_none())
+        .max_by_key(|t| {
+            t.get("preference")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MIN)
+        })
+        .map(|t| Image::new(url(t), None, None))
+        .or(sized)
+}
+
+#[cfg(test)]
+mod thumbnail_tests {
+    use serde_json::json;
+
+    #[test]
+    fn niconico_prefers_unsigned_large() {
+        let info = json!({ "thumbnails": [
+            { "id": "url", "preference": 0, "url": "https://nicovideo.cdn.nimg.jp/thumbnails/1/1" },
+            { "id": "largeUrl", "preference": 2, "url": "https://nicovideo.cdn.nimg.jp/thumbnails/1/1.L" },
+            { "id": "ogp", "preference": 4, "width": 1280, "height": 720,
+              "url": "https://img.cdn.nimg.jp/s/nicovideo/thumbnails/1/1.original/r1280x720l?key=abc" },
+        ]});
+        assert_eq!(
+            super::info_thumbnail(&info).unwrap().url,
+            "https://nicovideo.cdn.nimg.jp/thumbnails/1/1.L"
+        );
+    }
+
+    #[test]
+    fn soundcloud_picks_300() {
+        let info = json!({ "thumbnails": [
+            { "id": "large", "width": 100, "height": 100, "url": "l" },
+            { "id": "t300x300", "width": 300, "height": 300, "url": "t300" },
+            { "id": "t500x500", "width": 500, "height": 500, "url": "t500" },
+            { "id": "original", "preference": 10, "url": "o" },
+        ]});
+        assert_eq!(super::info_thumbnail(&info).unwrap().url, "t300");
+    }
+}

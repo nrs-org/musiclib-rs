@@ -65,6 +65,7 @@ impl VideoResponse {
         };
 
         EntityResult {
+            image: crate::providers::backends::ytdlp::info_thumbnail(&self.extra),
             release_date: self
                 .upload_date
                 .as_deref()
@@ -150,6 +151,10 @@ mod tests {
         let video = get_video(&client, url).await?;
 
         assert_eq!(video.aliases.len(), 1);
+        assert_eq!(
+            video.image.as_ref().map(|i| i.url.as_str()),
+            Some("https://nicovideo.cdn.nimg.jp/thumbnails/46158033/46158033.67884508.L")
+        );
         assert!(video.aliases[0].primary);
 
         assert!(matches!(

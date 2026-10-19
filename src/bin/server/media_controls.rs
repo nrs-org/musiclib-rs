@@ -16,6 +16,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use musiclib_rs::musicdb::MusicDb;
 use serde_json::Value;
 
 use crate::playback::{DEFAULT_VOLUME, MediaKey, PlaybackHub};
@@ -23,9 +24,11 @@ use crate::playback::{DEFAULT_VOLUME, MediaKey, PlaybackHub};
 /// The parts of a snapshot the OS controls show.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct NowPlaying {
+    /// The current track's entry, whose cover (`cover::resolve`) the
+    /// controls show.
+    entry_id: Option<i64>,
     title: Option<String>,
     artist: Option<String>,
-    art: Option<String>,
     duration_ms: Option<u64>,
     /// `None` with no current track.
     playing: Option<bool>,
@@ -40,10 +43,10 @@ impl NowPlaying {
             return Self::default();
         }
         Self {
+            entry_id: current["entry_id"].as_i64(),
             title: text(&current["title"]),
             // The library's credits, else what the playing source says.
             artist: text(&snapshot["artist"]).or_else(|| text(&snapshot["mounted"]["artist"])),
-            art: text(&snapshot["mounted"]["art"]),
             duration_ms: snapshot["duration_ms"].as_u64().filter(|&d| d > 0),
             playing: Some(snapshot["playing"].as_bool().unwrap_or(false)),
             position_ms: snapshot["position_ms"].as_u64().unwrap_or(0),
@@ -52,8 +55,13 @@ impl NowPlaying {
 
     /// Whether the OS should be told new metadata (not just a new position).
     fn same_track(&self, other: &Self) -> bool {
-        (&self.title, &self.artist, &self.art, self.duration_ms)
-            == (&other.title, &other.artist, &other.art, other.duration_ms)
+        (self.entry_id, &self.title, &self.artist, self.duration_ms)
+            == (
+                other.entry_id,
+                &other.title,
+                &other.artist,
+                other.duration_ms,
+            )
     }
 }
 
@@ -97,7 +105,7 @@ fn media_key(event: souvlaki::MediaControlEvent) -> Option<MediaKey> {
     unix,
     not(any(target_os = "macos", target_os = "ios", target_os = "android"))
 ))]
-pub async fn run(hub: Arc<PlaybackHub>) {
+pub async fn run(hub: Arc<PlaybackHub>, db: MusicDb) {
     use souvlaki::{MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 
     let config = PlatformConfig {
@@ -126,11 +134,28 @@ pub async fn run(hub: Arc<PlaybackHub>) {
     let mut snapshots = hub.subscribe();
     let mut shown: Option<NowPlaying> = None;
     let mut shown_volume: Option<f64> = None;
+    // The cover URL of the last entry looked up, resolved here rather than
+    // handed over as the `/cover` redirect: MPRIS clients load `artUrl`
+    // themselves and needn't follow redirects or reach this server.
+    let mut art: Option<(i64, Option<String>)> = None;
     loop {
         let snapshot = snapshots.borrow_and_update().clone();
         if let Ok(value) = serde_json::from_str::<Value>(&snapshot) {
             let now = NowPlaying::from_snapshot(&value);
             let volume = os_volume(&value);
+            if let Some(id) = now.entry_id
+                && art.as_ref().is_none_or(|(looked_up, _)| *looked_up != id)
+            {
+                let url = crate::cover::resolve(&db, id).await.unwrap_or_else(|e| {
+                    tracing::warn!("cover for entry {id}: {e}");
+                    None
+                });
+                art = Some((id, url));
+            }
+            let cover_url = art
+                .as_ref()
+                .filter(|(id, _)| Some(*id) == now.entry_id)
+                .and_then(|(_, url)| url.as_deref());
             let result = (|| {
                 // Also echoes a change the OS asked for, which MPRIS needs
                 // to show it (see `souvlaki::MediaControlEvent::SetVolume`).
@@ -142,7 +167,7 @@ pub async fn run(hub: Arc<PlaybackHub>) {
                         title: now.title.as_deref(),
                         artist: now.artist.as_deref(),
                         album: None,
-                        cover_url: now.art.as_deref(),
+                        cover_url,
                         duration: now.duration_ms.map(Duration::from_millis),
                     })?;
                 }
@@ -172,7 +197,7 @@ pub async fn run(hub: Arc<PlaybackHub>) {
     unix,
     not(any(target_os = "macos", target_os = "ios", target_os = "android"))
 )))]
-pub async fn run(_hub: Arc<PlaybackHub>) {
+pub async fn run(_hub: Arc<PlaybackHub>, _db: MusicDb) {
     tracing::info!(
         "OS media controls aren't available on this platform yet (Windows needs a window \
          handle, macOS a main-thread run loop)"
@@ -191,7 +216,7 @@ mod tests {
         let now = NowPlaying::from_snapshot(&json!({
             "current": { "entry_id": 7, "title": "LETTER☆彡" },
             "artist": "Shirakami Fubuki",
-            "mounted": { "provider": "youtube", "identifier": "x", "art": "https://a/b.jpg", "artist": "Fubuki Ch." },
+            "mounted": { "provider": "youtube", "identifier": "x", "artist": "Fubuki Ch." },
             "playing": true,
             "position_ms": 1500,
             "duration_ms": 200000,
@@ -199,9 +224,9 @@ mod tests {
         assert_eq!(
             now,
             NowPlaying {
+                entry_id: Some(7),
                 title: Some("LETTER☆彡".into()),
                 artist: Some("Shirakami Fubuki".into()),
-                art: Some("https://a/b.jpg".into()),
                 duration_ms: Some(200_000),
                 playing: Some(true),
                 position_ms: 1500,
@@ -240,7 +265,7 @@ mod tests {
         };
         assert!(a.same_track(&b));
         assert!(!a.same_track(&NowPlaying {
-            art: Some("new".into()),
+            entry_id: Some(8),
             ..a.clone()
         }));
     }

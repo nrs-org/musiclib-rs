@@ -335,6 +335,7 @@ pub async fn get_recording(
                     }
 
                     Ok(EntityResult {
+                        image: None,
                         release_date: None,
                         sources,
                         extra,

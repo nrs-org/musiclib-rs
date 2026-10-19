@@ -158,6 +158,7 @@ impl FetchProvider for Provider {
         };
 
         Ok(EntityResult {
+            image: result.image.clone(),
             children: result
                 .children
                 .iter()
