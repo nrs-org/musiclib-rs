@@ -1086,6 +1086,149 @@
     margin: 0 0 20px;
   }
 
+  /* ---------- renaming (`nameEditor`) ---------- */
+  .rename {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .card-rename { margin: -4px 0 14px; }
+
+  .rename-toggle {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    cursor: pointer;
+  }
+
+  .rename-toggle:hover,
+  .rename-toggle:focus-visible {
+    color: var(--ink);
+    text-decoration: underline;
+  }
+
+  .rename-toggle[hidden] { display: none; }
+
+  .rename-mark {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--brass-ink);
+  }
+
+  .rename-form {
+    flex: 1 1 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+    padding: 10px;
+  }
+
+  .rename-input {
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 14px;
+    min-width: 0;
+  }
+
+  .rename-input:focus { outline: none; border-color: var(--brass); }
+
+  .rename-aliases {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: 132px;
+    overflow-y: auto;
+  }
+
+  .rename-alias {
+    border: 1px solid var(--rail);
+    background: transparent;
+    color: var(--ink-soft);
+    padding: 3px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+
+  .rename-alias:hover { border-color: var(--ink-soft); color: var(--ink); }
+
+  .rename-alias[aria-pressed="true"] { border-color: var(--brass); color: var(--brass-ink); }
+
+  .rename-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .rename-status {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+
+  /* ---------- an entry's credited artists ---------- */
+  .credits { margin-bottom: 20px; }
+
+  .credits[hidden] { display: none; }
+
+  /* The heading over each section of an entry's page (credits, editions,
+     sources). */
+  .section-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--rail);
+  }
+
+  .card-byline:not(:empty)::after {
+    content: "·";
+    margin: 0 8px;
+    color: var(--ink-faint);
+  }
+
+  .card-byline .credit-name { color: var(--ink); }
+
+  .byline-edit { margin-left: 8px; }
+
+  .credit {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    padding: 4px 0;
+  }
+
+  .credit-name {
+    color: var(--ink);
+    text-decoration: none;
+  }
+
+  .credit-name:hover,
+  .credit-name:focus-visible { text-decoration: underline; }
+
+  .credit-artist {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
   .stamps {
     display: flex;
     flex-wrap: wrap;
@@ -1126,6 +1269,142 @@
   .relations-link {
     display: inline-block;
     margin-bottom: 28px;
+  }
+
+  /* ---------- an entry's editions (`fillEditionList`) ---------- */
+  .edition-list { margin-bottom: 28px; }
+
+  .edition-list[hidden] { display: none; }
+
+  .edition-group + .edition-group { margin-top: 10px; }
+
+  .edition-group-label {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ink-soft);
+    margin: 8px 0 2px;
+  }
+
+  .edition-group-count { color: var(--ink-faint); }
+
+  .edition-rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .edition-rows li[hidden] { display: none; }
+
+  .edition-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    border: none;
+    border-left: 2px solid transparent;
+    background: none;
+    color: var(--ink);
+    font: inherit;
+    text-align: left;
+    padding: 5px 6px 5px 8px;
+    cursor: pointer;
+  }
+
+  .edition-row:hover { background: var(--paper-deep); }
+
+  .edition-row[aria-current="true"] {
+    border-left-color: var(--verdigris);
+    background: var(--paper-deep);
+    cursor: default;
+  }
+
+  .edition-body {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 10px;
+  }
+
+  .edition-who { overflow-wrap: anywhere; }
+
+  .edition-row[aria-current="true"] .edition-who { color: var(--verdigris); }
+
+  .edition-title {
+    font-size: 12px;
+    color: var(--ink-soft);
+    overflow-wrap: anywhere;
+  }
+
+  .edition-dots {
+    display: flex;
+    gap: 4px;
+    flex: none;
+  }
+
+  .edition-dots .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+  }
+
+  .edition-date {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    min-width: 10ch;
+    text-align: right;
+  }
+
+  .edition-more {
+    background: none;
+    border: none;
+    padding: 4px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    cursor: pointer;
+  }
+
+  .edition-more:hover,
+  .edition-more:focus-visible { color: var(--ink); text-decoration: underline; }
+
+  /* ---------- an entry's sources (`fillSources`) ---------- */
+  .sources { margin-bottom: 20px; }
+
+  .sources[hidden] { display: none; }
+
+  .source-section {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 8px;
+  }
+
+  .source-section-label {
+    flex: none;
+    width: 6em;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  .source-section .stamps { margin-bottom: 0; }
+
+  .stamp-tag { color: var(--ink-faint); }
+
+  .stamp.is-via { border-style: dashed; }
+
+  @media (max-width: 520px) {
+    .source-section { flex-direction: column; gap: 4px; }
   }
 
   .editions {
@@ -1203,9 +1482,17 @@
     flex: 1;
     min-height: 0;
     margin-bottom: 0;
-    /* Positioning context for `.graph-detail-panel` below, which floats
-       over the canvas rather than sitting in the flex flow. */
+  }
+
+  /* The canvas plus the detail panel floating over its bottom edge — the
+     panel's positioning context. Kept apart from the toolbar and pickers
+     above it, so the panel only ever covers the canvas, never a button. */
+  #view-graph .graph-stage {
     position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
   }
 
   #view-graph .dedup-graph {
@@ -1217,6 +1504,7 @@
     flex: 1;
     min-height: 0;
     height: auto;
+    margin-bottom: 0;
   }
 
   #view-graph .graph-detail-panel {
@@ -1296,6 +1584,41 @@
     stroke-width: 3px;
   }
 
+  /* The default edition of a group of several (`default_edition`): a
+     brass dot on the node. Scoped under `.nodes` to outrank the node
+     shape rules above, which would otherwise restyle it as a shape. */
+  .nodes .node circle.edition-badge {
+    display: none;
+    fill: var(--brass);
+    stroke: var(--paper-deep);
+    stroke-width: 1.5px;
+    pointer-events: none;
+  }
+  .nodes .node.edition-default circle.edition-badge {
+    display: inline;
+  }
+
+  /* An edition that scores its original when played (instrumental, TV
+     size, ...; `folds_into`): dashed outline, faded fill. */
+  .node.edition-folded > :first-child {
+    stroke-dasharray: 3 2;
+    fill-opacity: 0.55;
+  }
+
+  /* One blob behind each edition group's nodes: the group's hull, drawn
+     with a thick round-joined stroke so two nodes make a capsule and
+     three or more a rounded polygon. Opacity sits on the element, not
+     fill/stroke separately, so the two don't stack where they overlap. */
+  .edition-hull {
+    fill: var(--brass);
+    stroke: var(--brass);
+    stroke-width: 46px;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    opacity: 0.1;
+    pointer-events: none;
+  }
+
   /* `paint-order: stroke` + a wide stroke in the page background color fakes
      a label background halo without measuring text width for a real <rect>
      behind it — the text itself is unaffected since fill paints on top.
@@ -1346,7 +1669,8 @@
     cursor: pointer;
   }
 
-  /* active: a live link. hover hints "click unlinks" (red). */
+  /* active: a live identity link (same_identity/variant). hover hints
+     "unlink" (red). */
   .edge.dedup.active-manual {
     stroke: var(--verdigris);
   }
@@ -1363,17 +1687,6 @@
     stroke: var(--danger);
   }
 
-  /* suggested: plain-unlinked, disabled but the row survives — dashed,
-     faint, one click from being restored. hover hints "click re-links". */
-  .edge.dedup.suggested {
-    stroke-dasharray: 3 4;
-    opacity: 0.6;
-  }
-  .edge-item:hover .edge.dedup.suggested {
-    stroke: var(--verdigris);
-    opacity: 1;
-  }
-
   /* blocked: force-unlinked (different_identity) — a hard "no", shown
      solid red. hover hints "click softens it back", not "click restores". */
   .edge.dedup.blocked {
@@ -1384,9 +1697,18 @@
     stroke: var(--brass);
   }
 
-  /* related: a RELATE_KINDS version-kind annotation (cover/remix/same_artist/…)
-     — a real connection, but not an identity assertion, so it gets its own
-     hue (brass) rather than borrowing active's verdigris. */
+  /* edition: an enabled `EDITION_KINDS` row — two editions of one work.
+     Solid brass, with an arrowhead on the derived side when the row
+     records which side is the original. */
+  .edge.dedup.edition {
+    stroke: var(--brass-ink);
+  }
+  .edge-item:hover .edge.dedup.edition {
+    stroke: var(--brass);
+  }
+
+  /* related: any other enabled row (medley, same_artist, ...) — a real
+     connection, but neither identity nor edition. */
   .edge.dedup.related {
     stroke: var(--brass-ink);
     stroke-dasharray: 2 3;
@@ -1395,16 +1717,16 @@
     stroke: var(--brass);
   }
 
-  /* cleared: a disabled different_identity or RELATE_KINDS row — asserts
-     nothing right now, but the row survives and is one click from being
-     restored, so it still gets a (very faint) line rather than vanishing. */
-  .edge.dedup.cleared {
+  /* removed: a disabled row — an unlinked link, a softened block, a
+     rejected suggestion. Only drawn with "Show removed links" on, or
+     after an edit this session, so an undo is still one click away. */
+  .edge.dedup.removed {
     stroke-dasharray: 1 4;
-    opacity: 0.35;
+    opacity: 0.45;
   }
-  .edge-item:hover .edge.dedup.cleared {
-    stroke: var(--ink-faint);
-    opacity: 0.8;
+  .edge-item:hover .edge.dedup.removed {
+    stroke: var(--ink-soft);
+    opacity: 0.9;
   }
 
   .edge.structural {
@@ -1431,6 +1753,48 @@
 
   .graph-arrowhead path {
     fill: var(--ink-faint);
+  }
+  .graph-arrowhead.edition path {
+    fill: var(--brass-ink);
+  }
+
+  .graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin: 0 0 10px;
+    padding: 0;
+    list-style: none;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-soft);
+  }
+  .graph-legend li {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .graph-legend svg {
+    flex: none;
+    overflow: visible;
+  }
+
+  .graph-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    margin-bottom: 10px;
+  }
+  .graph-toolbar label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    cursor: pointer;
   }
 
   .graph-hover-label {
@@ -1505,6 +1869,16 @@
   .graph-detail-edition .graph-detail-relate-select:first-child {
     flex-basis: 100%;
     min-height: 32px;
+  }
+
+  .graph-detail-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .graph-detail-fields .graph-detail-relate-select {
+    min-width: 180px;
+    min-height: 28px;
   }
 
   .graph-detail-relate-select {
@@ -1816,6 +2190,72 @@
     padding: 8px;
     border-top: 1px solid var(--rail);
     background: var(--paper-deep);
+  }
+
+  /* Preferred editions and sources on the dock strips (`preferPill`). */
+  .prefer-star {
+    color: var(--brass);
+    margin-right: 6px;
+  }
+
+  .player-dock-switch .prefer-toggle,
+  .player-dock-editions .prefer-toggle {
+    margin-left: auto;
+    border: 1px dashed var(--rail);
+    background: transparent;
+    color: var(--ink-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+
+  .prefer-toggle:hover { color: var(--ink); border-color: var(--ink-soft); }
+
+  .player-dock-switch .prefer-toggle[aria-pressed="true"],
+  .player-dock-editions .prefer-toggle[aria-pressed="true"] {
+    border-style: solid;
+    border-color: var(--brass);
+    color: var(--brass-ink);
+  }
+
+  .prefer-edit {
+    display: inline-flex;
+    align-items: stretch;
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .prefer-edit.is-preferred { border-color: var(--brass); }
+
+  .player-dock-switch .prefer-edit button,
+  .prefer-edit button {
+    border: 0;
+    background: transparent;
+    color: var(--ink-soft);
+    font: inherit;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+
+  .prefer-edit.is-preferred .prefer-name { color: var(--brass-ink); }
+
+  .player-dock-switch .prefer-edit .prefer-step,
+  .prefer-edit .prefer-step {
+    padding: 4px 7px;
+    border-left: 1px solid var(--rail);
+  }
+
+  .prefer-edit .prefer-step:disabled { opacity: 0.35; cursor: default; }
+
+  .prefer-weight {
+    min-width: 2.2ch;
+    padding: 4px 2px;
+    text-align: center;
+    border-left: 1px solid var(--rail);
+    color: var(--ink);
   }
 
   /* Another device is playing: the dock shows what and where instead of an
@@ -2164,6 +2604,19 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* A credited artist on the bar's sub line: opens its entry. */
+  .player-bar-artist {
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .player-bar-artist:hover,
+  .player-bar-artist:focus-visible {
+    color: var(--ink);
+    text-decoration: underline;
   }
 
   .player-bar-center {
@@ -5657,8 +6110,7 @@
     // ---- Library ----
 
     function editionLabel(ed) {
-      if (ed.is_default) return "original";
-      return (ed.transformation || ed.kind || "edition").replaceAll("_", " ");
+      return friendlyType(editionKind(ed));
     }
 
     function renderLibrary(entry) {
@@ -5930,6 +6382,18 @@
     let lastSpotifyPlaying = false;
     let lastSpotifyPosition = 0;
 
+    // The OS media controls' state (see `syncMediaSession`).
+    const mediaSession = "mediaSession" in navigator ? navigator.mediaSession : null;
+    // What the playing source says about the artist (YouTube's channel,
+    // Spotify's artists); the session itself only knows the title.
+    let engineArtist = "";
+    // The last `mounted` report (provider, identifier, art), resent when
+    // the artist arrives.
+    let lastMounted = null;
+    let mediaMetaKey = null;
+    let mediaPositionAt = 0;
+    const mediaActions = {};
+
     function formatTime(seconds) {
       if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
       const m = Math.floor(seconds / 60);
@@ -5968,6 +6432,7 @@
       if (localPlaying === null) return;
       progress = { pos: position, at: performance.now(), playing: localPlaying, duration };
       renderProgress();
+      syncMediaSession();
       const now = performance.now();
       if (now - lastReportAt < 2000) return;
       lastReportAt = now;
@@ -5986,6 +6451,7 @@
       localPlaying = isPlaying;
       localControllable = controllable;
       renderPlayPause();
+      syncMediaSession(true);
       if (changed) report({ playing: isPlaying, position_ms: Math.round(progress.pos * 1000) });
     }
 
@@ -6051,14 +6517,21 @@
       timeElapsedEl.textContent = formatTime(Number(seekInput.value));
     });
     seekInput.addEventListener("change", () => {
-      const value = Number(seekInput.value);
-      // Shown right away; the active device seeks once the server bumps
-      // `seek_seq` (see `reconcileEngine`), wherever the drag happened.
-      progress = { ...progress, pos: value, at: performance.now() };
       seeking = false;
-      renderProgress();
-      Remote.command({ type: "seek", position_ms: Math.round(value * 1000) }).catch(() => {});
+      seekToSeconds(Number(seekInput.value));
     });
+
+    // A seek from this device (the bar, the OS media controls). Shown right
+    // away; the active device seeks once the server bumps `seek_seq` (see
+    // `reconcileEngine`), wherever the seek came from.
+    function seekToSeconds(seconds) {
+      const d = progress.duration;
+      const value = Math.max(0, d > 0 ? Math.min(seconds, d) : seconds);
+      progress = { ...progress, pos: value, at: performance.now() };
+      renderProgress();
+      syncMediaSession(true);
+      Remote.command({ type: "seek", position_ms: Math.round(value * 1000) }).catch(() => {});
+    }
 
     function engineSeek(seconds) {
       if (provider === "youtube" && ytPlayer?.seekTo) ytPlayer.seekTo(seconds, true);
@@ -6327,9 +6800,27 @@
     // switch between a video and the compact Spotify surface).
     new ResizeObserver(syncStagePosition).observe(dockEl);
 
-    function updateBarMeta(title, sub, thumbUrl) {
+    // `artists` are the library's credited artists (`{ entry_id, name }`),
+    // each a link to its entry; `rest` is plain text after them.
+    let barSubKey = null;
+    function updateBarMeta(title, artists, rest, thumbUrl) {
       titleBtn.textContent = title || "(untitled)";
-      subEl.textContent = sub || "";
+      // Snapshots arrive often; rebuilding only on change keeps a hovered
+      // or focused artist link in place.
+      const subKey = JSON.stringify([artists, rest]);
+      if (subKey !== barSubKey) {
+        barSubKey = subKey;
+        const nodes = [];
+        artists.forEach((a, i) => {
+          if (i) nodes.push(", ");
+          nodes.push(entryLink(a.entry_id, a.name, "player-bar-artist"));
+        });
+        for (const text of rest) {
+          if (nodes.length) nodes.push(" · ");
+          nodes.push(text);
+        }
+        subEl.replaceChildren(...nodes);
+      }
       if (thumbUrl) {
         if (thumbImg.getAttribute("src") !== thumbUrl) thumbImg.src = thumbUrl;
         thumbImg.hidden = false;
@@ -6395,6 +6886,7 @@
             onReady: (e) => {
               if (token !== mountToken) return;
               localControllable = true;
+              setEngineArtist(e.target.getVideoData?.()?.author);
               renderPlayPause();
               applyVolume();
               if (!autoplay) {
@@ -6413,6 +6905,8 @@
             },
             onStateChange: (e) => {
               if (token !== mountToken) return;
+              // The video's details can land after `onReady`.
+              if (!engineArtist) setEngineArtist(e.target.getVideoData?.()?.author);
               if (e.data === YT.PlayerState.PLAYING) engineState(true, true);
               else if (e.data === YT.PlayerState.PAUSED) engineState(false, true);
               else if (e.data === YT.PlayerState.ENDED) reportEnded(token);
@@ -6473,6 +6967,7 @@
         if (!state || token !== mountToken) return;
         const playingThis = state.track_window?.current_track?.id === spotifyId;
         if (!playingThis) return;
+        setEngineArtist((state.track_window.current_track.artists || []).map((a) => a.name).join(", "));
         engineState(!state.paused, true);
         status.textContent = state.paused ? "Paused" : "Playing via your Spotify account";
       });
@@ -6630,6 +7125,8 @@
       nicoIframe = null;
       spotifyPending = null;
       provider = null;
+      engineArtist = "";
+      lastMounted = null;
       stopProgressPolling();
     }
 
@@ -6652,15 +7149,15 @@
       // The source's own provider (a Spotify track without a Spotify
       // connection is still "Spotify" to a remote, just as a bare preview
       // embed), plus whether this engine can actually control it.
-      const mounted = (art) =>
-        report({
-          mounted: {
-            provider: source.provider,
-            identifier: source.identifier,
-            art: art || null,
-            controllable: provider !== "other",
-          },
-        });
+      const mounted = (art) => {
+        lastMounted = {
+          provider: source.provider,
+          identifier: source.identifier,
+          art: art || null,
+          controllable: provider !== "other",
+        };
+        reportMounted();
+      };
       surfaceEl.className = "player-dock-surface " + (isSpotify ? "compact" : "video");
       if (isSpotify) {
         provider = "spotify";
@@ -6950,6 +7447,9 @@
     // mounted one pressed. Picking one is a command, so a remote can switch
     // what the active device plays too.
     let switcherKey = null;
+    // ★ Prefer on either dock strip: their pills show −/+ weights instead
+    // of switching, until Done.
+    let preferEditing = false;
     function renderSwitcher() {
       const s = snap;
       if (!s?.current) {
@@ -6962,21 +7462,49 @@
         if (snap?.current?.entry_id !== entryId) return;
         const ordered = sortByProviderPreference(list);
         const picked = snap.mounted?.identifier || snap.source || null;
-        const key = [entryId, picked, ordered.map((x) => x.identifier).join(",")].join("|");
+        const key = [
+          entryId,
+          picked,
+          preferEditing,
+          ordered.map((x) => `${x.identifier}=${x.preferred_weight || 0}`).join(","),
+        ].join("|");
         if (key === switcherKey) return;
         switcherKey = key;
         switchEl.innerHTML = "";
         if (ordered.length <= 1) return;
         for (const src of ordered) {
           switchEl.appendChild(
-            el("button", {
-              type: "button",
-              text: src.provider,
-              "aria-pressed": String(src.identifier === picked),
-              onclick: () => Remote.command({ type: "select_source", identifier: src.identifier }).catch(() => {}),
+            preferPill({
+              className: "",
+              label: src.provider,
+              current: src.identifier === picked,
+              weight: src.preferred_weight || 0,
+              editing: preferEditing,
+              onPick: () => Remote.command({ type: "select_source", identifier: src.identifier }).catch(() => {}),
+              setWeight: (w) => setSourceWeight(src, w),
             })
           );
         }
+        switchEl.appendChild(preferToggle(preferEditing, togglePreferEditing));
+      });
+    }
+
+    function togglePreferEditing() {
+      preferEditing = !preferEditing;
+      renderSwitcher();
+      fillDockEditions();
+    }
+
+    // `src` is the cached `loadSources` row, so updating it in place keeps
+    // the switcher right without refetching.
+    function setSourceWeight(src, weight) {
+      const before = src.preferred_weight || 0;
+      src.preferred_weight = weight;
+      renderSwitcher();
+      postJson("/api/preferred-source", { source: src.provider, identifier: src.identifier, weight }).catch((err) => {
+        src.preferred_weight = before;
+        renderSwitcher();
+        setStatus(err.message);
       });
     }
 
@@ -6985,17 +7513,40 @@
     // replaces it in the queue for every device. Editions aren't all
     // playable, so look before replacing.
     let editionsEntryId = null;
+    let dockEditions = [];
     function renderEditions() {
       const entryId = snap?.current?.entry_id ?? null;
       if (entryId === editionsEntryId) return;
       editionsEntryId = entryId;
-      fillEditions(dockEditionsEl, [], null);
+      dockEditions = [];
+      fillDockEditions();
       if (entryId == null) return;
       api(`/api/entries/${entryId}`)
         .then((entry) => {
-          if (editionsEntryId === entryId) fillEditions(dockEditionsEl, entry.editions, switchEdition);
+          if (editionsEntryId !== entryId) return;
+          dockEditions = entry.editions || [];
+          fillDockEditions();
         })
         .catch(() => {});
+    }
+
+    function fillDockEditions() {
+      fillEditions(dockEditionsEl, dockEditions, switchEdition, {
+        editing: preferEditing,
+        setWeight: setEditionWeight,
+        toggle: togglePreferEditing,
+      });
+    }
+
+    function setEditionWeight(ed, weight) {
+      const before = ed.preferred_weight || 0;
+      ed.preferred_weight = weight;
+      fillDockEditions();
+      postJson(`/api/entries/${ed.entry_id}/preferred-edition`, { weight }).catch((err) => {
+        ed.preferred_weight = before;
+        fillDockEditions();
+        setStatus(err.message);
+      });
     }
 
     async function switchEdition(ed) {
@@ -7004,7 +7555,7 @@
       const sources = await loadSources(ed.entry_id);
       if (snap?.current?.entry_id !== current.entry_id) return;
       if (!sources.length) {
-        setStatus(`No playable source for the ${friendlyType(ed.transformation || ed.kind || "original")} edition.`);
+        setStatus(`No playable source for the ${friendlyType(editionKind(ed))} edition.`);
         return;
       }
       const item = { entry_id: ed.entry_id, title: ed.title || current.title || null };
@@ -7158,11 +7709,12 @@
       renderRemoteSurface();
       if (has) {
         const p = s.mounted?.provider;
-        const parts = [p ? providerLabel(p) : null];
+        const artists = s.artists || [];
+        const rest = artists.length ? [] : [currentArtist() || (p ? providerLabel(p) : null)];
         if (!isActive()) {
-          parts.push(s.active_device ? `on ${deviceLabel(s.active_device)}` : "not playing");
+          rest.push(s.active_device ? `on ${deviceLabel(s.active_device)}` : "not playing");
         }
-        updateBarMeta(currentTitle, parts.filter(Boolean).join(" · "), s.mounted?.art || null);
+        updateBarMeta(currentTitle, artists, rest.filter(Boolean), s.mounted?.art || null);
       }
       prevBtn.disabled = !s.has_prev;
       nextBtn.disabled = !s.has_next;
@@ -7175,6 +7727,7 @@
       );
       renderPlayPause();
       renderProgress();
+      syncMediaSession(true);
       setVolumeUI();
       renderSwitcher();
       renderEditions();
@@ -7207,6 +7760,153 @@
     playPauseBtn.addEventListener("click", togglePlay);
     shuffleBtn.addEventListener("click", () => Remote.command({ type: "toggle_shuffle" }).catch(() => {}));
     repeatBtn.addEventListener("click", () => Remote.command({ type: "cycle_repeat" }).catch(() => {}));
+
+    // ---- Media Session: the OS media controls of this device (a phone's
+    // lock screen and notification, headset keys) ----
+    //
+    // Describes the session's track from the library rather than the
+    // embed's own idea of it (a YouTube embed publishes its video title and
+    // channel), and routes the OS buttons through the bar's paths. Which
+    // session the OS shows when the audio comes from a cross-origin iframe
+    // is still the browser's call. On the machine running the server, the
+    // server publishes the session itself (`media_controls.rs`), whichever
+    // device plays.
+    function isPlayingNow() {
+      return isActive() ? !!localPlaying : !!snap?.playing;
+    }
+
+    // Browsers hand the OS controls to a frame that's playing audio, and
+    // the audio is in the embed's cross-origin iframe, whose own session
+    // (the video's title, no queue) wins over this frame's. A looping,
+    // effectively silent clip here, playing while the engine plays, makes
+    // this frame a playing one too.
+    let silentAudio = null;
+
+    function silentClipUrl() {
+      const rate = 8000;
+      const samples = rate;
+      const buf = new ArrayBuffer(44 + samples * 2);
+      const v = new DataView(buf);
+      const ascii = (at, s) => [...s].forEach((c, i) => v.setUint8(at + i, c.charCodeAt(0)));
+      ascii(0, "RIFF");
+      v.setUint32(4, 36 + samples * 2, true);
+      ascii(8, "WAVE");
+      ascii(12, "fmt ");
+      v.setUint32(16, 16, true);
+      v.setUint16(20, 1, true); // PCM
+      v.setUint16(22, 1, true); // mono
+      v.setUint32(24, rate, true);
+      v.setUint32(28, rate * 2, true);
+      v.setUint16(32, 2, true);
+      v.setUint16(34, 16, true);
+      ascii(36, "data");
+      v.setUint32(40, samples * 2, true);
+      // ±1 LSB rather than zeros: about −90 dBFS, inaudible, but a browser
+      // that treats digitally silent media as not playing still counts it.
+      for (let i = 0; i < samples; i++) v.setInt16(44 + i * 2, i % 2 ? 1 : -1, true);
+      return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+    }
+
+    function syncSilentAudio() {
+      if (!(isActive() && localPlaying)) {
+        silentAudio?.pause();
+        return;
+      }
+      if (!silentAudio) {
+        silentAudio = new Audio(silentClipUrl());
+        silentAudio.loop = true;
+      }
+      // Refused without a user gesture yet; a later sync retries.
+      if (silentAudio.paused) silentAudio.play().catch(() => {});
+    }
+
+    // The library's credits, else what the playing source says (this
+    // device's embed first: it knows before the session does).
+    function currentArtist() {
+      return snap?.artist || engineArtist || snap?.mounted?.artist || "";
+    }
+
+    function setEngineArtist(artist) {
+      if ((artist || "") === engineArtist) return;
+      engineArtist = artist || "";
+      reportMounted();
+      syncMediaSession();
+    }
+
+    /// What this device mounted, with the source's artist once it's known
+    /// (often after mounting): the session hands it on to remotes and the
+    /// server's OS media controls.
+    function reportMounted() {
+      if (lastMounted) report({ mounted: { ...lastMounted, artist: engineArtist || null } });
+    }
+
+    /// Sets an action's handler only when it changes, so the OS's buttons
+    /// enable and disable with the bar's.
+    function setMediaAction(action, fn) {
+      if (mediaActions[action] === fn) return;
+      mediaActions[action] = fn;
+      try {
+        mediaSession.setActionHandler(action, fn);
+      } catch {
+        // An action this browser doesn't support.
+      }
+    }
+
+    const mediaPrev = () => Remote.command({ type: "prev" }).catch(() => {});
+    const mediaNext = () => Remote.command({ type: "next" }).catch(() => {});
+
+    /// `force` sends the position now; otherwise at most every few seconds,
+    /// since the OS extrapolates it between updates.
+    function syncMediaSession(force) {
+      if (!mediaSession) return;
+      syncSilentAudio();
+      if (!hasTrack()) {
+        mediaSession.metadata = null;
+        mediaSession.playbackState = "none";
+        mediaMetaKey = null;
+        return;
+      }
+      const art = snap.mounted?.art || null;
+      const artist = currentArtist();
+      const key = JSON.stringify([snap.current.entry_id, currentTitle, artist, art]);
+      if (key !== mediaMetaKey) {
+        mediaMetaKey = key;
+        mediaSession.metadata = new MediaMetadata({
+          title: currentTitle || "(untitled)",
+          artist,
+          artwork: art ? [{ src: art }] : [],
+        });
+        force = true;
+      }
+      mediaSession.playbackState = isPlayingNow() ? "playing" : "paused";
+      setMediaAction("previoustrack", snap.has_prev ? mediaPrev : null);
+      setMediaAction("nexttrack", snap.has_next ? mediaNext : null);
+      const now = performance.now();
+      if (!force && now - mediaPositionAt < 5000) return;
+      mediaPositionAt = now;
+      const duration = progress.duration;
+      if (!(duration > 0) || !mediaSession.setPositionState) return;
+      try {
+        mediaSession.setPositionState({ duration, position: Math.min(progressNow(), duration), playbackRate: 1 });
+      } catch {}
+    }
+
+    if (mediaSession) {
+      const pauseIfPlaying = () => {
+        if (isPlayingNow()) togglePlay();
+      };
+      const handlers = {
+        play: () => {
+          if (!isPlayingNow()) togglePlay();
+        },
+        pause: pauseIfPlaying,
+        stop: pauseIfPlaying,
+        seekto: (d) => seekToSeconds(d.seekTime),
+        seekbackward: (d) => seekToSeconds(progressNow() - (d.seekOffset || 10)),
+        seekforward: (d) => seekToSeconds(progressNow() + (d.seekOffset || 10)),
+      };
+      for (const [action, fn] of Object.entries(handlers)) setMediaAction(action, fn);
+    }
     expandBtn.addEventListener("click", () => setExpanded(!expanded));
     artBtn.addEventListener("click", () => setExpanded(!expanded));
     titleBtn.addEventListener("click", () => {
@@ -7425,27 +8125,266 @@
     return (t || "unknown").replace(/_/g, " ");
   }
 
-  // Fills the edition switcher (`EntrySummary.editions`, see
-  // `musicdb::EDITION_KINDS`) into `host`, or leaves it empty/hidden for a
-  // solo entry. Shared by `viewEntry` (initial render) and `refreshAfterEdit`
-  // (a manual relate/unrelate can change which editions this entry belongs
-  // to without a full card reload).
-  function fillEditions(host, editionsList, onPick = (ed) => viewEntry(ed.entry_id)) {
+  // What kind of edition `ed` is: the `derived_from` edge's transformation
+  // (cover, instrumental, ...), else the relation kind itself — the importer
+  // files a cover either way (`kind: "cover"`, or `derived_from` with
+  // `transformation: "cover"`), and both must read and group the same.
+  // `transformation` may carry extra `key:value` markers after the kind.
+  // An edition related only transitively (through a third one) has neither.
+  function editionKind(ed) {
+    if (ed.is_default) return "original";
+    const marker = (ed.transformation || "").split(/\s+/).find((t) => t && !t.includes(":"));
+    if (marker) return marker;
+    if (ed.kind && ed.kind !== "derived_from") return ed.kind;
+    return "version";
+  }
+
+  const EDITION_GROUP_LABEL = {
+    original: "Original",
+    cover: "Covers",
+    remix: "Remixes",
+    arrangement: "Arrangements",
+    live: "Live",
+    edit: "Edits",
+    medley: "Medleys",
+    alt_version: "Alternate versions",
+    instrumental: "Instrumentals",
+    short_ver: "Short versions",
+    tv_size: "TV size",
+    game_ver: "Game versions",
+    version: "Other versions",
+  };
+
+  // Groups with more rows than this show only the first few (and the
+  // current edition) behind a "show all".
+  const EDITION_GROUP_PREVIEW = 5;
+
+  // The dock's compact edition strip (`EntrySummary.editions`, see
+  // `musicdb::EDITION_KINDS`) for the playing track, or empty/hidden for a
+  // solo entry. Each pill names its performer, so a strip of covers isn't
+  // just "cover" over and over.
+  //
+  // With `prefs` (`{ editing, setWeight, toggle }`), each pill also carries
+  // its preference weight (`preferPill`) and the strip ends in the ★ toggle.
+  function fillEditions(host, editionsList, onPick = (ed) => viewEntry(ed.entry_id), prefs = null) {
     host.innerHTML = "";
     const list = editionsList || [];
     host.hidden = list.length <= 1;
     for (const ed of list) {
+      const who = ed.artists?.length ? ` · ${ed.artists.join(", ")}` : "";
+      const label = friendlyType(editionKind(ed)) + who;
+      if (prefs) {
+        host.appendChild(
+          preferPill({
+            className: "edition-btn",
+            label,
+            title: ed.title || null,
+            current: !!ed.is_current,
+            weight: ed.preferred_weight || 0,
+            editing: prefs.editing,
+            onPick: ed.is_current ? null : () => onPick(ed),
+            setWeight: (w) => prefs.setWeight(ed, w),
+          })
+        );
+        continue;
+      }
       host.appendChild(
         el("button", {
           className: "edition-btn",
           type: "button",
           "aria-current": String(!!ed.is_current),
           disabled: ed.is_current,
-          text: friendlyType(ed.transformation || ed.kind || (ed.is_default ? "original" : "edition")),
+          text: label,
+          title: ed.title || null,
           onclick: ed.is_current ? null : () => onPick(ed),
         })
       );
     }
+    if (prefs && list.length > 1) host.appendChild(preferToggle(prefs.editing, prefs.toggle));
+  }
+
+  // Preference weights cap (`preferences::MAX_WEIGHT`).
+  const MAX_PREFER_WEIGHT = 99;
+
+  // One option (an edition, a source) of the dock's strips with its
+  // preference weight: a ★ marks a preferred one (with its weight when
+  // above 1) and picking it does what the strip does. While editing, the
+  // name toggles it preferred and −/+ set its weight instead. Whatever is
+  // preferred plays when the track comes up; several take turns at random,
+  // in proportion to their weights (`preferences::resolve`).
+  function preferPill({ className, label, title, current, weight, editing, onPick, setWeight }) {
+    const star = weight > 0 ? el("span", { className: "prefer-star", text: weight > 1 ? `★${weight}` : "★" }) : null;
+    if (!editing) {
+      return el(
+        "button",
+        {
+          className,
+          type: "button",
+          // Editions mark the playing one as current, sources as pressed
+          // (see their strips' styles).
+          [className === "edition-btn" ? "aria-current" : "aria-pressed"]: String(current),
+          disabled: !onPick,
+          title: title || null,
+          onclick: onPick,
+        },
+        [star, el("span", { text: label })]
+      );
+    }
+    const step = (delta) => setWeight(Math.max(0, Math.min(MAX_PREFER_WEIGHT, weight + delta)));
+    return el("span", { className: "prefer-edit" + (weight > 0 ? " is-preferred" : "") }, [
+      el(
+        "button",
+        {
+          className: "prefer-name",
+          type: "button",
+          "aria-pressed": String(weight > 0),
+          title: weight > 0 ? "Stop preferring" : "Prefer",
+          onclick: () => setWeight(weight > 0 ? 0 : 1),
+        },
+        [star, el("span", { text: label })]
+      ),
+      el("button", {
+        className: "prefer-step",
+        type: "button",
+        text: "−",
+        "aria-label": "Lower weight",
+        disabled: weight === 0,
+        onclick: () => step(-1),
+      }),
+      el("span", { className: "prefer-weight", text: String(weight), title: "Weight" }),
+      el("button", {
+        className: "prefer-step",
+        type: "button",
+        text: "+",
+        "aria-label": "Raise weight",
+        disabled: weight >= MAX_PREFER_WEIGHT,
+        onclick: () => step(1),
+      }),
+    ]);
+  }
+
+  function preferToggle(editing, toggle) {
+    return el("button", {
+      className: "prefer-toggle",
+      type: "button",
+      "aria-pressed": String(editing),
+      text: editing ? "Done" : "★ Prefer",
+      title: editing
+        ? null
+        : "Choose what plays when this track comes up. Several preferred ones take turns at random, by weight.",
+      onclick: toggle,
+    });
+  }
+
+  // The entry page's edition list: editions grouped by kind (in the
+  // server's order — original, full versions, then degenerate ones), each
+  // group by release date, each row led by who performs it. Shared by
+  // `viewEntry` and `refreshAfterEdit` (a relate/unrelate edit can change
+  // the edition set without a full card reload).
+  function fillEditionList(host, editionsList) {
+    host.replaceChildren();
+    const list = editionsList || [];
+    host.hidden = list.length <= 1;
+    if (list.length <= 1) return;
+    host.appendChild(el("h2", { className: "section-label", text: `Editions · ${list.length}` }));
+
+    const original = list.find((ed) => ed.is_default);
+    const originalTitle = (original?.title || "").trim().toLowerCase();
+    // Performers only tell editions apart when they differ — the same
+    // artist's remix and instrumental read better by title.
+    const originalArtists = (original?.artists || []).join(", ");
+    const showArtists = list.some((ed) => (ed.artists || []).join(", ") !== originalArtists);
+    const groups = new Map();
+    for (const ed of list) {
+      const kind = editionKind(ed);
+      if (!groups.has(kind)) groups.set(kind, []);
+      groups.get(kind).push(ed);
+    }
+    for (const [kind, eds] of groups) {
+      eds.sort(
+        (a, b) =>
+          (a.release_date || "￿").localeCompare(b.release_date || "￿") || a.entry_id - b.entry_id
+      );
+      const rows = el("ul", { className: "edition-rows" });
+      const collapse = eds.length > EDITION_GROUP_PREVIEW + 1;
+      const hiddenRows = [];
+      eds.forEach((ed, i) => {
+        const row = editionRow(ed, originalTitle, showArtists);
+        if (collapse && i >= EDITION_GROUP_PREVIEW && !ed.is_current) {
+          row.hidden = true;
+          hiddenRows.push(row);
+        }
+        rows.appendChild(row);
+      });
+      const group = el("div", { className: "edition-group" }, [
+        el("h3", { className: "edition-group-label" }, [
+          el("span", { text: EDITION_GROUP_LABEL[kind] || friendlyType(kind) }),
+          eds.length > 1 ? el("span", { className: "edition-group-count", text: String(eds.length) }) : null,
+        ]),
+        rows,
+      ]);
+      if (hiddenRows.length) {
+        const more = el("button", {
+          className: "edition-more",
+          type: "button",
+          text: `Show ${hiddenRows.length} more`,
+          onclick: () => {
+            for (const row of hiddenRows) row.hidden = false;
+            more.remove();
+          },
+        });
+        group.appendChild(more);
+      }
+      host.appendChild(group);
+    }
+  }
+
+  // One edition row: its performers (the thing that tells covers apart)
+  // when `showArtists`, its own title when that says more than the
+  // original's, the platforms it plays on, and its date.
+  function editionRow(ed, originalTitle, showArtists) {
+    const who = showArtists && ed.artists?.length ? ed.artists.join(", ") : null;
+    const title = ed.title || "(untitled)";
+    const titleSaysMore = title.trim().toLowerCase() !== originalTitle;
+    const dots = el("span", { className: "edition-dots" });
+    for (const kind of ed.source_kinds || []) {
+      if (!PLATFORM_COLOR[kind]) continue;
+      const dot = el("span", { className: "dot", title: providerLabel(kind) });
+      dot.style.background = PLATFORM_COLOR[kind];
+      dots.appendChild(dot);
+    }
+    const preferred = ed.preferred_weight > 0;
+    const body = el("span", { className: "edition-body" }, [
+      el("span", { className: "edition-who" }, [
+        preferred
+          ? el("span", {
+              className: "prefer-star",
+              text: ed.preferred_weight > 1 ? `★${ed.preferred_weight}` : "★",
+              title: "Preferred: plays when this track comes up",
+            })
+          : null,
+        el("span", { text: who || title }),
+      ]),
+      who && titleSaysMore ? el("span", { className: "edition-title", text: title }) : null,
+    ]);
+    return el("li", {}, [
+      el(
+        "button",
+        {
+          className: "edition-row",
+          type: "button",
+          "aria-current": String(!!ed.is_current),
+          disabled: ed.is_current,
+          title: `${catalogNo(ed.entry_id)} — ${title}`,
+          onclick: ed.is_current ? null : () => viewEntry(ed.entry_id),
+        },
+        [
+          body,
+          dots,
+          el("span", { className: "edition-date", text: friendlyDate(ed.release_date) || "—" }),
+        ]
+      ),
+    ]);
   }
 
   // ---------- search ----------
@@ -7586,6 +8525,154 @@
     return el("span", { className: "stamp" }, [dot, label]);
   }
 
+  const SOURCE_LABEL = {
+    ...PROVIDER_LABEL,
+    apple_music: "Apple Music",
+    deezer: "Deezer",
+    tidal: "TIDAL",
+    musicbrainz: "MusicBrainz",
+    discogs: "Discogs",
+    vgmdb: "VGMdb",
+    lastfm: "Last.fm",
+    local: "Local file",
+    isrc: "ISRC",
+    upc: "UPC",
+  };
+
+  // Stores that hold the audio but that this player can't mount; listed
+  // after the playable providers.
+  const STORE_SOURCES = ["apple_music", "deezer", "tidal"];
+  const CATALOG_ORDER = ["musicbrainz", "discogs", "vgmdb", "lastfm"];
+  const CODE_SOURCES = ["isrc", "upc"];
+  const LINK_SOURCES = ["unknown_url", "url"];
+
+  // The entry page's source sections, in display order.
+  const SOURCE_SECTIONS = [
+    ["listen", "Listen"],
+    ["catalog", "Catalog"],
+    ["codes", "Codes"],
+    ["links", "Links"],
+  ];
+
+  function sourceSection(source) {
+    if (source in PLATFORM_COLOR || STORE_SOURCES.includes(source)) return "listen";
+    if (CODE_SOURCES.includes(source)) return "codes";
+    if (LINK_SOURCES.includes(source)) return "links";
+    return "catalog";
+  }
+
+  // Sort rank of `source` within its section: playable providers in the
+  // Settings preference order (so the first is what Play mounts), then
+  // stores; known catalogs first; anything else after, by name.
+  function sourceRank(source) {
+    const order = [...getProviderPreference(), ...STORE_SOURCES, ...CATALOG_ORDER, ...CODE_SOURCES];
+    const i = order.indexOf(source);
+    return i === -1 ? order.length : i;
+  }
+
+  // A short tag telling apart two sources of one provider: the last path
+  // segment of its URL (a YouTube video id, a MusicBrainz MBID's first
+  // block), or the start of a bare identifier.
+  function shortSourceId(identifier) {
+    try {
+      const url = new URL(identifier);
+      const last = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
+      const id = decodeURIComponent(last);
+      return id.length > 14 ? id.slice(0, 8) : id;
+    } catch {
+      return identifier.slice(0, 10);
+    }
+  }
+
+  function urlPath(identifier) {
+    try {
+      const url = new URL(identifier);
+      return decodeURIComponent(url.pathname.replace(/^\/+/, "")) + url.search;
+    } catch {
+      return identifier;
+    }
+  }
+
+  function hostOf(identifier) {
+    try {
+      return new URL(identifier).hostname.replace(/^www\./, "");
+    } catch {
+      return identifier;
+    }
+  }
+
+  // The entry page's sources, grouped by what they're for (listen, look up,
+  // codes, other links) and sorted within each. A provider's label gets a
+  // short id only when it appears more than once; codes always show their
+  // value, plain links their host. Sources that come from a soft-linked
+  // duplicate rather than this entry itself sort after its own, and say so
+  // in their tooltip.
+  function fillSources(host, entry) {
+    host.replaceChildren();
+    const sources = entry.sources || [];
+    host.hidden = sources.length === 0;
+    const memberOf = new Map();
+    for (const m of entry.members || []) {
+      for (const s of m.sources) memberOf.set(`${s.source}\u0000${s.identifier}`, m.entry_id);
+    }
+    const counts = new Map();
+    for (const s of sources) counts.set(s.source, (counts.get(s.source) || 0) + 1);
+    const rows = sources.map((s, i) => {
+      const member = memberOf.get(`${s.source}\u0000${s.identifier}`);
+      return { s, i, via: member != null && member !== entry.entry_id ? member : null };
+    });
+    rows.sort(
+      (a, b) =>
+        sourceRank(a.s.source) - sourceRank(b.s.source) ||
+        a.s.source.localeCompare(b.s.source) ||
+        (a.via != null) - (b.via != null) ||
+        a.i - b.i
+    );
+
+    for (const r of rows) {
+      if (CODE_SOURCES.includes(r.s.source)) r.tag = r.s.identifier;
+      else if (LINK_SOURCES.includes(r.s.source)) r.tag = hostOf(r.s.identifier);
+      else if (counts.get(r.s.source) > 1) r.tag = shortSourceId(r.s.identifier);
+    }
+    // Two URLs for one id (Apple Music's `us/` and `jp/` storefronts) give
+    // the same short id; their paths tell them apart instead.
+    for (const r of rows) {
+      if (r.tag && !LINK_SOURCES.includes(r.s.source)
+          && rows.some((o) => o !== r && o.s.source === r.s.source && o.tag === r.tag)) {
+        r.collides = true;
+      }
+    }
+    for (const r of rows) if (r.collides) r.tag = urlPath(r.s.identifier);
+
+    for (const [section, label] of SOURCE_SECTIONS) {
+      const inSection = rows.filter((r) => sourceSection(r.s.source) === section);
+      if (!inSection.length) continue;
+      const stamps = el("div", { className: "stamps" });
+      for (const { s, tag, via } of inSection) stamps.appendChild(sourceStamp(s, tag, via));
+      host.appendChild(
+        el("div", { className: "source-section" }, [el("span", { className: "source-section-label", text: label }), stamps])
+      );
+    }
+  }
+
+  function sourceStamp(s, tag, via) {
+    const href = s.identifier.startsWith("http") ? s.identifier : null;
+    const dot = el("span", { className: "dot" });
+    dot.style.background = PLATFORM_COLOR[s.source] || "var(--verdigris)";
+    const name = LINK_SOURCES.includes(s.source) ? null : SOURCE_LABEL[s.source] || friendlyType(s.source);
+    const children = [
+      dot,
+      name ? el("span", { text: name }) : null,
+      tag ? el("span", { className: "stamp-tag", text: tag }) : null,
+    ];
+    const title = s.identifier + (via != null ? `\nvia ${catalogNo(via)}` : "");
+    const className = "stamp" + (via != null ? " is-via" : "");
+    if (href) {
+      return el("a", { className, href, target: "_blank", rel: "noopener noreferrer", title }, children);
+    }
+    return el("span", { className, title }, children);
+  }
+
   // ---------- relations graph (dedup calibration + structure browsing) ----------
   //
   // A soft-identity component is a graph, not a hierarchy — entries link in
@@ -7642,12 +8729,11 @@
     };
   }
 
-  // The RELATE-tier version-kind taxonomy (`docs/CONFIG_REFERENCE.md`'s
-  // `relate(kind, conf, reason)`) — "related but not the same entry",
-  // separate from the same_identity/different_identity/variant trio that
-  // drives the soft-identity graph itself. Mirrors the server's own
-  // `RELATE_KINDS` allowlist (`src/bin/server/player.rs`) so the picker
-  // below only ever offers a kind the server will accept.
+  // The kinds `/api/relations/relate` accepts — mirrors the server's
+  // `RELATE_KINDS` allowlist (`src/bin/server/player.rs`). `unrelate` and
+  // `restore` also take `derived_from` (the server's `TOGGLE_KINDS`).
+  // Every other kind (provider `arrangement` rows, pipeline-only
+  // predicates) is read-only here.
   const RELATE_KINDS = [
     "alt_version",
     "live",
@@ -7660,41 +8746,104 @@
     "same_artist",
   ];
   const RELATE_KIND_SET = new Set(RELATE_KINDS);
-
-  // The dedup-v2 primitive-relation predicates (docs/dedup-v2.md; constants
-  // `MEMBER_OF`/`DERIVED_FROM`/`PARTICIPATES_IN`/`FACET_OF` in
-  // `src/musicdb/mod.rs`) — asserted only by the pipeline (e.g. `decide_track`
-  // relating a track to its instrumental via `derived_from`), never through
-  // `/api/relations/relate`, so unlike `RELATE_KINDS` this isn't an allowlist
-  // the server accepts from the UI. A `different_identity` pair with one of
-  // these edges is exactly the v2 ontology's "relate" policy outcome — same
-  // display bucket as `RELATE_KINDS`, not the same-identity "active" one,
-  // since these rows never mean the two entries are the same recording/edit.
-  const PRIMITIVE_RELATION_KINDS = ["member_of", "derived_from", "participates_in", "facet_of"];
-  const PRIMITIVE_RELATION_KIND_SET = new Set(PRIMITIVE_RELATION_KINDS);
-  // The ones a person may remove and restore, though not create (the
-  // server's `TOGGLE_KINDS`; the now-playing drawer derives new ones).
   const TOGGLE_RELATION_KIND_SET = new Set(["derived_from"]);
+  // The soft-identity ledger's own kinds, owned by link/unlink.
+  const IDENTITY_KIND_SET = new Set(["same_identity", "variant"]);
   // `musicdb::EDITION_KINDS`: rows that make two entries editions of one
-  // work, which `/api/relations/derive` rewrites (see `editionEditor`).
+  // work. New ones go through `/api/relations/derive` (see
+  // `connectionControls`), which records which side is the original —
+  // what the edition projection needs for the default edition and the
+  // rank target.
   const EDITION_KIND_SET = new Set(["derived_from", "alt_version", "live", "remix", "instrumental", "cover", "arrangement"]);
+  // What's left to offer as a plain relation once editions go through
+  // derive.
+  const OTHER_RELATE_KINDS = RELATE_KINDS.filter((kind) => !EDITION_KIND_SET.has(kind));
 
-  // "active" mirrors the live component (same_identity/variant, enabled).
-  // "suggested" is a plain-unlinked edge: disabled, but the row survives —
-  // shown dashed, one click restores it. "blocked" is a force-unlinked
-  // (different_identity) edge — shown distinctly, one click softens it back
-  // to neutral rather than trivially restoring it. "cleared" is a disabled
-  // different_identity/relate-kind row with nothing currently asserted —
-  // not rendered, it carries no actionable meaning. "related" is a
-  // RELATE_KINDS row (cover/remix/same_artist/…) or a dedup-v2 primitive
-  // relation (`derived_from`/…) — annotates a connection between two
-  // distinct entries, doesn't affect the identity graph at all.
+  // "active" is a live identity link, "blocked" an enabled
+  // different_identity row, "edition" an enabled edition row, "related"
+  // any other enabled row. "removed" is any disabled row — an unlinked
+  // link, a softened block, a rejected suggestion — which the graph hides
+  // unless asked (see `showRemoved`). Classified by rule rather than by
+  // listing every kind, so a kind this file doesn't know yet can never
+  // pass for an identity link.
   function dedupEdgeState(edge) {
-    if (edge.kind === "different_identity") return edge.enabled ? "blocked" : "cleared";
-    if (RELATE_KIND_SET.has(edge.kind) || PRIMITIVE_RELATION_KIND_SET.has(edge.kind)) {
-      return edge.enabled ? "related" : "cleared";
+    if (!edge.enabled) return "removed";
+    if (IDENTITY_KIND_SET.has(edge.kind)) return "active";
+    if (edge.kind === "different_identity") return "blocked";
+    if (EDITION_KIND_SET.has(edge.kind)) return "edition";
+    return "related";
+  }
+
+  // The original and derived side of an edition row, from its `extra`
+  // (`source_entry`/`derived_entry`); either one alone is enough, the
+  // other being the row's other endpoint — `build_edition_projection`
+  // reads `derived_entry` the same way. Null when the row records neither,
+  // or names an entry that isn't one of its endpoints.
+  function editionDirection(edge) {
+    if (!EDITION_KIND_SET.has(edge.kind)) return null;
+    const ends = [edge.entry_a, edge.entry_b];
+    let { source_entry: original, derived_entry: derived } = edge.extra || {};
+    if (ends.includes(derived) && !ends.includes(original)) original = ends.find((id) => id !== derived);
+    if (ends.includes(original) && !ends.includes(derived)) derived = ends.find((id) => id !== original);
+    if (!ends.includes(original) || !ends.includes(derived) || original === derived) return null;
+    return { original, derived };
+  }
+
+  // `extra.transformation` as one label — the match script emits an array
+  // when a track carries several markers.
+  function transformationOf(extra) {
+    return [extra?.transformation].flat().filter(Boolean).join(" ") || null;
+  }
+
+  function pairKey(a, b) {
+    return a < b ? `${a}-${b}` : `${b}-${a}`;
+  }
+
+  // Kind — and, for an edition, which side is the original — for a new
+  // connection between two entries: the graph's "New connection" panel and
+  // the "Relate as…" picker. Editions are recorded through
+  // `/api/relations/derive`, other kinds through `/api/relations/relate`,
+  // and identity through `/api/relations/link`. `nameOf("a"|"b")` labels
+  // each side in the original picker; `request(a, b)` sends the choice.
+  function connectionControls(nameOf, { identity = false } = {}) {
+    const kind = el("select", { className: "graph-detail-relate-select", "aria-label": "Connection kind" }, [
+      identity ? el("option", { value: "identity", text: "Same identity (link)" }) : null,
+      ...TRANSFORMATIONS.map(([group, opts]) =>
+        el(
+          "optgroup",
+          { label: `Edition: ${group.toLowerCase()}` },
+          opts.map(([value, label]) => el("option", { value: `edition:${value}`, text: label }))
+        )
+      ),
+      OTHER_RELATE_KINDS.length
+        ? el(
+            "optgroup",
+            { label: "Other relation" },
+            OTHER_RELATE_KINDS.map((k) => el("option", { value: k, text: friendlyType(k) }))
+          )
+        : null,
+    ]);
+    const original = el("select", { className: "graph-detail-relate-select", "aria-label": "Original" }, [
+      el("option", { value: "", text: "Which is the original?", selected: true, disabled: true }),
+      el("option", { value: "a", text: `${nameOf("a")} is the original` }),
+      el("option", { value: "b", text: `${nameOf("b")} is the original` }),
+    ]);
+    const sync = () => {
+      original.hidden = !kind.value.startsWith("edition:");
+    };
+    kind.addEventListener("change", sync);
+    sync();
+    function request(a, b) {
+      if (kind.value === "identity") return postJson("/api/relations/link", { a, b });
+      if (kind.value.startsWith("edition:")) {
+        if (!original.value) return Promise.reject(new Error("Pick which entry is the original."));
+        const [from, to] = original.value === "a" ? [a, b] : [b, a];
+        const transformation = kind.value.slice("edition:".length) || null;
+        return postJson("/api/relations/derive", { original: from, derived: to, transformation });
+      }
+      return postJson("/api/relations/relate", { a, b, kind: kind.value });
     }
-    return edge.enabled ? "active" : "suggested";
+    return { elements: [kind, original], request };
   }
 
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -7751,6 +8900,59 @@
   // looking at, then the things you can actually act on (dedup links),
   // then read-only structural context last.
   const GRAPH_LABEL_PRIORITY = { self: 0, member: 1, structural: 2 };
+  // Arrowheads: release → track structure, and original → derived edition.
+  const STRUCTURAL_MARKER_ID = "graph-arrow-main";
+  const EDITION_MARKER_ID = "graph-arrow-edition";
+
+  // The key under the hint. Swatches reuse the graph's own classes and
+  // arrow markers (a marker id resolves across inline SVGs in one
+  // document), so the legend can't drift from what the graph draws.
+  function buildGraphLegend() {
+    const lineSwatch = (cls, marker) => {
+      const swatch = svgEl("svg", { width: 28, height: 10, "aria-hidden": "true" });
+      swatch.appendChild(
+        svgEl("line", {
+          class: cls,
+          x1: 1,
+          y1: 5,
+          x2: marker ? 22 : 27,
+          y2: 5,
+          "marker-end": marker ? `url(#${marker})` : null,
+        })
+      );
+      return swatch;
+    };
+    const nodeSwatch = (cls) => {
+      const swatch = svgEl("svg", { width: 16, height: 16, "aria-hidden": "true" });
+      const layer = svgEl("g", { class: "nodes", transform: "translate(8,8) scale(0.6)" });
+      const node = svgEl("g", { class: `node type-track ${cls}` });
+      node.appendChild(svgEl("circle", { r: GRAPH_NODE_RADIUS }));
+      node.appendChild(svgEl("circle", { class: "edition-badge", cx: 8, cy: -8, r: 4 }));
+      layer.appendChild(node);
+      swatch.appendChild(layer);
+      return swatch;
+    };
+    const hullSwatch = svgEl("svg", { width: 18, height: 12, "aria-hidden": "true" });
+    hullSwatch.appendChild(
+      svgEl("rect", { class: "edition-hull", x: 1, y: 1, width: 16, height: 10, rx: 5, style: "stroke-width:0;opacity:0.3" })
+    );
+    const items = [
+      [lineSwatch("edge dedup active-manual"), "same identity"],
+      [lineSwatch("edge dedup edition", EDITION_MARKER_ID), "edition, arrow to derived"],
+      [lineSwatch("edge dedup related"), "other relation"],
+      [lineSwatch("edge dedup blocked"), "blocked"],
+      [lineSwatch("edge dedup removed"), "removed"],
+      [lineSwatch("edge structural", STRUCTURAL_MARKER_ID), "release to track"],
+      [hullSwatch, "edition group"],
+      [nodeSwatch("edition-default"), "default edition"],
+      [nodeSwatch("edition-folded"), "scores its original"],
+    ];
+    return el(
+      "ul",
+      { className: "graph-legend" },
+      items.map(([swatch, text]) => el("li", {}, [swatch, el("span", { text })]))
+    );
+  }
 
   // The relations graph is built exactly once (see `graphEditor` below) and
   // its DOM/simulation/node-position state is reused across every entry
@@ -7781,20 +8983,32 @@
     const hintEl = el("p", {
       className: "merge-picker-hint",
       text:
-        "Click one entry, then another, to start a connection — pick its kind before it's created. Click empty space to " +
-        "cancel. Shift+click an entry to focus the graph on it. Click a line for its details and actions (unlink, " +
-        "force-block, or remove/add a relation kind); hover it for a quick peek. Drag an entry in from the library to " +
-        "add it here. Dashed arrows are release/track structure and aren't editable.",
+        "Click one entry, then another, to connect them. Shift+click an entry to focus the graph on it. Click a " +
+        "line for its details and actions. Drag an entry in from the search results to add it here.",
     });
     const graphHost = el("div", { className: "dedup-graph" });
     const detailPanel = el("div", { className: "graph-detail-panel" }, [
       el("p", { className: "graph-detail-empty", text: "Click a node for details." }),
     ]);
     const errorEl = el("p", { className: "merge-picker-error", hidden: true });
+    // Disabled rows stay hidden unless this is on, or their pair was edited
+    // since the anchor last changed (`touchedPairs`) — so a link someone
+    // just unlinked stays on screen with its one-click undo.
+    let showRemoved = false;
+    const touchedPairs = new Set();
+    const removedToggle = el("input", { type: "checkbox" });
+    const removedToggleText = el("span", { text: "Show removed links" });
+    removedToggle.addEventListener("change", () => {
+      showRemoved = removedToggle.checked;
+      resetSelection();
+      if (lastData) buildGraph(lastData);
+    });
+    const toolbar = el("div", { className: "graph-toolbar" }, [el("label", {}, [removedToggle, removedToggleText])]);
+    const stage = el("div", { className: "graph-stage" }, [graphHost, detailPanel]);
     section.appendChild(labelEl);
     section.appendChild(hintEl);
-    section.appendChild(graphHost);
-    section.appendChild(detailPanel);
+    section.appendChild(buildGraphLegend());
+    section.appendChild(toolbar);
 
     function showError(message) {
       errorEl.hidden = false;
@@ -7815,6 +9029,27 @@
       } else {
         detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: "No sources." }));
       }
+      const roles = [];
+      if (data.editionSize > 1) {
+        roles.push(data.defaultEdition ? `Default edition of ${data.editionSize}.` : `One of ${data.editionSize} editions.`);
+      }
+      if (data.foldsInto != null) {
+        const target = currentNodesById.get(String(data.foldsInto));
+        roles.push(`Plays score ${target ? endpointLabel(target) : catalogNo(data.foldsInto)}.`);
+      }
+      for (const text of roles) detailPanel.appendChild(el("p", { className: "graph-detail-empty", text }));
+      if (data.entry_id !== currentEntryId) {
+        detailPanel.appendChild(
+          el("div", { className: "graph-detail-actions" }, [
+            el("button", {
+              className: "ghost-btn",
+              type: "button",
+              text: "Focus graph here",
+              onclick: () => viewGraph(data.entry_id),
+            }),
+          ])
+        );
+      }
     }
 
     // ---- SVG skeleton, built once — renderGraph()/update() below only
@@ -7823,23 +9058,32 @@
       class: "graph-svg",
       viewBox: `0 0 ${GRAPH_CANVAS_WIDTH} ${GRAPH_CANVAS_HEIGHT}`,
     });
-    // A single persistent graph editor only ever needs one marker id — no
-    // per-entry suffix needed now that this SVG isn't rebuilt per entry.
-    const markerId = "graph-arrow-main";
+    // A single persistent graph editor only ever needs one id per marker —
+    // no per-entry suffix needed now that this SVG isn't rebuilt per entry.
     const defs = svgEl("defs");
-    const marker = svgEl("marker", {
-      id: markerId,
-      viewBox: "0 0 10 10",
-      refX: 9,
-      refY: 5,
-      markerWidth: 6,
-      markerHeight: 6,
-      orient: "auto-start-reverse",
-      class: "graph-arrowhead",
-    });
-    marker.appendChild(svgEl("path", { d: "M0,0 L10,5 L0,10 Z" }));
-    defs.appendChild(marker);
+    for (const [id, cls] of [
+      [STRUCTURAL_MARKER_ID, "graph-arrowhead"],
+      [EDITION_MARKER_ID, "graph-arrowhead edition"],
+    ]) {
+      const marker = svgEl("marker", {
+        id,
+        viewBox: "0 0 10 10",
+        refX: 9,
+        refY: 5,
+        // Fixed size: in the default stroke-width units an edition arrow
+        // would grow with its confidence-scaled stroke (`edgeStrokeWidth`).
+        markerUnits: "userSpaceOnUse",
+        markerWidth: 9,
+        markerHeight: 9,
+        orient: "auto-start-reverse",
+        class: cls,
+      });
+      marker.appendChild(svgEl("path", { d: "M0,0 L10,5 L0,10 Z" }));
+      defs.appendChild(marker);
+    }
     const viewport = svgEl("g", { class: "viewport" });
+    // Edition-group blobs, painted under everything else (see `updateHulls`).
+    const hullLayer = svgEl("g", { class: "hulls" });
     const edgeLayer = svgEl("g", { class: "edges" });
     const nodeLayer = svgEl("g", { class: "nodes" });
     // Labels live in their own layer, stacked above every node — SVG paints
@@ -7859,6 +9103,7 @@
     // positions/zoom-pan; appended last so it always paints over every
     // node/edge it crosses. See `updatePendingLine`.
     const pendingLine = svgEl("line", { class: "pending-link-line" });
+    viewport.appendChild(hullLayer);
     viewport.appendChild(edgeLayer);
     viewport.appendChild(nodeLayer);
     viewport.appendChild(labelLayer);
@@ -7953,10 +9198,22 @@
         }
         return parts.join(" · ");
       }
-      const parts = [d.kind, d.origin, d.state];
+      const parts = [edgeKindLabel(d)];
+      if (d.directed) parts[0] += ` of ${truncateLabel(endpointLabel(d.source), 28)}`;
+      else if (EDITION_KIND_SET.has(d.kind)) parts.push("original unknown");
+      parts.push(d.origin, EDGE_STATE_LABEL[d.state]);
       if (typeof d.confidence === "number") parts.push(`${Math.round(d.confidence * 100)}% confidence`);
       return parts.filter(Boolean).join(" · ");
     }
+    // What an edge says, most specific first: the edition's transformation
+    // ("instrumental"), else its kind.
+    function edgeKindLabel(d) {
+      if (d.transformation) return friendlyType(d.transformation);
+      return d.kind === "derived_from" ? "other version" : friendlyType(d.kind);
+    }
+    // Only the states that change what an edge means; an edition or a
+    // relation is just that.
+    const EDGE_STATE_LABEL = { active: "linked", blocked: "blocked", removed: "removed" };
     function showEdgeHoverLabel(event, d) {
       const [x, y] = d3.pointer(event, graphHost);
       hoverLabel.textContent = edgeHoverText(d);
@@ -8015,6 +9272,9 @@
     // has since navigated away from) checks this before touching the DOM, so
     // it can't clobber a more recent render with stale data.
     let loadToken = 0;
+    // The last relations response, rebuilt without a refetch when "Show
+    // removed links" is toggled.
+    let lastData = null;
 
     // Positions/hides the dangling "creating a link" line every frame it
     // could plausibly need to move: on `mousemove` (pointer moved, node
@@ -8115,7 +9375,7 @@
     // interpolated ones, so it takes plain `{x,y}` points rather than
     // reading `d.source`/`d.target` itself.
     function edgeLineCoords(d, source, target) {
-      if (d.edgeType === "structural") {
+      if (d.edgeType === "structural" || d.directed) {
         // Shorten the line short of the target node's edge so the
         // arrowhead is visible instead of hiding under the node shape.
         const dx = target.x - source.x;
@@ -8142,8 +9402,30 @@
           const { x1, y1, x2, y2 } = edgeLineCoords(d, d.source, d.target);
           d3.select(this).selectAll("line").attr("x1", x1).attr("y1", y1).attr("x2", x2).attr("y2", y2);
         });
+      updateHulls();
       updateLabelVisibility();
       updatePendingLine();
+    }
+
+    // One blob per edition group with two or more nodes on screen (see
+    // `.edition-hull`); a group's nodes all carry its `editionGroup`.
+    function updateHulls() {
+      const groups = new Map();
+      for (const n of currentNodesById.values()) {
+        if (n.editionGroup == null || !(n.editionSize > 1)) continue;
+        if (!groups.has(n.editionGroup)) groups.set(n.editionGroup, []);
+        groups.get(n.editionGroup).push([n.x, n.y]);
+      }
+      const hulls = Array.from(groups, ([group, points]) => ({ group, points })).filter((h) => h.points.length > 1);
+      d3.select(hullLayer)
+        .selectAll(".edition-hull")
+        .data(hulls, (h) => h.group)
+        .join("path")
+        .attr("class", "edition-hull")
+        .attr("d", (h) => {
+          const ring = (h.points.length > 2 && d3.polygonHull(h.points)) || h.points;
+          return `M${ring.map((point) => point.join(",")).join("L")}Z`;
+        });
     }
 
     // Greedy priority-based label culling — the same idea map apps use:
@@ -8196,6 +9478,8 @@
         d.kind,
         `type-${d.entry_type || "unknown"}`,
         d.entry_id === selected ? "selected-for-link" : "",
+        d.editionSize > 1 && d.defaultEdition ? "edition-default" : "",
+        d.foldsInto != null ? "edition-folded" : "",
       ]
         .filter(Boolean)
         .join(" ");
@@ -8219,6 +9503,10 @@
     // certain than others" instead of forty identical spokes. `null` leaves
     // the CSS class's own stroke-width alone (structural edges, or any
     // dedup edge missing a confidence value).
+    function edgeMarker(d) {
+      if (d.edgeType === "structural") return `url(#${STRUCTURAL_MARKER_ID})`;
+      return d.directed && d.enabled ? `url(#${EDITION_MARKER_ID})` : null;
+    }
     function edgeStrokeWidth(d) {
       if (d.edgeType !== "dedup" || typeof d.confidence !== "number") return null;
       return `${(1 + d.confidence * 2.5).toFixed(2)}px`;
@@ -8404,6 +9692,7 @@
               .attr("opacity", 0)
               .call(dragBehavior);
             g.append((d) => svgEl(d.kind === "structural" ? "rect" : "circle"));
+            g.append(() => svgEl("circle", { class: "edition-badge", cx: 8, cy: -8, r: 4 }));
             g.on("mouseenter", (event, d) => showHoverLabel(d));
             g.on("mouseleave", hideHoverLabel);
             return g;
@@ -8463,8 +9752,7 @@
             // without changing how anything actually looks. Both lines get
             // identical coordinates every tick — see `ticked()`.
             g.append("line").attr("class", "edge-hit");
-            const visible = g.append("line").attr("class", edgeClass);
-            visible.filter((d) => d.edgeType === "structural").attr("marker-end", `url(#${markerId})`);
+            g.append("line").attr("class", edgeClass);
             // Click used to act immediately on a dedup edge (unlink, or
             // force-block on shift-click) — with only two outcomes that was
             // fine, but RELATE_KINDS adds a whole taxonomy of possible
@@ -8486,7 +9774,14 @@
           (update) => update,
           (exit) => exit.transition().duration(200).attr("opacity", 0).remove()
         );
-      edgeJoinSel.select("line:last-child").attr("class", edgeClass).style("stroke-width", edgeStrokeWidth);
+      // Set on every update, not just on enter: a refetch can give an
+      // existing edge a direction (derive) or take it away (removed).
+      edgeJoinSel
+        .select("line:last-child")
+        .attr("class", edgeClass)
+        .attr("marker-end", edgeMarker)
+        .style("stroke-width", edgeStrokeWidth);
+      updateHulls();
 
       simulation.nodes(nodes);
       linkForce.links(links);
@@ -8596,28 +9891,71 @@
         return;
       }
       if (myToken !== loadToken) return;
-      const dedupEdges = data.edges;
+      lastData = data;
+      buildGraph(data);
+    }
+
+    // Turns a relations response into nodes and links and joins them in.
+    // Disabled rows are left out unless `showRemoved` is on or this session
+    // edited the pair, and so is everything no longer connected to the
+    // anchor without them. An edition row with a known direction runs
+    // original → derived (`directed`), the way structural edges run
+    // release → track.
+    function buildGraph(data) {
+      const removedCount = data.edges.filter((e) => !e.enabled).length;
+      removedToggleText.textContent = removedCount ? `Show removed links (${removedCount})` : "Show removed links";
+      const shownEdges = data.edges.filter(
+        (e) => e.enabled || showRemoved || touchedPairs.has(pairKey(e.entry_a, e.entry_b))
+      );
       const structuralEdges = data.structural_edges || [];
+      const neighbors = new Map();
+      const connect = (a, b) => {
+        if (!neighbors.has(a)) neighbors.set(a, []);
+        if (!neighbors.has(b)) neighbors.set(b, []);
+        neighbors.get(a).push(b);
+        neighbors.get(b).push(a);
+      };
+      for (const e of shownEdges) connect(e.entry_a, e.entry_b);
+      for (const e of structuralEdges) connect(e.parent_entry_id, e.child_entry_id);
+      const reachable = new Set([currentEntryId]);
+      const queue = [currentEntryId];
+      while (queue.length) {
+        for (const next of neighbors.get(queue.pop()) || []) {
+          if (!reachable.has(next)) {
+            reachable.add(next);
+            queue.push(next);
+          }
+        }
+      }
+      const dedupEdges = shownEdges.filter((e) => reachable.has(e.entry_a) && reachable.has(e.entry_b));
       const memberIds = new Set();
       for (const e of dedupEdges) {
         memberIds.add(e.entry_a);
         memberIds.add(e.entry_b);
       }
 
-      const nodes = data.nodes.map((n) => ({
-        id: String(n.entry_id),
-        entry_id: n.entry_id,
-        title: n.title,
-        entry_type: n.entry_type,
-        sources: n.sources,
-        kind: n.entry_id === currentEntryId ? "self" : memberIds.has(n.entry_id) ? "member" : "structural",
-      }));
+      const nodes = data.nodes
+        .filter((n) => reachable.has(n.entry_id))
+        .map((n) => ({
+          id: String(n.entry_id),
+          entry_id: n.entry_id,
+          title: n.title,
+          entry_type: n.entry_type,
+          sources: n.sources,
+          editionGroup: n.edition_group,
+          editionSize: n.edition_size,
+          defaultEdition: n.default_edition,
+          foldsInto: n.folds_into,
+          kind: n.entry_id === currentEntryId ? "self" : memberIds.has(n.entry_id) ? "member" : "structural",
+        }));
       const links = [];
       for (const e of dedupEdges) {
+        const direction = editionDirection(e);
         links.push({
           id: `dedup-${e.entry_a}-${e.entry_b}-${e.kind}`,
-          source: String(e.entry_a),
-          target: String(e.entry_b),
+          source: String(direction ? direction.original : e.entry_a),
+          target: String(direction ? direction.derived : e.entry_b),
+          directed: Boolean(direction),
           edgeType: "dedup",
           entry_a: e.entry_a,
           entry_b: e.entry_b,
@@ -8626,6 +9964,7 @@
           enabled: e.enabled,
           confidence: e.confidence,
           extra: e.extra,
+          transformation: transformationOf(e.extra),
           state: dedupEdgeState(e),
         });
       }
@@ -8647,7 +9986,11 @@
     // here — refresh just the graph and the card fields that can actually
     // change as a result (title/date/stamps are a union across soft-linked
     // members, see `refreshAfterEdit`), never the whole detail view.
-    function afterEdit(promise) {
+    //
+    // `a`/`b` is the pair edited: it stays drawn even once disabled (see
+    // `touchedPairs`), so the edit can be undone from the same edge.
+    function afterEdit(promise, a, b) {
+      touchedPairs.add(pairKey(a, b));
       promise
         .then(() => {
           refreshAfterEdit(currentEntryId);
@@ -8687,13 +10030,10 @@
     }
 
     // The kind-picking half: both endpoints are already fixed, so this is
-    // just "what is this connection" — same identity (the old default
-    // behavior) or one of the RELATE_KINDS version-kind annotations, shown
-    // in the same detail panel an existing node/edge click would use.
-    // Mirrors `relateKindPicker`'s options list but can't reuse it directly:
-    // that one always posts to `/api/relations/relate` for an edge that
-    // already exists, while this also has to cover the same-identity `link`
-    // path for a pair that doesn't have an edge yet.
+    // just "what is this connection" — same identity, an edition (with
+    // which side is the original), or another relation kind — shown in the
+    // same detail panel an existing node/edge click would use. See
+    // `connectionControls`.
     function showCreateLinkPicker(a, b) {
       pickerOpen = true;
       const nodeA = currentNodesById.get(String(a));
@@ -8703,28 +10043,18 @@
       detailPanel.appendChild(
         el("p", { className: "graph-detail-type", text: `${endpointLabel(nodeA)} ↔ ${endpointLabel(nodeB)}` })
       );
-      const select = el(
-        "select",
-        { className: "graph-detail-relate-select" },
-        [el("option", { value: "same_identity", text: "Same identity (link)" })].concat(
-          RELATE_KINDS.map((kind) => el("option", { value: kind, text: friendlyType(kind) }))
-        )
+      const connection = connectionControls(
+        (side) => `${truncateLabel(endpointLabel(side === "a" ? nodeA : nodeB), 32)} (${catalogNo(side === "a" ? a : b)})`,
+        { identity: true }
       );
-      detailPanel.appendChild(select);
+      detailPanel.appendChild(el("div", { className: "graph-detail-fields" }, connection.elements));
       const actions = el("div", { className: "graph-detail-actions" });
       actions.appendChild(
         el("button", {
           className: "ghost-btn",
           type: "button",
           text: "Create",
-          onclick: () => {
-            const kind = select.value;
-            afterEdit(
-              kind === "same_identity"
-                ? postJson("/api/relations/link", { a, b })
-                : postJson("/api/relations/relate", { a, b, kind })
-            );
-          },
+          onclick: () => afterEdit(connection.request(a, b), a, b),
         })
       );
       actions.appendChild(
@@ -8733,95 +10063,85 @@
       detailPanel.appendChild(actions);
     }
 
-    // Buttons for whatever's actually valid on this edge's kind — a
-    // RELATE_KINDS edge only ever offers removal (it's an independent row,
-    // not a toggle), a `derived_from` edge removal or restore (it keeps the
-    // pipeline's direction; `TOGGLE_KINDS` in `src/bin/server/player.rs`),
-    // the other dedup-v2 primitive-relation edges nothing (pipeline-only
-    // assertions — `/api/relations/relate`+`unrelate` reject them
-    // server-side), while same_identity/different_identity/variant get the
-    // same link/unlink/force-block/soften-block moves the old raw click and
-    // shift-click used to perform directly.
+    // Buttons for whatever the server accepts on this edge's kind: the
+    // identity ledger's link/unlink/force-block/soften-block for
+    // same_identity/variant/different_identity; remove or restore for a
+    // `derived_from` row (`TOGGLE_KINDS`) or a `RELATE_KINDS` row; nothing
+    // for any other kind (provider `arrangement`, pipeline-only rows).
     function edgeDetailActions(d) {
       const actions = el("div", { className: "graph-detail-actions" });
       const button = (text, onclick) => el("button", { className: "ghost-btn", type: "button", text, onclick });
-      if (TOGGLE_RELATION_KIND_SET.has(d.kind)) {
-        const pair = { a: d.entry_a, b: d.entry_b, kind: d.kind };
+      const edit = (promise) => afterEdit(promise, d.entry_a, d.entry_b);
+      const pair = { a: d.entry_a, b: d.entry_b, kind: d.kind };
+      if (IDENTITY_KIND_SET.has(d.kind) || d.kind === "different_identity") {
+        const linked = d.state === "active";
+        const blocked = d.state === "blocked";
+        if (!linked) {
+          actions.appendChild(
+            button(blocked ? "Link anyway (same identity)" : "Link (same identity)", () =>
+              edit(postJson("/api/relations/link", { a: d.entry_a, b: d.entry_b }))
+            )
+          );
+        }
+        if (linked) {
+          actions.appendChild(
+            button("Unlink", () => edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false })))
+          );
+        }
         actions.appendChild(
-          d.state === "cleared"
-            ? button("Restore relation", () => afterEdit(postJson("/api/relations/restore", pair)))
-            : button("Remove relation", () => afterEdit(postJson("/api/relations/unrelate", pair)))
-        );
-        return actions;
-      }
-      if (PRIMITIVE_RELATION_KIND_SET.has(d.kind)) {
-        return actions;
-      }
-      if (RELATE_KIND_SET.has(d.kind)) {
-        actions.appendChild(
-          d.state === "cleared"
-            ? button("Restore relation", () =>
-                afterEdit(postJson("/api/relations/relate", { a: d.entry_a, b: d.entry_b, kind: d.kind }))
+          blocked
+            ? button("Soften block", () =>
+                edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false }))
               )
-            : button("Remove relation", () =>
-                afterEdit(postJson("/api/relations/unrelate", { a: d.entry_a, b: d.entry_b, kind: d.kind }))
+            : button("Force block", () =>
+                edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: true }))
               )
         );
-        return actions;
-      }
-      if (d.state !== "active") {
+      } else if (TOGGLE_RELATION_KIND_SET.has(d.kind)) {
         actions.appendChild(
-          button(d.state === "blocked" ? "Link anyway (same identity)" : "Restore link", () =>
-            afterEdit(postJson("/api/relations/link", { a: d.entry_a, b: d.entry_b }))
-          )
+          d.enabled
+            ? button("Remove relation", () => edit(postJson("/api/relations/unrelate", pair)))
+            : button("Restore relation", () => edit(postJson("/api/relations/restore", pair)))
         );
-      }
-      if (d.state === "active" || d.state === "suggested") {
+      } else if (RELATE_KIND_SET.has(d.kind)) {
         actions.appendChild(
-          button("Unlink", () =>
-            afterEdit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false }))
-          )
-        );
-      }
-      if (d.state === "blocked") {
-        actions.appendChild(
-          button("Soften block", () =>
-            afterEdit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false }))
-          )
-        );
-      } else {
-        actions.appendChild(
-          button("Force block", () =>
-            afterEdit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: true }))
-          )
+          d.enabled
+            ? button("Remove relation", () => edit(postJson("/api/relations/unrelate", pair)))
+            : button("Restore relation", () => edit(postJson("/api/relations/relate", pair)))
         );
       }
       return actions;
     }
 
-    // Both endpoints are already known for an edge (unlike the node picker's
-    // "Relate as…" flow, which still has to search for the other side), so
-    // this is just a kind + a submit button — tags the same pair with an
-    // additional RELATE_KINDS row rather than replacing whatever's already
-    // there, since a pair can legitimately be e.g. both `cover` and `live`
-    // at once.
-    function relateKindPicker(entryA, entryB) {
-      const wrap = el("div", { className: "graph-detail-relate" });
+    function isEditableKind(kind) {
+      return (
+        IDENTITY_KIND_SET.has(kind) ||
+        kind === "different_identity" ||
+        TOGGLE_RELATION_KIND_SET.has(kind) ||
+        RELATE_KIND_SET.has(kind)
+      );
+    }
+
+    // Tags the pair with an additional non-edition relation (medley,
+    // same_artist, ...) on top of whatever it already has. Edition kinds
+    // live in `editionEditor`, which records a direction.
+    function otherRelationPicker(entryA, entryB) {
+      if (!OTHER_RELATE_KINDS.length) return null;
       const select = el(
         "select",
-        { className: "graph-detail-relate-select" },
-        RELATE_KINDS.map((kind) => el("option", { value: kind, text: friendlyType(kind) }))
+        { className: "graph-detail-relate-select", "aria-label": "Other relation" },
+        OTHER_RELATE_KINDS.map((kind) => el("option", { value: kind, text: friendlyType(kind) }))
       );
-      wrap.appendChild(select);
-      wrap.appendChild(
+      return el("div", { className: "graph-detail-relate" }, [
+        select,
         el("button", {
           className: "ghost-btn",
           type: "button",
           text: "Add relation",
-          onclick: () => afterEdit(postJson("/api/relations/relate", { a: entryA, b: entryB, kind: select.value })),
-        })
-      );
-      return wrap;
+          onclick: () =>
+            afterEdit(postJson("/api/relations/relate", { a: entryA, b: entryB, kind: select.value }), entryA, entryB),
+        }),
+      ]);
     }
 
     // Rewrites an edition edge as "the other side is a <kind> of <original>"
@@ -8868,11 +10188,13 @@
             original: from,
             derived: from === d.entry_a ? d.entry_b : d.entry_a,
             transformation: kind.value || null,
-          })
+          }),
+          d.entry_a,
+          d.entry_b
         );
       };
       return el("div", { className: "graph-detail-edition" }, [
-        el("p", { className: "graph-detail-empty", text: "Edit as an edition:" }),
+        el("p", { className: "graph-detail-empty", text: d.enabled ? "Edit as an edition:" : "Accept as an edition:" }),
         el("div", { className: "graph-detail-relate" }, [
           original,
           kind,
@@ -8900,17 +10222,21 @@
         );
         return;
       }
-      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: friendlyType(d.kind) }));
-      const bits = [`${endpointLabel(d.source)} ↔ ${endpointLabel(d.target)}`, d.origin, d.state];
+      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: edgeKindLabel(d) }));
+      // `d.source` is the original for a directed edge (see `buildGraph`).
+      const ends = d.directed
+        ? `${endpointLabel(d.source)} (original) → ${endpointLabel(d.target)}`
+        : `${endpointLabel(d.source)} ↔ ${endpointLabel(d.target)}`;
+      const bits = [ends, EDITION_KIND_SET.has(d.kind) && !d.directed ? "original unknown" : null];
+      if (d.transformation) bits.push(friendlyType(d.kind));
+      bits.push(d.origin, EDGE_STATE_LABEL[d.state]);
       if (typeof d.confidence === "number") bits.push(`${Math.round(d.confidence * 100)}% confidence`);
       detailPanel.appendChild(el("p", { className: "graph-detail-type", text: bits.filter(Boolean).join(" · ") }));
-      // `extra` (entry_relation.extra) carries the RELATE reason and, for
-      // dedup-v2 primitive-relation kinds, the script's metadata map (e.g.
-      // `transformation`/`derived_side` for `derived_from` — see
-      // config/match.example.rhai). Surfaced as plain "key: value" lines,
-      // `reason` first since it's the one field every relate() call sets.
+      // `extra` (entry_relation.extra) carries the RELATE reason and the
+      // script's metadata map. `reason` goes first; the direction and
+      // transformation fields are already in the lines above.
       if (d.extra && typeof d.extra === "object") {
-        const { reason, ...rest } = d.extra;
+        const { reason, source_entry, derived_entry, transformation, ...rest } = d.extra;
         const lines = [];
         if (reason) lines.push(reason);
         for (const [k, v] of Object.entries(rest)) lines.push(`${friendlyType(k)}: ${v}`);
@@ -8918,19 +10244,23 @@
           detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: line }));
         }
       }
-      if (PRIMITIVE_RELATION_KIND_SET.has(d.kind) && !TOGGLE_RELATION_KIND_SET.has(d.kind)) {
+      if (!isEditableKind(d.kind)) {
         detailPanel.appendChild(
           el("p", {
             className: "graph-detail-empty",
-            text: "Asserted by the dedup pipeline — not manually editable here.",
+            text:
+              d.origin === "provider"
+                ? "Asserted by a provider (e.g. MusicBrainz) — not editable here."
+                : "Asserted by the dedup pipeline — not editable here.",
           })
         );
       }
       detailPanel.appendChild(edgeDetailActions(d));
-      if (EDITION_KIND_SET.has(d.kind) && d.origin !== "provider" && d.state !== "cleared") {
+      if (EDITION_KIND_SET.has(d.kind) && d.origin !== "provider") {
         detailPanel.appendChild(editionEditor(d));
       }
-      detailPanel.appendChild(relateKindPicker(d.entry_a, d.entry_b));
+      const other = otherRelationPicker(d.entry_a, d.entry_b);
+      if (other) detailPanel.appendChild(other);
     }
 
     graphHost.addEventListener("dragover", (e) => {
@@ -8978,7 +10308,7 @@
         mountMergePicker(pickerHost, currentEntryId, currentEntryType, new Set(currentSoftLinkedIds), showError);
       }
     });
-    section.appendChild(mergeBtn);
+    toolbar.appendChild(mergeBtn);
     section.appendChild(pickerHost);
 
     const relateBtn = el("button", { className: "ghost-btn", type: "button", text: "Relate as…" });
@@ -8989,10 +10319,11 @@
         mountRelatePicker(relatePickerHost, currentEntryId, currentEntryType, showError);
       }
     });
-    section.appendChild(relateBtn);
+    toolbar.appendChild(relateBtn);
     section.appendChild(relatePickerHost);
 
     section.appendChild(errorEl);
+    section.appendChild(stage);
 
     // Back to the placeholder state and a clean selection — used when
     // switching to a different anchor entry, after an edit settles, and to
@@ -9016,6 +10347,7 @@
     // on `entryId` and re-fetches/re-joins onto the live node/link data,
     // which is what produces the morph described above.
     function load(entryId, entryType, softLinkedIds) {
+      if (entryId !== currentEntryId) touchedPairs.clear();
       currentEntryId = entryId;
       currentEntryType = entryType;
       currentSoftLinkedIds = softLinkedIds || [];
@@ -9088,6 +10420,182 @@
   // are a union across soft-linked members and so can shift on link/unlink
   // (see `entries.rs`). Tracklist/play-CTA are untouched — dedup edits
   // don't affect release structure or playable sources.
+  // A link to an entry's page: a plain click opens it in place, a modified
+  // or middle click leaves it to the browser (a new tab).
+  function entryLink(entryId, text, className) {
+    const link = el("a", { className, href: `/entry/${entryId}`, text });
+    link.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      viewEntry(entryId);
+    });
+    return link;
+  }
+
+  // An inline editor for a display name: type one, or pick one of the
+  // `aliases` its sources know. `onSave(name)` gets `null` for "go back to
+  // `resetLabel`'s name" and resolves to the new `{ value, aliases, renamed }`,
+  // or `null` when the caller has re-rendered this editor away; a throw
+  // keeps the form open with the error.
+  function nameEditor({ label, value, aliases, renamed, resetLabel, className, onSave }) {
+    let state = { value, aliases, renamed };
+    const root = el("div", { className: `rename ${className || ""}` });
+    const toggle = el("button", { className: "rename-toggle", type: "button", text: label });
+    const mark = el("span", { className: "rename-mark", text: "renamed" });
+    root.append(toggle, mark);
+    let form = null;
+
+    function sync() {
+      mark.hidden = !state.renamed;
+    }
+
+    function close() {
+      form?.remove();
+      form = null;
+      toggle.hidden = false;
+      sync();
+      if (toggle.isConnected) toggle.focus();
+    }
+
+    function open() {
+      toggle.hidden = true;
+      mark.hidden = true;
+      const input = el("input", {
+        type: "text",
+        className: "rename-input",
+        "aria-label": "Name",
+        spellcheck: "false",
+        autocomplete: "off",
+      });
+      input.value = state.value;
+      const chips = state.aliases.map((alias) =>
+        el("button", {
+          type: "button",
+          className: "rename-alias",
+          text: alias,
+          title: "Use this name",
+          onclick: () => {
+            input.value = alias;
+            markChosen();
+            input.focus();
+          },
+        })
+      );
+      function markChosen() {
+        for (const chip of chips) {
+          chip.setAttribute("aria-pressed", String(chip.textContent === input.value.trim()));
+        }
+      }
+      input.addEventListener("input", markChosen);
+      markChosen();
+
+      const status = el("span", { className: "rename-status", role: "status" });
+      const buttons = [];
+      async function save(name) {
+        for (const b of buttons) b.disabled = true;
+        status.textContent = "Saving…";
+        try {
+          const next = await onSave(name);
+          if (!next) return;
+          state = next;
+          close();
+        } catch (err) {
+          status.textContent = err.message;
+          for (const b of buttons) b.disabled = false;
+        }
+      }
+      const saveBtn = el("button", { type: "button", className: "ghost-btn", text: "Save", onclick: () => save(input.value.trim() || null) });
+      buttons.push(saveBtn);
+      if (state.renamed) {
+        buttons.push(el("button", { type: "button", className: "ghost-btn", text: resetLabel, onclick: () => save(null) }));
+      }
+      buttons.push(el("button", { type: "button", className: "ghost-btn", text: "Cancel", onclick: close }));
+
+      form = el("div", { className: "rename-form" }, [
+        input,
+        chips.length ? el("div", { className: "rename-aliases", role: "group", "aria-label": "Known names" }, chips) : null,
+        el("div", { className: "rename-actions" }, [...buttons, status]),
+      ]);
+      form.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          close();
+        } else if (e.key === "Enter" && e.target === input) {
+          e.preventDefault();
+          saveBtn.click();
+        }
+      });
+      root.appendChild(form);
+      input.focus();
+      input.select();
+    }
+
+    toggle.addEventListener("click", open);
+    sync();
+    return root;
+  }
+
+  // The artists `entryId` credits, each a link to the artist with a rename
+  // for how this entry credits them.
+  async function loadCredits(entryId, container, byline) {
+    let credits;
+    try {
+      ({ credits } = await api(`/api/entries/${entryId}/credits`));
+    } catch {
+      return;
+    }
+    if (activeId === entryId) fillCredits(entryId, container, credits, byline);
+  }
+
+  // `byline` (the card meta's "by …" span) gets the credited names as
+  // links plus a toggle for `container`, the rename editors, which stay
+  // closed until asked for.
+  function fillCredits(entryId, container, credits, byline) {
+    byline.replaceChildren();
+    if (credits.length) {
+      byline.appendChild(document.createTextNode("by "));
+      credits.forEach((c, i) => {
+        if (i) byline.appendChild(document.createTextNode(", "));
+        byline.appendChild(entryLink(c.artist_id, c.name, "credit-name"));
+      });
+      byline.appendChild(
+        el("button", {
+          className: "rename-toggle byline-edit",
+          type: "button",
+          text: "edit credits",
+          onclick: () => {
+            container.hidden = !container.hidden;
+          },
+        })
+      );
+    }
+    container.replaceChildren();
+    if (!credits.length) {
+      container.hidden = true;
+      return;
+    }
+    container.appendChild(el("h2", { className: "section-label", text: "Credited artists" }));
+    for (const c of credits) {
+      const row = el("div", { className: "credit" }, [entryLink(c.artist_id, c.name, "credit-name")]);
+      if (c.renamed) row.appendChild(el("span", { className: "credit-artist", text: c.artist_name }));
+      row.appendChild(
+        nameEditor({
+          label: "rename here",
+          value: c.name,
+          aliases: c.aliases,
+          renamed: c.renamed,
+          resetLabel: `Use “${c.artist_name}”`,
+          onSave: async (name) => {
+            const next = await postJson(`/api/entries/${entryId}/credits/${c.artist_id}/display-name`, { name });
+            fillCredits(entryId, container, next.credits, byline);
+            return null;
+          },
+        })
+      );
+      container.appendChild(row);
+    }
+  }
+
   async function refreshAfterEdit(entryId) {
     refreshSearchIfActive();
     graphEditor.refresh();
@@ -9105,14 +10613,14 @@
     }
     if (activeId !== entryId || !cardEls) return;
     cardEls.title.textContent = entry.title || "(untitled)";
-    const date = friendlyDate(entry.release_date);
-    cardEls.meta.textContent = date ? `Released ${date}` : "Release date unknown";
-    fillEditions(cardEls.editions, entry.editions);
-    cardEls.stamps.innerHTML = "";
-    for (const s of entry.sources) {
-      cardEls.stamps.appendChild(stamp(s.source, s.identifier, s.source in PLATFORM_COLOR));
-    }
-    cardEls.stamps.hidden = entry.sources.length === 0;
+    if (entry.entry_type !== "artist" || entry.release_date) cardEls.date.textContent = releasedText(entry.release_date);
+    fillEditionList(cardEls.editions, entry.editions);
+    fillSources(cardEls.sources, entry);
+  }
+
+  function releasedText(raw) {
+    const date = friendlyDate(raw);
+    return date ? `Released ${date}` : "Release date unknown";
   }
 
   // Same search-and-pick shell as `mountMergePicker`, but for a
@@ -9132,12 +10640,8 @@
         text: "Pick a relation kind, then the other entry — reversible any time from that edge's details.",
       })
     );
-    const kindSelect = el(
-      "select",
-      { className: "graph-detail-relate-select" },
-      RELATE_KINDS.map((kind) => el("option", { value: kind, text: friendlyType(kind) }))
-    );
-    host.appendChild(kindSelect);
+    const connection = connectionControls((side) => (side === "a" ? "This entry" : "The picked entry"));
+    host.appendChild(el("div", { className: "graph-detail-fields" }, connection.elements));
     const input = el("input", {
       type: "search",
       className: "merge-picker-input",
@@ -9183,7 +10687,7 @@
               text: `${catalogNo(r.entry_id)} — ${r.title || "(untitled)"}`,
               onclick: async () => {
                 try {
-                  await postJson("/api/relations/relate", { a: entryId, b: r.entry_id, kind: kindSelect.value });
+                  await connection.request(entryId, r.entry_id);
                   refreshAfterEdit(entryId);
                 } catch (err) {
                   showError(err.message);
@@ -9305,7 +10809,8 @@
     );
     const row = el("div", { className: "play-cta-row" }, [btn, queueBtn]);
     if (sources.length > 1) {
-      row.appendChild(el("span", { className: "play-cta-hint", text: sources.map((s) => s.provider).join(" · ") }));
+      const providers = [...new Set(sortByProviderPreference(sources).map((s) => providerLabel(s.provider)))];
+      row.appendChild(el("span", { className: "play-cta-hint", text: providers.join(" · ") }));
     }
     return row;
   }
@@ -9348,44 +10853,51 @@
     );
     const titleEl = el("h1", { className: "card-title", text: entry.title || "(untitled)" });
     detail.appendChild(titleEl);
+    detail.appendChild(
+      nameEditor({
+        label: "rename",
+        className: "card-rename",
+        value: entry.title || "",
+        aliases: entry.aliases || [],
+        renamed: entry.renamed,
+        resetLabel: "Use the sources' name",
+        onSave: async (name) => {
+          const next = await postJson(`/api/entries/${entryId}/display-name`, { name });
+          titleEl.textContent = next.title || "(untitled)";
+          refreshSearchIfActive();
+          return { value: next.title || "", aliases: next.aliases || [], renamed: next.renamed };
+        },
+      })
+    );
 
-    const date = friendlyDate(entry.release_date);
-    const metaEl = el("p", { className: "card-meta", text: date ? `Released ${date}` : "Release date unknown" });
-    detail.appendChild(metaEl);
+    // "by <credits> · Released <date>" — the credits fill in once loaded.
+    const bylineEl = el("span", { className: "card-byline" });
+    // Artists have no release date; don't announce its absence.
+    const dateEl = el("span", {
+      className: "card-date",
+      text: entry.entry_type === "artist" && !entry.release_date ? "" : releasedText(entry.release_date),
+    });
+    detail.appendChild(el("p", { className: "card-meta" }, [bylineEl, dateEl]));
+
+    if (entry.entry_type !== "artist") {
+      const creditsEl = el("div", { className: "credits", hidden: true });
+      detail.appendChild(creditsEl);
+      loadCredits(entryId, creditsEl, bylineEl);
+    }
 
     // A track and its instrumental (or other `EDITION_KINDS` relation, see
     // `musicdb::EDITION_KINDS`) are distinct identities, unlike `members`
-    // below — the library list already collapsed them into this one row
-    // (`dedupe_by_edition`), so switching here just navigates to the other
-    // identity's own entry page instead of merging anything. Always mounted
-    // (like `stampsEl` below) so `refreshAfterEdit` has a stable element to
-    // refill if a manual relate/unrelate edit changes the edition set of the
-    // entry already on screen.
-    const editionsEl = el("div", { className: "editions" });
-    fillEditions(editionsEl, entry.editions);
-    detail.appendChild(editionsEl);
-
-    // Always mounted (just hidden when empty) rather than conditionally
-    // appended, so `refreshAfterEdit` has a stable element to refill in
-    // place if a dedup edit changes the source union from empty to
-    // non-empty (or vice versa) without a full re-render.
-    const stampsEl = el("div", { className: "stamps", hidden: entry.sources.length === 0 });
-    for (const s of entry.sources) {
-      stampsEl.appendChild(stamp(s.source, s.identifier, s.source in PLATFORM_COLOR));
-    }
-    detail.appendChild(stampsEl);
-    cardEls = { title: titleEl, meta: metaEl, stamps: stampsEl, editions: editionsEl };
-
-    // Relations/dedup calibration lives in its own full-screen mode now
-    // (see `viewGraph`) rather than embedded here — just a way in.
-    detail.appendChild(
-      el("button", {
-        className: "ghost-btn relations-link",
-        type: "button",
-        text: "View relations →",
-        onclick: () => viewGraph(entryId),
-      })
-    );
+    // — the library list already collapsed them into this one row
+    // (`dedupe_by_edition`), so picking one here just navigates to the other
+    // identity's own entry page instead of merging anything. Editions and
+    // sources are always mounted (just hidden when empty) so
+    // `refreshAfterEdit` has stable elements to refill in place when a
+    // relate or dedup edit changes them.
+    const editionsEl = el("section", { className: "edition-list" });
+    fillEditionList(editionsEl, entry.editions);
+    const sourcesEl = el("section", { className: "sources" });
+    fillSources(sourcesEl, entry);
+    cardEls = { title: titleEl, date: dateEl, sources: sourcesEl, editions: editionsEl };
 
     if (entry.entry_type === "artist") {
       detail.appendChild(
@@ -9402,11 +10914,25 @@
         detail.appendChild(
           el("p", {
             className: "note",
-            text: "No playable source for this track yet — see the stamps above for where it lives.",
+            text: "No playable source for this track yet — see its sources below for where it lives.",
           })
         );
       }
     }
+
+    detail.appendChild(editionsEl);
+    detail.appendChild(sourcesEl);
+
+    // Relations/dedup calibration lives in its own full-screen mode now
+    // (see `viewGraph`) rather than embedded here — just a way in.
+    detail.appendChild(
+      el("button", {
+        className: "ghost-btn relations-link",
+        type: "button",
+        text: "View relations →",
+        onclick: () => viewGraph(entryId),
+      })
+    );
 
     if (entry.entry_type === "release" || entry.entry_type === "release_group") {
       const tracks = await api(`/api/releases/${entryId}/tracks`).catch(() => ({ tracks: [] }));

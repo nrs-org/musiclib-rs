@@ -144,6 +144,85 @@ mod entry_alias {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// A display name the user chose for an entry, shown instead of the name
+/// its sources' aliases give it. Keyed by entry rather than by source pair,
+/// so re-imports, which rewrite aliases, leave it alone.
+mod entry_display_name {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "entry_display_name")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        pub name: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// How the user wants an artist credited on one entry (a track, release or
+/// release group), in place of the artist's own display name there — a
+/// character credit like "成海萌奈（CV：夏川椎菜）" on one song only.
+mod credit_display_name {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "credit_display_name")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub artist_entry_id: i64,
+        pub name: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// An edition the user wants played when its edition group is queued as
+/// the group's default edition, with a relative weight: when several
+/// editions of one group are preferred, the player draws one per enqueue,
+/// in proportion to their weights. Keyed by entry, like
+/// `entry_display_name`; `set_preferred_edition` keeps at most one row per
+/// soft-identity component.
+mod preferred_edition {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "preferred_edition")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        pub weight: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A source the user wants an entry played from, with a relative weight
+/// (see `preferred_edition`). Keyed by pair, so it follows the source
+/// through entry merges and splits.
+mod preferred_source {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "preferred_source")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub weight: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 mod entry_child {
     use sea_orm::entity::prelude::*;
 
@@ -373,6 +452,17 @@ pub struct PendingExport {
     pub entry_id: i64,
     pub listened_seconds: f64,
     pub exported_seconds: f64,
+}
+
+/// A main artist credited on one of an entry's sources.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MainCredit {
+    pub source: String,
+    pub identifier: String,
+    /// `listed_artist`, `uploader`, …
+    pub role: String,
+    /// The credited artist's own entry.
+    pub artist_entry_id: i64,
 }
 
 #[derive(Clone)]
@@ -1626,6 +1716,38 @@ impl MusicDb {
             .collect()
     }
 
+    /// The main-artist credits on each of `entry_id`'s sources, in credit
+    /// order. Every source credits the artists separately (MusicBrainz,
+    /// Spotify and a YouTube uploader for one track), so callers pick one
+    /// source's list rather than merging them.
+    pub async fn main_artist_credits(&self, entry_id: i64) -> Result<Vec<MainCredit>, Error> {
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "SELECT c.source AS source, c.identifier AS identifier, c.role AS role, \
+                    artist.entry_id AS artist_entry_id \
+             FROM entry_source es \
+             JOIN contribution c ON c.source = es.source AND c.identifier = es.identifier \
+             JOIN entry_source artist \
+               ON artist.source = c.artist_source AND artist.identifier = c.artist_identifier \
+             WHERE es.entry_id = ? AND c.main_artist \
+             ORDER BY c.source, c.identifier, json_extract(c.extra, '$.index'), c.id",
+            [entry_id.into()],
+        );
+        self.db
+            .query_all_raw(stmt)
+            .await?
+            .iter()
+            .map(|row| {
+                Ok(MainCredit {
+                    source: row.try_get("", "source")?,
+                    identifier: row.try_get("", "identifier")?,
+                    role: row.try_get("", "role")?,
+                    artist_entry_id: row.try_get("", "artist_entry_id")?,
+                })
+            })
+            .collect()
+    }
+
     /// `draws` ids drawn uniformly from `[min(entry.id), max(entry.id)]`,
     /// keeping the ones that are tracks, in draw order. Gaps and non-track
     /// ids are simply rejected, so this returns fewer than `draws` (possibly
@@ -1690,8 +1812,8 @@ impl MusicDb {
     }
 
     /// Re-point every `entry_source` row from `loser` to `winner` and delete the
-    /// loser `entry` row. No other tables reference `entry_id`, so this is the
-    /// entirety of a DB-level entry merge.
+    /// loser `entry` row. Relations and chosen display names move over too
+    /// (the winner's own names, where it has them, stay).
     pub async fn merge_entries(&self, loser: i64, winner: i64) -> Result<(), Error> {
         if loser == winner {
             return Ok(());
@@ -1712,6 +1834,75 @@ impl MusicDb {
         // to be deleted, so re-point every relation that referenced it onto the
         // winner, drop the resulting self-relations, and collapse duplicates.
         remap_relations(&txn, loser, winner).await?;
+
+        if let Some(name) = entry_display_name::Entity::find_by_id(loser)
+            .one(&txn)
+            .await?
+        {
+            entry_display_name::Entity::delete_by_id(loser)
+                .exec(&txn)
+                .await?;
+            if entry_display_name::Entity::find_by_id(winner)
+                .one(&txn)
+                .await?
+                .is_none()
+            {
+                entry_display_name::Entity::insert(entry_display_name::ActiveModel {
+                    entry_id: Set(winner),
+                    name: Set(name.name),
+                })
+                .exec(&txn)
+                .await?;
+            }
+        }
+        let credits = credit_display_name::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(credit_display_name::Column::EntryId.eq(loser))
+                    .add(credit_display_name::Column::ArtistEntryId.eq(loser)),
+            )
+            .all(&txn)
+            .await?;
+        for c in credits {
+            credit_display_name::Entity::delete_by_id((c.entry_id, c.artist_entry_id))
+                .exec(&txn)
+                .await?;
+            let remap = |id: i64| if id == loser { winner } else { id };
+            let key = (remap(c.entry_id), remap(c.artist_entry_id));
+            if credit_display_name::Entity::find_by_id(key)
+                .one(&txn)
+                .await?
+                .is_none()
+            {
+                credit_display_name::Entity::insert(credit_display_name::ActiveModel {
+                    entry_id: Set(key.0),
+                    artist_entry_id: Set(key.1),
+                    name: Set(c.name),
+                })
+                .exec(&txn)
+                .await?;
+            }
+        }
+        if let Some(pref) = preferred_edition::Entity::find_by_id(loser)
+            .one(&txn)
+            .await?
+        {
+            preferred_edition::Entity::delete_by_id(loser)
+                .exec(&txn)
+                .await?;
+            if preferred_edition::Entity::find_by_id(winner)
+                .one(&txn)
+                .await?
+                .is_none()
+            {
+                preferred_edition::Entity::insert(preferred_edition::ActiveModel {
+                    entry_id: Set(winner),
+                    weight: Set(pref.weight),
+                })
+                .exec(&txn)
+                .await?;
+            }
+        }
 
         entry::Entity::delete_by_id(loser).exec(&txn).await?;
 
@@ -1750,7 +1941,23 @@ impl MusicDb {
             .from(entry_source::Entity)
             .to_owned();
         entry::Entity::delete_many()
-            .filter(entry::Column::Id.not_in_subquery(referenced))
+            .filter(entry::Column::Id.not_in_subquery(referenced.clone()))
+            .exec(&self.db)
+            .await?;
+        entry_display_name::Entity::delete_many()
+            .filter(entry_display_name::Column::EntryId.not_in_subquery(referenced.clone()))
+            .exec(&self.db)
+            .await?;
+        preferred_edition::Entity::delete_many()
+            .filter(preferred_edition::Column::EntryId.not_in_subquery(referenced.clone()))
+            .exec(&self.db)
+            .await?;
+        credit_display_name::Entity::delete_many()
+            .filter(
+                Condition::any()
+                    .add(credit_display_name::Column::EntryId.not_in_subquery(referenced.clone()))
+                    .add(credit_display_name::Column::ArtistEntryId.not_in_subquery(referenced)),
+            )
             .exec(&self.db)
             .await?;
         Ok(())
@@ -2901,6 +3108,205 @@ impl MusicDb {
 
     /// Each of `pairs`' own best alias: primary first, then the oldest.
     /// Pairs without any alias are absent.
+    /// The display names chosen for any of `entry_ids` (`entry_display_name`).
+    pub async fn display_names(&self, entry_ids: &[i64]) -> Result<HashMap<i64, String>, Error> {
+        let mut out = HashMap::new();
+        for chunk in entry_ids.chunks(500) {
+            for m in entry_display_name::Entity::find()
+                .filter(entry_display_name::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+                .await?
+            {
+                out.insert(m.entry_id, m.name);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Names `entry_id` `name` in place of its aliases, or with `None` goes
+    /// back to them. `members` are the other entries sharing its display
+    /// title (its soft-identity component); their names are cleared so the
+    /// new one is the only one.
+    pub async fn set_display_name(
+        &self,
+        entry_id: i64,
+        members: &[i64],
+        name: Option<&str>,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        entry_display_name::Entity::delete_many()
+            .filter(
+                entry_display_name::Column::EntryId
+                    .is_in(members.iter().copied().chain([entry_id])),
+            )
+            .exec(&txn)
+            .await?;
+        if let Some(name) = name {
+            entry_display_name::Entity::insert(entry_display_name::ActiveModel {
+                entry_id: Set(entry_id),
+                name: Set(name.to_owned()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// How artists are credited on any of `entry_ids`
+    /// (`credit_display_name`): `(entry_id, artist_entry_id, name)`.
+    pub async fn credit_display_names(
+        &self,
+        entry_ids: &[i64],
+    ) -> Result<Vec<(i64, i64, String)>, Error> {
+        let mut out = Vec::new();
+        for chunk in entry_ids.chunks(500) {
+            for m in credit_display_name::Entity::find()
+                .filter(credit_display_name::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+                .await?
+            {
+                out.push((m.entry_id, m.artist_entry_id, m.name));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Credits `artist_id` as `name` on `entry_id`, or with `None` goes back
+    /// to the artist's own name. `entry_members` and `artist_members` are
+    /// the soft-identity components of each; any other name for the same
+    /// pair of components is cleared.
+    pub async fn set_credit_display_name(
+        &self,
+        entry_id: i64,
+        entry_members: &[i64],
+        artist_id: i64,
+        artist_members: &[i64],
+        name: Option<&str>,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        credit_display_name::Entity::delete_many()
+            .filter(
+                credit_display_name::Column::EntryId
+                    .is_in(entry_members.iter().copied().chain([entry_id])),
+            )
+            .filter(
+                credit_display_name::Column::ArtistEntryId
+                    .is_in(artist_members.iter().copied().chain([artist_id])),
+            )
+            .exec(&txn)
+            .await?;
+        if let Some(name) = name {
+            credit_display_name::Entity::insert(credit_display_name::ActiveModel {
+                entry_id: Set(entry_id),
+                artist_entry_id: Set(artist_id),
+                name: Set(name.to_owned()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// The preference weights set on any of `entry_ids`
+    /// (`preferred_edition`). Entries without a preference are absent.
+    pub async fn preferred_edition_weights(
+        &self,
+        entry_ids: &[i64],
+    ) -> Result<HashMap<i64, u32>, Error> {
+        let mut out = HashMap::new();
+        for chunk in entry_ids.chunks(500) {
+            for m in preferred_edition::Entity::find()
+                .filter(preferred_edition::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+                .await?
+            {
+                out.insert(m.entry_id, m.weight.clamp(0, u32::MAX as i64) as u32);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Prefers edition `entry_id` with `weight`, or with 0 stops preferring
+    /// it. `members` are the other entries of its soft-identity component;
+    /// their rows are cleared so the new one is the only one.
+    pub async fn set_preferred_edition(
+        &self,
+        entry_id: i64,
+        members: &[i64],
+        weight: u32,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        preferred_edition::Entity::delete_many()
+            .filter(
+                preferred_edition::Column::EntryId.is_in(members.iter().copied().chain([entry_id])),
+            )
+            .exec(&txn)
+            .await?;
+        if weight > 0 {
+            preferred_edition::Entity::insert(preferred_edition::ActiveModel {
+                entry_id: Set(entry_id),
+                weight: Set(weight.into()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// The preference weights set on any of `pairs` (`preferred_source`).
+    /// Pairs without a preference are absent.
+    pub async fn preferred_source_weights(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<HashMap<(String, String), u32>, Error> {
+        let wanted: HashSet<&(String, String)> = pairs.iter().collect();
+        let mut out = HashMap::new();
+        for chunk in pairs.chunks(500) {
+            for m in preferred_source::Entity::find()
+                .filter(
+                    preferred_source::Column::Identifier
+                        .is_in(chunk.iter().map(|(_, identifier)| identifier.clone())),
+                )
+                .all(&self.db)
+                .await?
+            {
+                let pair = (m.source, m.identifier);
+                if wanted.contains(&pair) {
+                    out.insert(pair, m.weight.clamp(0, u32::MAX as i64) as u32);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Prefers playing from `(source, identifier)` with `weight`, or with 0
+    /// stops preferring it.
+    pub async fn set_preferred_source(
+        &self,
+        source: &str,
+        identifier: &str,
+        weight: u32,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        preferred_source::Entity::delete_by_id((source.to_owned(), identifier.to_owned()))
+            .exec(&txn)
+            .await?;
+        if weight > 0 {
+            preferred_source::Entity::insert(preferred_source::ActiveModel {
+                source: Set(source.to_owned()),
+                identifier: Set(identifier.to_owned()),
+                weight: Set(weight.into()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
     pub async fn pair_titles(
         &self,
         pairs: &[(String, String)],
@@ -3117,6 +3523,62 @@ impl MusicDb {
             .into_iter()
             .map(RelationRow::from)
             .collect())
+    }
+
+    /// The relations graph the player draws around `entry_id`: every row,
+    /// enabled or not, touching any member of its edition group (each
+    /// edition's whole soft-identity component, so `relations_around`'s
+    /// anchors and more), plus every row between two entries those rows
+    /// reach. The second pass is what shows how the neighbors relate to
+    /// each other, e.g. that two suggested editions are already an
+    /// instrumental and its original.
+    pub async fn relation_graph_around(&self, entry_id: i64) -> Result<Vec<RelationRow>, Error> {
+        let (identity, editions) = self.display_projections_around(&[entry_id]).await?;
+        let canonical = identity.component_of(entry_id).unwrap_or(entry_id);
+        let mut anchors: HashSet<i64> = editions
+            .members_of(canonical)
+            .into_iter()
+            .flat_map(|edition| {
+                identity
+                    .members_by_component
+                    .get(&edition)
+                    .cloned()
+                    .unwrap_or_else(|| vec![edition])
+            })
+            .collect();
+        anchors.insert(entry_id);
+
+        let mut rows: Vec<RelationRow> = entry_relation::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(entry_relation::Column::EntryA.is_in(anchors.iter().copied()))
+                    .add(entry_relation::Column::EntryB.is_in(anchors.iter().copied())),
+            )
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect();
+        let nodes: BTreeSet<i64> = anchors
+            .iter()
+            .copied()
+            .chain(rows.iter().flat_map(|r| [r.entry_a, r.entry_b]))
+            .collect();
+        let mut seen: HashSet<(i64, i64, String)> = rows
+            .iter()
+            .map(|r| (r.entry_a, r.entry_b, r.kind.clone()))
+            .collect();
+        let between = entry_relation::Entity::find()
+            .filter(entry_relation::Column::EntryA.is_in(nodes.iter().copied()))
+            .filter(entry_relation::Column::EntryB.is_in(nodes.iter().copied()))
+            .all(&self.db)
+            .await?;
+        for row in between.into_iter().map(RelationRow::from) {
+            if seen.insert((row.entry_a, row.entry_b, row.kind.clone())) {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     /// All enabled relation rows, for reporting.
@@ -3887,6 +4349,50 @@ mod tests {
         assert_eq!(transformation, Some("instrumental"));
     }
 
+    #[tokio::test]
+    async fn relation_graph_around_spans_edition_group_and_neighbor_edges() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1i64..=6 {
+            insert_entry(db, id).await;
+        }
+        for (a, b, enabled) in [
+            // 4 is an edition of the anchor 1; 4–5 is a rejected suggestion.
+            (1i64, 4i64, true),
+            (4, 5, false),
+            // Rejected suggestions from the anchor to 2 and 3, which are an
+            // edition pair of their own.
+            (1, 2, false),
+            (1, 3, false),
+            (2, 3, true),
+            // Two hops out from the anchor's group: not part of the graph.
+            (3, 6, true),
+        ] {
+            entry_relation::Entity::insert(entry_relation::ActiveModel {
+                entry_a: Set(a),
+                entry_b: Set(b),
+                kind: Set(DERIVED_FROM.to_string()),
+                confidence: Set(0.8),
+                origin: Set("heuristic".to_string()),
+                enabled: Set(enabled),
+                extra: Set(None),
+            })
+            .exec(db)
+            .await
+            .unwrap();
+        }
+
+        let mut pairs: Vec<(i64, i64)> = mdb
+            .relation_graph_around(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.entry_a, r.entry_b))
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(1, 2), (1, 3), (1, 4), (2, 3), (4, 5)]);
+    }
+
     /// Regression test for the pre-existing gate bug this feature exposed:
     /// `build_edition_projection` used to only honor `extra.derived_entry`
     /// when `relation.kind == DERIVED_FROM`, even though the enclosing loop
@@ -4218,6 +4724,52 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].entry_a, rows[0].entry_b), (10, 20));
         assert!(rows[0].entry_a < rows[0].entry_b, "endpoints normalized");
+    }
+
+    #[tokio::test]
+    async fn a_chosen_display_name_is_one_per_component_and_survives_merges() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2, 3] {
+            insert_entry(&mdb.db, id).await;
+        }
+        mdb.set_display_name(1, &[1, 2], Some("Ado")).await.unwrap();
+        // Naming another member of the component replaces it.
+        mdb.set_display_name(2, &[1, 2], Some("ado")).await.unwrap();
+        let names = mdb.display_names(&[1, 2, 3]).await.unwrap();
+        assert_eq!(names, HashMap::from([(2, "ado".to_string())]));
+
+        mdb.merge_entries(2, 3).await.unwrap();
+        let names = mdb.display_names(&[1, 2, 3]).await.unwrap();
+        assert_eq!(names, HashMap::from([(3, "ado".to_string())]));
+
+        mdb.set_display_name(3, &[3], None).await.unwrap();
+        assert!(mdb.display_names(&[3]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_credit_name_is_per_entry_and_artist_and_survives_merges() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2, 10, 11] {
+            insert_entry(&mdb.db, id).await;
+        }
+        // Track 1 credits artist 10 as a character; track 2 doesn't.
+        mdb.set_credit_display_name(1, &[1], 10, &[10], Some("Moena (CV)"))
+            .await
+            .unwrap();
+        assert_eq!(
+            mdb.credit_display_names(&[1, 2]).await.unwrap(),
+            [(1, 10, "Moena (CV)".to_string())]
+        );
+        // The artist merging into 11 carries the credit along.
+        mdb.merge_entries(10, 11).await.unwrap();
+        assert_eq!(
+            mdb.credit_display_names(&[1]).await.unwrap(),
+            [(1, 11, "Moena (CV)".to_string())]
+        );
+        mdb.set_credit_display_name(1, &[1], 11, &[11], None)
+            .await
+            .unwrap();
+        assert!(mdb.credit_display_names(&[1]).await.unwrap().is_empty());
     }
 
     #[tokio::test]
