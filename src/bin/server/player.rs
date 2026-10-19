@@ -98,7 +98,7 @@ pub async fn route(
         "/api/playback/events" if *method == Method::GET => {
             playback::events(state, &parse_query(query))
         }
-        "/api/playback/command" if *method == Method::POST => playback::command(state, &body),
+        "/api/playback/command" if *method == Method::POST => playback::command(state, &body).await,
         "/api/playback/report" if *method == Method::POST => playback::report(state, &body),
         "/api/fetch-options/files" if *method == Method::GET => fetch_options_files(),
         "/api/fetch-options/entry-points" if *method == Method::GET => {
@@ -152,6 +152,16 @@ pub async fn route(
                 _ => respond::not_found(),
             }
         }
+        "/api/preferred-source" if *method == Method::POST => {
+            crate::preferences::set_source(state, &body).await
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/preferred-edition") => {
+            if *method != Method::POST {
+                return respond::method_not_allowed();
+            }
+            let id = &p["/api/entries/".len()..p.len() - "/preferred-edition".len()];
+            crate::preferences::set_edition(state, id, &body).await
+        }
         p if p.starts_with("/api/entries/") && p.ends_with("/display-name") => {
             if *method != Method::POST {
                 return respond::method_not_allowed();
@@ -195,7 +205,8 @@ pub async fn route(
         | "/api/relations/relate"
         | "/api/relations/unrelate"
         | "/api/relations/restore"
-        | "/api/relations/derive" => respond::method_not_allowed(),
+        | "/api/relations/derive"
+        | "/api/preferred-source" => respond::method_not_allowed(),
         _ => respond::not_found(),
     }
 }
@@ -662,6 +673,15 @@ async fn entry_details(state: &Arc<AppState>, id: &str) -> HyperResponse {
             ed.artists = line
                 .map(|artists| artists.into_iter().map(|a| a.name).collect())
                 .unwrap_or_default();
+        }
+        let ids: Vec<i64> = summary.editions.iter().map(|ed| ed.entry_id).collect();
+        match crate::preferences::edition_weights(&state.db, &ids).await {
+            Ok(weights) => {
+                for ed in &mut summary.editions {
+                    ed.preferred_weight = weights.get(&ed.entry_id).copied().unwrap_or(0);
+                }
+            }
+            Err(e) => tracing::warn!("couldn't read preferred editions of {entry_id}: {e:#}"),
         }
     }
     let aliases = match entry_aliases(&state.db, entry_id).await {
@@ -1277,15 +1297,30 @@ async fn playable_sources(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
+    let pairs: Vec<(String, String)> = source_rows
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    // The weights only label the switcher; playing doesn't need them here.
+    let weights = state
+        .db
+        .preferred_source_weights(&pairs)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("couldn't read preferred sources of {entry_id}: {e:#}");
+            HashMap::new()
+        });
     let sources: Vec<_> = source_rows
         .iter()
-        .filter_map(|s| {
+        .zip(&pairs)
+        .filter_map(|(s, pair)| {
             let (embed_url, capabilities) = embed_for(&s.source, &s.identifier)?;
             Some(json!({
                 "provider": s.source,
                 "identifier": s.identifier,
                 "embed_url": embed_url,
                 "capabilities": capabilities,
+                "preferred_weight": weights.get(pair).copied().unwrap_or(0),
             }))
         })
         .collect();

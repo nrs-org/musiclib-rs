@@ -36,6 +36,8 @@ mod playback;
 mod player;
 #[cfg(feature = "player")]
 mod plays;
+#[cfg(feature = "player")]
+mod preferences;
 mod respond;
 #[cfg(feature = "player")]
 mod spotify_auth;

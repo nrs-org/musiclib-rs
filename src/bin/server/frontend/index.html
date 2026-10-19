@@ -2192,6 +2192,72 @@
     background: var(--paper-deep);
   }
 
+  /* Preferred editions and sources on the dock strips (`preferPill`). */
+  .prefer-star {
+    color: var(--brass);
+    margin-right: 6px;
+  }
+
+  .player-dock-switch .prefer-toggle,
+  .player-dock-editions .prefer-toggle {
+    margin-left: auto;
+    border: 1px dashed var(--rail);
+    background: transparent;
+    color: var(--ink-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+
+  .prefer-toggle:hover { color: var(--ink); border-color: var(--ink-soft); }
+
+  .player-dock-switch .prefer-toggle[aria-pressed="true"],
+  .player-dock-editions .prefer-toggle[aria-pressed="true"] {
+    border-style: solid;
+    border-color: var(--brass);
+    color: var(--brass-ink);
+  }
+
+  .prefer-edit {
+    display: inline-flex;
+    align-items: stretch;
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .prefer-edit.is-preferred { border-color: var(--brass); }
+
+  .player-dock-switch .prefer-edit button,
+  .prefer-edit button {
+    border: 0;
+    background: transparent;
+    color: var(--ink-soft);
+    font: inherit;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+
+  .prefer-edit.is-preferred .prefer-name { color: var(--brass-ink); }
+
+  .player-dock-switch .prefer-edit .prefer-step,
+  .prefer-edit .prefer-step {
+    padding: 4px 7px;
+    border-left: 1px solid var(--rail);
+  }
+
+  .prefer-edit .prefer-step:disabled { opacity: 0.35; cursor: default; }
+
+  .prefer-weight {
+    min-width: 2.2ch;
+    padding: 4px 2px;
+    text-align: center;
+    border-left: 1px solid var(--rail);
+    color: var(--ink);
+  }
+
   /* Another device is playing: the dock shows what and where instead of an
      embed (see `Player.renderRemoteCard`). */
   .player-dock-remote {
@@ -7381,6 +7447,9 @@
     // mounted one pressed. Picking one is a command, so a remote can switch
     // what the active device plays too.
     let switcherKey = null;
+    // ★ Prefer on either dock strip: their pills show −/+ weights instead
+    // of switching, until Done.
+    let preferEditing = false;
     function renderSwitcher() {
       const s = snap;
       if (!s?.current) {
@@ -7393,21 +7462,49 @@
         if (snap?.current?.entry_id !== entryId) return;
         const ordered = sortByProviderPreference(list);
         const picked = snap.mounted?.identifier || snap.source || null;
-        const key = [entryId, picked, ordered.map((x) => x.identifier).join(",")].join("|");
+        const key = [
+          entryId,
+          picked,
+          preferEditing,
+          ordered.map((x) => `${x.identifier}=${x.preferred_weight || 0}`).join(","),
+        ].join("|");
         if (key === switcherKey) return;
         switcherKey = key;
         switchEl.innerHTML = "";
         if (ordered.length <= 1) return;
         for (const src of ordered) {
           switchEl.appendChild(
-            el("button", {
-              type: "button",
-              text: src.provider,
-              "aria-pressed": String(src.identifier === picked),
-              onclick: () => Remote.command({ type: "select_source", identifier: src.identifier }).catch(() => {}),
+            preferPill({
+              className: "",
+              label: src.provider,
+              current: src.identifier === picked,
+              weight: src.preferred_weight || 0,
+              editing: preferEditing,
+              onPick: () => Remote.command({ type: "select_source", identifier: src.identifier }).catch(() => {}),
+              setWeight: (w) => setSourceWeight(src, w),
             })
           );
         }
+        switchEl.appendChild(preferToggle(preferEditing, togglePreferEditing));
+      });
+    }
+
+    function togglePreferEditing() {
+      preferEditing = !preferEditing;
+      renderSwitcher();
+      fillDockEditions();
+    }
+
+    // `src` is the cached `loadSources` row, so updating it in place keeps
+    // the switcher right without refetching.
+    function setSourceWeight(src, weight) {
+      const before = src.preferred_weight || 0;
+      src.preferred_weight = weight;
+      renderSwitcher();
+      postJson("/api/preferred-source", { source: src.provider, identifier: src.identifier, weight }).catch((err) => {
+        src.preferred_weight = before;
+        renderSwitcher();
+        setStatus(err.message);
       });
     }
 
@@ -7416,17 +7513,40 @@
     // replaces it in the queue for every device. Editions aren't all
     // playable, so look before replacing.
     let editionsEntryId = null;
+    let dockEditions = [];
     function renderEditions() {
       const entryId = snap?.current?.entry_id ?? null;
       if (entryId === editionsEntryId) return;
       editionsEntryId = entryId;
-      fillEditions(dockEditionsEl, [], null);
+      dockEditions = [];
+      fillDockEditions();
       if (entryId == null) return;
       api(`/api/entries/${entryId}`)
         .then((entry) => {
-          if (editionsEntryId === entryId) fillEditions(dockEditionsEl, entry.editions, switchEdition);
+          if (editionsEntryId !== entryId) return;
+          dockEditions = entry.editions || [];
+          fillDockEditions();
         })
         .catch(() => {});
+    }
+
+    function fillDockEditions() {
+      fillEditions(dockEditionsEl, dockEditions, switchEdition, {
+        editing: preferEditing,
+        setWeight: setEditionWeight,
+        toggle: togglePreferEditing,
+      });
+    }
+
+    function setEditionWeight(ed, weight) {
+      const before = ed.preferred_weight || 0;
+      ed.preferred_weight = weight;
+      fillDockEditions();
+      postJson(`/api/entries/${ed.entry_id}/preferred-edition`, { weight }).catch((err) => {
+        ed.preferred_weight = before;
+        fillDockEditions();
+        setStatus(err.message);
+      });
     }
 
     async function switchEdition(ed) {
@@ -8043,24 +8163,117 @@
   // `musicdb::EDITION_KINDS`) for the playing track, or empty/hidden for a
   // solo entry. Each pill names its performer, so a strip of covers isn't
   // just "cover" over and over.
-  function fillEditions(host, editionsList, onPick = (ed) => viewEntry(ed.entry_id)) {
+  //
+  // With `prefs` (`{ editing, setWeight, toggle }`), each pill also carries
+  // its preference weight (`preferPill`) and the strip ends in the ★ toggle.
+  function fillEditions(host, editionsList, onPick = (ed) => viewEntry(ed.entry_id), prefs = null) {
     host.innerHTML = "";
     const list = editionsList || [];
     host.hidden = list.length <= 1;
     for (const ed of list) {
       const who = ed.artists?.length ? ` · ${ed.artists.join(", ")}` : "";
+      const label = friendlyType(editionKind(ed)) + who;
+      if (prefs) {
+        host.appendChild(
+          preferPill({
+            className: "edition-btn",
+            label,
+            title: ed.title || null,
+            current: !!ed.is_current,
+            weight: ed.preferred_weight || 0,
+            editing: prefs.editing,
+            onPick: ed.is_current ? null : () => onPick(ed),
+            setWeight: (w) => prefs.setWeight(ed, w),
+          })
+        );
+        continue;
+      }
       host.appendChild(
         el("button", {
           className: "edition-btn",
           type: "button",
           "aria-current": String(!!ed.is_current),
           disabled: ed.is_current,
-          text: friendlyType(editionKind(ed)) + who,
+          text: label,
           title: ed.title || null,
           onclick: ed.is_current ? null : () => onPick(ed),
         })
       );
     }
+    if (prefs && list.length > 1) host.appendChild(preferToggle(prefs.editing, prefs.toggle));
+  }
+
+  // Preference weights cap (`preferences::MAX_WEIGHT`).
+  const MAX_PREFER_WEIGHT = 99;
+
+  // One option (an edition, a source) of the dock's strips with its
+  // preference weight: a ★ marks a preferred one (with its weight when
+  // above 1) and picking it does what the strip does. While editing, the
+  // name toggles it preferred and −/+ set its weight instead. Whatever is
+  // preferred plays when the track comes up; several take turns at random,
+  // in proportion to their weights (`preferences::resolve`).
+  function preferPill({ className, label, title, current, weight, editing, onPick, setWeight }) {
+    const star = weight > 0 ? el("span", { className: "prefer-star", text: weight > 1 ? `★${weight}` : "★" }) : null;
+    if (!editing) {
+      return el(
+        "button",
+        {
+          className,
+          type: "button",
+          // Editions mark the playing one as current, sources as pressed
+          // (see their strips' styles).
+          [className === "edition-btn" ? "aria-current" : "aria-pressed"]: String(current),
+          disabled: !onPick,
+          title: title || null,
+          onclick: onPick,
+        },
+        [star, el("span", { text: label })]
+      );
+    }
+    const step = (delta) => setWeight(Math.max(0, Math.min(MAX_PREFER_WEIGHT, weight + delta)));
+    return el("span", { className: "prefer-edit" + (weight > 0 ? " is-preferred" : "") }, [
+      el(
+        "button",
+        {
+          className: "prefer-name",
+          type: "button",
+          "aria-pressed": String(weight > 0),
+          title: weight > 0 ? "Stop preferring" : "Prefer",
+          onclick: () => setWeight(weight > 0 ? 0 : 1),
+        },
+        [star, el("span", { text: label })]
+      ),
+      el("button", {
+        className: "prefer-step",
+        type: "button",
+        text: "−",
+        "aria-label": "Lower weight",
+        disabled: weight === 0,
+        onclick: () => step(-1),
+      }),
+      el("span", { className: "prefer-weight", text: String(weight), title: "Weight" }),
+      el("button", {
+        className: "prefer-step",
+        type: "button",
+        text: "+",
+        "aria-label": "Raise weight",
+        disabled: weight >= MAX_PREFER_WEIGHT,
+        onclick: () => step(1),
+      }),
+    ]);
+  }
+
+  function preferToggle(editing, toggle) {
+    return el("button", {
+      className: "prefer-toggle",
+      type: "button",
+      "aria-pressed": String(editing),
+      text: editing ? "Done" : "★ Prefer",
+      title: editing
+        ? null
+        : "Choose what plays when this track comes up. Several preferred ones take turns at random, by weight.",
+      onclick: toggle,
+    });
   }
 
   // The entry page's edition list: editions grouped by kind (in the
@@ -8140,8 +8353,18 @@
       dot.style.background = PLATFORM_COLOR[kind];
       dots.appendChild(dot);
     }
+    const preferred = ed.preferred_weight > 0;
     const body = el("span", { className: "edition-body" }, [
-      el("span", { className: "edition-who", text: who || title }),
+      el("span", { className: "edition-who" }, [
+        preferred
+          ? el("span", {
+              className: "prefer-star",
+              text: ed.preferred_weight > 1 ? `★${ed.preferred_weight}` : "★",
+              title: "Preferred: plays when this track comes up",
+            })
+          : null,
+        el("span", { text: who || title }),
+      ]),
       who && titleSaysMore ? el("span", { className: "edition-title", text: title }) : null,
     ]);
     return el("li", {}, [

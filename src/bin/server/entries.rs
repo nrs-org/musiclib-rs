@@ -103,12 +103,15 @@ pub struct EditionRef {
     /// this; `entry_summaries` leaves it empty, since search and the queue
     /// summarize far more entries than they show editions for.
     pub artists: Vec<String>,
+    /// How strongly the user prefers this edition when its group is queued
+    /// (`preferences`); 0 for no preference. Filled like `artists`.
+    pub preferred_weight: u32,
 }
 
 /// Edition switcher order: the original first, then full alternate versions,
 /// then degenerate ones (`musicdb::DEGENERATE_MARKERS` — the same ranking
 /// `EditionProjection::default_member_of` uses to pick the playback default
-/// until per-user preference exists, so the switcher's left-to-right order
+/// when no edition is preferred (`preferences`), so the switcher's left-to-right order
 /// matches what actually plays). `transformation` may hold several
 /// space-separated markers at once (e.g. `"instrumental named:long"`); one
 /// degenerate token is enough to sort the whole edition last.
@@ -440,6 +443,7 @@ pub async fn entry_summaries_with(
                         kinds
                     }),
                     artists: Vec::new(),
+                    preferred_weight: 0,
                 }
             })
             .collect();

@@ -182,6 +182,47 @@ mod credit_display_name {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// An edition the user wants played when its edition group is queued as
+/// the group's default edition, with a relative weight: when several
+/// editions of one group are preferred, the player draws one per enqueue,
+/// in proportion to their weights. Keyed by entry, like
+/// `entry_display_name`; `set_preferred_edition` keeps at most one row per
+/// soft-identity component.
+mod preferred_edition {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "preferred_edition")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        pub weight: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A source the user wants an entry played from, with a relative weight
+/// (see `preferred_edition`). Keyed by pair, so it follows the source
+/// through entry merges and splits.
+mod preferred_source {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "preferred_source")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub weight: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 mod entry_child {
     use sea_orm::entity::prelude::*;
 
@@ -1842,6 +1883,26 @@ impl MusicDb {
                 .await?;
             }
         }
+        if let Some(pref) = preferred_edition::Entity::find_by_id(loser)
+            .one(&txn)
+            .await?
+        {
+            preferred_edition::Entity::delete_by_id(loser)
+                .exec(&txn)
+                .await?;
+            if preferred_edition::Entity::find_by_id(winner)
+                .one(&txn)
+                .await?
+                .is_none()
+            {
+                preferred_edition::Entity::insert(preferred_edition::ActiveModel {
+                    entry_id: Set(winner),
+                    weight: Set(pref.weight),
+                })
+                .exec(&txn)
+                .await?;
+            }
+        }
 
         entry::Entity::delete_by_id(loser).exec(&txn).await?;
 
@@ -1885,6 +1946,10 @@ impl MusicDb {
             .await?;
         entry_display_name::Entity::delete_many()
             .filter(entry_display_name::Column::EntryId.not_in_subquery(referenced.clone()))
+            .exec(&self.db)
+            .await?;
+        preferred_edition::Entity::delete_many()
+            .filter(preferred_edition::Column::EntryId.not_in_subquery(referenced.clone()))
             .exec(&self.db)
             .await?;
         credit_display_name::Entity::delete_many()
@@ -3136,6 +3201,104 @@ impl MusicDb {
                 entry_id: Set(entry_id),
                 artist_entry_id: Set(artist_id),
                 name: Set(name.to_owned()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// The preference weights set on any of `entry_ids`
+    /// (`preferred_edition`). Entries without a preference are absent.
+    pub async fn preferred_edition_weights(
+        &self,
+        entry_ids: &[i64],
+    ) -> Result<HashMap<i64, u32>, Error> {
+        let mut out = HashMap::new();
+        for chunk in entry_ids.chunks(500) {
+            for m in preferred_edition::Entity::find()
+                .filter(preferred_edition::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+                .await?
+            {
+                out.insert(m.entry_id, m.weight.clamp(0, u32::MAX as i64) as u32);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Prefers edition `entry_id` with `weight`, or with 0 stops preferring
+    /// it. `members` are the other entries of its soft-identity component;
+    /// their rows are cleared so the new one is the only one.
+    pub async fn set_preferred_edition(
+        &self,
+        entry_id: i64,
+        members: &[i64],
+        weight: u32,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        preferred_edition::Entity::delete_many()
+            .filter(
+                preferred_edition::Column::EntryId.is_in(members.iter().copied().chain([entry_id])),
+            )
+            .exec(&txn)
+            .await?;
+        if weight > 0 {
+            preferred_edition::Entity::insert(preferred_edition::ActiveModel {
+                entry_id: Set(entry_id),
+                weight: Set(weight.into()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// The preference weights set on any of `pairs` (`preferred_source`).
+    /// Pairs without a preference are absent.
+    pub async fn preferred_source_weights(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<HashMap<(String, String), u32>, Error> {
+        let wanted: HashSet<&(String, String)> = pairs.iter().collect();
+        let mut out = HashMap::new();
+        for chunk in pairs.chunks(500) {
+            for m in preferred_source::Entity::find()
+                .filter(
+                    preferred_source::Column::Identifier
+                        .is_in(chunk.iter().map(|(_, identifier)| identifier.clone())),
+                )
+                .all(&self.db)
+                .await?
+            {
+                let pair = (m.source, m.identifier);
+                if wanted.contains(&pair) {
+                    out.insert(pair, m.weight.clamp(0, u32::MAX as i64) as u32);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Prefers playing from `(source, identifier)` with `weight`, or with 0
+    /// stops preferring it.
+    pub async fn set_preferred_source(
+        &self,
+        source: &str,
+        identifier: &str,
+        weight: u32,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        preferred_source::Entity::delete_by_id((source.to_owned(), identifier.to_owned()))
+            .exec(&txn)
+            .await?;
+        if weight > 0 {
+            preferred_source::Entity::insert(preferred_source::ActiveModel {
+                source: Set(source.to_owned()),
+                identifier: Set(identifier.to_owned()),
+                weight: Set(weight.into()),
             })
             .exec(&txn)
             .await?;

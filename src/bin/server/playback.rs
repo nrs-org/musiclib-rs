@@ -30,6 +30,7 @@ use serde_json::json;
 use tokio::sync::watch;
 
 use crate::{
+    preferences,
     respond::{self, HyperResponse},
     state::AppState,
 };
@@ -61,6 +62,11 @@ pub struct QueueItem {
     /// it alongside the track).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_id: Option<i64>,
+    /// The source to play it from, drawn from its preferred sources when it
+    /// was queued (`preferences::resolve`); `None` lets the active device
+    /// pick by its own provider preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -355,7 +361,8 @@ struct Session {
     /// repeat-one replay or a jump to the same row: the active device
     /// remounts when it changes, and stale reports are told apart by it.
     track_seq: u64,
-    /// Source explicitly picked with the switcher; `None` lets the active
+    /// Source explicitly picked with the switcher, or else the current
+    /// item's preferred one (`QueueItem::source`); `None` lets the active
     /// device pick by its own provider preference.
     source: Option<String>,
     mounted: Option<Mounted>,
@@ -425,7 +432,7 @@ impl Session {
     fn start_track(&mut self, keep_source: bool) {
         self.track_seq += 1;
         if !keep_source {
-            self.source = None;
+            self.source = self.queue.current().and_then(|it| it.source.clone());
         }
         self.mounted = None;
         self.position_ms = 0;
@@ -973,13 +980,30 @@ struct CommandRequest {
 type CommandError = (StatusCode, &'static str);
 
 /// `POST /api/playback/command` — `{device_id, type, ...}`.
-pub fn command(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
-    let req: CommandRequest = match serde_json::from_slice(body) {
+pub async fn command(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let mut req: CommandRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
             return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string());
         }
     };
+    // Queued items play a preferred edition and source, drawn now (before
+    // the lock: it reads the DB) so every device plays the same draw. An
+    // edition switched to by hand stays put, but still plays from its own
+    // preferred source.
+    let db = &state.db;
+    match &mut req.command {
+        Command::SetQueue { items, .. }
+        | Command::ShuffleLibrary { items }
+        | Command::Recommend { items } => preferences::resolve(db, items, true).await,
+        Command::Queue { item } => {
+            preferences::resolve(db, std::slice::from_mut(item), true).await;
+        }
+        Command::ReplaceCurrent { item } => {
+            preferences::resolve(db, std::slice::from_mut(item), false).await;
+        }
+        _ => {}
+    }
     let hub = &state.playback;
     let result = {
         let mut s = hub.lock();
@@ -1238,6 +1262,7 @@ mod tests {
             entry_id: id,
             title: None,
             release_id: None,
+            source: None,
         }
     }
 
