@@ -139,6 +139,7 @@ pub async fn get_release_group(
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
             image: None,
             release_date,
             sources,

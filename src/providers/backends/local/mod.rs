@@ -276,6 +276,7 @@ fn entry_to_entity_result(
         .collect::<Vec<_>>();
 
     EntityResult {
+        privacy: None,
         image: None,
         release_date: entry.release_date,
         sources,
@@ -342,6 +343,7 @@ impl FetchProvider for Provider {
             .collect::<Result<Vec<_>, Error>>()?;
 
         Ok(EntityResult {
+            privacy: None,
             image: result.image,
             children,
             release_date: result.release_date,

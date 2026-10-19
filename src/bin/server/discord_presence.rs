@@ -11,6 +11,12 @@
 //! https://discord.com/developers/applications, whose name heads the card.
 //! Without one, it stays off.
 //!
+//! No unlisted or private YouTube video reaches Discord: a YouTube link
+//! goes out only for a video that's public, and a YouTube thumbnail only if
+//! the video or playlist it shows is (`privacy::check_shareable`: what's
+//! stored, including the user's own call from the entry page). Every other
+//! source and cover is public.
+//!
 //! Discord has no paused activity: a paused track keeps its card, with a
 //! pause sign for the logo and no progress bar, while a player is open to
 //! resume it and for `PAUSED_FOR` at most. Discord needn't be running: the
@@ -32,7 +38,10 @@ use tokio::{
     time::Instant,
 };
 
-use crate::playback::PlaybackHub;
+use crate::{
+    playback::PlaybackHub,
+    privacy::{YouTubeKind, check_shareable, youtube_id},
+};
 
 /// Discord takes about 5 updates per 20 s; slower than that, a burst of
 /// skips ends on its last track instead of queueing behind the limit.
@@ -264,6 +273,52 @@ async fn album(db: &MusicDb, entry_id: i64) -> anyhow::Result<Option<String>> {
     let albums: Vec<(String, String)> = albums.into_iter().map(|(_, pair)| pair).collect();
     let titles = db.pair_titles(&albums).await?;
     Ok(albums.iter().find_map(|pair| titles.get(pair).cloned()))
+}
+
+/// What a cover's URL gives away.
+#[derive(Clone, Debug, PartialEq)]
+enum Reveals {
+    /// Nothing that isn't public anyway.
+    Nothing,
+    /// The YouTube video or playlist it's the thumbnail of.
+    Source(Pair),
+    /// A YouTube thumbnail of something it can't tell: never shown.
+    Unknown,
+}
+
+type Pair = (String, String);
+
+/// What a cover's URL gives away: a YouTube thumbnail names its video or
+/// playlist, which may be unlisted or private. Anything else is public.
+fn cover_reveals(url: &str) -> Reveals {
+    let Some((host, path)) = url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split_once('/'))
+    else {
+        return Reveals::Unknown;
+    };
+    if host != "ytimg.com" && !host.ends_with(".ytimg.com") {
+        return Reveals::Nothing;
+    }
+    let mut segments = path.split('/');
+    let kind = match segments.next() {
+        Some("vi" | "vi_webp") => YouTubeKind::Video,
+        Some("s_p") => YouTubeKind::Playlist,
+        _ => return Reveals::Unknown,
+    };
+    match segments.next().and_then(youtube_id) {
+        Some(id) => Reveals::Source(("youtube".into(), kind.identifier(id))),
+        None => Reveals::Unknown,
+    }
+}
+
+/// Whether a cover may be shown (`cover_reveals`).
+async fn cover_shareable(db: &MusicDb, url: &str) -> bool {
+    match cover_reveals(url) {
+        Reveals::Nothing => true,
+        Reveals::Source(pair) => check_shareable(db, &pair).await,
+        Reveals::Unknown => false,
+    }
 }
 
 fn now_ms() -> i64 {
@@ -522,7 +577,22 @@ pub async fn run(hub: Arc<PlaybackHub>, db: MusicDb, client_id: String) {
                             }
                             None => Extras::default(),
                         };
-                        Some(p.activity(&extras))
+                        // The link is the playing source itself.
+                        let mut link = None;
+                        if let (Some(provider), Some(url)) = (&p.provider, &p.url)
+                            && check_shareable(&db, &(provider.clone(), url.clone())).await
+                        {
+                            link = Some(url.clone());
+                        }
+                        let p = Presence {
+                            url: link,
+                            ..p.clone()
+                        };
+                        let cover = match extras.cover {
+                            Some(c) if cover_shareable(&db, &c).await => Some(c),
+                            _ => None,
+                        };
+                        Some(p.activity(&Extras { cover, ..extras }))
                     }
                     None => None,
                 };
@@ -684,6 +754,39 @@ mod tests {
         let seek = Presence::from_snapshot(&playing(60_000), 100_000).unwrap();
         assert!(a.same_as(&jitter));
         assert!(!a.same_as(&seek));
+    }
+
+    #[test]
+    fn a_youtube_thumbnail_gives_away_its_video() {
+        let source = |id: &str| Reveals::Source(("youtube".into(), id.into()));
+        assert_eq!(
+            cover_reveals("https://i.ytimg.com/vi/cZ12Tjci0LA/mqdefault.jpg"),
+            source("https://youtu.be/cZ12Tjci0LA")
+        );
+        assert_eq!(
+            cover_reveals("https://i9.ytimg.com/s_p/OLAK5uy_k0LMy/sddefault.jpg?sqp=x"),
+            source("https://www.youtube.com/playlist?list=OLAK5uy_k0LMy")
+        );
+        assert_eq!(
+            cover_reveals("https://i.ytimg.com/an_webp/x/y.webp"),
+            Reveals::Unknown
+        );
+        assert_eq!(
+            cover_reveals("https://i.ytimg.com/vi/a&b/y.jpg"),
+            Reveals::Unknown
+        );
+        assert_eq!(
+            cover_reveals("https://i.scdn.co/image/ab67"),
+            Reveals::Nothing
+        );
+        assert_eq!(
+            cover_reveals("https://nicovideo.cdn.nimg.jp/thumbnails/15251289/15251289"),
+            Reveals::Nothing
+        );
+        assert_eq!(
+            cover_reveals("https://evilytimg.com/vi/x/y.jpg"),
+            Reveals::Nothing
+        );
     }
 
     #[test]

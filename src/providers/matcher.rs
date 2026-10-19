@@ -1082,6 +1082,7 @@ mod tests {
             call_count,
         };
         EntityResult {
+            privacy: None,
             image: None,
             release_date: None,
             sources: Default::default(),
@@ -1207,6 +1208,7 @@ mod tests {
             call_count,
         });
         EntityResult {
+            privacy: None,
             image: None,
             release_date: None,
             sources: Default::default(),
@@ -1336,6 +1338,7 @@ mod tests {
                 return Err(Error::InvalidUrl("video unavailable".into()));
             }
             Ok(EntityResult {
+                privacy: None,
                 image: None,
                 release_date: None,
                 sources: Default::default(),

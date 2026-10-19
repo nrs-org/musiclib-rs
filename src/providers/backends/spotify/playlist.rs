@@ -220,6 +220,7 @@ pub async fn get_playlist(client: &SpotifyClient, url: &str) -> Result<EntityRes
         };
 
         let result = Ok(EntityResult {
+            privacy: None,
             image: pick_image(&p.images),
             release_date: None,
             sources: [(SOURCE.into(), HashSet::from([canonical]))].into(),

@@ -529,6 +529,7 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
                 }
 
                 Ok(EntityResult {
+                    privacy: None,
                     image: super::snippet_thumbnail(&c.snippet.extra),
                     release_date: None,
                     sources: [(SOURCE.into(), source_set)].into(),

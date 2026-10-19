@@ -431,6 +431,9 @@ pub async fn flush(
                 db.set_pair_image(&pair.0, &pair.1, image, ImageOrigin::Fetch, run_id)
                     .await?;
             }
+            if let Some(privacy) = meta.privacy {
+                db.set_provider_privacy(&pair.0, &pair.1, privacy).await?;
+            }
         } else {
             if let Some(image) = stubs.get(pair).and_then(|s| s.image.as_ref()) {
                 db.set_pair_image(&pair.0, &pair.1, image, ImageOrigin::Listing, run_id)
@@ -1022,6 +1025,7 @@ mod tests {
     fn track_metadata() -> PairMetadata {
         PairMetadata {
             image: None,
+            privacy: None,
             entry_type: EntryType::Track,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Track {
@@ -1299,6 +1303,7 @@ mod tests {
     fn release_metadata() -> PairMetadata {
         PairMetadata {
             image: None,
+            privacy: None,
             entry_type: EntryType::Release,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Release {
@@ -1540,6 +1545,7 @@ mod tests {
     fn artist_metadata() -> PairMetadata {
         PairMetadata {
             image: None,
+            privacy: None,
             entry_type: EntryType::Artist,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Artist,

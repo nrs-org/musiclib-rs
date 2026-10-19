@@ -221,6 +221,7 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
             image: cover_art_archive_front(&r.id, &r.extra),
             release_date,
             sources,

@@ -97,6 +97,7 @@ pub async fn get_user(client: Arc<YtdlpClient>, url: &str) -> Result<EntityResul
         .with_static_eval(upload_eval);
 
     Ok(EntityResult {
+        privacy: None,
         image: crate::providers::backends::ytdlp::info_thumbnail(&meta.extra),
         release_date: None,
         sources,

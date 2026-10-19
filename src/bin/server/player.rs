@@ -155,6 +155,7 @@ pub async fn route(
         "/api/preferred-source" if *method == Method::POST => {
             crate::preferences::set_source(state, &body).await
         }
+        "/api/source-privacy" if *method == Method::POST => crate::privacy::set(state, &body).await,
         p if p.starts_with("/api/entries/") && p.ends_with("/preferred-edition") => {
             if *method != Method::POST {
                 return respond::method_not_allowed();
@@ -710,8 +711,15 @@ async fn entry_details(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
+    let pairs: Vec<(String, String)> = summary
+        .sources
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let privacy = crate::privacy::for_entry(&state.db, &pairs).await;
     let mut body = json!(summary);
     body["aliases"] = json!(aliases);
+    body["privacy"] = privacy;
     respond::json(StatusCode::OK, body)
 }
 

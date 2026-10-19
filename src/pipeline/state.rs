@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::musicdb::ParentEdges;
 use crate::providers::types::{
-    Alias, Contribution, EntrySpecificData, EntryType, Image, OptionsId,
+    Alias, Contribution, EntrySpecificData, EntryType, Image, OptionsId, Privacy,
 };
 
 /// A `(source_key, identifier)` pair. The only unit of identity during import.
@@ -19,6 +19,7 @@ pub struct PairMetadata {
     pub specific_data: EntrySpecificData,
     pub aliases: Vec<Alias>,
     pub image: Option<Image>,
+    pub privacy: Option<Privacy>,
 }
 
 /// What a parent's listing said about a child (from its `ChildRef`). Kept so a

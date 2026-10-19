@@ -164,6 +164,7 @@ pub async fn get_master(client: &DiscogsClient, url: &str) -> Result<EntityResul
         .with_static_eval(release_eval);
 
         let result = Ok(EntityResult {
+            privacy: None,
             image: super::types::primary_image(&m.extra),
             release_date,
             sources: [(SOURCE.into(), HashSet::from([canonical]))].into(),

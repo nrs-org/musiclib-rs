@@ -261,6 +261,7 @@ pub async fn get_artist(client: &DiscogsClient, url: &str) -> Result<EntityResul
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
             image: super::types::primary_image(&a.extra),
             release_date: None,
             sources,

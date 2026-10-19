@@ -107,6 +107,7 @@ pub async fn get_mylist(client: Arc<YtdlpClient>, url: &str) -> Result<EntityRes
     });
 
     Ok(EntityResult {
+        privacy: None,
         image: crate::providers::backends::ytdlp::info_thumbnail(&meta.extra),
         release_date: None,
         sources,

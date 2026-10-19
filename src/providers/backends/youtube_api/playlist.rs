@@ -223,6 +223,7 @@ pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityRes
                         )
                     });
                 Ok(EntityResult {
+                    privacy: None,
                     image: super::snippet_thumbnail(&p.snippet.extra),
                     release_date,
                     sources: [(SOURCE.into(), HashSet::from([url.to_string()]))].into(),
