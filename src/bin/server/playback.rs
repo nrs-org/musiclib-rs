@@ -292,6 +292,9 @@ impl Queue {
     }
 }
 
+/// `Volume::global` before anything set it.
+pub const DEFAULT_VOLUME: u8 = 80;
+
 /// Two dials whose product is the effective volume (0..100 each): `global`
 /// scales everything, `by_provider` is a per-provider balance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -571,7 +574,7 @@ impl PlaybackHub {
     /// A command from the OS media controls (`media_controls`). They aren't
     /// a device and can't play anything, so they act as the device that
     /// last played: play resumes there while it's connected. With no such
-    /// device, only pausing and seeking apply.
+    /// device, only pausing, seeking and volume apply.
     #[cfg(feature = "media_controls")]
     pub fn media_key(&self, key: MediaKey) {
         let mut s = self.lock();
@@ -589,6 +592,14 @@ impl PlaybackHub {
                     position_ms: s.duration_ms.map_or(target, |d| target.min(d)),
                 }
             }
+            // The master dial: the per-provider balance stays as it is.
+            // Turning it up unmutes, like the bar's slider.
+            MediaKey::Volume(global) => Command::Volume {
+                global: Some(global),
+                by_provider: BTreeMap::new(),
+                muted: (global > 0).then_some(false),
+                seed: false,
+            },
             _ if device.is_none() => return,
             MediaKey::Play => Command::Play,
             MediaKey::Toggle => Command::Toggle,
@@ -887,6 +898,8 @@ pub enum MediaKey {
     SeekTo(u64),
     /// Milliseconds, either way, clamped to the track.
     SeekBy(i64),
+    /// The global volume, 0..100.
+    Volume(u8),
 }
 
 #[derive(Deserialize)]
@@ -1104,7 +1117,7 @@ fn apply(s: &mut Session, device: &str, command: Command) -> Result<(), CommandE
                 return Ok(());
             }
             let v = s.volume.get_or_insert_with(|| Volume {
-                global: 80,
+                global: DEFAULT_VOLUME,
                 by_provider: BTreeMap::new(),
                 muted: false,
             });
@@ -1440,6 +1453,27 @@ mod tests {
         }
         hub.media_key(MediaKey::SeekTo(5_000));
         assert_eq!(hub.lock().position_ms, 5_000);
+    }
+
+    #[cfg(feature = "media_controls")]
+    #[test]
+    fn media_key_volume_sets_the_global_dial_and_unmutes() {
+        let (_dir, hub) = idle_hub("a");
+        hub.lock().devices.clear();
+        hub.lock().volume = Some(Volume {
+            global: 50,
+            by_provider: BTreeMap::from([("youtube".into(), 30)]),
+            muted: true,
+        });
+        hub.media_key(MediaKey::Volume(0));
+        assert!(hub.lock().volume.as_ref().unwrap().muted);
+        hub.media_key(MediaKey::Volume(70));
+        let s = hub.lock();
+        let v = s.volume.as_ref().unwrap();
+        assert_eq!(
+            (v.global, v.muted, v.by_provider["youtube"]),
+            (70, false, 30)
+        );
     }
 
     #[cfg(feature = "media_controls")]

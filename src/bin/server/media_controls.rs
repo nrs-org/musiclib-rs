@@ -7,6 +7,7 @@
 //! queue). This one follows the session (`PlaybackHub::subscribe`) and
 //! sends the OS buttons back as session commands
 //! (`PlaybackHub::media_key`), so it's right whichever device plays.
+//! Its volume is the session's global dial (muted reads as 0).
 //!
 //! `souvlaki` also covers Windows and macOS, but neither fits a headless
 //! server yet: Windows controls need a window handle, and macOS delivers
@@ -17,7 +18,7 @@ use std::{sync::Arc, time::Duration};
 
 use serde_json::Value;
 
-use crate::playback::{MediaKey, PlaybackHub};
+use crate::playback::{DEFAULT_VOLUME, MediaKey, PlaybackHub};
 
 /// The parts of a snapshot the OS controls show.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -56,6 +57,16 @@ impl NowPlaying {
     }
 }
 
+/// The session's effective master volume, 0.0..1.0, as the OS shows it.
+fn os_volume(snapshot: &Value) -> f64 {
+    let volume = &snapshot["volume"];
+    if volume["muted"].as_bool().unwrap_or(false) {
+        return 0.0;
+    }
+    let global = volume["global"].as_u64().unwrap_or(DEFAULT_VOLUME.into());
+    global.min(100) as f64 / 100.0
+}
+
 /// The session command for an OS media-control event, if it maps to one.
 fn media_key(event: souvlaki::MediaControlEvent) -> Option<MediaKey> {
     use souvlaki::{MediaControlEvent as E, MediaPosition, SeekDirection};
@@ -74,7 +85,9 @@ fn media_key(event: souvlaki::MediaControlEvent) -> Option<MediaKey> {
         E::Seek(dir) => MediaKey::SeekBy(signed(dir, STEP_MS)),
         E::SeekBy(dir, by) => MediaKey::SeekBy(signed(dir, by.as_millis() as i64)),
         E::SetPosition(MediaPosition(at)) => MediaKey::SeekTo(at.as_millis() as u64),
-        E::SetVolume(_) | E::OpenUri(_) | E::Raise | E::Quit => return None,
+        // `as` maps NaN to 0.
+        E::SetVolume(v) => MediaKey::Volume((v.clamp(0.0, 1.0) * 100.0).round() as u8),
+        E::OpenUri(_) | E::Raise | E::Quit => return None,
     })
 }
 
@@ -112,11 +125,18 @@ pub async fn run(hub: Arc<PlaybackHub>) {
 
     let mut snapshots = hub.subscribe();
     let mut shown: Option<NowPlaying> = None;
+    let mut shown_volume: Option<f64> = None;
     loop {
         let snapshot = snapshots.borrow_and_update().clone();
         if let Ok(value) = serde_json::from_str::<Value>(&snapshot) {
             let now = NowPlaying::from_snapshot(&value);
+            let volume = os_volume(&value);
             let result = (|| {
+                // Also echoes a change the OS asked for, which MPRIS needs
+                // to show it (see `souvlaki::MediaControlEvent::SetVolume`).
+                if shown_volume != Some(volume) {
+                    controls.set_volume(volume)?;
+                }
                 if shown.as_ref().is_none_or(|s| !s.same_track(&now)) {
                     controls.set_metadata(MediaMetadata {
                         title: now.title.as_deref(),
@@ -140,6 +160,7 @@ pub async fn run(hub: Arc<PlaybackHub>) {
                 return;
             }
             shown = Some(now);
+            shown_volume = Some(volume);
         }
         if snapshots.changed().await.is_err() {
             return;
@@ -239,6 +260,20 @@ mod tests {
             media_key(E::SetPosition(MediaPosition(Duration::from_millis(42_000)))),
             Some(MediaKey::SeekTo(42_000))
         );
+        assert_eq!(media_key(E::SetVolume(0.426)), Some(MediaKey::Volume(43)));
+        assert_eq!(media_key(E::SetVolume(1.5)), Some(MediaKey::Volume(100)));
+        assert_eq!(media_key(E::SetVolume(f64::NAN)), Some(MediaKey::Volume(0)));
         assert_eq!(media_key(E::Raise), None);
+    }
+
+    #[test]
+    fn os_volume_is_the_global_dial_muted_as_zero() {
+        let vol = |v: Value| os_volume(&json!({ "volume": v }));
+        assert_eq!(
+            vol(json!({ "global": 40, "by_provider": { "youtube": 10 } })),
+            0.4
+        );
+        assert_eq!(vol(json!({ "global": 40, "muted": true })), 0.0);
+        assert_eq!(vol(Value::Null), f64::from(DEFAULT_VOLUME) / 100.0);
     }
 }
