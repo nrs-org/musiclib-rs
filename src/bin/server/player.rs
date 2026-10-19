@@ -159,6 +159,22 @@ pub async fn route(
             let id = &p["/api/entries/".len()..p.len() - "/display-name".len()];
             set_display_name(state, id, &body).await
         }
+        p if p.starts_with("/api/entries/") && p.ends_with("/cover") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/cover".len()]) {
+                Ok(id) => crate::cover::cover(&state.db, id).await,
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/discography") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            let id = &p["/api/entries/".len()..p.len() - "/discography".len()];
+            discography(state, id).await
+        }
         p if p.starts_with("/api/entries/") && p.ends_with("/relations") => {
             if *method != Method::GET {
                 return respond::method_not_allowed();
@@ -677,6 +693,23 @@ async fn entry_details(state: &Arc<AppState>, id: &str) -> HyperResponse {
     let mut body = json!(summary);
     body["aliases"] = json!(aliases);
     respond::json(StatusCode::OK, body)
+}
+
+/// `GET /api/entries/{id}/discography` — an artist's releases and tracks
+/// (`discography::discography`).
+async fn discography(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    let entry_id = match parse_entry_id(id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match crate::discography::discography(&state.db, entry_id).await {
+        Ok(d) => respond::json_typed(StatusCode::OK, &d),
+        Err(e) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &e.to_string(),
+        ),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1295,6 +1328,88 @@ async fn playable_sources(state: &Arc<AppState>, id: &str) -> HyperResponse {
     )
 }
 
+/// `(disc_no, track_no, track entry)`.
+type TrackPos = (Option<i32>, Option<i32>, i64);
+
+/// A `TrackPos` for each track `entry_id` lists, in
+/// order. Only `track` children count: a release group's children are its
+/// releases (and, from some providers, its artist), so a release group with
+/// no tracks of its own shows the longest tracklist among its releases.
+async fn tracklist(db: &MusicDb, entry_id: i64) -> anyhow::Result<Vec<TrackPos>> {
+    let (mut tracks, releases) = direct_children(db, entry_id).await?;
+    if tracks.is_empty() {
+        for release in releases {
+            let (release_tracks, _) = direct_children(db, release).await?;
+            if release_tracks.len() > tracks.len() {
+                tracks = release_tracks;
+            }
+        }
+    }
+    // One provider can list two entries soft dedup has since linked: keep
+    // one per soft-identity component.
+    let ids: Vec<i64> = tracks.iter().map(|(_, _, id)| *id).collect();
+    let (identity, _) = db.display_projections_around(&ids).await?;
+    let mut seen = HashSet::new();
+    tracks.retain(|(_, _, id)| seen.insert(identity.component_of(*id).unwrap_or(*id)));
+    Ok(tracks)
+}
+
+/// `entry_id`'s track children (ordered as in `tracklist`) and its release
+/// children.
+async fn direct_children(db: &MusicDb, entry_id: i64) -> anyhow::Result<(Vec<TrackPos>, Vec<i64>)> {
+    let pairs = db.pairs_by_entry_ids(&[entry_id]).await?;
+    let children = db.child_rows_for_parent_pairs(&pairs).await?;
+    let child_pairs: Vec<(String, String)> = children
+        .iter()
+        .map(|c| (c.child_source.clone(), c.child_identifier.clone()))
+        .collect();
+    let pair_to_entry: HashMap<(String, String), i64> = db
+        .source_rows_for_pairs(&child_pairs)
+        .await?
+        .into_iter()
+        .map(|s| ((s.source, s.identifier), s.entry_id))
+        .collect();
+    let child_ids: Vec<i64> = pair_to_entry.values().copied().collect();
+    let type_of: HashMap<i64, String> = db
+        .entry_rows_by_ids(&child_ids)
+        .await?
+        .into_iter()
+        .map(|e| (e.id, e.entry_type))
+        .collect();
+    let is = |id: &i64, t: &str| type_of.get(id).is_some_and(|et| et == t);
+
+    // Each of the entry's pairs is one provider's tracklist, listing that
+    // provider's own track entries — which dedup may not have linked to the
+    // other providers'. Show one provider's list, not their union: the
+    // longest, preferring one that numbers its tracks.
+    let mut by_pair: HashMap<(&str, &str), Vec<TrackPos>> = HashMap::new();
+    for c in &children {
+        let key = (c.child_source.clone(), c.child_identifier.clone());
+        if let Some(&eid) = pair_to_entry.get(&key).filter(|id| is(id, "track")) {
+            by_pair
+                .entry((c.parent_source.as_str(), c.parent_identifier.as_str()))
+                .or_default()
+                .push((c.disc_no, c.track_no, eid));
+        }
+    }
+    let mut tracks = by_pair
+        .into_iter()
+        .max_by_key(|(pair, list)| {
+            let numbered = list.iter().all(|(_, track, _)| track.is_some());
+            (list.len(), numbered, std::cmp::Reverse(*pair))
+        })
+        .map(|(_, list)| list)
+        .unwrap_or_default();
+    tracks.sort_by_key(|(disc, track, _)| (disc.unwrap_or(0), track.unwrap_or(i32::MAX)));
+    let mut releases: Vec<i64> = child_ids
+        .into_iter()
+        .filter(|id| is(id, "release"))
+        .collect();
+    releases.sort_unstable();
+    releases.dedup();
+    Ok((tracks, releases))
+}
+
 async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
     let Ok(entry_id) = id.parse::<i64>() else {
         return respond::error(
@@ -1303,8 +1418,8 @@ async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
             "id must be numeric",
         );
     };
-    let pairs = match state.db.pairs_by_entry_ids(&[entry_id]).await {
-        Ok(p) => p,
+    let ordered = match tracklist(&state.db, entry_id).await {
+        Ok(t) => t,
         Err(e) => {
             return respond::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1313,46 +1428,6 @@ async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
-    let children = match state.db.child_rows_for_parent_pairs(&pairs).await {
-        Ok(c) => c,
-        Err(e) => {
-            return respond::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &e.to_string(),
-            );
-        }
-    };
-    let child_pairs: Vec<(String, String)> = children
-        .iter()
-        .map(|c| (c.child_source.clone(), c.child_identifier.clone()))
-        .collect();
-    let child_sources = match state.db.source_rows_for_pairs(&child_pairs).await {
-        Ok(s) => s,
-        Err(e) => {
-            return respond::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &e.to_string(),
-            );
-        }
-    };
-    let pair_to_entry: HashMap<(String, String), i64> = child_sources
-        .iter()
-        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
-        .collect();
-
-    let mut ordered: Vec<(Option<i32>, Option<i32>, i64)> = children
-        .iter()
-        .filter_map(|c| {
-            let key = (c.child_source.clone(), c.child_identifier.clone());
-            pair_to_entry
-                .get(&key)
-                .map(|&eid| (c.disc_no, c.track_no, eid))
-        })
-        .collect();
-    ordered.sort_by_key(|(disc, track, _)| (disc.unwrap_or(0), track.unwrap_or(0)));
-    ordered.dedup_by_key(|(_, _, id)| *id);
 
     let ids: Vec<i64> = ordered.iter().map(|(_, _, id)| *id).collect();
     let summaries = match entry_summaries(&state.db, &ids).await {

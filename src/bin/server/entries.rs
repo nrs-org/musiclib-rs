@@ -311,6 +311,70 @@ pub async fn entry_aliases(db: &MusicDb, entry_id: i64) -> anyhow::Result<Vec<St
     Ok(names)
 }
 
+/// Just the display title and component-wide sources of each of `ids` —
+/// what `entry_summaries_with` computes for `title`/`sources`, without
+/// resolving every edition sibling. For listings of hundreds of entries,
+/// where some may sit in a huge edition group.
+pub async fn entry_titles_with(
+    db: &MusicDb,
+    ids: &[i64],
+    projection: &SoftIdentityProjection,
+) -> anyhow::Result<HashMap<i64, (Option<String>, Vec<SourceRef>)>> {
+    let members_of = |id: i64| {
+        let canonical = projection.component_of(id).unwrap_or(id);
+        projection
+            .members_by_component
+            .get(&canonical)
+            .cloned()
+            .unwrap_or_else(|| vec![id])
+    };
+    let expanded: Vec<i64> = ids
+        .iter()
+        .flat_map(|&id| members_of(id))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let source_rows = db.source_rows_by_entry_ids(&expanded).await?;
+    let pairs: Vec<(String, String)> = source_rows
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let alias_rows = db.alias_rows_for_pairs(&pairs).await?;
+    let display_names = db.display_names(&expanded).await?;
+    let mut aliases_by_pair: HashMap<(String, String), Vec<&musiclib_rs::musicdb::AliasRow>> =
+        HashMap::new();
+    for a in &alias_rows {
+        aliases_by_pair
+            .entry((a.source.clone(), a.identifier.clone()))
+            .or_default()
+            .push(a);
+    }
+    let mut sources_by_entry: HashMap<i64, Vec<&musiclib_rs::musicdb::SourceRow>> = HashMap::new();
+    for s in &source_rows {
+        sources_by_entry.entry(s.entry_id).or_default().push(s);
+    }
+    Ok(ids
+        .iter()
+        .map(|&id| {
+            let members = members_of(id);
+            let sources: Vec<&musiclib_rs::musicdb::SourceRow> = members
+                .iter()
+                .flat_map(|m| sources_by_entry.get(m).cloned().unwrap_or_default())
+                .collect();
+            let title = chosen_name(&members, &display_names)
+                .or_else(|| pick_title(&sources, &aliases_by_pair));
+            let refs = sources
+                .iter()
+                .map(|s| SourceRef {
+                    source: s.source.clone(),
+                    identifier: s.identifier.clone(),
+                })
+                .collect();
+            (id, (title, refs))
+        })
+        .collect())
+}
+
 /// Resolve `ids` to display-ready summaries in a handful of batch queries
 /// (not one round trip per id, nor one per soft-identity component). Title
 /// picks a primary alias if any member's source has one, else the first
