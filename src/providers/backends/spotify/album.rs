@@ -234,6 +234,7 @@ pub async fn get_album(client: &SpotifyClient, url: &str) -> Result<EntityResult
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
             image: pick_image(&a.images),
             release_date,
             sources,

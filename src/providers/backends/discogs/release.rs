@@ -281,6 +281,7 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
             image: super::types::primary_image(&r.extra),
             release_date,
             sources,

@@ -65,6 +65,7 @@ impl VideoResponse {
         };
 
         EntityResult {
+            privacy: None,
             image: crate::providers::backends::ytdlp::info_thumbnail(&self.extra),
             release_date: self
                 .upload_date

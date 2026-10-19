@@ -115,6 +115,7 @@ pub fn import(
             children,
             aliases,
             image,
+            privacy,
         } = result;
         let entry_type = specific_data.entry_type();
 
@@ -127,6 +128,7 @@ pub fn import(
             specific_data,
             aliases,
             image,
+            privacy,
         };
 
         // 5b. Cross-link: ask every other provider to enrich `sources` with
@@ -496,6 +498,7 @@ mod tests {
                 }
             };
             Ok(EntityResult {
+                privacy: None,
                 image: None,
                 release_date: None,
                 sources: Default::default(),
@@ -626,6 +629,7 @@ mod tests {
                 parent_type,
             )?;
             Ok(EntityResult {
+                privacy: None,
                 image: None,
                 release_date: None,
                 sources: Default::default(),

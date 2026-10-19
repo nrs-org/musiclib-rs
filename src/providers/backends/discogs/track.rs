@@ -57,6 +57,7 @@ pub async fn get_track(client: &DiscogsClient, url: &str) -> Result<EntityResult
                     artist_refs.extend(artist_child_refs(&t.extraartists));
 
                     Ok(EntityResult {
+                        privacy: None,
                         image: None,
                         release_date: None,
                         sources: [(SOURCE.into(), HashSet::from([canonical]))].into(),

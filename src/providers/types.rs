@@ -225,6 +225,40 @@ pub struct EntityResult<T: Clone + Send + Sync + 'static = ChildFetchOptions> {
     pub aliases: Vec<Alias>,
     /// The entity's own picture, if its provider gives one.
     pub image: Option<Image>,
+    /// Who can see the entity on its provider, for a provider with
+    /// unlisted or private entities (YouTube); `None` for the rest.
+    pub privacy: Option<Privacy>,
+}
+
+/// Who can see a YouTube video or playlist: anyone, anyone with its link, or
+/// only its owner. Stored per pair (`pair_privacy`) so nothing that isn't
+/// public gets shared from the library (e.g. the player's Discord status).
+/// Other providers' entities all count as public.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Privacy {
+    Public,
+    Unlisted,
+    Private,
+}
+
+impl Privacy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Privacy::Public => "public",
+            Privacy::Unlisted => "unlisted",
+            Privacy::Private => "private",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "public" => Some(Privacy::Public),
+            "unlisted" => Some(Privacy::Unlisted),
+            "private" => Some(Privacy::Private),
+            _ => None,
+        }
+    }
 }
 
 // result of canonicalizing an identifier, with canonical source key, canonical identifier, entry

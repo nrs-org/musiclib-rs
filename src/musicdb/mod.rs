@@ -7,7 +7,7 @@ use sea_orm::{
 };
 use tracing::warn;
 
-use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType};
+use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType, Privacy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -271,6 +271,43 @@ mod pair_image {
     }
 
     impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Who can see a pair on its provider (`Privacy`, stored by name): what the
+/// provider last said, filled on fetch, and the user's own call, which wins
+/// and which no fetch touches. A pair with neither is unknown.
+mod pair_privacy {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "pair_privacy")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub provider: Option<String>,
+        pub manual: Option<String>,
+        /// When `provider` was last set (unix seconds).
+        pub checked_at: Option<i64>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A pair's `pair_privacy` row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PairPrivacy {
+    pub provider: Option<Privacy>,
+    pub manual: Option<Privacy>,
+}
+
+impl PairPrivacy {
+    /// The user's call, else the provider's.
+    pub fn effective(&self) -> Option<Privacy> {
+        self.manual.or(self.provider)
+    }
 }
 
 /// Where a `pair_image` row came from. See `pair_image`.
@@ -2363,6 +2400,98 @@ impl MusicDb {
         Ok(())
     }
 
+    /// Records what the provider says about who can see the pair, leaving
+    /// the user's own call (`set_manual_privacy`) as it is.
+    pub async fn set_provider_privacy(
+        &self,
+        source: &str,
+        identifier: &str,
+        privacy: Privacy,
+    ) -> Result<(), Error> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        pair_privacy::Entity::insert(pair_privacy::ActiveModel {
+            source: Set(source.to_owned()),
+            identifier: Set(identifier.to_owned()),
+            provider: Set(Some(privacy.as_str().to_owned())),
+            manual: Set(None),
+            checked_at: Set(Some(now)),
+        })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                pair_privacy::Column::Source,
+                pair_privacy::Column::Identifier,
+            ])
+            .update_columns([
+                pair_privacy::Column::Provider,
+                pair_privacy::Column::CheckedAt,
+            ])
+            .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// Sets the user's own call on who can see the pair, overriding the
+    /// provider's; `None` goes back to the provider's.
+    pub async fn set_manual_privacy(
+        &self,
+        source: &str,
+        identifier: &str,
+        privacy: Option<Privacy>,
+    ) -> Result<(), Error> {
+        pair_privacy::Entity::insert(pair_privacy::ActiveModel {
+            source: Set(source.to_owned()),
+            identifier: Set(identifier.to_owned()),
+            provider: Set(None),
+            manual: Set(privacy.map(|p| p.as_str().to_owned())),
+            checked_at: Set(None),
+        })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                pair_privacy::Column::Source,
+                pair_privacy::Column::Identifier,
+            ])
+            .update_column(pair_privacy::Column::Manual)
+            .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// The `pair_privacy` rows of `pairs`; pairs without one are absent.
+    pub async fn pair_privacies(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<HashMap<(String, String), PairPrivacy>, Error> {
+        if pairs.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = chunked_pair_query(pairs, |chunk| {
+            pair_privacy::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    pair_privacy::Column::Source,
+                    pair_privacy::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|m| {
+                let privacy = PairPrivacy {
+                    provider: m.provider.as_deref().and_then(Privacy::parse),
+                    manual: m.manual.as_deref().and_then(Privacy::parse),
+                };
+                ((m.source, m.identifier), privacy)
+            })
+            .collect())
+    }
+
     /// The `pair_image` rows of `pairs`.
     pub async fn pair_image_rows(
         &self,
@@ -4248,6 +4377,48 @@ mod tests {
 
     async fn mem_db() -> MusicDb {
         MusicDb::new("sqlite::memory:").await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_users_privacy_call_outlasts_a_refetch() {
+        let mdb = mem_db().await;
+        let pair = ("youtube".to_owned(), "https://youtu.be/x".to_owned());
+        let other = ("youtube".to_owned(), "https://youtu.be/y".to_owned());
+        let get = |mdb: &MusicDb| {
+            let pairs = vec![pair.clone(), other.clone()];
+            let mdb = mdb.clone();
+            async move { mdb.pair_privacies(&pairs).await.unwrap() }
+        };
+        mdb.set_provider_privacy(&pair.0, &pair.1, Privacy::Unlisted)
+            .await
+            .unwrap();
+        mdb.set_manual_privacy(&pair.0, &pair.1, Some(Privacy::Public))
+            .await
+            .unwrap();
+        // A refetch updates what the provider says, not the user's call.
+        mdb.set_provider_privacy(&pair.0, &pair.1, Privacy::Private)
+            .await
+            .unwrap();
+        let rows = get(&mdb).await;
+        assert_eq!(
+            rows[&pair],
+            PairPrivacy {
+                provider: Some(Privacy::Private),
+                manual: Some(Privacy::Public),
+            }
+        );
+        assert_eq!(rows[&pair].effective(), Some(Privacy::Public));
+        assert!(!rows.contains_key(&other));
+
+        mdb.set_manual_privacy(&pair.0, &pair.1, None)
+            .await
+            .unwrap();
+        assert_eq!(get(&mdb).await[&pair].effective(), Some(Privacy::Private));
+        // A call made before any fetch stands on its own.
+        mdb.set_manual_privacy(&other.0, &other.1, Some(Privacy::Private))
+            .await
+            .unwrap();
+        assert_eq!(get(&mdb).await[&other].effective(), Some(Privacy::Private));
     }
 
     #[tokio::test]

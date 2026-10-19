@@ -180,6 +180,7 @@ pub async fn get_artist(client: &SpotifyClient, url: &str) -> Result<EntityResul
         .with_static_eval(album_eval);
 
         let result = Ok(EntityResult {
+            privacy: None,
             image: pick_image(&a.images),
             release_date: None,
             sources: [(SOURCE.into(), HashSet::from([canonical]))].into(),

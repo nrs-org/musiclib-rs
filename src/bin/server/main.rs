@@ -22,6 +22,8 @@
 
 mod cover;
 mod discography;
+#[cfg(all(feature = "discord_presence", unix))]
+mod discord_presence;
 mod entries;
 mod fetch_options;
 mod ingest_progress;
@@ -40,6 +42,8 @@ mod player;
 mod plays;
 #[cfg(feature = "player")]
 mod preferences;
+#[cfg(feature = "player")]
+mod privacy;
 mod respond;
 #[cfg(feature = "player")]
 mod spotify_auth;
@@ -122,6 +126,12 @@ struct Args {
     #[cfg(feature = "media_controls")]
     #[arg(long)]
     no_media_controls: bool,
+    /// Discord application whose Rich Presence shows the session's track
+    /// (the application's name heads the card). Defaults to
+    /// `$DISCORD_CLIENT_ID`; with neither, no presence.
+    #[cfg(feature = "discord_presence")]
+    #[arg(long)]
+    discord_client_id: Option<String>,
     #[command(flatten)]
     dirs: musiclib_rs::app_dirs::DirArgs,
 }
@@ -351,6 +361,25 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&state.playback),
             state.db.clone(),
         ));
+    }
+    #[cfg(feature = "discord_presence")]
+    if let Some(id) = args
+        .discord_client_id
+        .clone()
+        .or_else(|| std::env::var("DISCORD_CLIENT_ID").ok())
+        .filter(|id| !id.is_empty())
+    {
+        #[cfg(unix)]
+        local.spawn_local(discord_presence::run(
+            Arc::clone(&state.playback),
+            state.db.clone(),
+            id,
+        ));
+        #[cfg(not(unix))]
+        {
+            drop(id);
+            tracing::info!("Discord presence isn't available on this platform yet");
+        }
     }
     #[cfg(feature = "nrs")]
     local.spawn_local(nrs_bridge::export_listening_loop(Arc::clone(&state)));

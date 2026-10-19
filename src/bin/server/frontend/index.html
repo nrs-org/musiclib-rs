@@ -1415,6 +1415,31 @@
 
   .stamp.is-via { border-style: dashed; }
 
+  /* A playable source's privacy, beside its stamp (`privacyChip`). */
+  .stamp-group { display: inline-flex; }
+
+  .stamp-group .stamp { border-right: 0; }
+
+  .privacy-chip {
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    padding: 4px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--verdigris);
+    cursor: pointer;
+  }
+
+  .privacy-chip:hover { color: var(--ink); border-color: var(--ink-soft); }
+
+  .privacy-chip:focus-visible { outline: 2px solid var(--ink-soft); outline-offset: 1px; }
+
+  .privacy-chip.is-hidden { color: var(--danger); }
+
+  .privacy-chip.is-unknown { color: var(--ink-faint); }
+
+  .privacy-chip.is-manual { border-color: var(--brass); }
+
   @media (max-width: 520px) {
     .source-section { flex-direction: column; gap: 4px; }
   }
@@ -8917,15 +8942,70 @@
     }
     for (const r of rows) if (r.collides) r.tag = urlPath(r.s.identifier);
 
+    const privacy = new Map((entry.privacy || []).map((p) => [`${p.source}\u0000${p.identifier}`, p]));
     for (const [section, label] of SOURCE_SECTIONS) {
       const inSection = rows.filter((r) => sourceSection(r.s.source) === section);
       if (!inSection.length) continue;
       const stamps = el("div", { className: "stamps" });
-      for (const { s, tag, via } of inSection) stamps.appendChild(sourceStamp(s, tag, via));
+      for (const { s, tag, via } of inSection) {
+        const stamp = sourceStamp(s, tag, via);
+        if (s.source !== "youtube") {
+          stamps.appendChild(stamp);
+          continue;
+        }
+        const key = `${s.source}\u0000${s.identifier}`;
+        const row = privacy.get(key) || { source: s.source, identifier: s.identifier, provider: null, manual: null };
+        privacy.set(key, row);
+        stamps.appendChild(el("span", { className: "stamp-group" }, [stamp, privacyChip(row)]));
+      }
       host.appendChild(
         el("div", { className: "source-section" }, [el("span", { className: "source-section-label", text: label }), stamps])
       );
     }
+  }
+
+  // Who can see a YouTube source, as the server decides what it may share
+  // (the player's Discord status): the user's call, else YouTube's. Only
+  // "public" is shared; every other provider's sources always are.
+  // Clicking flips it between public and private; flipping back to what
+  // YouTube says drops the user's call.
+  function privacyChip(row) {
+    const byProvider = row.provider;
+    const effective = row.manual || byProvider;
+    const shared = effective === "public";
+    const said = byProvider ? `YouTube says ${byProvider}` : "Privacy unknown";
+    const lines = [
+      shared ? "Shared (Discord status)" : "Not shared (Discord status)",
+      row.manual ? `Set by you; ${said.charAt(0).toLowerCase()}${said.slice(1)}` : said,
+      `Click to mark ${shared ? "private" : "public"}`,
+    ];
+    const chip = el("button", {
+      type: "button",
+      className:
+        "privacy-chip" +
+        (shared ? "" : effective ? " is-hidden" : " is-unknown") +
+        (row.manual ? " is-manual" : ""),
+      text: effective || "unknown",
+      title: lines.join("\n"),
+      "aria-label": `${effective || "unknown"} — click to mark ${shared ? "private" : "public"}`,
+    });
+    chip.onclick = () => {
+      const want = shared ? "private" : "public";
+      const providerShared = byProvider === "public";
+      // Back to the provider's word when it already agrees.
+      const manual = byProvider && (want === "public") === providerShared ? null : want;
+      const before = row.manual;
+      row.manual = manual;
+      const next = privacyChip(row);
+      chip.replaceWith(next);
+      next.focus();
+      postJson("/api/source-privacy", { source: row.source, identifier: row.identifier, privacy: manual }).catch((err) => {
+        row.manual = before;
+        next.replaceWith(privacyChip(row));
+        setStatus(err.message);
+      });
+    };
+    return chip;
   }
 
   function sourceStamp(s, tag, via) {
