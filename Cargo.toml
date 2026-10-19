@@ -53,7 +53,7 @@ name = "repair_multi_work"
 path = "src/bin/repair_multi_work.rs"
 
 [features]
-default = ["store_protocol", "player", "nrs", "media_controls"]
+default = ["store_protocol", "player", "nrs", "media_controls", "discord_presence"]
 # Generic C-ABI FFI rhai module (`pipeline::ffi`): bind/call any cdylib from a
 # match script. Off by default — enabling it pulls libffi (built from source via
 # autotools). See learned-matcher's rhai/match.learned.rhai for a cdylib binding.
@@ -73,6 +73,10 @@ nrs = ["player"]
 # The player session's OS media controls (`media_controls`): MPRIS on Linux.
 # Turn off at runtime with `--no-media-controls`.
 media_controls = ["player", "dep:souvlaki"]
+# The player session's Discord Rich Presence (`discord_presence`), over the
+# Discord client's local socket (Unix only). On only with an application id:
+# `--discord-client-id` or `$DISCORD_CLIENT_ID`.
+discord_presence = ["player"]
 
 [dependencies]
 libloading = "0.9"

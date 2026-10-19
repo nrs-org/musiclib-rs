@@ -44,13 +44,16 @@ const PROVIDER_ORDER: &[&str] = &[
 const FOUND_MAX_AGE: u32 = 24 * 60 * 60;
 const MISSING_MAX_AGE: u32 = 10 * 60;
 
+/// Where `source` falls in `PROVIDER_ORDER`, unlisted ones last.
+pub(crate) fn provider_rank(source: &str) -> usize {
+    PROVIDER_ORDER
+        .iter()
+        .position(|p| *p == source)
+        .unwrap_or(PROVIDER_ORDER.len())
+}
+
 fn best(rows: Vec<PairImageRow>) -> Option<String> {
-    let rank = |source: &str| {
-        PROVIDER_ORDER
-            .iter()
-            .position(|p| *p == source)
-            .unwrap_or(PROVIDER_ORDER.len())
-    };
+    let rank = provider_rank;
     rows.into_iter()
         .min_by(|a, b| {
             (!a.fetched, rank(&a.source), &a.source, &a.identifier).cmp(&(
