@@ -28,7 +28,7 @@ use musiclib_rs::{
     pipeline::ingest::ingest_entry,
     providers::backends::soundcloud,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
@@ -325,6 +325,37 @@ pub(crate) fn embed_for(
             ))
         }
         _ => None,
+    }
+}
+
+/// Where a track (or one of its editions) stands for playback, judged from
+/// its sources. `Playable` has a source `embed_for` can mount. `Unlinked`
+/// has none yet, but the recording may be on a platform musiclib hasn't
+/// imported a link from, so it's worth looking for. `Unavailable` exists
+/// only as a local file (a `local` source, e.g. a CTB Girls' Dormitory
+/// setlist rip), so there's nothing to look for and nothing to play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Playability {
+    Playable,
+    Unlinked,
+    Unavailable,
+}
+
+impl Playability {
+    pub(crate) fn of<'a>(sources: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let mut local = false;
+        for (source, identifier) in sources {
+            if embed_for(source, identifier).is_some() {
+                return Self::Playable;
+            }
+            local |= source == "local";
+        }
+        if local {
+            Self::Unavailable
+        } else {
+            Self::Unlinked
+        }
     }
 }
 
@@ -1547,7 +1578,23 @@ async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::embed_for;
+    use super::{Playability, embed_for};
+
+    #[test]
+    fn playability_prefers_any_embeddable_source() {
+        let local = ("local", "local://ctbgd/track/x");
+        let video = ("youtube", "https://youtu.be/dQw4w9WgXcQ");
+        let mb = ("musicbrainz", "https://musicbrainz.org/recording/x");
+        assert_eq!(Playability::of([local, video]), Playability::Playable);
+        assert_eq!(Playability::of([mb, local]), Playability::Unavailable);
+        assert_eq!(Playability::of([mb]), Playability::Unlinked);
+        assert_eq!(Playability::of([]), Playability::Unlinked);
+        // A channel URL isn't a video: still nothing to mount.
+        assert_eq!(
+            Playability::of([("youtube", "https://www.youtube.com/@x")]),
+            Playability::Unlinked
+        );
+    }
 
     #[test]
     fn soundcloud_track_embeds() {

@@ -1474,6 +1474,13 @@
     cursor: default;
   }
 
+  /* The dock's editions the player can't switch to (`playability`): one
+     that's only a local file is disabled; one without a platform link yet
+     is dashed, and can still be picked. */
+  .edition-btn[data-playability="unlinked"] { border-style: dashed; }
+  .edition-btn[data-playability="unavailable"] { opacity: 0.45; cursor: not-allowed; }
+  .edition-btn[data-playability="unavailable"]:hover { border-color: var(--rail); color: var(--ink-soft); }
+
   /* ---------- manual soft-merge (dedup calibration) ---------- */
 
   .merge-section {
@@ -8004,7 +8011,7 @@
       const sources = await loadSources(ed.entry_id);
       if (snap?.current?.entry_id !== current.entry_id) return;
       if (!sources.length) {
-        setStatus(`No playable source for the ${friendlyType(editionKind(ed))} edition.`);
+        setStatus(`No playable source for the ${friendlyType(editionKind(ed))} edition yet.`);
         return;
       }
       const item = { entry_id: ed.entry_id, title: ed.title || current.title || null };
@@ -8712,6 +8719,13 @@
   //
   // With `prefs` (`{ editing, setWeight, toggle }`), each pill also carries
   // its preference weight (`preferPill`) and the strip ends in the ★ toggle.
+  // Hover notes for the dock's editions that have nothing to play
+  // (`EditionRef::playability`).
+  const PLAYABILITY_NOTE = {
+    unlinked: "No playable source yet",
+    unavailable: "Only a local file — nothing to play",
+  };
+
   function fillEditions(host, editionsList, onPick = (ed) => viewEntry(ed.entry_id), prefs = null) {
     host.innerHTML = "";
     const list = editionsList || [];
@@ -8720,15 +8734,18 @@
       const who = ed.artists?.length ? ` · ${ed.artists.join(", ")}` : "";
       const label = friendlyType(editionKind(ed)) + who;
       if (prefs) {
+        const playability = ed.is_current ? null : ed.playability;
+        const note = PLAYABILITY_NOTE[playability];
         host.appendChild(
           preferPill({
             className: "edition-btn",
             label,
-            title: ed.title || null,
+            title: [ed.title, note].filter(Boolean).join(" — ") || null,
             current: !!ed.is_current,
+            playability: note ? playability : null,
             weight: ed.preferred_weight || 0,
             editing: prefs.editing,
-            onPick: ed.is_current ? null : () => onPick(ed),
+            onPick: ed.is_current || playability === "unavailable" ? null : () => onPick(ed),
             setWeight: (w) => prefs.setWeight(ed, w),
           })
         );
@@ -8758,7 +8775,7 @@
   // name toggles it preferred and −/+ set its weight instead. Whatever is
   // preferred plays when the track comes up; several take turns at random,
   // in proportion to their weights (`preferences::resolve`).
-  function preferPill({ className, label, title, current, weight, editing, onPick, setWeight }) {
+  function preferPill({ className, label, title, current, playability = null, weight, editing, onPick, setWeight }) {
     const star = weight > 0 ? el("span", { className: "prefer-star", text: weight > 1 ? `★${weight}` : "★" }) : null;
     if (!editing) {
       return el(
@@ -8770,6 +8787,7 @@
           // (see their strips' styles).
           [className === "edition-btn" ? "aria-current" : "aria-pressed"]: String(current),
           disabled: !onPick,
+          "data-playability": playability,
           title: title || null,
           onclick: onPick,
         },
