@@ -26,6 +26,8 @@ mod discography;
 mod discord_presence;
 mod entries;
 mod fetch_options;
+#[cfg(feature = "player")]
+mod find_source;
 mod ingest_progress;
 mod jobs;
 #[cfg(feature = "media_controls")]
