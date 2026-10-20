@@ -5937,6 +5937,36 @@
     };
   })();
 
+  // ---------- library changes: tell the player to reload ----------
+  //
+  // The dock and the now-playing drawer cache what they show per track, so
+  // a write that changes editions, titles, credits or sources has to tell
+  // them. `postJson`/`del` report such writes here; other tabs of this
+  // browser hear about them over a BroadcastChannel. A burst of writes
+  // (a batch merge) reloads once.
+  const LibraryChanges = (() => {
+    const WRITES = /^\/api\/(relations\/|nrs\/merge|source-privacy|entries\/\d+\/(display-name|credits\/))/;
+    const listeners = new Set();
+    let timer = null;
+    let channel = null;
+    try {
+      channel = new BroadcastChannel("musiclib-library");
+      channel.onmessage = () => schedule();
+    } catch {}
+    function schedule() {
+      clearTimeout(timer);
+      timer = setTimeout(() => listeners.forEach((fn) => fn()), 100);
+    }
+    return {
+      wrote(path) {
+        if (!WRITES.test(path)) return;
+        schedule();
+        channel?.postMessage("changed");
+      },
+      subscribe: (fn) => listeners.add(fn),
+    };
+  })();
+
   // ---------- now-playing drawer: score, NRS relations, library fixes ----------
   //
   // Follows the session's current track (`track`, called on every snapshot).
@@ -6597,7 +6627,7 @@
           derived: current.entry_id,
           transformation: kind.value || null,
         });
-        refresh();
+        // `LibraryChanges` reloads the drawer and the dock.
         return "Saved.";
       });
       nodes.push(
@@ -6635,6 +6665,12 @@
 
     barBtn.addEventListener("click", () => toggle());
     closeBtn.addEventListener("click", () => toggle(false));
+    LibraryChanges.subscribe(() => {
+      if (entryId == null) return;
+      draft = null;
+      forget();
+      if (isOpen()) load();
+    });
 
     return { track, toggle };
   })();
@@ -7970,21 +8006,33 @@
     // playable, so look before replacing.
     let editionsEntryId = null;
     let dockEditions = [];
-    function renderEditions() {
+    let editionsRequest = 0;
+    // `reload` refetches the current track's editions (the library
+    // changed), keeping the strip shown until they arrive.
+    function renderEditions(reload = false) {
       const entryId = snap?.current?.entry_id ?? null;
-      if (entryId === editionsEntryId) return;
-      editionsEntryId = entryId;
-      dockEditions = [];
-      fillDockEditions();
+      if (entryId === editionsEntryId && !reload) return;
+      if (entryId !== editionsEntryId) {
+        editionsEntryId = entryId;
+        dockEditions = [];
+        fillDockEditions();
+      }
       if (entryId == null) return;
+      const my = ++editionsRequest;
       api(`/api/entries/${entryId}`)
         .then((entry) => {
-          if (editionsEntryId !== entryId) return;
+          if (my !== editionsRequest) return;
           dockEditions = entry.editions || [];
           fillDockEditions();
         })
         .catch(() => {});
     }
+
+    LibraryChanges.subscribe(() => {
+      sourcesCache.clear();
+      renderSwitcher();
+      renderEditions(true);
+    });
 
     function fillDockEditions() {
       fillEditions(dockEditionsEl, dockEditions, switchEdition, {
@@ -8645,6 +8693,7 @@
       } catch {}
       throw new Error(message || `request failed (${res.status})`);
     }
+    LibraryChanges.wrote(path);
     return res.json();
   }
 
@@ -8657,6 +8706,7 @@
       } catch {}
       throw new Error(message || `request failed (${res.status})`);
     }
+    LibraryChanges.wrote(path);
     return res.json();
   }
 
