@@ -15,6 +15,8 @@ use std::collections::{HashMap, HashSet};
 use musiclib_rs::musicdb::{EditionProjection, MusicDb, SoftIdentityProjection};
 use serde::Serialize;
 
+use crate::player::Playability;
+
 #[derive(Clone, Serialize)]
 pub struct SourceRef {
     pub source: String,
@@ -106,6 +108,9 @@ pub struct EditionRef {
     /// How strongly the user prefers this edition when its group is queued
     /// (`preferences`); 0 for no preference. Filled like `artists`.
     pub preferred_weight: u32,
+    /// Whether the player can switch to this edition, over the sources of
+    /// its whole soft-identity component.
+    pub playability: Playability,
 }
 
 /// Edition switcher order: the original first, then full alternate versions,
@@ -508,6 +513,11 @@ pub async fn entry_summaries_with(
                     }),
                     artists: Vec::new(),
                     preferred_weight: 0,
+                    playability: Playability::of(
+                        sib_sources
+                            .iter()
+                            .map(|s| (s.source.as_str(), s.identifier.as_str())),
+                    ),
                 }
             })
             .collect();
