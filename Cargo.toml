@@ -134,3 +134,12 @@ ureq = { version = "3.3.0", features = ["json"] }
 [dev-dependencies]
 tokio-util = "0.7.18"
 tempfile = "3"
+
+# Full debug info dominated binary size and link time in incremental builds.
+# Split it out of the linked binary, and keep only line tables (enough for
+# backtraces) for dependencies.
+[profile.dev]
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = "line-tables-only"

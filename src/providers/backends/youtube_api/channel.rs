@@ -156,6 +156,14 @@ pub(crate) const PLAYLISTS_MAX_RESULTS: &str = "50";
 pub(crate) const UPLOADS_PARTS: &str = "snippet";
 pub(crate) const UPLOADS_MAX_RESULTS: &str = "50";
 
+/// The channel's long-form uploads playlist (its Videos tab) for its uploads
+/// playlist ID: `UU<id>` → `UULF<id>`. Unlike `UU…` it leaves out Shorts
+/// and live-stream archives, which are clips and streams rather than
+/// discography (a Short is usually a snippet of a full upload).
+fn long_form_uploads_playlist_id(uploads_playlist_id: &str) -> String {
+    format!("UULF{}", &uploads_playlist_id[2..])
+}
+
 // --- Page fetchers ---
 
 /// Fetches pages of playlists owned by a channel (→ `EntryType::Release`).
@@ -205,7 +213,8 @@ impl PageFetcher for ChannelPlaylistsPageFetcher {
     }
 }
 
-/// Fetches pages of videos from the channel's uploads playlist (→ `EntryType::Track`).
+/// Fetches pages of videos from the channel's long-form uploads playlist
+/// (→ `EntryType::Track`).
 struct ChannelUploadsPageFetcher {
     client: YoutubeClient,
     uploads_playlist_id: String,
@@ -224,7 +233,7 @@ impl PageFetcher for ChannelUploadsPageFetcher {
         }
         let params_ref: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
-        let (items, next_page_token) = self
+        let result = self
             .client
             .get::<UploadsPlaylistItemsResponse, _, _, Error, _>(
                 "playlistItems",
@@ -235,7 +244,12 @@ impl PageFetcher for ChannelUploadsPageFetcher {
                     async move { Ok((items, next_page_token)) }
                 },
             )
-            .await?;
+            .await;
+        let (items, next_page_token) = match result {
+            // A channel without long-form uploads may have no such playlist.
+            Err(Error::NotFound(_)) if page_token.is_none() => (vec![], None),
+            r => r?,
+        };
 
         let children = items
             .into_iter()
@@ -479,7 +493,8 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
                     // For now use the uploads playlist ID to derive it: uploads = "UU" + channel_id[2..]
                     _ => format!("UC{}", &c.content_details.related_playlists.uploads[2..]),
                 };
-                let uploads_playlist_id = c.content_details.related_playlists.uploads.clone();
+                let uploads_playlist_id =
+                    long_form_uploads_playlist_id(&c.content_details.related_playlists.uploads);
 
                 // Always include the canonical channel ID URL.
                 let mut source_set = HashSet::from([
@@ -505,7 +520,7 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
                     }))
                     .with_static_eval(release_eval);
 
-                // Source 2: videos uploaded by the channel (Track)
+                // Source 2: long-form videos uploaded by the channel (Track)
                 let uploads_source =
                     PaginatedChildSource::new(Box::new(ChannelUploadsPageFetcher {
                         client: client.clone(),
@@ -623,7 +638,8 @@ where
         .await
 }
 
-/// Fetches the first page of the channel's uploads playlist — used for fixture updates.
+/// Fetches the first page of the channel's long-form uploads playlist — used
+/// for fixture updates.
 pub async fn get_channel_uploads_raw<T, F, R, E, FR>(
     client: &YoutubeClient,
     url: &str,
@@ -640,15 +656,12 @@ where
             let first = c.items.first().cloned();
             let id = id.to_string();
             async move {
-                let uploads = first
-                    .ok_or_else(|| {
-                        E::from(Error::NotFound(format!("YouTube channel not found: {id}")))
-                    })?
-                    .content_details
-                    .related_playlists
-                    .uploads
-                    .clone();
-                Ok(uploads)
+                let uploads = first.ok_or_else(|| {
+                    E::from(Error::NotFound(format!("YouTube channel not found: {id}")))
+                })?;
+                Ok(long_form_uploads_playlist_id(
+                    &uploads.content_details.related_playlists.uploads,
+                ))
             }
         })
         .await?;
@@ -814,7 +827,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_channel_with_children() -> anyhow::Result<()> {
         let channel_id = "UCqm3BQLlJfvkTsX_hvm0UmA";
-        let uploads_playlist_id = "UUqm3BQLlJfvkTsX_hvm0UmA";
+        let uploads_playlist_id = "UULFqm3BQLlJfvkTsX_hvm0UmA";
         let api_key = "doesnotmatter";
 
         let mut http_client = MockHttpClient::new();
@@ -893,11 +906,11 @@ mod tests {
         assert_eq!(first_upload.entry_type, EntryType::Track);
         assert_eq!(
             first_upload.sources.get(SOURCE).unwrap(),
-            &HashSet::from(["https://youtu.be/3MrxDLj2fOw".to_string()])
+            &HashSet::from(["https://youtu.be/jPv1zTt-poY".to_string()])
         );
         assert_eq!(
             first_upload.name.as_deref().unwrap(),
-            "【雑談＆お礼】新衣装だったりガンダムだったり嬉しいね！【角巻わため/ホロライブ４期生】"
+            "じゃあ！尻相撲しようよ！【ギリギリわるくないわため】 #ギリわる"
         );
 
         Ok(())
@@ -906,7 +919,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_channel_with_ytmusicapi() -> anyhow::Result<()> {
         let channel_id = "UCqm3BQLlJfvkTsX_hvm0UmA";
-        let uploads_playlist_id = "UUqm3BQLlJfvkTsX_hvm0UmA";
+        let uploads_playlist_id = "UULFqm3BQLlJfvkTsX_hvm0UmA";
         let api_key = "doesnotmatter";
         let ytmusicapi_url = "http://localhost:9001";
 

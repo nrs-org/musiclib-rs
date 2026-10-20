@@ -976,7 +976,9 @@ fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: u
                         Tribool::False
                     }
                 }
-                None => Tribool::False,
+                // Listings without names (a Niconico user's uploads) need the
+                // fetched entity's name.
+                None => Tribool::Indeterminate,
             },
             CompiledEntryDataMatcher::HasSource(source) => {
                 if child.sources.get(source).is_some() {
