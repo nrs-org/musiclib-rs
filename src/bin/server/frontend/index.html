@@ -1990,6 +1990,9 @@
     filter: drop-shadow(2px 2px 0 var(--ink-faint));
   }
   .node.conflict circle:first-child { stroke: var(--danger); stroke-width: 3px; }
+  .node.detached { opacity: 0.4; }
+  .node-label.detached-label { fill-opacity: 0.45; }
+  .node.detached circle:first-child { stroke-dasharray: 3 3; }
   .node.selected circle:first-child,
   .node.selected rect:first-child {
     stroke: var(--verdigris);
@@ -9738,6 +9741,11 @@
     // Entries waiting for "Move under…": the next node clicked becomes
     // what they were made from, with this transformation.
     let pickParent = null;
+    // Versions detached from the anchor's song while it's on screen, by
+    // identity: song view keeps drawing them, faded and unattached, so a
+    // detach (a Cut stroke included) visibly happens instead of a node just
+    // vanishing, and stays one click from "Put back". Cleared on re-anchor.
+    const detachedHere = new Map();
     const graphHost = el("div", { className: "dedup-graph" });
     const detailPanel = el("div", { className: "graph-detail-panel" }, [
       el("p", { className: "graph-detail-empty", text: "Click a node for details." }),
@@ -9974,6 +9982,7 @@
     const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
     function roleText(d) {
       if (d.placeholder) return "This song's original isn't in the library, or no relation says which version it is.";
+      if (d.detached) return "Detached from this song. It stays here, faded, until you leave this song.";
       if (!d.inSong) return viewMode === "song" ? "Not in this song." : null;
       if (d.isOriginal) return "The original.";
       const kind = songKindText(d.songKind);
@@ -10049,6 +10058,24 @@
         actions.appendChild(button("Focus graph here", () => viewGraph(data.entry_id)));
       }
       if (actions.children.length) detailPanel.appendChild(actions);
+      if (data.detached) {
+        const parent = currentNodesById.get(String(data.formerParent));
+        detailPanel.appendChild(
+          el("div", { className: "graph-detail-actions" }, [
+            button(editing ? "Put back" : "Put back (switch to Edit)", () => {
+              if (!editing) return;
+              songEdit(`Put back ${nodeName(data)}`, {
+                op: "set_parent",
+                entries: [data.entry_id],
+                parent: parent ? data.formerParent : anchorOriginal(),
+                transformation: data.formerKind || null,
+                unblock: true,
+              });
+            }),
+          ])
+        );
+        return;
+      }
       if (editing && viewMode === "song") detailPanel.appendChild(songActions([data]));
     }
 
@@ -10129,10 +10156,20 @@
     }
 
     function detachNodes(nodes) {
-      const entries = nodes.filter((n) => n.inSong && !n.placeholder).map((n) => n.entry_id);
+      const leaving = nodes.filter((n) => n.inSong && !n.placeholder && !n.detached);
+      const entries = leaving.map((n) => n.entry_id);
       if (!entries.length) return;
-      const label = entries.length > 1 ? `Detach ${entries.length} versions` : `Detach ${nodeName(nodes[0])}`;
-      songEdit(label, { op: "detach", entries });
+      for (const n of leaving) {
+        detachedHere.set(n.identity ?? n.entry_id, {
+          ...n,
+          formerParent: n.songParent ?? n.songOriginal,
+          formerKind: kindOf(n),
+        });
+      }
+      const label = entries.length > 1 ? `Detach ${entries.length} versions` : `Detach ${nodeName(leaving[0])}`;
+      songEdit(label, { op: "detach", entries }).then((ok) => {
+        if (!ok) for (const n of leaving) detachedHere.delete(n.identity ?? n.entry_id);
+      });
     }
     function detachSelection() {
       detachNodes([...selection].map((id) => currentNodesById.get(id)).filter(Boolean));
@@ -10681,6 +10718,7 @@
         d.foldsInto != null ? "edition-folded" : "",
         d.isOriginal ? "song-original" : "",
         d.placeholder ? "placeholder" : "",
+        d.detached ? "detached" : "",
         d.identitySize > 1 && !expanded.has(d.identity) ? "stacked" : "",
         d.conflict ? "conflict" : "",
       ]
@@ -10984,6 +11022,7 @@
           (exit) => exit.transition().duration(200).attr("opacity", 0).remove()
         )
         .attr("transform", labelTransform)
+        .classed("detached-label", (d) => Boolean(d.detached))
         .each(function (d) {
           const text = d3.select(this);
           text.selectAll("tspan").remove();
@@ -11178,6 +11217,7 @@
     }
 
     const PLACEHOLDER_ID = "unknown-original";
+    const anchorOriginal = () => lastData?.nodes.find((n) => n.entry_id === currentEntryId)?.song_original ?? null;
 
     // The anchor's song: every track node in its edition group. Null when
     // the anchor isn't a track (song view then shows all relations).
@@ -11272,6 +11312,10 @@
       if (original == null) {
         nodes.push({ id: PLACEHOLDER_ID, placeholder: true, title: "Unknown original", kind: "member", inSong: true });
       }
+      for (const [identity, ghost] of detachedHere) {
+        if (byIdentity.has(identity)) continue; // put back since
+        nodes.push({ ...ghost, id: String(identity), entry_id: identity, inSong: false, detached: true, kind: "member" });
+      }
       for (const [identity, uploads] of byIdentity) {
         if (identity === original) continue;
         const rep = uploads.find((n) => n.entry_id === identity) || uploads[0];
@@ -11320,6 +11364,13 @@
         node.treeX = r * Math.sin(h.x);
         node.treeY = -r * Math.cos(h.x);
       }
+      const ghosts = nodes.filter((n) => n.detached);
+      const outer = radius + Math.max((root.height || 1) - 1, 0) * 120 + 90;
+      ghosts.forEach((n, i) => {
+        const angle = (2 * Math.PI * (i + 0.5)) / Math.max(ghosts.length, 8) - Math.PI / 2;
+        n.treeX = outer * Math.cos(angle);
+        n.treeY = outer * Math.sin(angle);
+      });
       const uploadsOf = new Map();
       for (const n of nodes) {
         if (n.uploadOf == null) continue;
@@ -11958,7 +12009,10 @@
     // on `entryId` and re-fetches/re-joins onto the live node/link data,
     // which is what produces the morph described above.
     function load(entryId, entryType, softLinkedIds) {
-      if (entryId !== currentEntryId) touchedPairs.clear();
+      if (entryId !== currentEntryId) {
+        touchedPairs.clear();
+        detachedHere.clear();
+      }
       currentEntryId = entryId;
       currentEntryType = entryType;
       currentSoftLinkedIds = softLinkedIds || [];
