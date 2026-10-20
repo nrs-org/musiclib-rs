@@ -3235,6 +3235,36 @@
     margin: 0 0 6px;
   }
 
+  .np-dupe {
+    display: block;
+    font-family: var(--mono);
+    font-size: 11px;
+    margin: 0 0 4px;
+    overflow-wrap: anywhere;
+  }
+
+  .np-dupe a { color: var(--brass-ink); }
+
+  .np-dupe-bind {
+    display: block;
+    padding-left: 20px;
+    color: var(--ink-faint);
+  }
+
+  .nrs-dupes-warning {
+    border-left: 3px solid var(--danger);
+    background: var(--paper-deep);
+    padding: 10px 14px;
+    margin: 0 0 24px;
+  }
+
+  .nrs-dupes-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--danger);
+    margin: 0 0 4px;
+  }
+
   .np-section {
     border-top: 1px solid var(--rail);
     padding-top: 10px;
@@ -6251,6 +6281,7 @@
         sub.append("Not in NRS yet. Saving a score adds it.");
       }
       nodes.push(sub);
+      if (data.nrs.duplicates?.length > 1) nodes.push(renderDuplicates(data));
       if (entry?.issues?.length) {
         nodes.push(el("p", { className: "np-sub np-issues", text: `NRS checks: ${entry.issues.map((i) => i.message).join(" · ")}` }));
       }
@@ -6389,6 +6420,11 @@
       }
       nodes.push(el("p", { className: "np-hint", text: "n toggles · 1–9, 0 set music · s saves" }));
       return nodes;
+    }
+
+    function renderDuplicates(data) {
+      const dupes = data.nrs.duplicates;
+      return section(`${dupes.length} NRS entries for this song`, [nrsDuplicatesPanel(dupes, refresh)]);
     }
 
     function renderAlbum(album) {
@@ -8480,6 +8516,102 @@
   });
 
   Remote.connect();
+
+  let dupePanels = 0;
+
+  /// One song bound to several NRS entries (each bound on its own, then
+  /// linked in the library): pick the one to keep, preview, and merge the
+  /// rest into it (`POST /api/nrs/merge`). The drawer and entry pages both
+  /// show it; `onMerged` reloads whichever asked.
+  function nrsDuplicatesPanel(dupes, onMerged) {
+    const weight = (e) => e.impacts + e.relations;
+    let keep = dupes.reduce((best, e) => (weight(e) > weight(best) ? e : best)).id;
+    let previewed = null;
+    const name = `nrs-keep-${++dupePanels}`;
+    const summary = el("div");
+    const statusEl = el("p", { className: "np-status" });
+    const previewBtn = el("button", { className: "ghost-btn", type: "button", text: "Preview merge" });
+    const mergeBtn = el("button", { className: "ghost-btn", type: "button", text: "Merge", hidden: true });
+    const picks = dupes.map((e) =>
+      el("label", { className: "np-dupe" }, [
+        el("input", {
+          type: "radio",
+          name,
+          value: e.id,
+          checked: e.id === keep,
+          onchange: () => {
+            keep = e.id;
+            previewed = null;
+            mergeBtn.hidden = true;
+            summary.replaceChildren();
+            statusEl.textContent = "";
+          },
+        }),
+        el("span", { text: ` keep ${e.title || e.id} · ${e.impacts} impact${e.impacts === 1 ? "" : "s"} · ${e.relations} relation${e.relations === 1 ? "" : "s"} · ` }),
+        el("a", { href: e.link, target: "_blank", rel: "noopener", text: "Open in NRS ↗" }),
+        el("span", { className: "np-dupe-bind", text: e.store_id || e.id }),
+      ])
+    );
+    const others = () => dupes.filter((e) => e.id !== keep);
+    const describe = (from, r) => {
+      const plan = r.plan;
+      const c = r.cleanup;
+      const lines = [`${from.title || from.id}: moves ${plan.impacts.length} impact(s), ${plan.relations.length} relation(s)`];
+      const params = (i) => Object.entries(i.params).filter(([k]) => k !== "source" && k !== "kind").map(([k, v]) => `${k} ${v}`).join(", ");
+      for (const i of c.drop_impacts) lines.push(`drops its ${i.kind} (${params(i)})`);
+      if (c.consumed) lines.push(`listening ${c.consumed.minutes_before.toFixed(2)} → ${c.consumed.minutes_after.toFixed(2)} min`);
+      for (const rel of c.drop_relations) lines.push(`drops a repeated ${rel.kind} with ${rel.other}`);
+      for (const conflict of plan.conflicts) lines.push(`blocked: ${conflict}`);
+      return lines;
+    };
+    const busy = async (btn, text, run) => {
+      if (btn.getAttribute("aria-busy") === "true") return;
+      btn.setAttribute("aria-busy", "true");
+      statusEl.className = "np-status";
+      statusEl.textContent = text;
+      try {
+        statusEl.textContent = (await run()) || "";
+      } catch (e) {
+        statusEl.className = "np-status is-error";
+        statusEl.textContent = e.message;
+      } finally {
+        btn.removeAttribute("aria-busy");
+      }
+    };
+    previewBtn.onclick = () =>
+      busy(previewBtn, "Previewing…", async () => {
+        const results = [];
+        for (const from of others()) results.push([from, await postJson("/api/nrs/merge", { from: from.id, into: keep })]);
+        summary.replaceChildren(...results.flatMap(([from, r]) => describe(from, r)).map((line) => el("p", { className: "np-sub", text: line })));
+        previewed = keep;
+        mergeBtn.hidden = results.some(([, r]) => r.plan.conflicts.length);
+      });
+    mergeBtn.onclick = () =>
+      busy(mergeBtn, "Merging…", async () => {
+        if (previewed !== keep) throw new Error("Preview first.");
+        for (const from of others()) await postJson("/api/nrs/merge", { from: from.id, into: keep, apply: true });
+        await onMerged();
+        return "Merged.";
+      });
+    return el("div", { className: "nrs-dupes" }, [...picks, summary, el("div", { className: "np-actions" }, [previewBtn, mergeBtn]), statusEl]);
+  }
+
+  /// The entry page's warning when what it ranks as in NRS is several NRS
+  /// entries. Stays hidden without NRS, or with one entry or none.
+  async function loadNrsDuplicates(entryId, box) {
+    let data = null;
+    try {
+      data = await api(`/api/nrs/duplicates/${entryId}`);
+    } catch {}
+    const dupes = data?.duplicates || [];
+    box.hidden = dupes.length < 2;
+    if (box.hidden) return;
+    box.replaceChildren(
+      el("p", { className: "nrs-dupes-title", text: `${dupes.length} NRS entries for this ${box.dataset.kind || "entry"}` }),
+      el("p", { className: "np-sub", text: "Each was added to NRS before the library linked them, so scores and listening time are split between them. Merge them into one:" }),
+      nrsDuplicatesPanel(dupes, () => loadNrsDuplicates(entryId, box))
+    );
+  }
 
   async function api(path) {
     const res = await fetch(path);
@@ -11757,6 +11889,10 @@
         headingEl,
       ])
     );
+
+    const dupesEl = el("section", { className: "nrs-dupes-warning", hidden: true, "data-kind": friendlyType(entry.entry_type).toLowerCase() });
+    detail.appendChild(dupesEl);
+    loadNrsDuplicates(entryId, dupesEl);
 
     if (entry.entry_type !== "artist") {
       const creditsEl = el("div", { className: "credits", hidden: true });

@@ -12,10 +12,19 @@
 //!   entry, score, impacts and profile, its albums (and `release`, the one
 //!   it's playing from), and its listening time. The library half is
 //!   answered even when NRS isn't.
+//! - `GET /api/nrs/duplicates/{entry_id}`: the NRS entries bound to the
+//!   edition `entry_id` ranks as, when there are several (see `merge`), for
+//!   the entry page's warning. Empty with one or none.
 //! - `POST /api/nrs/score`: binds a library entry to NRS if needed, then
 //!   upserts its profile impacts (music quality, visual grade) and adds any
 //!   one-off impacts (a response).
 //! - `POST /api/nrs/export`: runs a listening-time export now.
+//! - `POST /api/nrs/merge`: merges one NRS entry into another (NRS's own
+//!   `entries/{id}/merge`, a plain union), then removes what the union
+//!   repeats by this bridge's conventions (`merge_cleanup`). Without
+//!   `apply`, previews both. The drawer offers it when one identity is
+//!   bound to several NRS entries (`nrs.duplicates`): an entry adopted
+//!   before its identity was linked to another bound one.
 //! - `/api/nrs/v1/...`: passed through to the NRS app's `/api/v1/...`, for
 //!   the drawer's direct reads and writes (relation suggestions, palette,
 //!   media, visual grades).
@@ -101,7 +110,14 @@ pub async fn route(
             }
             Err(_) => Err(BridgeError::BadRequest("entry id must be numeric".into())),
         },
+        (&Method::GET, p) if p.starts_with("/duplicates/") => {
+            match p["/duplicates/".len()..].parse::<i64>() {
+                Ok(id) => duplicates(state, id).await,
+                Err(_) => Err(BridgeError::BadRequest("entry id must be numeric".into())),
+            }
+        }
         (&Method::POST, "/score") => score(state, &body).await,
+        (&Method::POST, "/merge") => merge(state, &body).await,
         (&Method::POST, "/export") => export_listening(state)
             .await
             .map(|n| json!({ "exported_to": n }))
@@ -287,13 +303,25 @@ fn identity_members(identity: &SoftIdentityProjection, id: i64) -> Vec<i64> {
 
 /// The NRS entry bound to any of `members` (one identity's entries).
 fn bound_nrs_id(state: &AppState, pool: &NrsPool, members: &[i64]) -> Option<String> {
+    bound_nrs_ids(state, pool, members).into_iter().next()
+}
+
+/// Every NRS entry bound to one of `members`, `bound_nrs_id`'s first. More
+/// than one means the identity was linked after several of its entries
+/// were bound separately.
+fn bound_nrs_ids(state: &AppState, pool: &NrsPool, members: &[i64]) -> Vec<String> {
     let adopted = state.nrs_bridge.adopted.lock().expect("adopted lock");
-    members.iter().find_map(|m| {
-        adopted
+    let mut ids: Vec<String> = Vec::new();
+    for m in members {
+        let id = adopted
             .get(m)
             .cloned()
-            .or_else(|| pool.bound.get(m).map(|b| b.nrs_id.clone()))
-    })
+            .or_else(|| pool.bound.get(m).map(|b| b.nrs_id.clone()));
+        if let Some(id) = id.filter(|id| !ids.contains(id)) {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 // ---- now playing ----
@@ -362,6 +390,41 @@ async fn now_playing(
     Ok(out)
 }
 
+/// The duplicate warning's view of `bound` (one identity's NRS entries):
+/// nothing unless there are several.
+async fn duplicate_views(state: &AppState, bound: &[String]) -> anyhow::Result<Vec<Value>> {
+    let mut views = Vec::new();
+    if bound.len() < 2 {
+        return Ok(views);
+    }
+    for id in bound {
+        let detail = nrs_get(state, &entry_path(id, "")).await?;
+        views.push(json!({
+            "id": id,
+            "title": detail["entry"]["title"],
+            "store_id": detail["entry"]["store_id"],
+            "link": entry_link(state, id),
+            "impacts": detail["impacts"].as_array().map_or(0, Vec::len),
+            "relations": detail["relations"].as_array().map_or(0, Vec::len),
+        }));
+    }
+    Ok(views)
+}
+
+async fn duplicates(state: &Arc<AppState>, entry_id: i64) -> Result<Value, BridgeError> {
+    let (identity, editions) = state.db.display_projections_around(&[entry_id]).await?;
+    let canonical = identity.component_of(entry_id).unwrap_or(entry_id);
+    let target = editions.rank_target(canonical);
+    let pool = nrs_pool::get(state, false)
+        .await
+        .map_err(BridgeError::Nrs)?;
+    let bound = bound_nrs_ids(state, &pool, &identity_members(&identity, target));
+    let duplicates = duplicate_views(state, &bound)
+        .await
+        .map_err(BridgeError::Nrs)?;
+    Ok(json!({ "target": target, "duplicates": duplicates }))
+}
+
 /// One NRS entry as the drawer shows it: id, link, score, impacts, the
 /// profile slots it's expected to fill, and the checks it still fails.
 async fn nrs_entry_view(state: &AppState, nrs_id: &str) -> anyhow::Result<Value> {
@@ -399,7 +462,9 @@ async fn nrs_part(
     release: Option<(i64, Option<String>, Vec<i64>)>,
 ) -> anyhow::Result<Value> {
     let pool = nrs_pool::get(state, false).await?;
-    let nrs_id = bound_nrs_id(state, &pool, target_members);
+    let bound = bound_nrs_ids(state, &pool, target_members);
+    let nrs_id = bound.first().cloned();
+    let duplicates = duplicate_views(state, &bound).await?;
     let mut entry = Value::Null;
     let mut videos = Value::Array(Vec::new());
     let mut albums: Vec<Value> = Vec::new();
@@ -447,6 +512,7 @@ async fn nrs_part(
         "available": true,
         "nrs_url": state.nrs_url,
         "entry": entry,
+        "duplicates": duplicates,
         "videos": videos,
         "albums": albums,
     }))
@@ -620,6 +686,218 @@ async fn put_impact(
     Ok(())
 }
 
+// ---- merging ----
+
+#[derive(Deserialize)]
+struct MergeRequest {
+    /// The NRS entry that goes away.
+    from: String,
+    /// The one that stays.
+    into: String,
+    /// Without it, only the plans are returned and nothing is written.
+    #[serde(default)]
+    apply: bool,
+}
+
+/// Impact kinds the drawer keeps one of per entry (`score`'s `set`):
+/// after a merge, `into`'s own one stays and `from`'s goes.
+const PROFILE_KINDS: &[&str] = &["music", "visual"];
+
+/// What this bridge removes from a merged entry, beyond NRS's union.
+#[derive(Default, serde::Serialize)]
+struct MergeCleanup {
+    /// `from`'s impacts of a `PROFILE_KINDS` kind `into` has its own of.
+    drop_impacts: Vec<Value>,
+    /// `from`'s consumed time, added onto `into`'s consumed impact.
+    consumed: Option<ConsumedSum>,
+    /// `from`'s relations that repeat one of `into`'s once merged.
+    drop_relations: Vec<Value>,
+}
+
+#[derive(serde::Serialize)]
+struct ConsumedSum {
+    /// `into`'s consumed impact, which keeps the sum.
+    #[serde(skip)]
+    impact: Value,
+    /// `from`'s consumed impacts, deleted once added.
+    drop: Vec<String>,
+    minutes_before: f64,
+    minutes_after: f64,
+}
+
+fn own_impacts<'a>(detail: &'a Value, kind: &str) -> Vec<&'a Value> {
+    detail["impacts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["kind"].as_str() == Some(kind) && i["shared"].is_null())
+        .collect()
+}
+
+fn consumed_minutes(impact: &Value) -> f64 {
+    string_fields(&impact["params"])
+        .get("duration_minutes")
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// What merging `from` (detail `from_detail`) into `into` leaves
+/// repeated, by the conventions `score` and `add_consumed_minutes` write
+/// with: one music and one visual impact, and one consumed impact holding
+/// all listening time. Relations repeat when kind, ends and transform are
+/// the same once `from` reads as `into`.
+fn merge_cleanup(from: &str, into: &str, from_detail: &Value, into_detail: &Value) -> MergeCleanup {
+    let mut cleanup = MergeCleanup::default();
+    for kind in PROFILE_KINDS {
+        if !own_impacts(into_detail, kind).is_empty() {
+            for impact in own_impacts(from_detail, kind) {
+                cleanup.drop_impacts.push(json!({
+                    "id": impact["id"],
+                    "kind": impact["kind"],
+                    "params": impact["params"],
+                }));
+            }
+        }
+    }
+    let theirs = own_impacts(from_detail, CONSUMED_KIND);
+    if let Some(ours) = own_impact(into_detail, CONSUMED_KIND).filter(|_| !theirs.is_empty()) {
+        let before = consumed_minutes(&ours);
+        cleanup.consumed = Some(ConsumedSum {
+            minutes_after: before + theirs.iter().map(|i| consumed_minutes(i)).sum::<f64>(),
+            minutes_before: before,
+            drop: theirs
+                .iter()
+                .filter_map(|i| i["id"].as_str().map(str::to_owned))
+                .collect(),
+            impact: ours,
+        });
+    }
+    let as_into = |id: &Value| -> String {
+        let id = id.as_str().unwrap_or_default();
+        if id == from {
+            into.to_owned()
+        } else {
+            id.to_owned()
+        }
+    };
+    let key = |r: &Value| {
+        (
+            r["kind"].to_string(),
+            as_into(&r["from"]),
+            as_into(&r["to"]),
+            r["transform"].to_string(),
+        )
+    };
+    let relations = |detail: &Value| detail["relations"].as_array().cloned().unwrap_or_default();
+    let ours: HashSet<_> = relations(into_detail).iter().map(key).collect();
+    for relation in relations(from_detail) {
+        let between = relation["other"]["id"].as_str() == Some(into);
+        if !between && ours.contains(&key(&relation)) {
+            cleanup.drop_relations.push(json!({
+                "id": relation["id"],
+                "kind": relation["kind"],
+                "other": relation["other"]["title"],
+            }));
+        }
+    }
+    cleanup
+}
+
+async fn merge(state: &Arc<AppState>, body: &[u8]) -> Result<Value, BridgeError> {
+    let request: MergeRequest = serde_json::from_slice(body)
+        .map_err(|e| BridgeError::BadRequest(format!("bad merge request: {e}")))?;
+    let (from, into) = (request.from.as_str(), request.into.as_str());
+    let merge_path = entry_path(from, "/merge");
+    let preview = nrs_call(
+        state,
+        reqwest::Method::POST,
+        &merge_path,
+        Some(&json!({ "into": into, "apply": false })),
+    )
+    .await
+    .map_err(BridgeError::Nrs)?;
+    let from_detail = nrs_get(state, &entry_path(from, ""))
+        .await
+        .map_err(BridgeError::Nrs)?;
+    let into_detail = nrs_get(state, &entry_path(into, ""))
+        .await
+        .map_err(BridgeError::Nrs)?;
+    let cleanup = merge_cleanup(from, into, &from_detail, &into_detail);
+    let blocked = preview["conflicts"]
+        .as_array()
+        .is_some_and(|c| !c.is_empty());
+    if !request.apply || blocked {
+        return Ok(json!({ "plan": preview, "cleanup": cleanup, "applied": false }));
+    }
+
+    let plan = nrs_call(
+        state,
+        reqwest::Method::POST,
+        &merge_path,
+        Some(&json!({
+            "into": into,
+            "apply": true,
+            "note": "one identity in musiclib",
+        })),
+    )
+    .await
+    .map_err(BridgeError::Nrs)?;
+    for (library_entry, nrs_id) in state
+        .nrs_bridge
+        .adopted
+        .lock()
+        .expect("adopted lock")
+        .iter_mut()
+    {
+        if nrs_id == from {
+            debug!("library entry {library_entry} now binds {into}");
+            *nrs_id = into.to_owned();
+        }
+    }
+    nrs_pool::invalidate(state);
+    info!("merged NRS entry {from} into {into}");
+    // The union is written; what follows only tidies it.
+    let tidy = async {
+        for impact in &cleanup.drop_impacts {
+            let id = impact["id"].as_str().unwrap_or_default();
+            nrs_call(
+                state,
+                reqwest::Method::DELETE,
+                &entry_path(into, &format!("/impacts/{}", urlencoding::encode(id))),
+                None,
+            )
+            .await?;
+        }
+        if let Some(sum) = &cleanup.consumed {
+            set_consumed_minutes(state, into, &sum.impact, sum.minutes_after).await?;
+            for id in &sum.drop {
+                nrs_call(
+                    state,
+                    reqwest::Method::DELETE,
+                    &entry_path(into, &format!("/impacts/{}", urlencoding::encode(id))),
+                    None,
+                )
+                .await?;
+            }
+        }
+        for relation in &cleanup.drop_relations {
+            let id = relation["id"].as_str().unwrap_or_default();
+            nrs_call(
+                state,
+                reqwest::Method::DELETE,
+                &entry_path(into, &format!("/relations/{}", urlencoding::encode(id))),
+                None,
+            )
+            .await?;
+        }
+        anyhow::Ok(())
+    };
+    tidy.await.map_err(|e| {
+        BridgeError::Nrs(e.context(format!("merged {from} into {into}, but cleaning up failed")))
+    })?;
+    Ok(json!({ "plan": plan, "cleanup": cleanup, "applied": true }))
+}
+
 // ---- listening time ----
 
 /// Runs `export_listening` every `EXPORT_EVERY`, for the server's lifetime.
@@ -695,17 +973,8 @@ async fn add_consumed_minutes(state: &AppState, nrs_id: &str, minutes: f64) -> a
     let detail = nrs_get(state, &entry_path(nrs_id, "")).await?;
     match own_impact(&detail, CONSUMED_KIND) {
         Some(impact) => {
-            let mut fields = string_fields(&impact["params"]);
-            let current: f64 = fields
-                .get("duration_minutes")
-                .and_then(|m| m.parse().ok())
-                .unwrap_or(0.0);
-            fields.insert("kind".into(), CONSUMED_KIND.into());
-            fields.insert(
-                "duration_minutes".into(),
-                format!("{:.2}", current + minutes),
-            );
-            put_impact(state, nrs_id, &impact, &fields).await
+            let total = consumed_minutes(&impact) + minutes;
+            set_consumed_minutes(state, nrs_id, &impact, total).await
         }
         None => {
             let mut fields = Map::new();
@@ -713,5 +982,81 @@ async fn add_consumed_minutes(state: &AppState, nrs_id: &str, minutes: f64) -> a
             fields.insert("duration_minutes".into(), format!("{minutes:.2}").into());
             post_impact(state, nrs_id, &detail, &fields).await
         }
+    }
+}
+
+/// Sets a consumed impact's duration, keeping its other params.
+async fn set_consumed_minutes(
+    state: &AppState,
+    nrs_id: &str,
+    impact: &Value,
+    minutes: f64,
+) -> anyhow::Result<()> {
+    let mut fields = string_fields(&impact["params"]);
+    fields.insert("kind".into(), CONSUMED_KIND.into());
+    fields.insert("duration_minutes".into(), format!("{minutes:.2}"));
+    put_impact(state, nrs_id, impact, &fields).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn impact(id: &str, kind: &str, params: Value) -> Value {
+        json!({ "id": id, "kind": kind, "params": params, "shared": null })
+    }
+
+    fn relation(id: &str, kind: &str, from: &str, to: &str, other: &str) -> Value {
+        json!({
+            "id": id,
+            "kind": kind,
+            "from": from,
+            "to": to,
+            "other": { "id": other, "title": other },
+            "transform": { "type": "scalar", "factor": 0.2 },
+        })
+    }
+
+    #[test]
+    fn cleanup_keeps_into_s_profile_sums_consumed_and_drops_repeated_relations() {
+        let old = json!({
+            "impacts": [
+                impact("m-old", "music", json!({ "music_base": "0.7" })),
+                impact("nei", "nei", json!({})),
+                impact("c-old", CONSUMED_KIND, json!({ "duration_minutes": "9.23" })),
+            ],
+            "relations": [relation("r-old", "remix", "old", "ctb", "ctb")],
+        });
+        let new = json!({
+            "impacts": [
+                impact("c-new", CONSUMED_KIND, json!({ "duration_minutes": "3.96" })),
+                impact("m-new", "music", json!({ "music_base": "0.65" })),
+                impact("v-new", "visual", json!({ "base": "0.5" })),
+            ],
+            "relations": [
+                relation("r-new", "remix", "new", "ctb", "ctb"),
+                relation("r-other", "contains", "album", "new", "album"),
+                relation("r-between", "remix", "new", "old", "old"),
+            ],
+        });
+        let cleanup = merge_cleanup("new", "old", &new, &old);
+        // `old` has its own music, not a visual one: only the music goes.
+        let dropped: Vec<&str> = cleanup
+            .drop_impacts
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(dropped, vec!["m-new"]);
+        let consumed = cleanup.consumed.unwrap();
+        assert_eq!(consumed.impact["id"], "c-old");
+        assert_eq!(consumed.drop, vec!["c-new".to_string()]);
+        assert!((consumed.minutes_after - 13.19).abs() < 1e-9);
+        // NRS drops the relation between the two itself.
+        let dropped: Vec<&str> = cleanup
+            .drop_relations
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(dropped, vec!["r-new"]);
     }
 }
