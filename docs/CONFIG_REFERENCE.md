@@ -292,13 +292,18 @@ An entity reached under several option sets in one run (say, an album reached
 as a leaf from a track and with `main` from its artist) is processed under
 each of them, so the result doesn't depend on which path arrives first.
 
-Three ready-made files live in `config/fetch_options/`:
+Four ready-made files live in `config/fetch_options/`:
 
 | File | Purpose |
 |---|---|
 | `fetch_discography.yaml` | Fetch an artist's releases and their tracks; each track also fetches its album(s), credited artists and original as leaves (`track`) |
 | `vtuber_fetch_discography.yaml` | Like above but skip YouTube videos at channel level; whitelist/blacklist playlists by title |
+| `utaite_fetch_discography.yaml` | Like `fetch_discography.yaml`, with a channel's uploads as the discography: skip playlists, and uploads that are clips, crossfades or over 8 minutes |
 | `no_fetch_discography.yaml` | Fetch the entry itself, follow nothing (its structural children become stubs) |
+
+A YouTube channel's discography lists its playlists and its long-form uploads
+(the channel's Videos tab, playlist `UULF…`): Shorts and live-stream archives
+are not listed.
 
 ### File structure
 
