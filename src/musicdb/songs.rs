@@ -461,7 +461,7 @@ async fn set_parent<C: ConnectionTrait>(
         if !same_song && let Some(block) = groups.blocker(child, parent) {
             if !unblock {
                 return Err(Error::Blocked(format!(
-                    "entries {} and {} are marked as different songs",
+                    "Entries {} and {} are marked as different songs",
                     block.0, block.1
                 )));
             }
