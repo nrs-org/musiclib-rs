@@ -16,6 +16,9 @@
 //! only among *this artist's* entries: an artist's cover of a song stays
 //! their own row, never swapped for another artist's original the way
 //! search's `dedupe_by_edition` would.
+//!
+//! `GET /api/entries/{id}/appearances` is the same release folding from a
+//! track's side: the releases whose tracklists list it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -23,7 +26,7 @@ use musiclib_rs::musicdb::{EditionProjection, MusicDb, SoftIdentityProjection, S
 use serde::Serialize;
 
 use crate::{
-    entries::{component_members, entry_titles_with},
+    entries::{SourceRef, component_members, entry_titles_with},
     player::embed_for,
 };
 
@@ -325,59 +328,12 @@ pub async fn discography(db: &MusicDb, artist_id: i64) -> anyhow::Result<Discogr
         ids.sort_unstable();
         ids
     };
-    let mut release_groups = of_type("release_group");
+    let release_groups = of_type("release_group");
     let releases = of_type("release");
     let tracks = of_type("track");
 
-    // Fold each release under a release group it belongs to, pulling that
-    // group in even if the artist doesn't list it directly.
-    let release_sources = db.source_rows_by_entry_ids(&releases).await?;
-    let release_pairs: Vec<Pair> = release_sources
-        .iter()
-        .map(|s| (s.source.clone(), s.identifier.clone()))
-        .collect();
-    let entry_of_pair: HashMap<Pair, i64> = release_sources
-        .iter()
-        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
-        .collect();
-    let parent_rows = db.child_rows_for_child_pairs(&release_pairs).await?;
-    let parent_pairs: Vec<Pair> = parent_rows
-        .iter()
-        .map(|c| (c.parent_source.clone(), c.parent_identifier.clone()))
-        .collect();
-    let parent_sources = db.source_rows_for_pairs(&parent_pairs).await?;
-    let parent_entry_of: HashMap<Pair, i64> = parent_sources
-        .iter()
-        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
-        .collect();
-    let parent_ids: Vec<i64> = parent_entry_of.values().copied().collect();
-    let parent_is_group: HashSet<i64> = db
-        .entry_rows_by_ids(&parent_ids)
-        .await?
-        .into_iter()
-        .filter(|e| e.entry_type == "release_group")
-        .map(|e| e.id)
-        .collect();
-    let mut folded: HashMap<i64, Vec<i64>> = HashMap::new();
-    let mut has_group: HashSet<i64> = HashSet::new();
-    for c in &parent_rows {
-        let parent = (c.parent_source.clone(), c.parent_identifier.clone());
-        let child = (c.child_source.clone(), c.child_identifier.clone());
-        let (Some(&group), Some(&release)) =
-            (parent_entry_of.get(&parent), entry_of_pair.get(&child))
-        else {
-            continue;
-        };
-        if !parent_is_group.contains(&group) || !has_group.insert(release) {
-            continue;
-        }
-        folded.entry(group).or_default().push(release);
-        if !release_groups.contains(&group) {
-            release_groups.push(group);
-        }
-    }
-    let mut release_rows: Vec<i64> = release_groups.clone();
-    release_rows.extend(releases.iter().filter(|r| !has_group.contains(r)));
+    // Pulls in a release's group even if the artist doesn't list it directly.
+    let (release_rows, folded) = fold_into_release_groups(db, release_groups, &releases).await?;
 
     let plays = db.counted_plays_by_entry().await?;
     let mut seeds: Vec<i64> = release_rows.clone();
@@ -424,38 +380,8 @@ pub async fn discography(db: &MusicDb, artist_id: i64) -> anyhow::Result<Discogr
             .collect()
     };
 
-    // Tracklist length per release pair: distinct track entries under it.
     let release_side_pairs: Vec<Pair> = release_groups_out.iter().flat_map(&group_pairs).collect();
-    let tracklist_rows = db.child_rows_for_parent_pairs(&release_side_pairs).await?;
-    let tracklist_children: Vec<Pair> = tracklist_rows
-        .iter()
-        .map(|c| (c.child_source.clone(), c.child_identifier.clone()))
-        .collect();
-    let child_sources = db.source_rows_for_pairs(&tracklist_children).await?;
-    let child_entry_of: HashMap<Pair, i64> = child_sources
-        .iter()
-        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
-        .collect();
-    let child_ids: Vec<i64> = child_entry_of.values().copied().collect();
-    let child_is_track: HashSet<i64> = db
-        .entry_rows_by_ids(&child_ids)
-        .await?
-        .into_iter()
-        .filter(|e| e.entry_type == "track")
-        .map(|e| e.id)
-        .collect();
-    let mut tracklist: HashMap<Pair, HashSet<i64>> = HashMap::new();
-    for c in &tracklist_rows {
-        let child = (c.child_source.clone(), c.child_identifier.clone());
-        if let Some(&id) = child_entry_of.get(&child)
-            && child_is_track.contains(&id)
-        {
-            tracklist
-                .entry((c.parent_source.clone(), c.parent_identifier.clone()))
-                .or_default()
-                .insert(id);
-        }
-    }
+    let tracklist = tracklists(db, &release_side_pairs).await?;
 
     let reps: Vec<i64> = release_groups_out
         .iter()
@@ -468,37 +394,12 @@ pub async fn discography(db: &MusicDb, artist_id: i64) -> anyhow::Result<Discogr
         .iter()
         .map(|g| {
             let pairs = group_pairs(g);
-            let rows: Vec<&SourceRow> = g
-                .entries
-                .iter()
-                .flat_map(|e| sources_by_entry.get(e).into_iter().flatten().copied())
-                .collect();
-            let track_count = pairs
-                .iter()
-                .filter_map(|p| tracklist.get(p).map(HashSet::len))
-                .max();
-            let kind = release_kind(
-                rows.iter().filter_map(|s| s.primary_type.as_deref()),
-                rows.iter().filter_map(|s| s.release_type.as_deref()),
-                track_count,
-            );
             let (main, _) = credit_of(
                 &pairs.iter().collect::<Vec<_>>(),
                 &contribs_by_pair,
                 &artist_pairs,
             );
-            let (title, sources) = titles.get(&g.rep).cloned().unwrap_or_default();
-            ReleaseRow {
-                entry_id: g.rep,
-                title,
-                kind,
-                main,
-                release_date: rows.iter().filter_map(|s| s.release_date.clone()).min(),
-                track_count,
-                source_kinds: source_kinds(&sources),
-                entries: g.entries.len(),
-                also: Vec::new(),
-            }
+            release_row(g, &pairs, &sources_by_entry, &tracklist, &titles, main)
         })
         .collect();
     let mut out_releases = fold_by_title(out_releases);
@@ -557,6 +458,328 @@ pub async fn discography(db: &MusicDb, artist_id: i64) -> anyhow::Result<Discogr
         releases: out_releases,
         tracks: out_tracks,
     })
+}
+
+/// Folds each of `releases` under a release group it belongs to, adding
+/// that group to `release_groups` when it isn't there yet. Returns the
+/// candidates for release rows — the groups, then every release with no
+/// group — and the releases folded under each group.
+async fn fold_into_release_groups(
+    db: &MusicDb,
+    mut release_groups: Vec<i64>,
+    releases: &[i64],
+) -> anyhow::Result<(Vec<i64>, HashMap<i64, Vec<i64>>)> {
+    let release_sources = db.source_rows_by_entry_ids(releases).await?;
+    let release_pairs: Vec<Pair> = release_sources
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let entry_of_pair: HashMap<Pair, i64> = release_sources
+        .iter()
+        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
+        .collect();
+    let parent_rows = db.child_rows_for_child_pairs(&release_pairs).await?;
+    let parent_pairs: Vec<Pair> = parent_rows
+        .iter()
+        .map(|c| (c.parent_source.clone(), c.parent_identifier.clone()))
+        .collect();
+    let parent_sources = db.source_rows_for_pairs(&parent_pairs).await?;
+    let parent_entry_of: HashMap<Pair, i64> = parent_sources
+        .iter()
+        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
+        .collect();
+    let parent_ids: Vec<i64> = parent_entry_of.values().copied().collect();
+    let parent_is_group: HashSet<i64> = db
+        .entry_rows_by_ids(&parent_ids)
+        .await?
+        .into_iter()
+        .filter(|e| e.entry_type == "release_group")
+        .map(|e| e.id)
+        .collect();
+    let mut folded: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut has_group: HashSet<i64> = HashSet::new();
+    for c in &parent_rows {
+        let parent = (c.parent_source.clone(), c.parent_identifier.clone());
+        let child = (c.child_source.clone(), c.child_identifier.clone());
+        let (Some(&group), Some(&release)) =
+            (parent_entry_of.get(&parent), entry_of_pair.get(&child))
+        else {
+            continue;
+        };
+        if !parent_is_group.contains(&group) || !has_group.insert(release) {
+            continue;
+        }
+        folded.entry(group).or_default().push(release);
+        if !release_groups.contains(&group) {
+            release_groups.push(group);
+        }
+    }
+    let mut release_rows = release_groups;
+    release_rows.extend(releases.iter().filter(|r| !has_group.contains(r)));
+    Ok((release_rows, folded))
+}
+
+/// Tracklist per release pair: the distinct track entries listed under it.
+async fn tracklists(
+    db: &MusicDb,
+    release_pairs: &[Pair],
+) -> anyhow::Result<HashMap<Pair, HashSet<i64>>> {
+    let tracklist_rows = db.child_rows_for_parent_pairs(release_pairs).await?;
+    let tracklist_children: Vec<Pair> = tracklist_rows
+        .iter()
+        .map(|c| (c.child_source.clone(), c.child_identifier.clone()))
+        .collect();
+    let child_sources = db.source_rows_for_pairs(&tracklist_children).await?;
+    let child_entry_of: HashMap<Pair, i64> = child_sources
+        .iter()
+        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
+        .collect();
+    let child_ids: Vec<i64> = child_entry_of.values().copied().collect();
+    let child_is_track: HashSet<i64> = db
+        .entry_rows_by_ids(&child_ids)
+        .await?
+        .into_iter()
+        .filter(|e| e.entry_type == "track")
+        .map(|e| e.id)
+        .collect();
+    let mut tracklist: HashMap<Pair, HashSet<i64>> = HashMap::new();
+    for c in &tracklist_rows {
+        let child = (c.child_source.clone(), c.child_identifier.clone());
+        if let Some(&id) = child_entry_of.get(&child)
+            && child_is_track.contains(&id)
+        {
+            tracklist
+                .entry((c.parent_source.clone(), c.parent_identifier.clone()))
+                .or_default()
+                .insert(id);
+        }
+    }
+    Ok(tracklist)
+}
+
+/// The row for release group `g`, whose sources are `pairs`.
+fn release_row(
+    g: &Group,
+    pairs: &[Pair],
+    sources_by_entry: &HashMap<i64, Vec<&SourceRow>>,
+    tracklist: &HashMap<Pair, HashSet<i64>>,
+    titles: &HashMap<i64, (Option<String>, Vec<SourceRef>)>,
+    main: bool,
+) -> ReleaseRow {
+    let rows: Vec<&SourceRow> = g
+        .entries
+        .iter()
+        .flat_map(|e| sources_by_entry.get(e).into_iter().flatten().copied())
+        .collect();
+    let track_count = pairs
+        .iter()
+        .filter_map(|p| tracklist.get(p).map(HashSet::len))
+        .max();
+    let kind = release_kind(
+        rows.iter().filter_map(|s| s.primary_type.as_deref()),
+        rows.iter().filter_map(|s| s.release_type.as_deref()),
+        track_count,
+    );
+    let (title, sources) = titles.get(&g.rep).cloned().unwrap_or_default();
+    ReleaseRow {
+        entry_id: g.rep,
+        title,
+        kind,
+        main,
+        release_date: rows.iter().filter_map(|s| s.release_date.clone()).min(),
+        track_count,
+        source_kinds: source_kinds(&sources),
+        entries: g.entries.len(),
+        also: Vec::new(),
+    }
+}
+
+type Position = (Option<i32>, Option<i32>);
+
+/// Orders `(disc_no, track_no)` positions best first: one with a track
+/// number before one without, then the earliest.
+fn position_rank(p: &Position) -> (bool, Option<i32>, Option<i32>) {
+    (p.1.is_none(), p.0, p.1)
+}
+
+#[derive(Serialize)]
+pub struct Appearances {
+    pub releases: Vec<Appearance>,
+}
+
+/// A release that lists the track. `main` is false when the release credits
+/// main artists but none of the track's own (a compilation or split).
+#[derive(Serialize)]
+pub struct Appearance {
+    #[serde(flatten)]
+    pub release: ReleaseRow,
+    pub disc_no: Option<i32>,
+    pub track_no: Option<i32>,
+}
+
+/// `GET /api/entries/{id}/appearances` — the releases whose tracklists list
+/// the entry (across its soft-identity component), folded the same way as
+/// an artist's discography, with where each one lists it. The track's own
+/// artists' releases come first, then the rest, each oldest first.
+pub async fn appearances(db: &MusicDb, entry_id: i64) -> anyhow::Result<Appearances> {
+    let members = component_members(db, entry_id).await?;
+    let mut entry_pairs = db.pairs_by_entry_ids(&members).await?;
+    entry_pairs.sort();
+
+    let listing_rows = db.child_rows_for_child_pairs(&entry_pairs).await?;
+    let mut position_of: HashMap<Pair, Position> = HashMap::new();
+    for c in &listing_rows {
+        let position = (c.disc_no, c.track_no);
+        position_of
+            .entry((c.parent_source.clone(), c.parent_identifier.clone()))
+            .and_modify(|p| {
+                if position_rank(&position) < position_rank(p) {
+                    *p = position;
+                }
+            })
+            .or_insert(position);
+    }
+    let parent_pairs: Vec<Pair> = position_of.keys().cloned().collect();
+    let parent_ids: Vec<i64> = db
+        .source_rows_for_pairs(&parent_pairs)
+        .await?
+        .iter()
+        .map(|s| s.entry_id)
+        .filter(|id| !members.contains(id))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let type_of: HashMap<i64, String> = db
+        .entry_rows_by_ids(&parent_ids)
+        .await?
+        .into_iter()
+        .map(|e| (e.id, e.entry_type))
+        .collect();
+    let of_type = |t: &str| -> Vec<i64> {
+        let mut ids: Vec<i64> = parent_ids
+            .iter()
+            .copied()
+            .filter(|id| type_of.get(id).is_some_and(|et| et == t))
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    let (release_rows, folded) =
+        fold_into_release_groups(db, of_type("release_group"), &of_type("release")).await?;
+
+    // The entry's main artists, across their soft-identity components, to
+    // tell their own releases from compilations.
+    let main_artist_pairs: Vec<Pair> = db
+        .contrib_rows_for_track_pairs(&entry_pairs)
+        .await?
+        .into_iter()
+        .filter(|c| c.main_artist)
+        .map(|c| (c.artist_source, c.artist_identifier))
+        .collect();
+    let main_artist_ids: Vec<i64> = db
+        .source_rows_for_pairs(&main_artist_pairs)
+        .await?
+        .iter()
+        .map(|s| s.entry_id)
+        .collect();
+
+    let mut seeds: Vec<i64> = release_rows.clone();
+    seeds.extend(folded.values().flatten());
+    seeds.extend(&main_artist_ids);
+    let (identity, editions) = db.display_projections_around(&seeds).await?;
+    let artist_members: Vec<i64> = main_artist_ids
+        .iter()
+        .flat_map(|&id| {
+            let canonical = identity.component_of(id).unwrap_or(id);
+            identity
+                .members_by_component
+                .get(&canonical)
+                .cloned()
+                .unwrap_or_else(|| vec![id])
+        })
+        .collect();
+    let artist_pairs: HashSet<Pair> = db
+        .pairs_by_entry_ids(&artist_members)
+        .await?
+        .into_iter()
+        .collect();
+
+    let groups = group_by_edition(&release_rows, &folded, &identity, &editions);
+    let group_entries: Vec<i64> = groups
+        .iter()
+        .flat_map(|g| g.entries.iter().copied())
+        .collect();
+    let all_sources = db.source_rows_by_entry_ids(&group_entries).await?;
+    let mut sources_by_entry: HashMap<i64, Vec<&SourceRow>> = HashMap::new();
+    for s in &all_sources {
+        sources_by_entry.entry(s.entry_id).or_default().push(s);
+    }
+    let all_pairs: Vec<Pair> = all_sources
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let contribs = db.contrib_rows_for_track_pairs(&all_pairs).await?;
+    let mut contribs_by_pair: HashMap<Pair, Vec<&musiclib_rs::musicdb::ContribRow>> =
+        HashMap::new();
+    for c in &contribs {
+        contribs_by_pair
+            .entry((c.source.clone(), c.identifier.clone()))
+            .or_default()
+            .push(c);
+    }
+    let tracklist = tracklists(db, &all_pairs).await?;
+    let reps: Vec<i64> = groups.iter().map(|g| g.rep).collect();
+    let titles = entry_titles_with(db, &reps, &identity).await?;
+
+    let mut positions: HashMap<i64, Position> = HashMap::new();
+    let rows: Vec<ReleaseRow> = groups
+        .iter()
+        .map(|g| {
+            let pairs: Vec<Pair> = g
+                .entries
+                .iter()
+                .flat_map(|e| sources_by_entry.get(e).into_iter().flatten())
+                .map(|s| (s.source.clone(), s.identifier.clone()))
+                .collect();
+            if let Some(position) = pairs
+                .iter()
+                .filter_map(|p| position_of.get(p))
+                .min_by_key(|p| position_rank(p))
+            {
+                positions.insert(g.rep, *position);
+            }
+            let (main, _) = credit_of(
+                &pairs.iter().collect::<Vec<_>>(),
+                &contribs_by_pair,
+                &artist_pairs,
+            );
+            release_row(g, &pairs, &sources_by_entry, &tracklist, &titles, main)
+        })
+        .collect();
+    let mut releases: Vec<Appearance> = fold_by_title(rows)
+        .into_iter()
+        .map(|release| {
+            let (disc_no, track_no) = std::iter::once(&release.entry_id)
+                .chain(&release.also)
+                .find_map(|id| positions.get(id))
+                .copied()
+                .unwrap_or_default();
+            Appearance {
+                release,
+                disc_no,
+                track_no,
+            }
+        })
+        .collect();
+    releases.sort_by(|a, b| {
+        let (a, b) = (&a.release, &b.release);
+        b.main
+            .cmp(&a.main)
+            .then(a.release_date.is_none().cmp(&b.release_date.is_none()))
+            .then(a.release_date.cmp(&b.release_date))
+            .then(a.entry_id.cmp(&b.entry_id))
+    });
+    Ok(Appearances { releases })
 }
 
 #[cfg(test)]

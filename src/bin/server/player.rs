@@ -186,6 +186,13 @@ pub async fn route(
             let id = &p["/api/entries/".len()..p.len() - "/discography".len()];
             discography(state, id).await
         }
+        p if p.starts_with("/api/entries/") && p.ends_with("/appearances") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            let id = &p["/api/entries/".len()..p.len() - "/appearances".len()];
+            appearances(state, id).await
+        }
         p if p.starts_with("/api/entries/") && p.ends_with("/relations") => {
             if *method != Method::GET {
                 return respond::method_not_allowed();
@@ -732,6 +739,23 @@ async fn discography(state: &Arc<AppState>, id: &str) -> HyperResponse {
     };
     match crate::discography::discography(&state.db, entry_id).await {
         Ok(d) => respond::json_typed(StatusCode::OK, &d),
+        Err(e) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &e.to_string(),
+        ),
+    }
+}
+
+/// `GET /api/entries/{id}/appearances` — the releases listing a track,
+/// with its position on each (`discography::appearances`).
+async fn appearances(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    let entry_id = match parse_entry_id(id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match crate::discography::appearances(&state.db, entry_id).await {
+        Ok(a) => respond::json_typed(StatusCode::OK, &a),
         Err(e) => respond::error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
