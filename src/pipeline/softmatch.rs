@@ -20,7 +20,8 @@ use crate::pipeline::embedding::{
 use crate::http::{HeaderName, HeaderValue, HttpClient, Method, Request as HttpRequest};
 use crate::musicdb::{
     AliasRow, ChildRow, ContribRow, EDITION_KINDS, IdentityJudgment, MusicDb, NewDedupFeedback,
-    PROVIDER_ORIGIN, RelationRow, SoftIdentityProjection, SourceRow, merge_songs,
+    PROVIDER_ORIGIN, RelationRow, SoftIdentityProjection, SourceRow, extra_derivations,
+    merge_songs,
 };
 use crate::pipeline::dedup::DedupConfig;
 use crate::providers::FetchProvider;
@@ -2558,20 +2559,19 @@ impl KnownRelations {
                 .extra
                 .as_deref()
                 .and_then(|raw| serde_json::from_str(raw).ok());
-            let id = |key: &str| extra.as_ref()?.get(key)?.as_i64();
-            let (Some(derived), Some(original)) = (id("derived_entry"), id("source_entry")) else {
-                continue;
-            };
-            let (derived, original) = (known.canon(derived), known.canon(original));
-            if derived == original {
-                continue;
+            let derivations = extra.as_ref().map(extra_derivations).unwrap_or_default();
+            for (derived, original) in derivations {
+                let (derived, original) = (known.canon(derived), known.canon(original));
+                if derived == original {
+                    continue;
+                }
+                known.originals.entry(derived).or_default().insert(original);
+                known
+                    .derivatives
+                    .entry(original)
+                    .or_default()
+                    .insert(derived);
             }
-            known.originals.entry(derived).or_default().insert(original);
-            known
-                .derivatives
-                .entry(original)
-                .or_default()
-                .insert(derived);
         }
         known
     }
