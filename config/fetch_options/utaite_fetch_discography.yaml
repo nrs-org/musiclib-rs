@@ -16,8 +16,14 @@
 # - A YouTube channel's uploads are its long-form uploads (its Videos tab):
 #   Shorts and live-stream archives are already left out. Of these, and of a
 #   Niconico account's uploads, videos are fetched unless their title marks
-#   them as a clip, stream or album crossfade, or they run over 8 minutes
-#   (gameplay clips, live sets).
+#   them as something other than a song (a clip, gameplay, crossfade, teaser,
+#   digest, announcement, ad), or they run under 30 seconds or over 8 minutes
+#   (variety and gameplay videos, live sets). Short and live versions of
+#   songs are kept.
+#
+#   Tested on 16 utaite (2026-10-20). A channel with a lot of variety content
+#   still leaks some of it under 8 minutes (まふまふ: short game videos,
+#   vlogs); use the VTuber options for those.
 # - YouTube playlists are not fetched: the uploads already hold their songs.
 #   This also drops YouTube Music releases (listed as playlists); Spotify and
 #   MusicBrainz releases are fetched with `main`.
@@ -38,14 +44,18 @@ main:
     - match: { external_type: "youtube:playlist" }
       fetch: null
 
-    # Uploads that aren't songs: stream clips, stream archives on Niconico,
-    # album crossfade demos, announcements
+    # Uploads that aren't songs: stream clips and archives, gameplay, album
+    # crossfades and previews, teasers, digests, announcements, interviews
     - match:
         all:
           - any:
               - { external_type: "youtube:video" }
               - { external_type: "nicovideo:video" }
-          - { name_regex: "(?i)(切り抜き|雑談|歌枠|XFD|クロスフェード|crossfade|trailer|teaser)" }
+          - any:
+              - { name_regex: "(?i)(切り抜き|雑談|歌枠|実況|XFD|クロスフェード|crossfade|試聴|trailer|トレイラー|トレーラー|teaser|ティザー|ダイジェスト|digest|告知|お知らせ|開催決定|インタビュー|interview|対談|メイキング|making of|behind the scenes)" }
+              # Ad spots ("[30sec.SPOT]", "【CM】"); case-sensitive, and
+              # "CMソング" (a cover of a jingle) has no word boundary
+              - { name_regex: "\\b(SPOT|CM)\\b" }
       fetch: null
     - match:
         all:
