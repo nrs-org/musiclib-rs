@@ -62,7 +62,7 @@ fn bad_request(message: &str) -> HyperResponse {
 
 fn db_error(e: DbError) -> HyperResponse {
     match e {
-        DbError::InvalidInput(msg) => bad_request(&msg),
+        DbError::InvalidInput(msg) | DbError::Blocked(msg) => bad_request(&msg),
         DbError::Database(_) => respond::error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

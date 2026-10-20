@@ -15,7 +15,7 @@
 //! `/releases/:id/tracks`).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -24,7 +24,10 @@ use futures::future::join_all;
 use hyper::{Method, StatusCode};
 use musiclib_rs::{
     app_dirs,
-    musicdb::{DERIVED_FROM, Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback},
+    musicdb::{
+        DERIVED_FROM, Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback, RowImage,
+        SongEdit,
+    },
     pipeline::ingest::ingest_entry,
     providers::backends::soundcloud,
 };
@@ -131,6 +134,12 @@ pub async fn route(
         "/api/relations/derive" if *method == Method::POST => {
             recredit_after(state, derive_edition(state, &body).await)
         }
+        "/api/songs/edit" if *method == Method::POST => {
+            recredit_after(state, edit_song(state, &body).await)
+        }
+        "/api/relations/rows" if *method == Method::POST => {
+            recredit_after(state, restore_relation_rows(state, &body).await)
+        }
         p if p.starts_with("/api/entries/") && p.ends_with("/playable-sources") => {
             if *method != Method::GET {
                 return respond::method_not_allowed();
@@ -230,6 +239,8 @@ pub async fn route(
         | "/api/relations/unrelate"
         | "/api/relations/restore"
         | "/api/relations/derive"
+        | "/api/songs/edit"
+        | "/api/relations/rows"
         | "/api/preferred-source" => respond::method_not_allowed(),
         _ => respond::not_found(),
     }
@@ -1026,6 +1037,42 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
+    // What tells versions with one title apart: who performs them, when,
+    // and how long they run. Artists are per identity, so asked once each.
+    let track_identities: Vec<i64> = node_ids
+        .iter()
+        .filter(|nid| summaries.get(nid).is_some_and(|s| s.entry_type == "track"))
+        .map(|&nid| identity.component_of(nid).unwrap_or(nid))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let artist_lines = join_all(
+        track_identities
+            .iter()
+            .map(|&id| crate::playback::artist_line(&state.db, id, None)),
+    )
+    .await;
+    let artists: HashMap<i64, Vec<String>> = track_identities
+        .into_iter()
+        .zip(artist_lines)
+        .map(|(id, line)| {
+            let names = line
+                .map(|artists| artists.into_iter().map(|a| a.name).collect())
+                .unwrap_or_default();
+            (id, names)
+        })
+        .collect();
+    let mut durations: HashMap<i64, i64> = HashMap::new();
+    match state.db.source_rows_by_entry_ids(&node_ids).await {
+        Ok(rows) => {
+            for row in rows {
+                if let Some(&ms) = row.duration_ms.first() {
+                    durations.entry(row.entry_id).or_insert(ms);
+                }
+            }
+        }
+        Err(e) => return db_error_response(e),
+    }
     let nodes: Vec<_> = node_ids
         .iter()
         .map(|&nid| {
@@ -1033,6 +1080,14 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
             let own_member = summary.and_then(|s| s.members.iter().find(|m| m.entry_id == nid));
             let canonical = identity.component_of(nid).unwrap_or(nid);
             let rank_target = editions.rank_target(canonical);
+            let original = editions.original_of(canonical);
+            let parent = editions.parent_of(canonical);
+            // What this version is, relative to what it was made from.
+            let song_kind = parent
+                .or(original)
+                .filter(|&to| to != canonical)
+                .and_then(|to| editions.edge_label(canonical, to))
+                .map(|(kind, transformation)| json!({ "kind": kind, "transformation": transformation }));
             json!({
                 "entry_id": nid,
                 // This node's own title, not the soft-dedup-merged
@@ -1046,6 +1101,17 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
                 "edition_size": editions.members_of(canonical).len(),
                 "default_edition": editions.default_member_of(canonical) == canonical,
                 "folds_into": (rank_target != canonical).then_some(rank_target),
+                "identity": canonical,
+                "identity_size": identity
+                    .members_by_component
+                    .get(&canonical)
+                    .map_or(1, Vec::len),
+                "artists": artists.get(&canonical).cloned().unwrap_or_default(),
+                "release_date": summary.and_then(|s| s.release_date.clone()),
+                "duration_ms": durations.get(&nid),
+                "song_original": original,
+                "song_parent": parent,
+                "song_kind": song_kind,
             })
         })
         .collect();
@@ -1318,11 +1384,57 @@ async fn derive_edition(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     respond::json(StatusCode::OK, json!({ "ok": true }))
 }
 
+/// `POST /api/songs/edit` `{"op": "detach" | "set_original" | "set_parent"
+/// | "move" | "derive" | "relate" | "disable" | "enable", ...}` — edits a version of a song as a whole (see
+/// `musicdb::SongEdit`) and returns `{"undo": [...]}`: the rows it changed
+/// as they were, for `/api/relations/rows`. A `different_song` block in
+/// the way is a 409 `blocked`, which `set_parent` with `"unblock": true`
+/// lifts.
+async fn edit_song(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let edit: SongEdit = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    if let SongEdit::Relate { kind, .. } = &edit
+        && !RELATE_KINDS.contains(&kind.as_str())
+    {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            &format!("unknown relation kind {kind:?}"),
+        );
+    }
+    match state.db.edit_song(edit).await {
+        Ok(undo) => respond::json(StatusCode::OK, json!({ "undo": undo })),
+        Err(e) => db_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RowsRequest {
+    rows: Vec<RowImage>,
+}
+
+/// `POST /api/relations/rows` `{"rows": [...]}` — writes relation rows back
+/// as an earlier edit's `undo` recorded them, and returns `{"redo": [...]}`,
+/// the rows it replaced, which this same endpoint takes to redo.
+async fn restore_relation_rows(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let req: RowsRequest = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    match state.db.restore_relation_rows(req.rows).await {
+        Ok(redo) => respond::json(StatusCode::OK, json!({ "redo": redo })),
+        Err(e) => db_error_response(e),
+    }
+}
+
 fn db_error_response(e: DbError) -> HyperResponse {
     match e {
         DbError::InvalidInput(msg) => {
             respond::error(StatusCode::BAD_REQUEST, "invalid_input", &msg)
         }
+        DbError::Blocked(msg) => respond::error(StatusCode::CONFLICT, "blocked", &msg),
         DbError::Database(_) => respond::error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

@@ -15,6 +15,9 @@ pub enum Error {
     Database(#[from] DbErr),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    /// A `different_song` row keeps the two songs an edit would join apart.
+    #[error("Blocked: {0}")]
+    Blocked(String),
 }
 
 // Pair-centric schema. Metadata lives on `entry_source` (keyed by the
@@ -386,6 +389,9 @@ mod dedup_block_key {
 // at insertion time so there is at most one row per (entry_a, entry_b, kind)
 // triple regardless of which side was passed first. Disabling a row (enabled=0)
 // tombstones the decision without losing history.
+mod songs;
+pub use songs::{RowImage, RowState, SongEdit};
+
 mod entry_relation {
     use sea_orm::entity::prelude::*;
 
@@ -1641,6 +1647,70 @@ fn remap_extra_ids(extra: &str, loser: i64, winner: i64) -> String {
     } else {
         extra.to_string()
     }
+}
+
+/// The write half of `MusicDb::set_edition_derivation`, inside `txn`:
+/// tombstones every non-provider edition row between the two identities
+/// (`originals`/`deriveds` are their members) and upserts the manual
+/// `derived_from` row recording the direction.
+async fn write_derivation<C: ConnectionTrait>(
+    txn: &C,
+    (original, originals): (i64, &[i64]),
+    (derived, deriveds): (i64, &[i64]),
+    transformation: Option<&str>,
+) -> Result<(), Error> {
+    let mut extra = serde_json::json!({
+        "derived_entry": derived,
+        "source_entry": original,
+    });
+    if let Some(t) = transformation.filter(|t| !t.trim().is_empty()) {
+        extra["transformation"] = t.trim().into();
+    }
+    let (a, b) = ordered_pair(original, derived);
+    let between = Condition::any()
+        .add(
+            Condition::all()
+                .add(entry_relation::Column::EntryA.is_in(originals.iter().copied()))
+                .add(entry_relation::Column::EntryB.is_in(deriveds.iter().copied())),
+        )
+        .add(
+            Condition::all()
+                .add(entry_relation::Column::EntryA.is_in(deriveds.iter().copied()))
+                .add(entry_relation::Column::EntryB.is_in(originals.iter().copied())),
+        );
+    entry_relation::Entity::update_many()
+        .col_expr(entry_relation::Column::Enabled, false.into())
+        .filter(between)
+        .filter(entry_relation::Column::Kind.is_in(EDITION_KINDS.iter().copied()))
+        .filter(entry_relation::Column::Origin.ne(PROVIDER_ORIGIN))
+        .exec(txn)
+        .await?;
+    entry_relation::Entity::insert(entry_relation::ActiveModel {
+        entry_a: Set(a),
+        entry_b: Set(b),
+        kind: Set(DERIVED_FROM.to_string()),
+        confidence: Set(1.0),
+        origin: Set("manual".to_string()),
+        enabled: Set(true),
+        extra: Set(Some(extra.to_string())),
+    })
+    .on_conflict(
+        sea_query::OnConflict::columns([
+            entry_relation::Column::EntryA,
+            entry_relation::Column::EntryB,
+            entry_relation::Column::Kind,
+        ])
+        .update_columns([
+            entry_relation::Column::Confidence,
+            entry_relation::Column::Origin,
+            entry_relation::Column::Enabled,
+            entry_relation::Column::Extra,
+        ])
+        .to_owned(),
+    )
+    .exec(txn)
+    .await?;
+    Ok(())
 }
 
 /// Re-point every `entry_relation` row referencing `loser` onto `winner` and keep
@@ -4176,13 +4246,6 @@ impl MusicDb {
                 "an entry can't be an edition of itself".into(),
             ));
         }
-        let mut extra = serde_json::json!({
-            "derived_entry": derived,
-            "source_entry": original,
-        });
-        if let Some(t) = transformation.filter(|t| !t.trim().is_empty()) {
-            extra["transformation"] = t.trim().into();
-        }
         let (identity, _) = self
             .display_projections_around(&[original, derived])
             .await?;
@@ -4200,51 +4263,14 @@ impl MusicDb {
                 "both entries are the same identity, not two editions".into(),
             ));
         }
-        let (a, b) = ordered_pair(original, derived);
         let _guard = self.write_lock.lock().await;
         let txn = self.db.begin().await?;
-        let between = Condition::any()
-            .add(
-                Condition::all()
-                    .add(entry_relation::Column::EntryA.is_in(originals.clone()))
-                    .add(entry_relation::Column::EntryB.is_in(deriveds.clone())),
-            )
-            .add(
-                Condition::all()
-                    .add(entry_relation::Column::EntryA.is_in(deriveds))
-                    .add(entry_relation::Column::EntryB.is_in(originals)),
-            );
-        entry_relation::Entity::update_many()
-            .col_expr(entry_relation::Column::Enabled, false.into())
-            .filter(between)
-            .filter(entry_relation::Column::Kind.is_in(EDITION_KINDS.iter().copied()))
-            .filter(entry_relation::Column::Origin.ne(PROVIDER_ORIGIN))
-            .exec(&txn)
-            .await?;
-        entry_relation::Entity::insert(entry_relation::ActiveModel {
-            entry_a: Set(a),
-            entry_b: Set(b),
-            kind: Set(DERIVED_FROM.to_string()),
-            confidence: Set(1.0),
-            origin: Set("manual".to_string()),
-            enabled: Set(true),
-            extra: Set(Some(extra.to_string())),
-        })
-        .on_conflict(
-            sea_query::OnConflict::columns([
-                entry_relation::Column::EntryA,
-                entry_relation::Column::EntryB,
-                entry_relation::Column::Kind,
-            ])
-            .update_columns([
-                entry_relation::Column::Confidence,
-                entry_relation::Column::Origin,
-                entry_relation::Column::Enabled,
-                entry_relation::Column::Extra,
-            ])
-            .to_owned(),
+        write_derivation(
+            &txn,
+            (original, &originals),
+            (derived, &deriveds),
+            transformation,
         )
-        .exec(&txn)
         .await?;
         txn.commit().await?;
         Ok(())
