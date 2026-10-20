@@ -838,6 +838,68 @@ impl EditionProjection {
     }
 }
 
+/// The objects in a relation's `extra`: normally one, but [`combine_extra`]
+/// keeps both payloads as a list when a merge collapses two rows.
+pub fn extra_objects(
+    extra: &serde_json::Value,
+) -> Vec<&serde_json::Map<String, serde_json::Value>> {
+    match extra {
+        serde_json::Value::Array(items) => items.iter().filter_map(|v| v.as_object()).collect(),
+        serde_json::Value::Object(object) => vec![object],
+        _ => Vec::new(),
+    }
+}
+
+/// `(derived_entry, source_entry)` for each object in a relation's `extra`
+/// (see [`extra_objects`]) that names both — none when the objects disagree
+/// on the derived side (see [`extra_derived_entry`]).
+pub fn extra_derivations(extra: &serde_json::Value) -> Vec<(i64, i64)> {
+    if extra_derived_entry(extra).is_none() {
+        return Vec::new();
+    }
+    let mut derivations: Vec<(i64, i64)> = extra_objects(extra)
+        .into_iter()
+        .filter_map(|object| {
+            Some((
+                object.get("derived_entry")?.as_i64()?,
+                object.get("source_entry")?.as_i64()?,
+            ))
+        })
+        .collect();
+    derivations.dedup();
+    derivations
+}
+
+/// The `derived_entry` that every object in a relation's `extra` naming one
+/// agrees on. A list whose objects name different derived sides (two merged
+/// rows that recorded opposite directions) leaves the direction unknown.
+pub fn extra_derived_entry(extra: &serde_json::Value) -> Option<i64> {
+    let mut derived = extra_objects(extra)
+        .into_iter()
+        .filter_map(|object| object.get("derived_entry")?.as_i64());
+    let first = derived.next()?;
+    derived.all(|other| other == first).then_some(first)
+}
+
+/// An `extra` object's `transformation` as one label. `version_token_symdiff`
+/// in the match script emits an array -- a track can carry more than one
+/// marker at once (e.g. both "instrumental" and "named:long") -- space-joined
+/// to match that script's own `version_tokens()` convention.
+fn transformation_of(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    match object.get("transformation")? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(items) => {
+            let joined = items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    }
+}
+
 /// Builds an `EditionProjection` over `identity`'s canonical ids from raw
 /// `EDITION_KINDS` relation rows. Any such row's `extra.derived_entry` (see
 /// `pipeline::softmatch::resolve_derived_side` for the heuristic path, and
@@ -875,43 +937,28 @@ fn build_edition_projection(
             .extra
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok());
-        let transformation = extra
-            .as_ref()
-            .and_then(|v| v.get("transformation"))
-            .and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                // `version_token_symdiff` in the match script emits an array
-                // -- a track can carry more than one marker at once (e.g.
-                // both "instrumental" and "named:long") -- space-joined to
-                // match that script's own `version_tokens()` convention.
-                serde_json::Value::Array(items) => {
-                    let joined = items
-                        .iter()
-                        .filter_map(|item| item.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    (!joined.is_empty()).then_some(joined)
-                }
-                _ => None,
-            });
-        if let Some(derived_entry) = extra
-            .as_ref()
-            .and_then(|v| v.get("derived_entry"))
-            .and_then(|v| v.as_i64())
-        {
+        let objects = extra.as_ref().map(extra_objects).unwrap_or_default();
+        let transformation = objects.iter().find_map(|object| transformation_of(object));
+        if let Some(derived_entry) = extra.as_ref().and_then(extra_derived_entry) {
             let derived_canonical = identity
                 .component_of(derived_entry)
                 .unwrap_or(derived_entry);
-            is_derived_side.insert(derived_canonical);
-            let degenerate = relation.kind == "instrumental"
-                || transformation.as_deref().is_some_and(|t| {
-                    t.split_whitespace()
-                        .any(|tok| DEGENERATE_MARKERS.contains(&tok))
-                });
-            if degenerate {
-                is_degenerate_side.insert(derived_canonical);
-                let original = if derived_canonical == a { b } else { a };
-                if derived_canonical == a || derived_canonical == b {
+            // `derived_entry` names one of the row's own endpoints; a stale
+            // id (say, one a merge didn't re-point) would otherwise mark some
+            // unrelated entry as derived.
+            if derived_canonical == a || derived_canonical == b {
+                is_derived_side.insert(derived_canonical);
+                let degenerate = relation.kind == "instrumental"
+                    || objects
+                        .iter()
+                        .filter_map(|o| transformation_of(o))
+                        .any(|t| {
+                            t.split_whitespace()
+                                .any(|tok| DEGENERATE_MARKERS.contains(&tok))
+                        });
+                if degenerate {
+                    is_degenerate_side.insert(derived_canonical);
+                    let original = if derived_canonical == a { b } else { a };
                     // Lowest original wins, so the fold doesn't depend on
                     // relation row order.
                     fold_to
@@ -1304,6 +1351,11 @@ fn combine_extra(a: &Option<String>, b: &Option<String>) -> Option<String> {
             }
             items.sort_by_key(|v| v.to_string());
             items.dedup_by_key(|v| v.to_string());
+            // Payloads that only differed in formatting (or in an id
+            // `remap_extra_ids` just re-pointed) are one payload, not a list.
+            if items.len() == 1 {
+                return Some(items[0].to_string());
+            }
             Some(serde_json::Value::Array(items).to_string())
         }
     }
@@ -1335,6 +1387,36 @@ fn combine_relations(
         origin: primary.origin.clone(),
         enabled: primary.enabled,
         extra: combine_extra(&a.extra, &b.extra),
+    }
+}
+
+/// `extra` with its `source_entry`/`derived_entry` ids re-pointed from
+/// `loser` to `winner`, so it keeps naming the relation's own endpoints
+/// once [`remap_relations`] re-points them. Anything else is left as is.
+fn remap_extra_ids(extra: &str, loser: i64, winner: i64) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(extra) else {
+        return extra.to_string();
+    };
+    let objects: Vec<&mut serde_json::Map<String, serde_json::Value>> = match &mut value {
+        serde_json::Value::Array(items) => {
+            items.iter_mut().filter_map(|v| v.as_object_mut()).collect()
+        }
+        serde_json::Value::Object(object) => vec![object],
+        _ => Vec::new(),
+    };
+    let mut changed = false;
+    for object in objects {
+        for key in ["source_entry", "derived_entry"] {
+            if object.get(key).and_then(|v| v.as_i64()) == Some(loser) {
+                object.insert(key.to_string(), serde_json::json!(winner));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        value.to_string()
+    } else {
+        extra.to_string()
     }
 }
 
@@ -1380,6 +1462,7 @@ async fn remap_relations<C: ConnectionTrait>(
         if r.entry_b == loser {
             r.entry_b = winner;
         }
+        r.extra = r.extra.map(|extra| remap_extra_ids(&extra, loser, winner));
         if r.entry_a == r.entry_b {
             // Lossy: a relationship that is now internal to a single entry is
             // dropped. Surface it so the loss is never silent.
@@ -4604,6 +4687,33 @@ mod tests {
         );
     }
 
+    /// Merging re-points the ids inside `extra` along with the endpoints, so
+    /// a cover row keeps naming its own original and derived side, and two
+    /// payloads that only differed in the merged-away id collapse into one.
+    #[tokio::test]
+    async fn merge_entries_remaps_extra_ids() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2, 3] {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(db, 1, 3, "cover", r#"{"derived_entry":3,"source_entry":1}"#).await;
+        insert_edition_rel(db, 2, 3, "cover", r#"{"derived_entry":3,"source_entry":2}"#).await;
+
+        mdb.merge_entries(1, 2).await.unwrap();
+
+        let row = entry_relation::Entity::find_by_id((2, 3, "cover".to_string()))
+            .one(db)
+            .await
+            .unwrap()
+            .expect("cover row re-pointed onto the winner");
+        let extra: serde_json::Value = serde_json::from_str(row.extra.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            extra,
+            serde_json::json!({"derived_entry": 3, "source_entry": 2})
+        );
+    }
+
     /// combine_relations is order-independent: the higher-confidence row's scalar
     /// fields win regardless of argument order.
     #[test]
@@ -4775,6 +4885,82 @@ mod tests {
             2,
             "original (higher id) is the default, not the cover"
         );
+    }
+
+    /// A merge that collapses two rows with different payloads stores
+    /// `extra` as a list (`combine_extra`); its `derived_entry` still marks
+    /// the derived side.
+    #[tokio::test]
+    async fn edition_projection_reads_list_extra() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2] {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(
+            db,
+            1,
+            2,
+            "cover",
+            r#"[{"derived_entry":1,"source_entry":2},{"reason":"provider"}]"#,
+        )
+        .await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(
+            projection.default_member_of(1),
+            2,
+            "the original, not the cover"
+        );
+    }
+
+    /// A `derived_entry` that isn't one of the row's endpoints is stale and
+    /// marks nothing — not the unrelated entry that happens to have that id.
+    #[tokio::test]
+    async fn edition_projection_ignores_derived_entry_off_the_row() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=4 {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(db, 1, 2, "cover", r#"{"derived_entry":3,"source_entry":1}"#).await;
+        insert_edition_rel(db, 3, 4, "cover", r#"{"derived_entry":4,"source_entry":3}"#).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(
+            projection.default_member_of(3),
+            3,
+            "3 is still 4's original"
+        );
+    }
+
+    /// A list `extra` whose objects name opposite derived sides leaves the
+    /// direction unknown instead of marking (and folding) both sides.
+    #[tokio::test]
+    async fn edition_projection_ignores_conflicting_list_directions() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2] {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(
+            db,
+            1,
+            2,
+            DERIVED_FROM,
+            r#"[{"derived_entry":2,"source_entry":1,"transformation":"instrumental"},
+                {"derived_entry":1,"source_entry":2,"transformation":"instrumental"}]"#,
+        )
+        .await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.rank_target(1), 1);
+        assert_eq!(projection.rank_target(2), 2);
+        let extra = serde_json::from_str(
+            r#"[{"derived_entry":2,"source_entry":1},{"derived_entry":1,"source_entry":2}]"#,
+        )
+        .unwrap();
+        assert!(extra_derivations(&extra).is_empty());
     }
 
     /// `match.example.rhai`'s `version_token_symdiff` emits `transformation`

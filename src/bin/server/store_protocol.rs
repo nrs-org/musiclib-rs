@@ -22,7 +22,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use musiclib_rs::{
-    musicdb::PairFacts, pipeline::ingest::ingest_entry, providers::registry::canonicalize,
+    musicdb::{PairFacts, extra_derivations},
+    pipeline::ingest::ingest_entry,
+    providers::registry::canonicalize,
 };
 
 use crate::{
@@ -680,14 +682,13 @@ async fn originals(
         else {
             continue;
         };
-        let (Some(derived), Some(source)) = (
-            extra["derived_entry"].as_i64(),
-            extra["source_entry"].as_i64(),
-        ) else {
-            continue;
-        };
-        if own.contains(&derived) && !own.contains(&source) && !out.iter().any(|o| o.0 == source) {
-            out.push((source, row.kind, row.confidence));
+        for (derived, source) in extra_derivations(&extra) {
+            if own.contains(&derived)
+                && !own.contains(&source)
+                && !out.iter().any(|o| o.0 == source)
+            {
+                out.push((source, row.kind.clone(), row.confidence));
+            }
         }
     }
     Ok(out)
