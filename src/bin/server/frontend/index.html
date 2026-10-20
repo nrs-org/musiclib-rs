@@ -1930,6 +1930,112 @@
     padding: 3px 4px;
   }
 
+  /* ---------- song view and the editor's modes ---------- */
+
+  .graph-seg {
+    display: inline-flex;
+    border: 1px solid var(--rail);
+  }
+  .graph-seg[hidden] { display: none; }
+  .graph-seg-btn {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    background: transparent;
+    color: var(--ink-soft);
+    border: 0;
+    cursor: pointer;
+  }
+  .graph-seg-btn + .graph-seg-btn { border-left: 1px solid var(--rail); }
+  .graph-seg-btn[aria-pressed="true"] {
+    background: var(--ink);
+    color: var(--paper);
+  }
+  .graph-seg-btn:focus-visible { outline: 2px solid var(--brass); outline-offset: -2px; }
+  .graph-toolbar .graph-removed-toggle[hidden] { display: none; }
+  .graph-toolbar .ghost-btn:disabled { opacity: 0.4; cursor: default; }
+  .graph-flash {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--verdigris);
+    margin: -4px 0 8px;
+  }
+  .graph-detail-role {
+    font-size: 13px;
+    margin: 0 0 8px;
+  }
+  .graph-selection-list {
+    margin: 0 0 4px;
+    padding-left: 18px;
+    font-size: 12px;
+    max-height: 9em;
+    overflow-y: auto;
+  }
+  .graph-legend[hidden] { display: none; }
+
+  .node-label .node-sublabel { fill: var(--ink-soft); }
+
+  .node.song-original circle {
+    stroke: var(--brass);
+    stroke-width: 3.5px;
+  }
+  .node.placeholder circle {
+    fill: var(--paper);
+    stroke: var(--ink-faint);
+    stroke-dasharray: 3 3;
+  }
+  /* Several uploads of one recording: a second ring, like a stack. */
+  .node.stacked circle:first-child {
+    stroke-width: 1.5px;
+    filter: drop-shadow(2px 2px 0 var(--ink-faint));
+  }
+  .node.conflict circle:first-child { stroke: var(--danger); stroke-width: 3px; }
+  .node.detached { opacity: 0.4; }
+  .node-label.detached-label { fill-opacity: 0.45; }
+  .node.detached circle:first-child { stroke-dasharray: 3 3; }
+  .node.selected circle:first-child,
+  .node.selected rect:first-child {
+    stroke: var(--verdigris);
+    stroke-width: 3.5px;
+  }
+
+  .edge.tree {
+    stroke: var(--brass-ink);
+    stroke-width: 1.6px;
+    pointer-events: none;
+  }
+  .edge.tree.unknown { stroke-dasharray: 5 4; }
+  .edge-item:hover .edge.tree { stroke-width: 2.6px; }
+  .edge.identity-link {
+    stroke: var(--ink-faint);
+    stroke-width: 2.5px;
+    stroke-dasharray: 1 3;
+    stroke-linecap: round;
+    pointer-events: none;
+  }
+  .edge-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    fill: var(--ink-soft);
+    paint-order: stroke;
+    stroke: var(--paper-deep);
+    stroke-width: 3px;
+    pointer-events: none;
+    user-select: none;
+  }
+
+  .cut-path {
+    fill: none;
+    stroke: var(--danger);
+    stroke-width: 2px;
+    stroke-dasharray: 6 4;
+    pointer-events: none;
+    opacity: 0;
+  }
+  .cut-path.visible { opacity: 0.9; }
+  .dedup-graph.tool-cut { cursor: crosshair; }
+  .dedup-graph.tool-connect .node circle { cursor: cell; }
+
   .merge-picker {
     margin-top: 10px;
     border: 1px solid var(--rail);
@@ -9373,7 +9479,7 @@
   function dedupEdgeState(edge) {
     if (!edge.enabled) return "removed";
     if (IDENTITY_KIND_SET.has(edge.kind)) return "active";
-    if (edge.kind === "different_identity") return "blocked";
+    if (edge.kind === "different_identity" || edge.kind === "different_song") return "blocked";
     if (EDITION_KIND_SET.has(edge.kind)) return "edition";
     return "related";
   }
@@ -9558,6 +9664,41 @@
     );
   }
 
+  // Song view's key: what its tree edges, rings and badges mean.
+  function buildSongLegend() {
+    const swatch = (draw, w = 28, h = 16) => {
+      const svg = svgEl("svg", { width: w, height: h, "aria-hidden": "true" });
+      draw(svg);
+      return svg;
+    };
+    const node = (cls, r = 6) =>
+      swatch((svg) => {
+        const layer = svgEl("g", { class: "nodes", transform: "translate(8,8)" });
+        const g = svgEl("g", { class: `node type-track ${cls}` });
+        g.appendChild(svgEl("circle", { r }));
+        layer.appendChild(g);
+        svg.appendChild(layer);
+      }, 16);
+    const items = [
+      [
+        swatch((svg) =>
+          svg.appendChild(svgEl("line", { class: "edge tree", x1: 1, y1: 8, x2: 22, y2: 8, "marker-end": `url(#${EDITION_MARKER_ID})` }))
+        ),
+        "made from → version",
+      ],
+      [node("song-original"), "the original"],
+      [node("placeholder"), "original not in the library"],
+      [node("stacked"), "several uploads of one recording"],
+      [node("edition-folded"), "scores its original"],
+      [node("conflict"), "contradictory relations"],
+    ];
+    return el(
+      "ul",
+      { className: "graph-legend" },
+      items.map(([svg, text]) => el("li", {}, [svg, el("span", { text })]))
+    );
+  }
+
   // The relations graph is built exactly once (see `graphEditor` below) and
   // its DOM/simulation/node-position state is reused across every entry
   // shown thereafter, rather than torn down and recreated per `viewGraph`
@@ -9584,12 +9725,27 @@
     let currentEntryType = null;
     let currentSoftLinkedIds = [];
     const labelEl = el("p", { className: "merge-label", text: "Relations" });
-    const hintEl = el("p", {
-      className: "merge-picker-hint",
-      text:
-        "Click one entry, then another, to connect them. Shift+click an entry to focus the graph on it. Click a " +
-        "line for its details and actions. Drag an entry in from the search results to add it here.",
-    });
+    const hintEl = el("p", { className: "merge-picker-hint" });
+    // Song view draws the anchor's song as a tree: one node per recording
+    // (duplicate uploads collapsed, see `expanded`), each version under
+    // what it was made from (`song_parent`, else the original). "All
+    // relations" is the raw row graph. View mode only inspects; Edit mode
+    // adds the tools (`tool`) and the panel's actions.
+    let viewMode = "song";
+    let editing = false;
+    let tool = "select";
+    // Node ids selected in Edit mode (Ctrl+click adds), and identities
+    // whose uploads song view draws one by one.
+    const selection = new Set();
+    const expanded = new Set();
+    // Entries waiting for "Move under…": the next node clicked becomes
+    // what they were made from, with this transformation.
+    let pickParent = null;
+    // Versions detached from the anchor's song while it's on screen, by
+    // identity: song view keeps drawing them, faded and unattached, so a
+    // detach (a Cut stroke included) visibly happens instead of a node just
+    // vanishing, and stays one click from "Put back". Cleared on re-anchor.
+    const detachedHere = new Map();
     const graphHost = el("div", { className: "dedup-graph" });
     const detailPanel = el("div", { className: "graph-detail-panel" }, [
       el("p", { className: "graph-detail-empty", text: "Click a node for details." }),
@@ -9607,53 +9763,496 @@
       resetSelection();
       if (lastData) buildGraph(lastData);
     });
-    const toolbar = el("div", { className: "graph-toolbar" }, [el("label", {}, [removedToggle, removedToggleText])]);
+    const removedLabel = el("label", { className: "graph-removed-toggle" }, [removedToggle, removedToggleText]);
+
+    // A row of mutually exclusive buttons (`aria-pressed`).
+    function segmented(name, options, onPick) {
+      const buttons = options.map(([value, text]) =>
+        el("button", { type: "button", className: "graph-seg-btn", text, "data-value": value, onclick: () => onPick(value) })
+      );
+      const group = el("div", { className: "graph-seg", role: "group", "aria-label": name }, buttons);
+      group.sync = (current) => {
+        for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.value === current));
+      };
+      return group;
+    }
+    const modeSeg = segmented("Mode", [["view", "View"], ["edit", "Edit"]], (value) => {
+      editing = value === "edit";
+      tool = "select";
+      resetSelection();
+      if (lastData) buildGraph(lastData);
+    });
+    const viewSeg = segmented("Show", [["song", "Song"], ["raw", "All relations"]], (value) => {
+      viewMode = value;
+      resetSelection();
+      if (lastData) buildGraph(lastData);
+    });
+    const toolSeg = segmented("Tool", [["select", "Select"], ["connect", "Connect"], ["cut", "Cut"]], (value) => {
+      tool = value;
+      resetSelection();
+    });
+    const undoBtn = el("button", { className: "ghost-btn", type: "button", text: "Undo", onclick: () => undo() });
+    const redoBtn = el("button", { className: "ghost-btn", type: "button", text: "Redo", onclick: () => redo() });
+    const toolbar = el("div", { className: "graph-toolbar" }, [modeSeg, viewSeg, toolSeg, undoBtn, redoBtn, removedLabel]);
     const stage = el("div", { className: "graph-stage" }, [graphHost, detailPanel]);
+    const songLegend = buildSongLegend();
+    const rawLegend = buildGraphLegend();
     section.appendChild(labelEl);
     section.appendChild(hintEl);
-    section.appendChild(buildGraphLegend());
+    section.appendChild(songLegend);
+    section.appendChild(rawLegend);
     section.appendChild(toolbar);
+
+    const HINTS = {
+      view: "Click a version for its details. Shift+click focuses the graph on it. Switch to Edit to change the song.",
+      select:
+        "Click a version to select it; Ctrl+click adds to the selection. The panel below detaches, moves or relabels " +
+        "what's selected; Delete detaches. Drag an entry in from search to add it.",
+      connect: "Click the version something was made from, then the version made from it.",
+      cut: "Drag across lines to cut them.",
+    };
+    function syncToolbar() {
+      modeSeg.sync(editing ? "edit" : "view");
+      viewSeg.sync(viewMode);
+      toolSeg.sync(tool);
+      toolSeg.hidden = !editing;
+      removedLabel.hidden = viewMode !== "raw";
+      songLegend.hidden = viewMode !== "song";
+      rawLegend.hidden = viewMode !== "raw";
+      undoBtn.disabled = !undoStack.length;
+      redoBtn.disabled = !redoStack.length;
+      undoBtn.title = undoStack.length ? `Undo: ${undoStack[undoStack.length - 1].label} (Ctrl+Z)` : "Nothing to undo";
+      redoBtn.title = redoStack.length ? `Redo: ${redoStack[redoStack.length - 1].label} (Ctrl+Shift+Z)` : "Nothing to redo";
+      let hint = editing ? HINTS[tool] : HINTS.view;
+      if (editing && tool === "cut" && viewMode === "song") hint = "Drag across lines to detach the versions at their ends.";
+      if (pickParent) hint = "Click the version they were made from. Esc cancels.";
+      hintEl.textContent = hint;
+      graphHost.classList.toggle("tool-cut", editing && tool === "cut");
+      graphHost.classList.toggle("tool-connect", editing && tool === "connect");
+    }
+
+    // ---- undo/redo ----
+    // An entry is either `rows` (relation rows as an edit found them;
+    // `/api/relations/rows` writes them back and answers with the rows it
+    // replaced, which redo writes back the same way) or a list of identity
+    // `calls` with their `inverse` (link/unlink go through the dedup
+    // ledger, so they're undone by the opposite judgment).
+    const undoStack = [];
+    const redoStack = [];
+    function record(entry) {
+      undoStack.push(entry);
+      if (undoStack.length > 100) undoStack.shift();
+      redoStack.length = 0;
+      syncToolbar();
+    }
+    async function replay(entry) {
+      if (entry.rows) {
+        const res = await postJson("/api/relations/rows", { rows: entry.rows });
+        return { label: entry.label, rows: res.redo };
+      }
+      for (const call of entry.calls) await postJson(call.path, call.body);
+      return { label: entry.label, calls: entry.inverse, inverse: entry.calls };
+    }
+    let replaying = false;
+    async function step(from, to, verb) {
+      if (replaying || !from.length) return;
+      replaying = true;
+      const entry = from.pop();
+      try {
+        to.push(await replay(entry));
+        flash(`${verb}: ${entry.label}`);
+      } catch (err) {
+        from.push(entry);
+        showError(err.message);
+      } finally {
+        replaying = false;
+        syncToolbar();
+        refreshAfterEdit(currentEntryId);
+      }
+    }
+    const undo = () => step(undoStack, redoStack, "Undid");
+    const redo = () => step(redoStack, undoStack, "Redid");
+
+    // A short note under the toolbar for what just happened.
+    const flashEl = el("p", { className: "graph-flash", hidden: true });
+    let flashTimer = null;
+    function flash(text) {
+      flashEl.textContent = text;
+      flashEl.hidden = false;
+      clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => (flashEl.hidden = true), 4000);
+    }
+    section.appendChild(flashEl);
+
+    // Sends a `/api/songs/edit` operation and records its undo. A
+    // `different_song` block answers 409; `onBlocked` gets its message.
+    async function songEdit(label, payload, { onBlocked } = {}) {
+      errorEl.hidden = true;
+      const res = await fetch("/api/songs/edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      let body = {};
+      try {
+        body = await res.json();
+      } catch {}
+      if (!res.ok) {
+        if (res.status === 409 && onBlocked) onBlocked(body.message || "These are marked as different songs.");
+        else showError(body.message || `request failed (${res.status})`);
+        return false;
+      }
+      if (body.undo?.length) record({ label, rows: body.undo });
+      flash(label);
+      refreshAfterEdit(currentEntryId);
+      return true;
+    }
+
+    // Identity links go through the dedup ledger; undo sends the opposite.
+    async function identityEdit(label, call, inverse) {
+      errorEl.hidden = true;
+      try {
+        await postJson(call.path, call.body);
+      } catch (err) {
+        showError(err.message);
+        return;
+      }
+      record({ label, calls: [call], inverse: [inverse] });
+      flash(label);
+      refreshAfterEdit(currentEntryId);
+    }
+    const linkCall = (a, b) => ({ path: "/api/relations/link", body: { a, b } });
+    const unlinkCall = (a, b, force = false) => ({ path: "/api/relations/unlink", body: { a, b, force } });
+
+    document.addEventListener("keydown", (e) => {
+      if (currentMode !== "graph" || section.hidden) return;
+      const active = document.activeElement;
+      const typing = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT");
+      if (typing) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      } else if (mod && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        redo();
+      } else if (e.key === "Escape") {
+        resetSelection();
+      } else if (editing && viewMode === "song" && (e.key === "Delete" || e.key === "Backspace") && selection.size) {
+        e.preventDefault();
+        detachSelection();
+      }
+    });
 
     function showError(message) {
       errorEl.hidden = false;
       errorEl.textContent = message;
     }
 
+    // What tells versions with one title apart.
+    function nodeMeta(d) {
+      const bits = [];
+      if (d.artists?.length) bits.push(d.artists.join(", "));
+      const year = d.release_date && releaseYear(d.release_date);
+      if (year && year !== "—") bits.push(year);
+      if (d.duration_ms) bits.push(clockTime(d.duration_ms));
+      if (!d.placeholder) bits.push(catalogNo(d.entry_id));
+      if (d.identitySize > 1) bits.push(`${d.identitySize} uploads`);
+      return bits.join(" · ");
+    }
+    function clockTime(ms) {
+      const total = Math.round(ms / 1000);
+      return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+    }
+    // A node's name with its first artist, for pickers and role lines.
+    function nodeName(n) {
+      if (!n) return "?";
+      const title = n.title || catalogNo(n.entry_id);
+      if (n.placeholder || !n.title) return title;
+      // Versions mostly share a title: name the performer, else the entry.
+      return `${title} (${n.artists?.length ? n.artists[0] : catalogNo(n.entry_id)})`;
+    }
+    // "cover", "instrumental", ... for a `song_kind`; null when unknown.
+    function songKindText(kind) {
+      if (!kind) return null;
+      const text = kind.transformation || (kind.kind === "derived_from" ? null : kind.kind);
+      return text ? friendlyType(text.split(" ")[0]) : null;
+    }
+    const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+    function roleText(d) {
+      if (d.placeholder) return "This song's original isn't in the library, or no relation says which version it is.";
+      if (d.detached) return "Detached from this song. It stays here, faded, until you leave this song.";
+      if (!d.inSong) return viewMode === "song" ? "Not in this song." : null;
+      if (d.isOriginal) return "The original.";
+      const kind = songKindText(d.songKind);
+      const parent = d.songParent ?? d.songOriginal;
+      const what = kind ? capitalize(kind) : "A version";
+      if (parent == null) return `${what} of an unknown original.`;
+      return `${what} of ${nodeName(currentNodesById.get(String(parent))) || catalogNo(parent)}.`;
+    }
+    const button = (text, onclick, extra = {}) => el("button", { className: "ghost-btn", type: "button", text, onclick, ...extra });
+
+    // The transformation select, preset to `current`.
+    function kindSelect(current) {
+      return el(
+        "select",
+        { className: "graph-detail-relate-select", "aria-label": "Kind of version" },
+        TRANSFORMATIONS.map(([group, opts]) =>
+          el(
+            "optgroup",
+            { label: group },
+            opts.map(([value, label]) => el("option", { value, text: label, selected: value === (current || "") }))
+          )
+        )
+      );
+    }
+    const kindOf = (d) => d.songKind?.transformation?.split(" ")[0] || (d.songKind && d.songKind.kind !== "derived_from" ? d.songKind.kind : "");
+
     function renderDetail(data) {
       detailPanel.innerHTML = "";
+      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: data.title || catalogNo(data.entry_id) }));
+      const meta = nodeMeta(data);
       detailPanel.appendChild(
-        el("p", { className: "graph-detail-title", text: data.title || catalogNo(data.entry_id) })
+        el("p", { className: "graph-detail-type", text: [friendlyType(data.entry_type), meta].filter(Boolean).join(" · ") })
       );
-      detailPanel.appendChild(el("p", { className: "graph-detail-type", text: friendlyType(data.entry_type) }));
+      const role = roleText(data);
+      if (role) detailPanel.appendChild(el("p", { className: "graph-detail-role", text: role }));
       const sources = data.sources || [];
       if (sources.length) {
         const stamps = el("div", { className: "stamps" });
         for (const s of sources) stamps.appendChild(stamp(s.source, s.identifier, s.source in PLATFORM_COLOR));
         detailPanel.appendChild(stamps);
-      } else {
+      } else if (!data.placeholder) {
         detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: "No sources." }));
-      }
-      const roles = [];
-      if (data.editionSize > 1) {
-        roles.push(data.defaultEdition ? `Default edition of ${data.editionSize}.` : `One of ${data.editionSize} editions.`);
       }
       if (data.foldsInto != null) {
         const target = currentNodesById.get(String(data.foldsInto));
-        roles.push(`Plays score ${target ? endpointLabel(target) : catalogNo(data.foldsInto)}.`);
+        detailPanel.appendChild(
+          el("p", { className: "graph-detail-empty", text: `Plays score ${target ? nodeName(target) : catalogNo(data.foldsInto)}.` })
+        );
       }
-      for (const text of roles) detailPanel.appendChild(el("p", { className: "graph-detail-empty", text }));
+      if (data.placeholder) {
+        detailPanel.appendChild(
+          el("p", {
+            className: "graph-detail-empty",
+            text: editing
+              ? "Select the original and use Set as original, or drag it in from search and connect it."
+              : "Switch to Edit to set the original.",
+          })
+        );
+        return;
+      }
+      const actions = el("div", { className: "graph-detail-actions" });
+      if (viewMode === "song" && data.identitySize > 1) {
+        const open = expanded.has(data.identity);
+        actions.appendChild(
+          button(open ? "Collapse uploads" : `Show ${data.identitySize} uploads`, () => {
+            if (open) expanded.delete(data.identity);
+            else expanded.add(data.identity);
+            if (lastData) buildGraph(lastData);
+          })
+        );
+      }
       if (data.entry_id !== currentEntryId) {
+        actions.appendChild(button("Focus graph here", () => viewGraph(data.entry_id)));
+      }
+      if (actions.children.length) detailPanel.appendChild(actions);
+      if (data.detached) {
+        const parent = currentNodesById.get(String(data.formerParent));
         detailPanel.appendChild(
           el("div", { className: "graph-detail-actions" }, [
-            el("button", {
-              className: "ghost-btn",
-              type: "button",
-              text: "Focus graph here",
-              onclick: () => viewGraph(data.entry_id),
+            button(editing ? "Put back" : "Put back (switch to Edit)", () => {
+              if (!editing) return;
+              songEdit(`Put back ${nodeName(data)}`, {
+                op: "set_parent",
+                entries: [data.entry_id],
+                parent: parent ? data.formerParent : anchorOriginal(),
+                transformation: data.formerKind || null,
+                unblock: true,
+              });
             }),
           ])
         );
+        return;
       }
+      if (editing && viewMode === "song") detailPanel.appendChild(songActions([data]));
+    }
+
+    // Edit actions for one or more versions in song view.
+    function songActions(nodes) {
+      const box = el("div", { className: "graph-detail-edition" });
+      const inSong = nodes.filter((n) => n.inSong);
+      const outside = nodes.filter((n) => !n.inSong && !n.placeholder);
+      const ids = (list) => list.map((n) => n.entry_id);
+      if (outside.length) {
+        box.appendChild(
+          el("p", { className: "graph-detail-empty", text: "Attach to this song: pick what it was made from." })
+        );
+        const kind = kindSelect("cover");
+        box.appendChild(
+          el("div", { className: "graph-detail-relate" }, [
+            kind,
+            button("Attach under…", () => startPickParent(outside, kind.value)),
+          ])
+        );
+      }
+      if (!inSong.length) return box;
+      const single = inSong.length === 1 ? inSong[0] : null;
+      const kind = kindSelect(single ? kindOf(single) : "");
+      const relabel = button(single ? "Save kind" : "Apply kind", async () => {
+        // Each version keeps what it was made from; only the kind changes.
+        const byParent = new Map();
+        for (const n of inSong) {
+          const parent = n.songParent ?? n.songOriginal;
+          if (parent == null || n.isOriginal) continue;
+          if (!byParent.has(parent)) byParent.set(parent, []);
+          byParent.get(parent).push(n.entry_id);
+        }
+        if (!byParent.size) {
+          showError("Set the song's original first: a kind says what a version was made from.");
+          return;
+        }
+        const rows = [];
+        const label = `Mark ${inSong.length > 1 ? `${inSong.length} versions` : nodeName(single)} as ${friendlyType(kind.value || "other version")}`;
+        for (const [parent, entries] of byParent) {
+          const res = await rawSongEdit({ op: "set_parent", entries, parent, transformation: kind.value || null });
+          if (!res) break;
+          rows.push(...res);
+        }
+        if (rows.length) record({ label, rows });
+        flash(label);
+        refreshAfterEdit(currentEntryId);
+      });
+      box.appendChild(el("div", { className: "graph-detail-relate" }, [kind, relabel]));
+      const actions = el("div", { className: "graph-detail-actions" });
+      if (single && !single.isOriginal) {
+        actions.appendChild(
+          button("Set as original", () =>
+            songEdit(`Make ${nodeName(single)} the original`, { op: "set_original", entry: single.entry_id })
+          )
+        );
+      }
+      actions.appendChild(button("Move under…", () => startPickParent(inSong, kind.value)));
+      actions.appendChild(
+        button(inSong.length > 1 ? `Detach ${inSong.length} versions` : "Detach from song", () => detachNodes(inSong), {
+          title: "Take it out of this song for good (Delete)",
+        })
+      );
+      box.appendChild(actions);
+      return box;
+    }
+
+    // `songEdit` without the bookkeeping, for an action that sends several
+    // operations and records them as one undo step. Returns the undo rows,
+    // or null after showing the error.
+    async function rawSongEdit(payload) {
+      try {
+        return (await postJson("/api/songs/edit", payload)).undo || [];
+      } catch (err) {
+        showError(err.message);
+        return null;
+      }
+    }
+
+    function detachNodes(nodes) {
+      const leaving = nodes.filter((n) => n.inSong && !n.placeholder && !n.detached);
+      const entries = leaving.map((n) => n.entry_id);
+      if (!entries.length) return;
+      for (const n of leaving) {
+        detachedHere.set(n.identity ?? n.entry_id, {
+          ...n,
+          formerParent: n.songParent ?? n.songOriginal,
+          formerKind: kindOf(n),
+        });
+      }
+      const label = entries.length > 1 ? `Detach ${entries.length} versions` : `Detach ${nodeName(leaving[0])}`;
+      songEdit(label, { op: "detach", entries }).then((ok) => {
+        if (!ok) for (const n of leaving) detachedHere.delete(n.identity ?? n.entry_id);
+      });
+    }
+    function detachSelection() {
+      detachNodes([...selection].map((id) => currentNodesById.get(id)).filter(Boolean));
+    }
+
+    function renderSelection() {
+      const nodes = [...selection].map((id) => currentNodesById.get(id)).filter(Boolean);
+      detailPanel.innerHTML = "";
+      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: `${nodes.length} selected` }));
+      const list = el("ul", { className: "graph-selection-list" });
+      for (const n of nodes) list.appendChild(el("li", { text: `${nodeName(n)} · ${catalogNo(n.entry_id)}` }));
+      detailPanel.appendChild(list);
+      if (editing && viewMode === "song") detailPanel.appendChild(songActions(nodes));
+    }
+
+    function startPickParent(nodes, transformation) {
+      pickParent = { nodes, transformation };
+      syncToolbar();
+      detailPanel.innerHTML = "";
+      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: "Move under…" }));
+      detailPanel.appendChild(
+        el("p", {
+          className: "graph-detail-empty",
+          text: `Click the version ${nodes.length > 1 ? "these were" : `${nodeName(nodes[0])} was`} made from. Esc cancels.`,
+        })
+      );
+      detailPanel.appendChild(el("div", { className: "graph-detail-actions" }, [button("Cancel", () => resetSelection())]));
+    }
+
+    // The second half of "Move under…" (and of Connect in song view):
+    // `nodes` were made from `parent`.
+    function chooseParent({ nodes, transformation }, parent) {
+      pickParent = null;
+      syncToolbar();
+      if (parent.placeholder) {
+        showError("Pick a version in the library: the unknown original can't be a parent.");
+        return;
+      }
+      const entries = nodes.map((n) => n.entry_id).filter((id) => id !== parent.entry_id);
+      if (!entries.length) return;
+      const who = entries.length > 1 ? `${entries.length} versions` : nodeName(nodes.find((n) => n.entry_id === entries[0]));
+      const kind = transformation ? friendlyType(transformation) : "version";
+      const label = `Put ${who} under ${nodeName(parent)} as ${kind}`;
+      const payload = { op: "set_parent", entries, parent: parent.entry_id, transformation: transformation || null };
+      const blocked = (message) => showBlocked(message, () => songEdit(label, { ...payload, unblock: true }));
+      const sameSong = parent.inSong && nodes.every((n) => n.inSong);
+      if (sameSong || nodes.every((n) => n.inSong || n.alone)) {
+        songEdit(label, payload, { onBlocked: blocked });
+        return;
+      }
+      // Across songs: either take just these versions over, or merge the
+      // songs they're in.
+      detailPanel.innerHTML = "";
+      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: label }));
+      detailPanel.appendChild(
+        el("p", {
+          className: "graph-detail-empty",
+          text: "These belong to another song. Move only them, or merge their whole song into this one?",
+        })
+      );
+      detailPanel.appendChild(
+        el("div", { className: "graph-detail-actions" }, [
+          button("Move only these", () =>
+            songEdit(label, { op: "move", entries, parent: parent.entry_id, transformation: transformation || null })
+          ),
+          button("Merge the songs", () => songEdit(`Merge songs: ${label}`, payload, { onBlocked: blocked })),
+          button("Cancel", () => resetSelection()),
+        ])
+      );
+    }
+
+    function showBlocked(message, retry) {
+      detailPanel.innerHTML = "";
+      detailPanel.appendChild(el("p", { className: "graph-detail-title", text: "Marked as different songs" }));
+      detailPanel.appendChild(
+        el("p", { className: "graph-detail-empty", text: `${message}. Someone detached one from the other earlier.` })
+      );
+      detailPanel.appendChild(
+        el("div", { className: "graph-detail-actions" }, [
+          button("Attach anyway", retry, { title: "Lifts the block between the two songs" }),
+          button("Cancel", () => resetSelection()),
+        ])
+      );
     }
 
     // ---- SVG skeleton, built once — renderGraph()/update() below only
@@ -9707,11 +10306,14 @@
     // positions/zoom-pan; appended last so it always paints over every
     // node/edge it crosses. See `updatePendingLine`.
     const pendingLine = svgEl("line", { class: "pending-link-line" });
+    // The Cut tool's stroke, in world coordinates like the edges it cuts.
+    const cutPath = svgEl("polyline", { class: "cut-path" });
     viewport.appendChild(hullLayer);
     viewport.appendChild(edgeLayer);
     viewport.appendChild(nodeLayer);
     viewport.appendChild(labelLayer);
     viewport.appendChild(pendingLine);
+    viewport.appendChild(cutPath);
     svg.appendChild(defs);
     svg.appendChild(viewport);
     graphHost.appendChild(svg);
@@ -9734,7 +10336,9 @@
     }
     const zoomBehavior = d3
       .zoom()
-      .scaleExtent([0.3, 3])
+      .scaleExtent([0.15, 3])
+      // The Cut tool drags across the canvas; only the wheel zooms then.
+      .filter((event) => !(editing && tool === "cut") || event.type === "wheel")
       .on("zoom", (event) => {
         viewport.setAttribute("transform", event.transform.toString());
         currentZoomK = event.transform.k;
@@ -9759,17 +10363,29 @@
       }
       const nodes = Array.from(currentNodesById.values());
       if (!nodes.length) return;
-      const pad = GRAPH_NODE_RADIUS + 20;
-      const minX = Math.min(...nodes.map((n) => n.x)) - pad;
-      const maxX = Math.max(...nodes.map((n) => n.x)) + pad;
-      const minY = Math.min(...nodes.map((n) => n.y)) - pad;
-      const maxY = Math.max(...nodes.map((n) => n.y)) + pad;
+      const minX = Math.min(...nodes.map((n) => n.x));
+      const maxX = Math.max(...nodes.map((n) => n.x));
+      const minY = Math.min(...nodes.map((n) => n.y));
+      const maxY = Math.max(...nodes.map((n) => n.y));
       const rect = graphHost.getBoundingClientRect();
       const w = Math.max(rect.width, 200);
-      const h = Math.max(rect.height, 200);
-      const scale = Math.min(1.5, w / Math.max(maxX - minX, 1), h / Math.max(maxY - minY, 1));
-      const tx = w / 2 - scale * (minX + maxX) / 2;
-      const ty = h / 2 - scale * (minY + maxY) / 2;
+      // The detail panel floats over the canvas bottom in Graph mode: fit
+      // the graph into what it leaves visible.
+      const panelCover = detailPanel.parentElement === stage ? detailPanel.offsetHeight : 0;
+      const h = Math.max(rect.height - panelCover, 200);
+      // Labels keep their screen size at any zoom, so their room is
+      // reserved in screen pixels: half a label's width beside the
+      // outermost nodes, two lines below the lowest.
+      const sidePad = 22 * LABEL_CHAR_WIDTH * 0.5 + 8;
+      const topPad = GRAPH_NODE_RADIUS + 12;
+      const bottomPad = LABEL_OFFSET_Y + LABEL_LINE_HEIGHT * 2 + 8;
+      const scale = Math.min(
+        1.5,
+        Math.max(w - 2 * sidePad, 50) / Math.max(maxX - minX, 1),
+        Math.max(h - topPad - bottomPad, 50) / Math.max(maxY - minY, 1)
+      );
+      const tx = w / 2 - (scale * (minX + maxX)) / 2;
+      const ty = topPad + (h - topPad - bottomPad) / 2 - (scale * (minY + maxY)) / 2;
       d3.select(svg)
         .transition()
         .duration(300)
@@ -9779,7 +10395,7 @@
     function showHoverLabel(d) {
       const t = d3.zoomTransform(svg);
       const [x, y] = t.apply([d.x, d.y]);
-      hoverLabel.textContent = d.title || catalogNo(d.entry_id);
+      hoverLabel.textContent = nodeName(d);
       hoverLabel.style.left = `${x}px`;
       hoverLabel.style.top = `${y}px`;
       hoverLabel.hidden = false;
@@ -9795,6 +10411,10 @@
     // see the hint text above the graph), the same split as a node's own
     // hover-for-title vs. click-for-select/link.
     function edgeHoverText(d) {
+      if (d.edgeType === "tree") {
+        return `${capitalize(d.kindText || "version")} of ${truncateLabel(nodeName(d.source), 40)}`;
+      }
+      if (d.edgeType === "identity") return "same recording, another upload";
       if (d.edgeType === "structural") {
         const parts = ["structural"];
         if (d.discNo != null || d.trackNo != null) {
@@ -9979,7 +10599,7 @@
     // interpolated ones, so it takes plain `{x,y}` points rather than
     // reading `d.source`/`d.target` itself.
     function edgeLineCoords(d, source, target) {
-      if (d.edgeType === "structural" || d.directed) {
+      if (d.edgeType === "structural" || d.edgeType === "tree" || d.directed) {
         // Shorten the line short of the target node's edge so the
         // arrowhead is visible instead of hiding under the node shape.
         const dx = target.x - source.x;
@@ -10005,6 +10625,10 @@
           // both at once rather than picking them apart here.
           const { x1, y1, x2, y2 } = edgeLineCoords(d, d.source, d.target);
           d3.select(this).selectAll("line").attr("x1", x1).attr("y1", y1).attr("x2", x2).attr("y2", y2);
+          d3.select(this)
+            .select(".edge-label")
+            .attr("x", (x1 + x2) / 2)
+            .attr("y", (y1 + y2) / 2);
         });
       updateHulls();
       updateLabelVisibility();
@@ -10015,7 +10639,7 @@
     // `.edition-hull`); a group's nodes all carry its `editionGroup`.
     function updateHulls() {
       const groups = new Map();
-      for (const n of currentNodesById.values()) {
+      for (const n of viewMode === "raw" ? currentNodesById.values() : []) {
         if (n.editionGroup == null || !(n.editionSize > 1)) continue;
         if (!groups.has(n.editionGroup)) groups.set(n.editionGroup, []);
         groups.get(n.editionGroup).push([n.x, n.y]);
@@ -10044,19 +10668,26 @@
     // even though each label's own screen size stays fixed), so what's
     // droppable changes too — zooming in should reveal previously-hidden
     // labels once there's room, exactly like a map.
+    // A node's label: its title, then (song view) who performs it, since
+    // a song's versions mostly share one title.
+    function labelLines(n) {
+      const lines = [truncateLabel(n.title, 22) || catalogNo(n.entry_id)];
+      if (n.subtitle) lines.push(truncateLabel(n.subtitle, 22));
+      return lines;
+    }
     function updateLabelVisibility() {
       const t = d3.zoomTransform(svg);
       const boxes = Array.from(currentNodesById.values()).map((n) => {
         const [sx, sy] = t.apply([n.x, n.y]);
-        const label = truncateLabel(n.title, 22) || catalogNo(n.entry_id);
-        const halfWidth = (label.length * LABEL_CHAR_WIDTH) / 2;
+        const lines = labelLines(n);
+        const halfWidth = (Math.max(...lines.map((l) => Array.from(l).length)) * LABEL_CHAR_WIDTH) / 2;
         return {
           id: n.id,
           priority: GRAPH_LABEL_PRIORITY[n.kind] ?? 3,
           left: sx - halfWidth,
           right: sx + halfWidth,
           top: sy + LABEL_OFFSET_Y,
-          bottom: sy + LABEL_OFFSET_Y + LABEL_LINE_HEIGHT,
+          bottom: sy + LABEL_OFFSET_Y + LABEL_LINE_HEIGHT * lines.length,
         };
       });
       boxes.sort((a, b) => a.priority - b.priority);
@@ -10082,14 +10713,22 @@
         d.kind,
         `type-${d.entry_type || "unknown"}`,
         d.entry_id === selected ? "selected-for-link" : "",
-        d.editionSize > 1 && d.defaultEdition ? "edition-default" : "",
+        selection.has(d.id) ? "selected" : "",
+        d.editionSize > 1 && d.defaultEdition && viewMode === "raw" ? "edition-default" : "",
         d.foldsInto != null ? "edition-folded" : "",
+        d.isOriginal ? "song-original" : "",
+        d.placeholder ? "placeholder" : "",
+        d.detached ? "detached" : "",
+        d.identitySize > 1 && !expanded.has(d.identity) ? "stacked" : "",
+        d.conflict ? "conflict" : "",
       ]
         .filter(Boolean)
         .join(" ");
     }
     function edgeClass(d) {
       if (d.edgeType === "structural") return "edge structural";
+      if (d.edgeType === "tree") return d.placeholderParent ? "edge tree unknown" : "edge tree";
+      if (d.edgeType === "identity") return "edge identity-link";
       return [
         "edge",
         "dedup",
@@ -10109,6 +10748,7 @@
     // dedup edge missing a confidence value).
     function edgeMarker(d) {
       if (d.edgeType === "structural") return `url(#${STRUCTURAL_MARKER_ID})`;
+      if (d.edgeType === "tree") return `url(#${EDITION_MARKER_ID})`;
       return d.directed && d.enabled ? `url(#${EDITION_MARKER_ID})` : null;
     }
     function edgeStrokeWidth(d) {
@@ -10183,24 +10823,57 @@
       simulation.alphaTarget(ALPHA_DRAG).alpha(Math.max(simulation.alpha(), ALPHA_DRAG)).restart();
       d.fx = event.x;
       d.fy = event.y;
+      d.userPinned = true;
     }
     function dragEnded(event, d) {
       simulation.alphaTarget(0);
       const moved = Math.hypot(event.x - d.__dragStartEventX, event.y - d.__dragStartEventY);
       if (moved >= 5) return;
+      // A click that wobbled a pixel or two isn't a placement: back to its
+      // spot in the tree.
+      if (d.treeX != null && d.userPinned) {
+        d.userPinned = false;
+        d.fx = centerX + d.treeX;
+        d.fy = centerY + d.treeY;
+      }
       // Shift-click re-anchors the graph on that entry (a real navigation —
       // pushes history, morphs onto its relations, same as clicking it in
       // the rail search while Graph mode is open) rather than the plain
       // click's link-selection, so the two gestures can't be confused for
       // each other on the same node. Only Library mode's `viewEntry` leaves
       // the graph behind entirely; nothing here should do that.
-      if (event.sourceEvent?.shiftKey) {
+      if (event.sourceEvent?.shiftKey && !d.placeholder) {
         if (currentMode === "graph") viewGraph(d.entry_id);
         else viewEntry(d.entry_id);
         return;
       }
-      renderDetail(d);
-      onNodeClick(d.entry_id);
+      handleNodeClick(event.sourceEvent || {}, d);
+    }
+
+    // View mode inspects; Edit mode's Select tool selects (Ctrl+click
+    // adds), Connect picks two versions, and a pending "Move under…" takes
+    // the clicked node as the parent.
+    function handleNodeClick(source, d) {
+      errorEl.hidden = true;
+      if (pickParent) {
+        chooseParent(pickParent, d);
+        return;
+      }
+      if (editing && tool === "connect" && !d.placeholder) {
+        onNodeClick(d.entry_id);
+        return;
+      }
+      if (editing && (source.ctrlKey || source.metaKey) && !d.placeholder) {
+        if (selection.has(d.id)) selection.delete(d.id);
+        else selection.add(d.id);
+      } else {
+        selection.clear();
+        selection.add(d.id);
+      }
+      d3.select(nodeLayer).selectAll(".node").attr("class", nodeClass);
+      if (selection.size > 1) renderSelection();
+      else if (selection.size === 1) renderDetail(currentNodesById.get([...selection][0]));
+      else resetSelection();
     }
     const dragBehavior = d3.drag().on("start", dragStarted).on("drag", dragged).on("end", dragEnded);
 
@@ -10238,10 +10911,12 @@
           // A dragged node's own `fx`/`fy` (set by `dragged()`) is a
           // deliberate, user-placed pin and carries over across refetches —
           // unlike the old auto-pin on the anchor node, this one only ever
-          // exists because the user put it there.
-          if (prev.fx !== undefined) {
+          // exists because the user put it there. Song view's tree pins
+          // (below) don't carry over: they're recomputed every time.
+          if (prev.userPinned) {
             n.fx = prev.fx;
             n.fy = prev.fy;
+            n.userPinned = true;
           }
         } else if (n.id === anchorId) {
           // Seed (not pin) the anchor at the container's center so the
@@ -10252,6 +10927,16 @@
         } else {
           n.x = hashUnit(n.id, "x") * w;
           n.y = hashUnit(n.id, "y") * h;
+        }
+        // Song view lays the tree out itself (`layoutSongTree`): pin each
+        // node to its spot unless the user placed it.
+        if (n.treeX != null && !n.userPinned) {
+          n.fx = centerX + n.treeX;
+          n.fy = centerY + n.treeY;
+          if (!prev) {
+            n.x = n.fx;
+            n.y = n.fy;
+          }
         }
       }
 
@@ -10337,7 +11022,21 @@
           (exit) => exit.transition().duration(200).attr("opacity", 0).remove()
         )
         .attr("transform", labelTransform)
-        .text((d) => truncateLabel(d.title, 22) || catalogNo(d.entry_id));
+        .classed("detached-label", (d) => Boolean(d.detached))
+        .each(function (d) {
+          const text = d3.select(this);
+          text.selectAll("tspan").remove();
+          labelLines(d).forEach((line, i) =>
+            text
+              .append("tspan")
+              // Only later lines set x/dy: the first keeps the text's own
+              // offset below the node.
+              .attr("x", i ? 0 : null)
+              .attr("dy", i ? LABEL_LINE_HEIGHT : null)
+              .attr("class", i ? "node-sublabel" : null)
+              .text(line)
+          );
+        });
 
       const edgeJoinSel = d3
         .select(edgeLayer)
@@ -10357,6 +11056,7 @@
             // identical coordinates every tick — see `ticked()`.
             g.append("line").attr("class", "edge-hit");
             g.append("line").attr("class", edgeClass);
+            g.append("text").attr("class", "edge-label").attr("text-anchor", "middle").attr("dy", -3);
             // Click used to act immediately on a dedup edge (unlink, or
             // force-block on shift-click) — with only two outcomes that was
             // fine, but RELATE_KINDS adds a whole taxonomy of possible
@@ -10380,8 +11080,9 @@
         );
       // Set on every update, not just on enter: a refetch can give an
       // existing edge a direction (derive) or take it away (removed).
+      edgeJoinSel.select(".edge-label").text((d) => (d.edgeType === "tree" ? d.kindText || "" : ""));
       edgeJoinSel
-        .select("line:last-child")
+        .select("line:nth-of-type(2)")
         .attr("class", edgeClass)
         .attr("marker-end", edgeMarker)
         .style("stroke-width", edgeStrokeWidth);
@@ -10506,6 +11207,188 @@
     // original → derived (`directed`), the way structural edges run
     // release → track.
     function buildGraph(data) {
+      syncToolbar();
+      const members = viewMode === "song" ? songMembers(data) : null;
+      if (members) {
+        buildSongGraph(data, members);
+        return;
+      }
+      buildRawGraph(data);
+    }
+
+    const PLACEHOLDER_ID = "unknown-original";
+    const anchorOriginal = () => lastData?.nodes.find((n) => n.entry_id === currentEntryId)?.song_original ?? null;
+
+    // The anchor's song: every track node in its edition group. Null when
+    // the anchor isn't a track (song view then shows all relations).
+    function songMembers(data) {
+      const anchor = data.nodes.find((n) => n.entry_id === currentEntryId);
+      if (!anchor || anchor.entry_type !== "track") return null;
+      return data.nodes.filter((n) => n.entry_type === "track" && n.edition_group === anchor.edition_group);
+    }
+
+    // The fields every node datum carries, from a relations-response node.
+    function nodeFields(n) {
+      return {
+        id: String(n.entry_id),
+        entry_id: n.entry_id,
+        title: n.title,
+        entry_type: n.entry_type,
+        sources: n.sources,
+        artists: n.artists || [],
+        release_date: n.release_date,
+        duration_ms: n.duration_ms,
+        identity: n.identity,
+        identitySize: n.identity_size || 1,
+        editionGroup: n.edition_group,
+        editionSize: n.edition_size,
+        defaultEdition: n.default_edition,
+        foldsInto: n.folds_into,
+        songOriginal: n.song_original,
+        songParent: n.song_parent,
+        songKind: n.song_kind,
+      };
+    }
+
+    // One node per recording (its uploads collapsed unless `expanded`),
+    // each version under what it was made from, else under the original,
+    // else under a placeholder for the unknown original.
+    function buildSongGraph(data, members) {
+      removedToggleText.textContent = "Show removed links";
+      const anchor = members.find((n) => n.entry_id === currentEntryId);
+      const original = anchor.song_original;
+      const identityOf = new Map(data.nodes.map((n) => [n.entry_id, n.identity ?? n.entry_id]));
+      // An edition row inside one recording's uploads contradicts itself
+      // (a cover of its own upload): flag that recording.
+      const conflicted = new Set(
+        data.edges
+          .filter((e) => e.enabled && EDITION_KIND_SET.has(e.kind))
+          .filter((e) => identityOf.get(e.entry_a) === identityOf.get(e.entry_b))
+          .map((e) => identityOf.get(e.entry_a))
+      );
+      const byIdentity = new Map();
+      for (const n of members) {
+        if (!byIdentity.has(n.identity)) byIdentity.set(n.identity, []);
+        byIdentity.get(n.identity).push(n);
+      }
+      const nodes = [];
+      const links = [];
+      for (const [identity, uploads] of byIdentity) {
+        const rep = uploads.find((n) => n.entry_id === identity) || uploads[0];
+        const open = expanded.has(identity) && uploads.length > 1;
+        const base = {
+          ...nodeFields(rep),
+          id: String(identity),
+          entry_id: identity,
+          subtitle: rep.artists?.[0],
+          sources: open ? rep.sources : uploads.flatMap((n) => n.sources || []),
+          inSong: true,
+          isOriginal: identity === original,
+          conflict: conflicted.has(identity),
+          kind: uploads.some((n) => n.entry_id === currentEntryId) && !open ? "self" : "member",
+        };
+        if (open && rep.entry_id === currentEntryId) base.kind = "self";
+        nodes.push(base);
+        if (!open) continue;
+        for (const upload of uploads) {
+          if (upload === rep) continue;
+          nodes.push({
+            ...nodeFields(upload),
+            subtitle: upload.artists?.[0],
+            inSong: true,
+            uploadOf: identity,
+            kind: upload.entry_id === currentEntryId ? "self" : "member",
+          });
+          links.push({
+            id: `upload-${upload.entry_id}`,
+            source: String(identity),
+            target: String(upload.entry_id),
+            edgeType: "identity",
+            entry_a: identity,
+            entry_b: upload.entry_id,
+          });
+        }
+      }
+      if (original == null) {
+        nodes.push({ id: PLACEHOLDER_ID, placeholder: true, title: "Unknown original", kind: "member", inSong: true });
+      }
+      for (const [identity, ghost] of detachedHere) {
+        if (byIdentity.has(identity)) continue; // put back since
+        nodes.push({ ...ghost, id: String(identity), entry_id: identity, inSong: false, detached: true, kind: "member" });
+      }
+      for (const [identity, uploads] of byIdentity) {
+        if (identity === original) continue;
+        const rep = uploads.find((n) => n.entry_id === identity) || uploads[0];
+        const parent = rep.song_parent ?? original;
+        links.push({
+          id: `tree-${identity}`,
+          source: parent == null ? PLACEHOLDER_ID : String(parent),
+          target: String(identity),
+          edgeType: "tree",
+          kindText: songKindText(rep.song_kind),
+          child: identity,
+          parent,
+          placeholderParent: parent == null,
+        });
+      }
+      layoutSongTree(nodes, links, original == null ? PLACEHOLDER_ID : String(original));
+      update(nodes, links);
+      // Every node is pinned, so the simulation has nothing to settle and
+      // its "end" (which frames the view) may never come.
+      suppressNextFit = false;
+      fitToContent();
+    }
+
+    // Rings by depth around the root: the original's versions on the
+    // first, versions made from those further out, spaced by leaf count so
+    // a 50-version song still has room. Uploads sit beside their recording.
+    function layoutSongTree(nodes, links, rootId) {
+      const children = new Map();
+      for (const l of links) {
+        if (l.edgeType !== "tree") continue;
+        if (!children.has(l.source)) children.set(l.source, []);
+        children.get(l.source).push(l.target);
+      }
+      for (const list of children.values()) list.sort((a, b) => Number(a) - Number(b));
+      const root = d3.hierarchy(rootId, (id) => children.get(id));
+      const leaves = root.leaves().length;
+      const radius = Math.max(130, (leaves * 74) / (2 * Math.PI));
+      d3.tree()
+        .size([2 * Math.PI, 1])
+        .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)(root);
+      const byId = new Map(nodes.map((n) => [n.id, n]));
+      for (const h of root.descendants()) {
+        const node = byId.get(h.data);
+        if (!node) continue;
+        const r = h.depth === 0 ? 0 : radius + (h.depth - 1) * 120;
+        node.treeX = r * Math.sin(h.x);
+        node.treeY = -r * Math.cos(h.x);
+      }
+      const ghosts = nodes.filter((n) => n.detached);
+      const outer = radius + Math.max((root.height || 1) - 1, 0) * 120 + 90;
+      ghosts.forEach((n, i) => {
+        const angle = (2 * Math.PI * (i + 0.5)) / Math.max(ghosts.length, 8) - Math.PI / 2;
+        n.treeX = outer * Math.cos(angle);
+        n.treeY = outer * Math.sin(angle);
+      });
+      const uploadsOf = new Map();
+      for (const n of nodes) {
+        if (n.uploadOf == null) continue;
+        if (!uploadsOf.has(n.uploadOf)) uploadsOf.set(n.uploadOf, []);
+        uploadsOf.get(n.uploadOf).push(n);
+      }
+      for (const [identity, uploads] of uploadsOf) {
+        const owner = byId.get(String(identity));
+        if (owner?.treeX == null) continue;
+        uploads.forEach((n, i) => {
+          const angle = (2 * Math.PI * (i + 0.5)) / uploads.length;
+          n.treeX = owner.treeX + 56 * Math.cos(angle);
+          n.treeY = owner.treeY + 56 * Math.sin(angle);
+        });
+      }
+    }
+
+    function buildRawGraph(data) {
       const removedCount = data.edges.filter((e) => !e.enabled).length;
       removedToggleText.textContent = removedCount ? `Show removed links (${removedCount})` : "Show removed links";
       const shownEdges = data.edges.filter(
@@ -10541,15 +11424,7 @@
       const nodes = data.nodes
         .filter((n) => reachable.has(n.entry_id))
         .map((n) => ({
-          id: String(n.entry_id),
-          entry_id: n.entry_id,
-          title: n.title,
-          entry_type: n.entry_type,
-          sources: n.sources,
-          editionGroup: n.edition_group,
-          editionSize: n.edition_size,
-          defaultEdition: n.default_edition,
-          foldsInto: n.folds_into,
+          ...nodeFields(n),
           kind: n.entry_id === currentEntryId ? "self" : memberIds.has(n.entry_id) ? "member" : "structural",
         }));
       const links = [];
@@ -10593,13 +11468,10 @@
     //
     // `a`/`b` is the pair edited: it stays drawn even once disabled (see
     // `touchedPairs`), so the edit can be undone from the same edge.
-    function afterEdit(promise, a, b) {
+    // Keeps an edited pair drawn in All relations even once disabled, so
+    // the edit can be undone from the same edge.
+    function touch(a, b) {
       touchedPairs.add(pairKey(a, b));
-      promise
-        .then(() => {
-          refreshAfterEdit(currentEntryId);
-        })
-        .catch((err) => showError(err.message));
     }
 
     // The node-picking half of "create a link": first click arms `selected`
@@ -10644,27 +11516,65 @@
       const nodeB = currentNodesById.get(String(b));
       detailPanel.innerHTML = "";
       detailPanel.appendChild(el("p", { className: "graph-detail-title", text: "New connection" }));
+      if (viewMode === "song") {
+        // First click: what it was made from; second: the version.
+        let [from, to] = [nodeA, nodeB];
+        const line = el("p", { className: "graph-detail-type" });
+        const sync = () => (line.textContent = `${nodeName(to)} was made from ${nodeName(from)}`);
+        sync();
+        detailPanel.appendChild(line);
+        const kind = kindSelect("cover");
+        detailPanel.appendChild(el("div", { className: "graph-detail-fields" }, [kind]));
+        detailPanel.appendChild(
+          el("div", { className: "graph-detail-actions" }, [
+            button("Save", () => chooseParent({ nodes: [to], transformation: kind.value }, from)),
+            button("Swap", () => {
+              [from, to] = [to, from];
+              sync();
+            }),
+            button("Same recording instead", () => {
+              touch(a, b);
+              identityEdit(`Link ${nodeName(nodeA)} and ${nodeName(nodeB)} as one recording`, linkCall(a, b), unlinkCall(a, b));
+            }),
+            button("Cancel", () => resetSelection()),
+          ])
+        );
+        return;
+      }
       detailPanel.appendChild(
-        el("p", { className: "graph-detail-type", text: `${endpointLabel(nodeA)} ↔ ${endpointLabel(nodeB)}` })
+        el("p", { className: "graph-detail-type", text: `${nodeName(nodeA)} ↔ ${nodeName(nodeB)}` })
       );
       const connection = connectionControls(
-        (side) => `${truncateLabel(endpointLabel(side === "a" ? nodeA : nodeB), 32)} (${catalogNo(side === "a" ? a : b)})`,
+        (side) => `${truncateLabel(nodeName(side === "a" ? nodeA : nodeB), 40)} (${catalogNo(side === "a" ? a : b)})`,
         { identity: true }
       );
       detailPanel.appendChild(el("div", { className: "graph-detail-fields" }, connection.elements));
-      const actions = el("div", { className: "graph-detail-actions" });
-      actions.appendChild(
-        el("button", {
-          className: "ghost-btn",
-          type: "button",
-          text: "Create",
-          onclick: () => afterEdit(connection.request(a, b), a, b),
-        })
+      const [kindEl, originalEl] = connection.elements;
+      const create = () => {
+        touch(a, b);
+        const value = kindEl.value;
+        if (value === "identity") {
+          identityEdit(`Link ${nodeName(nodeA)} and ${nodeName(nodeB)}`, linkCall(a, b), unlinkCall(a, b));
+        } else if (value.startsWith("edition:")) {
+          if (!originalEl.value) {
+            showError("Pick which entry is the original.");
+            return;
+          }
+          const [original, derived] = originalEl.value === "a" ? [a, b] : [b, a];
+          const transformation = value.slice("edition:".length) || null;
+          songEdit(`Mark ${nodeName(currentNodesById.get(String(derived)))} as ${friendlyType(transformation || "version")}`, {
+            op: "derive",
+            original,
+            derived,
+            transformation,
+          });
+        } else {
+          songEdit(`Relate as ${friendlyType(value)}`, { op: "relate", a, b, kind: value });
+        }
+      };
+      detailPanel.appendChild(
+        el("div", { className: "graph-detail-actions" }, [button("Create", create), button("Cancel", () => resetSelection())])
       );
-      actions.appendChild(
-        el("button", { className: "ghost-btn", type: "button", text: "Cancel", onclick: () => resetSelection() })
-      );
-      detailPanel.appendChild(actions);
     }
 
     // Buttons for whatever the server accepts on this edge's kind: the
@@ -10674,51 +11584,44 @@
     // for any other kind (provider `arrangement`, pipeline-only rows).
     function edgeDetailActions(d) {
       const actions = el("div", { className: "graph-detail-actions" });
-      const button = (text, onclick) => el("button", { className: "ghost-btn", type: "button", text, onclick });
-      const edit = (promise) => afterEdit(promise, d.entry_a, d.entry_b);
-      const pair = { a: d.entry_a, b: d.entry_b, kind: d.kind };
+      const { entry_a: a, entry_b: b } = d;
+      const names = `${nodeName(currentNodesById.get(String(a)))} and ${nodeName(currentNodesById.get(String(b)))}`;
+      const rows = [{ a, b, kind: d.kind }];
+      const toggle = (enable, label) =>
+        button(label, () => {
+          touch(a, b);
+          songEdit(`${label}: ${names}`, { op: enable ? "enable" : "disable", rows });
+        });
       if (IDENTITY_KIND_SET.has(d.kind) || d.kind === "different_identity") {
         const linked = d.state === "active";
         const blocked = d.state === "blocked";
+        const identity = (label, call, inverse) =>
+          button(label, () => {
+            touch(a, b);
+            identityEdit(`${label}: ${names}`, call, inverse);
+          });
         if (!linked) {
           actions.appendChild(
-            button(blocked ? "Link anyway (same identity)" : "Link (same identity)", () =>
-              edit(postJson("/api/relations/link", { a: d.entry_a, b: d.entry_b }))
-            )
+            identity(blocked ? "Link anyway (same identity)" : "Link (same identity)", linkCall(a, b), unlinkCall(a, b, blocked))
           );
         }
-        if (linked) {
-          actions.appendChild(
-            button("Unlink", () => edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false })))
-          );
-        }
+        if (linked) actions.appendChild(identity("Unlink", unlinkCall(a, b), linkCall(a, b)));
         actions.appendChild(
           blocked
-            ? button("Soften block", () =>
-                edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: false }))
-              )
-            : button("Force block", () =>
-                edit(postJson("/api/relations/unlink", { a: d.entry_a, b: d.entry_b, force: true }))
-              )
+            ? identity("Soften block", unlinkCall(a, b), unlinkCall(a, b, true))
+            : identity("Force block", unlinkCall(a, b, true), linked ? linkCall(a, b) : unlinkCall(a, b))
         );
-      } else if (TOGGLE_RELATION_KIND_SET.has(d.kind)) {
-        actions.appendChild(
-          d.enabled
-            ? button("Remove relation", () => edit(postJson("/api/relations/unrelate", pair)))
-            : button("Restore relation", () => edit(postJson("/api/relations/restore", pair)))
-        );
-      } else if (RELATE_KIND_SET.has(d.kind)) {
-        actions.appendChild(
-          d.enabled
-            ? button("Remove relation", () => edit(postJson("/api/relations/unrelate", pair)))
-            : button("Restore relation", () => edit(postJson("/api/relations/relate", pair)))
-        );
+      } else if (d.kind === "different_song") {
+        actions.appendChild(d.enabled ? toggle(false, "Lift block") : toggle(true, "Restore block"));
+      } else if (TOGGLE_RELATION_KIND_SET.has(d.kind) || RELATE_KIND_SET.has(d.kind)) {
+        actions.appendChild(d.enabled ? toggle(false, "Remove relation") : toggle(true, "Restore relation"));
       }
       return actions;
     }
 
     function isEditableKind(kind) {
       return (
+        kind === "different_song" ||
         IDENTITY_KIND_SET.has(kind) ||
         kind === "different_identity" ||
         TOGGLE_RELATION_KIND_SET.has(kind) ||
@@ -10742,8 +11645,10 @@
           className: "ghost-btn",
           type: "button",
           text: "Add relation",
-          onclick: () =>
-            afterEdit(postJson("/api/relations/relate", { a: entryA, b: entryB, kind: select.value }), entryA, entryB),
+          onclick: () => {
+            touch(entryA, entryB);
+            songEdit(`Relate as ${friendlyType(select.value)}`, { op: "relate", a: entryA, b: entryB, kind: select.value });
+          },
         }),
       ]);
     }
@@ -10787,15 +11692,14 @@
           showError("Pick which entry is the original.");
           return;
         }
-        afterEdit(
-          postJson("/api/relations/derive", {
-            original: from,
-            derived: from === d.entry_a ? d.entry_b : d.entry_a,
-            transformation: kind.value || null,
-          }),
-          d.entry_a,
-          d.entry_b
-        );
+        const derived = from === d.entry_a ? d.entry_b : d.entry_a;
+        touch(d.entry_a, d.entry_b);
+        songEdit(`Mark ${nodeName(currentNodesById.get(String(derived)))} as ${friendlyType(kind.value || "version")}`, {
+          op: "derive",
+          original: from,
+          derived,
+          transformation: kind.value || null,
+        });
       };
       return el("div", { className: "graph-detail-edition" }, [
         el("p", { className: "graph-detail-empty", text: d.enabled ? "Edit as an edition:" : "Accept as an edition:" }),
@@ -10813,6 +11717,36 @@
 
     function showEdgeDetail(d) {
       detailPanel.innerHTML = "";
+      errorEl.hidden = true;
+      if (d.edgeType === "tree") {
+        const child = d.target;
+        const kindText = d.kindText || "version";
+        detailPanel.appendChild(
+          el("p", {
+            className: "graph-detail-title",
+            text: d.placeholderParent ? `${capitalize(kindText)} of an unknown original` : `${capitalize(kindText)} of ${nodeName(d.source)}`,
+          })
+        );
+        detailPanel.appendChild(el("p", { className: "graph-detail-type", text: `${nodeName(child)} · ${nodeMeta(child)}` }));
+        if (!editing) {
+          detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: "Switch to Edit to change it." }));
+          return;
+        }
+        detailPanel.appendChild(songActions([child]));
+        return;
+      }
+      if (d.edgeType === "identity") {
+        detailPanel.appendChild(el("p", { className: "graph-detail-title", text: "Same recording" }));
+        detailPanel.appendChild(
+          el("p", { className: "graph-detail-type", text: `${nodeName(d.target)} is another upload of ${nodeName(d.source)}` })
+        );
+        if (editing) {
+          detailPanel.appendChild(
+            el("div", { className: "graph-detail-actions" }, [button("Separate this upload", () => separateUpload(d.target.entry_id))])
+          );
+        }
+        return;
+      }
       if (d.edgeType === "structural") {
         detailPanel.appendChild(el("p", { className: "graph-detail-title", text: "Release/track structure" }));
         detailPanel.appendChild(
@@ -10859,12 +11793,123 @@
           })
         );
       }
+      if (!editing) {
+        if (isEditableKind(d.kind)) {
+          detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: "Switch to Edit to change it." }));
+        }
+        return;
+      }
       detailPanel.appendChild(edgeDetailActions(d));
       if (EDITION_KIND_SET.has(d.kind) && d.origin !== "provider") {
         detailPanel.appendChild(editionEditor(d));
       }
       const other = otherRelationPicker(d.entry_a, d.entry_b);
       if (other) detailPanel.appendChild(other);
+    }
+
+    // Unlinks every `same_identity` row on `entryId`, so that upload stands
+    // as its own recording; undo links them again.
+    function separateUpload(entryId) {
+      const rows = (lastData?.edges || []).filter(
+        (e) => e.enabled && IDENTITY_KIND_SET.has(e.kind) && (e.entry_a === entryId || e.entry_b === entryId)
+      );
+      if (!rows.length) {
+        showError("No direct link on this upload: it's joined through another one. Use All relations to unlink it there.");
+        return;
+      }
+      identityEditMany(
+        `Separate ${catalogNo(entryId)} from its recording`,
+        rows.map((r) => unlinkCall(r.entry_a, r.entry_b)),
+        rows.map((r) => linkCall(r.entry_a, r.entry_b))
+      );
+    }
+    async function identityEditMany(label, calls, inverse) {
+      errorEl.hidden = true;
+      try {
+        for (const call of calls) await postJson(call.path, call.body);
+      } catch (err) {
+        showError(err.message);
+        refreshAfterEdit(currentEntryId);
+        return;
+      }
+      record({ label, calls, inverse });
+      flash(label);
+      refreshAfterEdit(currentEntryId);
+    }
+
+    // ---- the Cut tool: drag a stroke across lines to cut them ----
+    let cutting = null;
+    function drawCut() {
+      cutPath.setAttribute("points", (cutting || []).map((p) => p.join(",")).join(" "));
+      cutPath.classList.toggle("visible", Boolean(cutting));
+    }
+    svg.addEventListener("pointerdown", (event) => {
+      if (!(editing && tool === "cut") || event.button !== 0 || event.target.closest(".node")) return;
+      cutting = [d3.pointer(event, viewport)];
+      svg.setPointerCapture(event.pointerId);
+      drawCut();
+    });
+    svg.addEventListener("pointermove", (event) => {
+      if (!cutting) return;
+      cutting.push(d3.pointer(event, viewport));
+      drawCut();
+    });
+    svg.addEventListener("pointerup", () => {
+      if (!cutting) return;
+      const stroke = cutting;
+      cutting = null;
+      drawCut();
+      if (stroke.length > 1) cutEdges(edgesCrossing(stroke));
+    });
+    // Proper segment intersection (orientation test); touching endpoints
+    // don't count, so a stroke ending on a node doesn't cut its edges.
+    function segmentsCross([ax, ay], [bx, by], [cx, cy], [dx, dy]) {
+      const orient = (px, py, qx, qy, rx, ry) => Math.sign((qx - px) * (ry - py) - (qy - py) * (rx - px));
+      return (
+        orient(ax, ay, bx, by, cx, cy) * orient(ax, ay, bx, by, dx, dy) < 0 &&
+        orient(cx, cy, dx, dy, ax, ay) * orient(cx, cy, dx, dy, bx, by) < 0
+      );
+    }
+    function edgesCrossing(stroke) {
+      return currentLinks.filter((l) => {
+        const from = [l.source.x, l.source.y];
+        const to = [l.target.x, l.target.y];
+        for (let i = 1; i < stroke.length; i++) {
+          if (segmentsCross(stroke[i - 1], stroke[i], from, to)) return true;
+        }
+        return false;
+      });
+    }
+    function cutEdges(edges) {
+      if (!edges.length) {
+        flash("The stroke didn't cross any line.");
+        return;
+      }
+      const identityRows = [];
+      if (viewMode === "song") {
+        const children = [...new Set(edges.filter((e) => e.edgeType === "tree").map((e) => e.child))];
+        if (children.length) {
+          detachNodes(children.map((id) => currentNodesById.get(String(id))).filter(Boolean));
+        }
+        for (const e of edges.filter((e) => e.edgeType === "identity")) separateUpload(e.target.entry_id);
+        return;
+      }
+      const rows = [];
+      for (const e of edges) {
+        if (e.edgeType !== "dedup" || !e.enabled) continue;
+        touch(e.entry_a, e.entry_b);
+        if (IDENTITY_KIND_SET.has(e.kind)) identityRows.push(e);
+        else if (e.kind !== "different_identity") rows.push({ a: e.entry_a, b: e.entry_b, kind: e.kind });
+      }
+      if (rows.length) songEdit(`Cut ${rows.length} relation${rows.length > 1 ? "s" : ""}`, { op: "disable", rows });
+      if (identityRows.length) {
+        identityEditMany(
+          `Unlink ${identityRows.length} identity link${identityRows.length > 1 ? "s" : ""}`,
+          identityRows.map((e) => unlinkCall(e.entry_a, e.entry_b)),
+          identityRows.map((e) => linkCall(e.entry_a, e.entry_b))
+        );
+      }
+      if (!rows.length && !identityRows.length) flash("Nothing editable on those lines.");
     }
 
     graphHost.addEventListener("dragover", (e) => {
@@ -10896,12 +11941,20 @@
         entry_type: dropped.entry_type,
         sources: ownMember?.sources || dropped.sources || [],
         kind: "member",
+        inSong: false,
+        // No other versions: attaching it can't split anything.
+        alone: (dropped.editions || []).length <= 1,
         x,
         y,
         fx: x,
         fy: y,
+        userPinned: true,
       };
       update(Array.from(currentNodesById.values()).concat([newNode]), currentLinks);
+      selection.clear();
+      selection.add(newNode.id);
+      d3.select(nodeLayer).selectAll(".node").attr("class", nodeClass);
+      renderDetail(newNode);
     });
 
     const mergeBtn = el("button", { className: "ghost-btn", type: "button", text: "Merge with…" });
@@ -10939,10 +11992,15 @@
     function resetSelection() {
       selected = null;
       pickerOpen = false;
+      pickParent = null;
+      selection.clear();
+      cutting = null;
+      drawCut();
+      syncToolbar();
       updatePendingLine();
       d3.select(nodeLayer).selectAll(".node").attr("class", nodeClass);
       detailPanel.innerHTML = "";
-      detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: "Click a node for details." }));
+      detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: "Click a version for its details." }));
       errorEl.hidden = true;
     }
 
@@ -10951,7 +12009,10 @@
     // on `entryId` and re-fetches/re-joins onto the live node/link data,
     // which is what produces the morph described above.
     function load(entryId, entryType, softLinkedIds) {
-      if (entryId !== currentEntryId) touchedPairs.clear();
+      if (entryId !== currentEntryId) {
+        touchedPairs.clear();
+        detachedHere.clear();
+      }
       currentEntryId = entryId;
       currentEntryType = entryType;
       currentSoftLinkedIds = softLinkedIds || [];
