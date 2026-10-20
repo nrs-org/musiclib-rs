@@ -130,8 +130,9 @@ pub struct MusicBrainzConfig {
     /// recording-recording relations) also fetch the *original* recording as
     /// a child, linked by a directed `entry_relation` row so both land in
     /// one switchable "edition" group. The `cover`/arrangement path costs an
-    /// extra `work/{id}` API call per such relation encountered; set to
-    /// `false` to skip all of this and fetch only the recording itself.
+    /// extra original-recording lookup per such relation encountered. Set
+    /// to `false` to skip original discovery; performed works are still
+    /// looked up for their writing credits and song grouping.
     #[serde(default = "MusicBrainzConfig::default_resolve_original_recordings")]
     pub resolve_original_recordings: bool,
 }
