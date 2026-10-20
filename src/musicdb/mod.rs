@@ -572,6 +572,12 @@ pub const SAME_IDENTITY: &str = "same_identity";
 /// (see `pipeline::flush`).
 pub const PROVIDER_ORIGIN: &str = "provider";
 pub const DIFFERENT_IDENTITY: &str = "different_identity";
+/// A person's judgment that two entries are versions of different songs:
+/// a cannot-link for edition groups, the way `different_identity` is for
+/// identity. `build_edition_projection` refuses any edition edge that would
+/// put both ends into one group, so a detached entry can't drift back in
+/// through some other path.
+pub const DIFFERENT_SONG: &str = "different_song";
 
 // Primitive relation predicates from the dedup-v2 ontology (see
 // docs/dedup-v2.md, docs/dedup-label-schema-v2.json). These are additive:
@@ -782,6 +788,17 @@ pub struct EditionProjection {
     /// Degenerate edition (see `DEGENERATE_MARKERS`) -> the edition it
     /// derives from. See `rank_target`.
     fold_to: HashMap<i64, i64>,
+    /// Group -> its original, for groups that have one (see
+    /// `original_of`).
+    original_by_group: HashMap<i64, i64>,
+    /// Edition -> the edition it was made from, for chains (see
+    /// `parent_of`).
+    parent: HashMap<i64, i64>,
+    /// Edition edges left out because a `different_song` row keeps their
+    /// two groups apart, as `(edition edge, different_song edge)`.
+    pub conflicts: Vec<((i64, i64), (i64, i64))>,
+    /// `different_song` pairs, identity-canonical.
+    different: Vec<(i64, i64)>,
 }
 
 impl EditionProjection {
@@ -816,6 +833,44 @@ impl EditionProjection {
         self.edge_labels
             .get(&ordered_pair(a, b))
             .map(|(kind, transformation)| (kind.as_str(), transformation.as_deref()))
+    }
+
+    /// Builds the projection over `identity` from `EDITION_KINDS` and
+    /// `DIFFERENT_SONG` rows; disabled rows are ignored. See
+    /// `build_edition_projection`.
+    pub fn build(
+        identity: &SoftIdentityProjection,
+        relations: impl IntoIterator<Item = RelationRow>,
+    ) -> Self {
+        build_edition_projection(identity, relations)
+    }
+
+    /// These songs as a union-find to grow (see `SongGroups`).
+    pub fn song_groups(&self) -> SongGroups {
+        let mut dsu = IdentityDsu::new(self.group_by_canonical.keys().copied());
+        for (&member, &group) in &self.group_by_canonical {
+            dsu.union(member, group);
+        }
+        SongGroups {
+            dsu: ConstrainedDsu::new(dsu, &self.different),
+        }
+    }
+
+    /// The original of `identity_canonical`'s song: the member every other
+    /// version derives from, directly or through a chain. `None` when the
+    /// library doesn't hold it (a group of covers only), or the relations
+    /// don't say which member it is.
+    pub fn original_of(&self, identity_canonical: i64) -> Option<i64> {
+        let group = self.group_of(identity_canonical);
+        self.original_by_group.get(&group).copied()
+    }
+
+    /// The version `identity_canonical` was made from inside its song, when
+    /// that isn't simply the original: a remix of a cover has the cover as
+    /// parent. `None` for the original itself and for versions that hang
+    /// straight off the original (or off the unknown original).
+    pub fn parent_of(&self, identity_canonical: i64) -> Option<i64> {
+        self.parent.get(&identity_canonical).copied()
     }
 
     /// The edition that is ranked as its own work when `identity_canonical`
@@ -901,79 +956,167 @@ fn transformation_of(object: &serde_json::Map<String, serde_json::Value>) -> Opt
 }
 
 /// Builds an `EditionProjection` over `identity`'s canonical ids from raw
-/// `EDITION_KINDS` relation rows. Any such row's `extra.derived_entry` (see
-/// `pipeline::softmatch::resolve_derived_side` for the heuristic path, and
-/// `pipeline::flush`'s provider-asserted original->derived writes for
-/// cover/remix/arrangement) marks its canonical as the non-default side of
-/// its group; a group with no such marker (edges only via the manual
-/// version-kind taxonomy) falls back to its lowest id.
+/// `EDITION_KINDS` and `DIFFERENT_SONG` relation rows.
+///
+/// Rows apply strongest first (manual, then provider, then the matcher; by
+/// confidence within each), and a row that would join two groups a
+/// `different_song` row keeps apart is left out (`conflicts`). Each pair of
+/// identities takes its direction from its strongest row that names one
+/// (`extra.derived_entry`, see `pipeline::softmatch::resolve_derived_side`
+/// and `pipeline::flush`), so a person's `derive` outranks a provider's or
+/// the matcher's opinion of the same pair.
+///
+/// Inside a group the versions form a tree under the original:
+/// - a version's parent is its strongest directed row from a manual or
+///   provider source, or from the matcher when the change is degenerate
+///   (`DEGENERATE_MARKERS`: an instrumental's direction is reliable). The
+///   matcher's direction between two full versions (two covers) is
+///   arbitrary, so those never form a chain;
+/// - the original is a member that is the source of some directed row and
+///   derived in none, preferring one with a trusted row, then the lowest id.
+///   With no such member the original is unknown (`original_of` is `None`).
 fn build_edition_projection(
     identity: &SoftIdentityProjection,
     relations: impl IntoIterator<Item = RelationRow>,
 ) -> EditionProjection {
     let canonical_ids: HashSet<i64> = identity.component_by_entry.values().copied().collect();
-    let mut dsu = IdentityDsu::new(canonical_ids.iter().copied());
-    let mut is_derived_side: HashSet<i64> = HashSet::new();
-    let mut is_degenerate_side: HashSet<i64> = HashSet::new();
-    let mut edge_labels: HashMap<(i64, i64), (String, Option<String>)> = HashMap::new();
-    let mut fold_to: HashMap<i64, i64> = HashMap::new();
+    let canon = |id: i64| identity.component_of(id).unwrap_or(id);
 
-    for relation in relations
-        .into_iter()
-        .filter(|r| r.enabled && EDITION_KINDS.contains(&r.kind.as_str()))
-    {
-        let a = identity
-            .component_of(relation.entry_a)
-            .unwrap_or(relation.entry_a);
-        let b = identity
-            .component_of(relation.entry_b)
-            .unwrap_or(relation.entry_b);
+    let mut edition_rows = Vec::new();
+    let mut different = Vec::new();
+    for relation in relations.into_iter().filter(|r| r.enabled) {
+        if relation.kind == DIFFERENT_SONG {
+            let pair = ordered_pair(canon(relation.entry_a), canon(relation.entry_b));
+            if pair.0 != pair.1 {
+                different.push(pair);
+            }
+        } else if EDITION_KINDS.contains(&relation.kind.as_str()) {
+            edition_rows.push(relation);
+        }
+    }
+    different.sort_unstable();
+    different.dedup();
+    edition_rows.sort_by(|a, b| {
+        origin_priority(&a.origin)
+            .cmp(&origin_priority(&b.origin))
+            .then_with(|| b.confidence.total_cmp(&a.confidence))
+            .then_with(|| {
+                ordered_pair(a.entry_a, a.entry_b).cmp(&ordered_pair(b.entry_a, b.entry_b))
+            })
+            .then_with(|| a.kind.cmp(&b.kind))
+    });
+
+    let mut dsu = ConstrainedDsu::new(IdentityDsu::new(canonical_ids.iter().copied()), &different);
+    let mut conflicts = Vec::new();
+    let mut edge_labels: HashMap<(i64, i64), (String, Option<String>)> = HashMap::new();
+    /// A pair's direction, from its strongest row that names one.
+    struct Direction {
+        derived: i64,
+        source: i64,
+        priority: u8,
+        confidence: f64,
+        degenerate: bool,
+    }
+    let mut directions: HashMap<(i64, i64), Direction> = HashMap::new();
+    for relation in edition_rows {
+        let (a, b) = (canon(relation.entry_a), canon(relation.entry_b));
         if a == b {
             continue;
         }
-        dsu.union(a, b);
-
+        let pair = ordered_pair(a, b);
+        if let Err(blocker) = dsu.try_union(a, b) {
+            conflicts.push((ordered_pair(relation.entry_a, relation.entry_b), blocker));
+            continue;
+        }
         let extra: Option<serde_json::Value> = relation
             .extra
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok());
         let objects = extra.as_ref().map(extra_objects).unwrap_or_default();
         let transformation = objects.iter().find_map(|object| transformation_of(object));
-        if let Some(derived_entry) = extra.as_ref().and_then(extra_derived_entry) {
-            let derived_canonical = identity
-                .component_of(derived_entry)
-                .unwrap_or(derived_entry);
-            // `derived_entry` names one of the row's own endpoints; a stale
-            // id (say, one a merge didn't re-point) would otherwise mark some
-            // unrelated entry as derived.
-            if derived_canonical == a || derived_canonical == b {
-                is_derived_side.insert(derived_canonical);
-                let degenerate = relation.kind == "instrumental"
-                    || objects
-                        .iter()
-                        .filter_map(|o| transformation_of(o))
-                        .any(|t| {
-                            t.split_whitespace()
-                                .any(|tok| DEGENERATE_MARKERS.contains(&tok))
-                        });
-                if degenerate {
-                    is_degenerate_side.insert(derived_canonical);
-                    let original = if derived_canonical == a { b } else { a };
-                    // Lowest original wins, so the fold doesn't depend on
-                    // relation row order.
-                    fold_to
-                        .entry(derived_canonical)
-                        .and_modify(|o| *o = (*o).min(original))
-                        .or_insert(original);
-                }
-            }
-        }
         edge_labels
-            .entry(ordered_pair(a, b))
-            .or_insert((relation.kind.clone(), transformation));
+            .entry(pair)
+            .or_insert((relation.kind.clone(), transformation.clone()));
+        if directions.contains_key(&pair) {
+            continue;
+        }
+        // `derived_entry` names one of the row's own endpoints; a stale id
+        // (say, one a merge didn't re-point) would otherwise mark some
+        // unrelated entry as derived.
+        let Some(derived) = extra.as_ref().and_then(extra_derived_entry).map(canon) else {
+            continue;
+        };
+        if derived != a && derived != b {
+            continue;
+        }
+        let degenerate = relation.kind == "instrumental"
+            || transformation.as_deref().is_some_and(|t| {
+                t.split_whitespace()
+                    .any(|tok| DEGENERATE_MARKERS.contains(&tok))
+            });
+        directions.insert(
+            pair,
+            Direction {
+                derived,
+                source: if derived == a { b } else { a },
+                priority: origin_priority(&relation.origin),
+                confidence: relation.confidence,
+                degenerate,
+            },
+        );
     }
 
-    let ids: Vec<i64> = dsu.parent.keys().copied().collect();
+    let mut is_derived_side: HashSet<i64> = HashSet::new();
+    let mut is_degenerate_side: HashSet<i64> = HashSet::new();
+    let mut is_source: HashMap<i64, u8> = HashMap::new();
+    let mut fold_to: HashMap<i64, i64> = HashMap::new();
+    // Each version's strongest trusted parent, as (priority, -confidence,
+    // parent) so `min` picks it.
+    let mut trusted_parent: HashMap<i64, (u8, i64, i64)> = HashMap::new();
+    let mut sorted_pairs: Vec<_> = directions.iter().collect();
+    sorted_pairs.sort_by_key(|(pair, _)| **pair);
+    for (_, d) in sorted_pairs {
+        is_derived_side.insert(d.derived);
+        let level = is_source.entry(d.source).or_insert(d.priority);
+        *level = (*level).min(d.priority);
+        if d.degenerate {
+            is_degenerate_side.insert(d.derived);
+            // Lowest original wins, so the fold doesn't depend on row order.
+            fold_to
+                .entry(d.derived)
+                .and_modify(|o| *o = (*o).min(d.source))
+                .or_insert(d.source);
+        }
+        if d.priority < 2 || d.degenerate {
+            let key = (d.priority, -(d.confidence * 1e6) as i64, d.source);
+            trusted_parent
+                .entry(d.derived)
+                .and_modify(|best| *best = (*best).min(key))
+                .or_insert(key);
+        }
+    }
+    let mut parent: HashMap<i64, i64> = trusted_parent
+        .into_iter()
+        .map(|(child, (_, _, source))| (child, source))
+        .collect();
+    // Two trusted rows can contradict each other (A from B, B from A).
+    // Follow each chain and cut it where it loops back.
+    let mut children: Vec<i64> = parent.keys().copied().collect();
+    children.sort_unstable();
+    for start in children {
+        let mut seen = vec![start];
+        let mut current = start;
+        while let Some(&next) = parent.get(&current) {
+            if seen.contains(&next) {
+                parent.remove(&current);
+                break;
+            }
+            seen.push(next);
+            current = next;
+        }
+    }
+
+    let ids: Vec<i64> = dsu.dsu.parent.keys().copied().collect();
     let mut raw_groups: HashMap<i64, Vec<i64>> = HashMap::new();
     for id in ids {
         let root = dsu.find(id);
@@ -982,26 +1125,41 @@ fn build_edition_projection(
     let mut group_by_canonical = HashMap::new();
     let mut members_by_group = BTreeMap::new();
     let mut default_by_group = HashMap::new();
+    let mut original_by_group = HashMap::new();
     for mut members in raw_groups.into_values() {
         members.sort_unstable();
         let canonical = members[0];
+        let original = members
+            .iter()
+            .filter(|m| !is_derived_side.contains(m) && !parent.contains_key(m))
+            .filter_map(|m| is_source.get(m).map(|&level| (level, *m)))
+            .min()
+            .map(|(_, m)| m);
         // Playback default until per-user preference exists (see
-        // `DEGENERATE_MARKERS`): original first, then a full alternate
+        // `DEGENERATE_MARKERS`): the original, else a full alternate
         // version, then a degenerate one; ties broken by lowest id via the
         // stable sort above.
-        let default = members
-            .iter()
-            .min_by_key(
-                |m| match (is_derived_side.contains(m), is_degenerate_side.contains(m)) {
-                    (false, _) => 0,
-                    (true, false) => 1,
-                    (true, true) => 2,
-                },
-            )
-            .copied()
-            .unwrap_or(members[0]);
+        let default = original.unwrap_or_else(|| {
+            members
+                .iter()
+                .min_by_key(|m| {
+                    match (is_derived_side.contains(m), is_degenerate_side.contains(m)) {
+                        (false, _) => 0,
+                        (true, false) => 1,
+                        (true, true) => 2,
+                    }
+                })
+                .copied()
+                .unwrap_or(members[0])
+        });
         for &member in &members {
             group_by_canonical.insert(member, canonical);
+        }
+        if let Some(original) = original {
+            original_by_group.insert(canonical, original);
+            // A chain that ends at the original needs no parent entry: a
+            // version without one hangs off the original.
+            parent.retain(|_, p| *p != original || !members.contains(p));
         }
         members_by_group.insert(canonical, members);
         default_by_group.insert(canonical, default);
@@ -1013,6 +1171,10 @@ fn build_edition_projection(
         default_by_group,
         edge_labels,
         fold_to,
+        original_by_group,
+        parent,
+        conflicts,
+        different,
     }
 }
 
@@ -1191,6 +1353,110 @@ impl IdentityDsu {
     }
 }
 
+/// A union-find that refuses any union that would put both ends of a
+/// cannot-link pair into one set. Cannot-link pairs are indexed by the root
+/// of each endpoint and merged small-into-large on every union, so a union
+/// only scans its smaller side's blockers instead of every pair
+/// (O(unions × pairs) was minutes on a real library).
+struct ConstrainedDsu {
+    dsu: IdentityDsu,
+    blockers: HashMap<i64, Vec<(i64, Edge)>>,
+}
+
+impl ConstrainedDsu {
+    /// `cannot` must be sorted: a refused union reports its first blocker
+    /// in that order.
+    fn new(mut dsu: IdentityDsu, cannot: &[Edge]) -> Self {
+        let mut blockers: HashMap<i64, Vec<(i64, Edge)>> = HashMap::new();
+        for &(a, b) in cannot {
+            blockers.entry(dsu.find(a)).or_default().push((b, (a, b)));
+            blockers.entry(dsu.find(b)).or_default().push((a, (a, b)));
+        }
+        Self { dsu, blockers }
+    }
+
+    fn find(&mut self, id: i64) -> i64 {
+        self.dsu.find(id)
+    }
+
+    /// Joins `a`'s and `b`'s sets, or returns the cannot-link pair that
+    /// keeps them apart.
+    fn try_union(&mut self, a: i64, b: i64) -> Result<(), Edge> {
+        if let Some(edge) = self.blocker(a, b) {
+            return Err(edge);
+        }
+        let left_root = self.dsu.find(a);
+        let right_root = self.dsu.find(b);
+        if left_root == right_root {
+            return Ok(());
+        }
+        self.dsu.union(left_root, right_root);
+        let root = self.dsu.find(left_root);
+        let child = if root == left_root {
+            right_root
+        } else {
+            left_root
+        };
+        if let Some(mut moved) = self.blockers.remove(&child) {
+            let kept = self.blockers.entry(root).or_default();
+            if kept.len() < moved.len() {
+                std::mem::swap(kept, &mut moved);
+            }
+            kept.extend(moved);
+        }
+        Ok(())
+    }
+
+    /// The cannot-link pair that keeps `a`'s and `b`'s sets apart, if any.
+    fn blocker(&mut self, a: i64, b: i64) -> Option<Edge> {
+        let left_root = self.dsu.find(a);
+        let right_root = self.dsu.find(b);
+        if left_root == right_root {
+            return None;
+        }
+        let Self { dsu, blockers } = self;
+        let side_len = |root| blockers.get(&root).map_or(0, Vec::len);
+        let (scan_root, target_root) = if side_len(left_root) <= side_len(right_root) {
+            (left_root, right_root)
+        } else {
+            (right_root, left_root)
+        };
+        // Every blocking pair appears on both sides, so `min` over either
+        // side is the first blocker in sorted order.
+        blockers
+            .get(&scan_root)
+            .into_iter()
+            .flatten()
+            .filter(|(other, _)| dsu.find(*other) == target_root)
+            .map(|&(_, edge)| edge)
+            .min()
+    }
+}
+
+/// An `EditionProjection`'s songs as a union-find that grows: softmatch
+/// joins songs here as it writes edition edges during one run, so it can
+/// tell when a new edge would only repeat a connection the song already
+/// has, or cross a `different_song` block. Ids are identity-canonical.
+pub struct SongGroups {
+    dsu: ConstrainedDsu,
+}
+
+impl SongGroups {
+    pub fn same(&mut self, a: i64, b: i64) -> bool {
+        self.dsu.find(a) == self.dsu.find(b)
+    }
+
+    /// The `different_song` pair that keeps `a`'s and `b`'s songs apart.
+    pub fn blocker(&mut self, a: i64, b: i64) -> Option<(i64, i64)> {
+        self.dsu.blocker(a, b)
+    }
+
+    /// Joins the two songs unless a `different_song` pair keeps them apart.
+    pub fn join(&mut self, a: i64, b: i64) -> Result<(), (i64, i64)> {
+        self.dsu.try_union(a, b)
+    }
+}
+
 fn origin_priority(origin: &str) -> u8 {
     match origin {
         "user" | "manual" => 0,
@@ -1216,7 +1482,7 @@ fn build_soft_identity_projection(
     relations: impl IntoIterator<Item = RelationRow>,
     same_kinds: &[&str],
 ) -> SoftIdentityProjection {
-    let mut dsu = IdentityDsu::new(entry_ids);
+    let dsu = IdentityDsu::new(entry_ids);
     let mut same = Vec::new();
     let mut different = Vec::new();
     for relation in relations.into_iter().filter(|relation| relation.enabled) {
@@ -1237,61 +1503,18 @@ fn build_soft_identity_projection(
             })
     });
 
-    // Cannot-link edges indexed by the DSU root of each endpoint, as
-    // `(other endpoint, edge)`, merged small-into-large on every union, so a
-    // same-edge only scans its smaller side's blockers instead of all of
-    // `different` (O(same × different) was minutes on a real library).
-    let mut blockers: HashMap<i64, Vec<(i64, Edge)>> = HashMap::new();
-    for &(a, b) in &different {
-        blockers.entry(dsu.find(a)).or_default().push((b, (a, b)));
-        blockers.entry(dsu.find(b)).or_default().push((a, (a, b)));
-    }
-
+    let mut dsu = ConstrainedDsu::new(dsu, &different);
     let mut conflicts = Vec::new();
     for relation in same {
         let edge = ordered_pair(relation.entry_a, relation.entry_b);
-        let left_root = dsu.find(edge.0);
-        let right_root = dsu.find(edge.1);
-        if left_root == right_root {
-            continue;
-        }
-        let side_len = |root| blockers.get(&root).map_or(0, Vec::len);
-        let (scan_root, target_root) = if side_len(left_root) <= side_len(right_root) {
-            (left_root, right_root)
-        } else {
-            (right_root, left_root)
-        };
-        // Every blocking edge appears on both sides, so `min` over either
-        // side is the first blocker in sorted `different` order.
-        let blocker = blockers
-            .get(&scan_root)
-            .into_iter()
-            .flatten()
-            .filter(|(other, _)| dsu.find(*other) == target_root)
-            .map(|&(_, different_edge)| different_edge)
-            .min();
-        if let Some(different_edge) = blocker {
+        if let Err(different_edge) = dsu.try_union(edge.0, edge.1) {
             conflicts.push(SoftIdentityConflict {
                 same_edge: edge,
                 different_edge,
             });
-        } else {
-            dsu.union(edge.0, edge.1);
-            let root = dsu.find(edge.0);
-            let child = if root == left_root {
-                right_root
-            } else {
-                left_root
-            };
-            if let Some(mut moved) = blockers.remove(&child) {
-                let kept = blockers.entry(root).or_default();
-                if kept.len() < moved.len() {
-                    std::mem::swap(kept, &mut moved);
-                }
-                kept.extend(moved);
-            }
         }
     }
+    let mut dsu = dsu.dsu;
 
     let ids: Vec<i64> = dsu.parent.keys().copied().collect();
     let mut raw_components: HashMap<i64, Vec<i64>> = HashMap::new();
@@ -2972,6 +3195,21 @@ impl MusicDb {
     }
 
     /// Every `EDITION_KINDS` relation row, enabled or tombstoned.
+    /// Every `EDITION_KINDS` and `DIFFERENT_SONG` relation row, enabled or
+    /// tombstoned: what `EditionProjection::build` reads.
+    pub async fn song_relations(&self) -> Result<Vec<RelationRow>, Error> {
+        Ok(entry_relation::Entity::find()
+            .filter(
+                entry_relation::Column::Kind
+                    .is_in(EDITION_KINDS.iter().copied().chain([DIFFERENT_SONG])),
+            )
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect())
+    }
+
     pub async fn edition_relations(&self) -> Result<Vec<RelationRow>, Error> {
         Ok(entry_relation::Entity::find()
             .filter(entry_relation::Column::Kind.is_in(EDITION_KINDS.iter().copied()))
@@ -3039,7 +3277,7 @@ impl MusicDb {
     pub async fn edition_projection_for_display(&self) -> Result<EditionProjection, Error> {
         let identity = self.soft_identity_projection_for_display().await?;
         let mut kind_filter = Condition::any();
-        for kind in EDITION_KINDS {
+        for kind in EDITION_KINDS.iter().chain([&DIFFERENT_SONG]) {
             kind_filter = kind_filter.add(entry_relation::Column::Kind.eq(*kind));
         }
         let relations = entry_relation::Entity::find()
@@ -3074,7 +3312,7 @@ impl MusicDb {
         let kinds = SAME_KINDS
             .iter()
             .chain(EDITION_KINDS)
-            .chain([&DIFFERENT_IDENTITY])
+            .chain([&DIFFERENT_IDENTITY, &DIFFERENT_SONG])
             .map(|kind| format!("'{kind}'"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -4993,6 +5231,142 @@ mod tests {
         let (kind, transformation) = projection.edge_label(1, 2).unwrap();
         assert_eq!(kind, DERIVED_FROM);
         assert_eq!(transformation, Some("instrumental named:long"));
+    }
+
+    async fn insert_rel_from(
+        db: &DatabaseConnection,
+        (a, b): (i64, i64),
+        kind: &str,
+        origin: &str,
+        extra: Option<&str>,
+    ) {
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(a.min(b)),
+            entry_b: Set(a.max(b)),
+            kind: Set(kind.to_string()),
+            confidence: Set(0.9),
+            origin: Set(origin.to_string()),
+            enabled: Set(true),
+            extra: Set(extra.map(str::to_string)),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    fn derived(derived: i64, source: i64) -> String {
+        format!(r#"{{"derived_entry":{derived},"source_entry":{source}}}"#)
+    }
+
+    /// A `different_song` row keeps two songs apart: the edition edge that
+    /// would join them is left out (and reported), even through a third
+    /// entry related to both.
+    #[tokio::test]
+    async fn different_song_keeps_songs_apart() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=4 {
+            insert_entry(db, id).await;
+        }
+        // 2 is a cover of 1; 3 was detached from 1's song; 4 covers 3 and
+        // the matcher also relates it to 2.
+        insert_rel_from(db, (1, 2), "cover", "provider", Some(&derived(2, 1))).await;
+        insert_rel_from(db, (1, 3), DIFFERENT_SONG, "manual", None).await;
+        insert_rel_from(db, (3, 4), DERIVED_FROM, "heuristic", Some(&derived(4, 3))).await;
+        insert_rel_from(db, (2, 4), DERIVED_FROM, "heuristic", Some(&derived(4, 2))).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(
+            projection.members_of(1),
+            vec![1, 2, 4],
+            "4 joins first through 2"
+        );
+        assert_eq!(
+            projection.members_of(3),
+            vec![3],
+            "and so can't bring 3 along"
+        );
+        assert_eq!(projection.conflicts, vec![((3, 4), (1, 3))]);
+    }
+
+    /// A pair takes its direction from its strongest row: a person's
+    /// `derive` outranks a provider row about the same pair.
+    #[tokio::test]
+    async fn manual_direction_outranks_provider() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2] {
+            insert_entry(db, id).await;
+        }
+        insert_rel_from(db, (1, 2), "cover", "provider", Some(&derived(2, 1))).await;
+        insert_rel_from(db, (1, 2), DERIVED_FROM, "manual", Some(&derived(1, 2))).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.original_of(1), Some(2));
+        assert_eq!(projection.default_member_of(1), 2);
+    }
+
+    /// Versions form a tree under the original: provider and manual rows
+    /// chain (a remix of a cover), as does a matcher instrumental, while the
+    /// matcher's direction between two covers never does.
+    #[tokio::test]
+    async fn song_tree_chains_trusted_rows_only() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=6 {
+            insert_entry(db, id).await;
+        }
+        // 1 original; 2, 3 covers of it; 4 remix of cover 2 (manual);
+        // 5 instrumental of cover 3 (matcher); the matcher also says
+        // cover 3 was made from cover 2, and 6 from cover 3.
+        insert_rel_from(db, (1, 2), "cover", "provider", Some(&derived(2, 1))).await;
+        insert_rel_from(db, (1, 3), "cover", "provider", Some(&derived(3, 1))).await;
+        insert_rel_from(db, (2, 4), DERIVED_FROM, "manual", Some(&derived(4, 2))).await;
+        let instrumental =
+            r#"{"derived_entry":5,"source_entry":3,"transformation":"instrumental"}"#;
+        insert_rel_from(db, (3, 5), DERIVED_FROM, "heuristic", Some(instrumental)).await;
+        insert_rel_from(db, (2, 3), DERIVED_FROM, "heuristic", Some(&derived(3, 2))).await;
+        insert_rel_from(db, (3, 6), DERIVED_FROM, "heuristic", Some(&derived(6, 3))).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.original_of(4), Some(1));
+        assert_eq!(projection.parent_of(1), None, "the original is the root");
+        assert_eq!(projection.parent_of(2), None, "hangs off the original");
+        assert_eq!(
+            projection.parent_of(3),
+            None,
+            "no chain from a matcher cover"
+        );
+        assert_eq!(projection.parent_of(4), Some(2), "manual remix of a cover");
+        assert_eq!(projection.parent_of(5), Some(3), "matcher instrumental");
+        assert_eq!(projection.parent_of(6), None);
+        assert_eq!(
+            projection.rank_target(5),
+            3,
+            "the instrumental scores its cover"
+        );
+    }
+
+    /// A group of covers whose relations name no original leaves it unknown.
+    #[tokio::test]
+    async fn song_without_original_has_unknown_original() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=3 {
+            insert_entry(db, id).await;
+        }
+        let cover = r#"{"reason":"learned v19 (cover)","transformation":"cover"}"#;
+        insert_rel_from(db, (1, 2), DERIVED_FROM, "heuristic", Some(cover)).await;
+        insert_rel_from(db, (2, 3), DERIVED_FROM, "heuristic", Some(cover)).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.members_of(1), vec![1, 2, 3]);
+        assert_eq!(projection.original_of(1), None);
+        assert_eq!(
+            projection.default_member_of(1),
+            1,
+            "playback still has a default"
+        );
     }
 
     async fn insert_edition_rel(db: &DatabaseConnection, a: i64, b: i64, kind: &str, extra: &str) {
