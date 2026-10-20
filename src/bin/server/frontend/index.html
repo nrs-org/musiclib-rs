@@ -2057,6 +2057,17 @@
     padding: 0;
   }
 
+  /* A multi-disc tracklist's disc heading. */
+  .manifest-disc {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    padding: 12px 4px 4px;
+    border-bottom: 1px solid var(--rail);
+  }
+
+  .manifest-disc:first-child { padding-top: 0; }
+
   .manifest-row {
     display: flex;
     width: 100%;
@@ -11612,12 +11623,16 @@
     list.after(more);
   }
 
-  // `position` (a track's "Track 5", see `trackPosition`) replaces the
-  // track count in the tile's meta line.
+  // `position` (a track's "Track 5", see `trackPosition`) leads the tile's
+  // meta line. `track_count` counts every disc, so "Track 5 of 12" holds
+  // only on disc 1; later discs list the count on its own.
   function releaseTile(r, { position } = {}) {
     const meta = [];
-    if (position) meta.push(r.track_count ? `${position} of ${r.track_count}` : position);
-    else if (r.track_count) meta.push(plural(r.track_count, "track"));
+    if (position && r.track_count && !(r.disc_no > 1)) meta.push(`${position} of ${r.track_count}`);
+    else {
+      if (position) meta.push(position);
+      if (r.track_count) meta.push(plural(r.track_count, "track"));
+    }
     const tile = el("li", { className: "release-tile", "data-kind": r.kind }, [
       el(
         "button",
@@ -12041,7 +12056,15 @@
 
         detail.appendChild(el("p", { className: "manifest-label", text: "Tracklist" }));
         const list = el("ul", { className: "manifest" });
+        // Track numbers restart on each disc, so a multi-disc release gets
+        // a heading per disc.
+        const multiDisc = tracks.tracks.some((t) => t.disc_no > 1);
+        let disc;
         for (const t of tracks.tracks) {
+          if (multiDisc && t.disc_no !== disc) {
+            disc = t.disc_no;
+            list.appendChild(el("li", { className: "manifest-disc", text: disc != null ? `Disc ${disc}` : "No disc" }));
+          }
           const queuePos = playableTracks.findIndex((pt) => pt.entry_id === t.entry_id);
           const playIcon = el("span", { className: "manifest-play-icon" });
           playIcon.innerHTML = svgIcon(Player.isPlayingEntry(t.entry_id) ? "pause" : "play", 12);
