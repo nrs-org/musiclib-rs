@@ -440,6 +440,21 @@ mod tests {
         assert_eq!(arranger.name.as_deref(), Some("佐藤純一"));
         assert_eq!(arranger.contributions[0].role, "arranger");
         assert!(!arranger.contributions[0].main_artist);
+        assert_eq!(arranger.contributions[0].extra["credited_name"], "佐藤純一");
+        assert_eq!(arranger.contributions[0].extra["direction"], "backward");
+
+        let (saxophonist, _) = child_next(&mut rec_artists)
+            .await?
+            .expect("expected saxophonist");
+        assert_eq!(saxophonist.contributions[0].role, "instrument");
+        assert_eq!(
+            saxophonist.contributions[0].extra["attributes"],
+            serde_json::json!(["alto saxophone"])
+        );
+        assert_eq!(
+            saxophonist.contributions[0].extra["attribute-ids"]["alto saxophone"],
+            "9c977091-b27a-4a0e-b54e-b5ab89420e22"
+        );
 
         Ok(())
     }

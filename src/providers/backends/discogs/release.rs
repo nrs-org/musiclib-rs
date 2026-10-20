@@ -39,6 +39,11 @@ pub(crate) struct ReleaseResponse {
 pub struct ReleaseArtist {
     pub id: u64,
     pub name: String,
+    /// The artist name variation printed on this release.
+    #[serde(default)]
+    pub anv: String,
+    #[serde(default)]
+    pub join: String,
     #[serde(default)]
     pub role: String,
 }
@@ -167,7 +172,11 @@ pub(crate) fn artist_child_refs(artists: &[ReleaseArtist]) -> Vec<ChildRef> {
                 },
                 main_artist: a.role.is_empty(),
                 source: SOURCE.into(),
-                extra: serde_json::json!({ "index": i }),
+                extra: serde_json::json!({
+                    "index": i,
+                    "credited_name": if a.anv.is_empty() { &a.name } else { &a.anv },
+                    "joinphrase": a.join,
+                }),
             }],
             ..Default::default()
         })
@@ -326,6 +335,24 @@ mod tests {
 
     fn release_api_url(id: &str) -> String {
         DiscogsClient::build_url(&format!("releases/{id}"), &[])
+    }
+
+    #[test]
+    fn artist_credit_keeps_discogs_name_variations_separate_from_artist_names() {
+        let response: ReleaseResponse =
+            serde_json::from_str(include_str!("./release_hop_step_sheep.json")).unwrap();
+        let artists = super::artist_child_refs(&response.artists);
+        assert_eq!(artists[0].name.as_deref(), Some("角巻わため"));
+        assert_eq!(
+            artists[0].contributions[0].extra["credited_name"],
+            "Tsunomaki Watame"
+        );
+        let contributors = super::artist_child_refs(&response.tracklist[0].extraartists);
+        assert_eq!(
+            contributors[0].contributions[0].extra["credited_name"],
+            "新藤晴一"
+        );
+        assert!(!contributors[0].contributions[0].main_artist);
     }
 
     #[tokio::test]

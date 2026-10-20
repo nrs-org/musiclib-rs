@@ -61,6 +61,8 @@ pub(crate) struct RecordingRelation {
     /// Populated when `target_type == "work"` (a `performance` relation —
     /// how MB models cover/live/karaoke/etc., see `work.rs`).
     pub work: Option<RecordingRelationTarget>,
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +172,14 @@ pub async fn get_recording(
                         continue;
                     }
                     let Some(artist) = &rel.artist else { continue };
+                    let mut extra = rel.extra.clone();
+                    extra["attributes"] = serde_json::json!(rel.attributes);
+                    extra["direction"] = serde_json::json!(rel.direction);
+                    let credited_name = rel.extra["target-credit"]
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&artist.name);
+                    extra["credited_name"] = serde_json::json!(credited_name);
                     artist_refs.push(ChildRef {
                         entry_type: EntryType::Artist,
                         external_type: EXTERNAL_TYPE_ARTIST.into(),
@@ -179,7 +189,7 @@ pub async fn get_recording(
                             role: rel.relation_type.clone(),
                             main_artist: false,
                             source: SOURCE.into(),
-                            extra: serde_json::Value::Null,
+                            extra,
                         }],
                         ..Default::default()
                     });
