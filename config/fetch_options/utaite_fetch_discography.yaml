@@ -45,14 +45,15 @@ main:
       fetch: null
 
     # Uploads that aren't songs: stream clips and archives, gameplay, album
-    # crossfades and previews, teasers, digests, announcements, interviews
+    # crossfades and previews, teasers, digests, announcements, product
+    # explainers, interviews
     - match:
         all:
           - any:
               - { external_type: "youtube:video" }
               - { external_type: "nicovideo:video" }
           - any:
-              - { name_regex: "(?i)(切り抜き|雑談|歌枠|実況|XFD|クロスフェード|crossfade|試聴|trailer|トレイラー|トレーラー|teaser|ティザー|ダイジェスト|digest|告知|お知らせ|開催決定|インタビュー|interview|対談|メイキング|making of|behind the scenes)" }
+              - { name_regex: "(?i)(切り抜き|雑談|歌枠|実況|XFD|クロスフェード|crossfade|試聴|予告|trailer|トレイラー|トレーラー|teaser|ティザー|ダイジェスト|digest|告知|お知らせ|開催決定|解説|インタビュー|interview|対談|メイキング|making of|behind the scenes)" }
               # Ad spots ("[30sec.SPOT]", "【CM】"); case-sensitive, and
               # "CMソング" (a cover of a jingle) has no word boundary
               - { name_regex: "\\b(SPOT|CM)\\b" }
