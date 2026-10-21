@@ -1132,11 +1132,17 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
             let own_member = summary.and_then(|s| s.members.iter().find(|m| m.entry_id == nid));
             let canonical = identity.component_of(nid).unwrap_or(nid);
             let rank_target = editions.rank_target(canonical);
-            let original = editions.original_of(canonical);
+            // No relation names the original (a song with one recording,
+            // or versions nobody gave a direction): show its default
+            // recording as the original. `original_of` itself stays `None`
+            // there, for soft-matching and song edits.
+            let original = editions
+                .original_of(canonical)
+                .unwrap_or_else(|| editions.default_member_of(canonical));
             let parent = editions.parent_of(canonical);
             // What this version is, relative to what it was made from.
             let song_kind = parent
-                .or(original)
+                .or(Some(original))
                 .filter(|&to| to != canonical)
                 .and_then(|to| editions.edge_label(canonical, to))
                 .map(|(kind, transformation)| json!({ "kind": kind, "transformation": transformation }));
