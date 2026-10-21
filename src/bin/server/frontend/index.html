@@ -2681,6 +2681,95 @@
     color: var(--brass-ink);
   }
 
+  /* Source finder (`Player.openFinder`): search YouTube Music and Spotify
+     for the playing track, or one of its editions, and attach the pick. */
+  .player-dock-switch .find-btn {
+    margin-left: auto;
+    border-style: dashed;
+    background: transparent;
+    color: var(--ink-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .player-dock-switch .find-btn[aria-expanded="true"] { border-style: solid; color: var(--ink); }
+  .player-dock-switch .find-btn + .prefer-toggle { margin-left: 0; }
+
+  .player-dock-find {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border-top: 1px solid var(--rail);
+    background: var(--paper-deep);
+    max-height: 360px;
+    overflow-y: auto;
+  }
+  .player-dock-find[hidden] { display: none; }
+  .player-dock-find p { margin: 0; }
+
+  .find-head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+  .find-head .find-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .find-head .find-skip { font-family: var(--mono); font-size: 11px; color: var(--brass-ink); }
+  .find-head button,
+  .find-form button {
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    color: var(--ink-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  .find-head button:hover,
+  .find-form button:hover { color: var(--ink); border-color: var(--ink-soft); }
+
+  .find-reason { font-size: 12px; color: var(--danger); }
+  .find-form { display: flex; gap: 6px; }
+  .find-form input {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    color: var(--ink);
+  }
+  .find-note { font-size: 11px; color: var(--ink-faint); }
+
+  .find-results { display: flex; flex-direction: column; gap: 2px; }
+  .find-row {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    padding: 4px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .find-row:hover:not(:disabled) { border-color: var(--rail); background: var(--paper); }
+  .find-row:disabled { cursor: default; opacity: 0.5; }
+  .find-row[aria-busy="true"] { opacity: 1; border-color: var(--brass); }
+  .find-thumb { width: 36px; height: 36px; object-fit: cover; background: var(--paper-deeper); }
+  .find-name,
+  .find-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .find-name { font-size: 12px; }
+  .find-sub { font-size: 11px; color: var(--ink-soft); }
+  .find-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-right: 6px;
+  }
+  .find-len { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); }
+  /* Far from the track's own length: likely another cut. */
+  .find-len[data-off] { color: var(--brass-ink); }
+
   /* Edition switcher for the playing track — same buttons as the entry
      page's `.editions`, laid out as a dock strip like the source switcher. */
   .player-dock-editions {
@@ -3611,6 +3700,7 @@
       <button type="button" id="player-dock-remote-strip-take">Play here</button>
     </div>
     <div id="player-dock-switch" class="player-dock-switch"></div>
+    <div id="player-dock-find" class="player-dock-find" hidden></div>
     <div id="player-dock-editions" class="editions player-dock-editions" hidden></div>
     <div id="player-dock-queue" class="player-dock-queue" hidden></div>
   </div>
@@ -6074,12 +6164,17 @@
       clearTimeout(timer);
       timer = setTimeout(() => listeners.forEach((fn) => fn()), 100);
     }
+    function changed() {
+      schedule();
+      channel?.postMessage("changed");
+    }
     return {
       wrote(path) {
-        if (!WRITES.test(path)) return;
-        schedule();
-        channel?.postMessage("changed");
+        if (WRITES.test(path)) changed();
       },
+      // A change made by a job rather than one write (the source finder's
+      // `attach-source`), reported once it's done.
+      changed,
       subscribe: (fn) => listeners.add(fn),
     };
   })();
@@ -7432,7 +7527,7 @@
         return true;
       }
       engineState(false, false);
-      setTimeout(() => reportEnded(token), 1800);
+      offerFinder(token, "None of this track's sources played here.");
       return false;
     }
 
@@ -7493,7 +7588,7 @@
               if (sourceFailed(token)) return;
               const message = YT_ERROR_MESSAGES[e.data] || "This video can't be played here.";
               wrapper.innerHTML = "";
-              wrapper.appendChild(el("p", { className: "note", text: message + " Skipping…" }));
+              wrapper.appendChild(el("p", { className: "note", text: message }));
               wrapper.appendChild(
                 el("a", { className: "stamp", href: watchUrl, target: "_blank", rel: "noopener noreferrer" }, [
                   el("span", { className: "dot" }),
@@ -7827,6 +7922,16 @@
       return sourcesCache.get(entryId);
     }
 
+    // `loadSources`, fetched again if the cached list lacks `identifier`: a
+    // source the finder just attached, maybe from another device.
+    function loadSourcesWith(entryId, identifier) {
+      return loadSources(entryId).then((list) => {
+        if (!identifier || list.some((x) => x.identifier === identifier)) return list;
+        sourcesCache.delete(entryId);
+        return loadSources(entryId);
+      });
+    }
+
     // Mounts what the snapshot says is current, picking up where the
     // session is (a transfer, or a reload resuming): from its position, and
     // playing only if the session is.
@@ -7847,7 +7952,7 @@
       renderPlayPause();
       // `Spotify.ready`: a reload resuming a Spotify track must know the
       // server's login before `mountSource` checks `isConnected()`.
-      Promise.all([loadSources(s.current.entry_id), Spotify.ready]).then(([list]) => {
+      Promise.all([loadSourcesWith(s.current.entry_id, s.source), Spotify.ready]).then(([list]) => {
         if (mountedKey !== key) return;
         // Ordered by this device's Settings-mode source preference, not
         // playable-sources' own (DB-row) order — see
@@ -7855,11 +7960,11 @@
         // there is one. `sourceFailed` walks on down the list.
         const ordered = sortByProviderPreference(list);
         if (!ordered.length) {
-          // Nothing this device can play: skip it, same as a failed embed.
+          // Nothing this device can play: offer the finder, then skip,
+          // same as when every source fails.
           surfaceEl.className = "player-dock-surface compact";
-          surfaceEl.appendChild(el("p", { className: "player-dock-spotify-sub", text: "No playable source. Skipping…" }));
-          const token = mountToken;
-          setTimeout(() => reportEnded(token), 1200);
+          surfaceEl.appendChild(el("p", { className: "player-dock-spotify-sub", text: "No playable source." }));
+          offerFinder(mountToken, "This track has no playable source.");
           return;
         }
         currentSources = ordered;
@@ -8061,26 +8166,39 @@
     let preferEditing = false;
     function renderSwitcher() {
       const s = snap;
+      if (finder && finder.trackSeq !== (s?.track_seq ?? null)) closeFinder();
       if (!s?.current) {
         switchEl.innerHTML = "";
         switcherKey = null;
         return;
       }
       const entryId = s.current.entry_id;
-      loadSources(entryId).then((list) => {
+      const picked = s.mounted?.identifier || s.source || null;
+      loadSourcesWith(entryId, picked).then((list) => {
         if (snap?.current?.entry_id !== entryId) return;
         const ordered = sortByProviderPreference(list);
-        const picked = snap.mounted?.identifier || snap.source || null;
         const key = [
           entryId,
           picked,
           preferEditing,
+          !!finder,
           ordered.map((x) => `${x.identifier}=${x.preferred_weight || 0}`).join(","),
         ].join("|");
         if (key === switcherKey) return;
         switcherKey = key;
         switchEl.innerHTML = "";
-        if (ordered.length <= 1) return;
+        const findBtn = el("button", {
+          className: "find-btn",
+          type: "button",
+          text: "Find source",
+          title: "Search YouTube Music and Spotify for this track",
+          "aria-expanded": String(!!finder),
+          onclick: () => (finder ? closeFinder() : findForCurrent()),
+        });
+        if (ordered.length <= 1) {
+          switchEl.appendChild(findBtn);
+          return;
+        }
         for (const src of ordered) {
           switchEl.appendChild(
             preferPill({
@@ -8094,6 +8212,7 @@
             })
           );
         }
+        switchEl.appendChild(findBtn);
         switchEl.appendChild(preferToggle(preferEditing, togglePreferEditing));
       });
     }
@@ -8175,12 +8294,290 @@
       if (!current) return;
       const sources = await loadSources(ed.entry_id);
       if (snap?.current?.entry_id !== current.entry_id) return;
+      const item = { entry_id: ed.entry_id, title: ed.title || current.title || null };
+      const play = () => Remote.command({ type: "replace_current", item }).catch((err) => setStatus(err.message));
       if (!sources.length) {
-        setStatus(`No playable source for the ${friendlyType(editionKind(ed))} edition yet.`);
+        // An unlinked edition: find it a source, then play it.
+        openFinder({
+          entryId: ed.entry_id,
+          title: ed.title || current.title,
+          artist: ed.artists?.[0] ?? null,
+          reason: `The ${friendlyType(editionKind(ed))} edition has nothing to play yet.`,
+          onAttached: () => {
+            sourcesCache.delete(ed.entry_id);
+            if (snap?.current?.entry_id === current.entry_id) play();
+          },
+        });
         return;
       }
-      const item = { entry_id: ed.entry_id, title: ed.title || current.title || null };
-      Remote.command({ type: "replace_current", item }).catch((err) => setStatus(err.message));
+      play();
+    }
+
+    // ---- source finder (`find_source.rs`) ----
+    //
+    // Searches YouTube Music and Spotify for a track and attaches the pick
+    // as one of its sources (imported, then linked as the same recording).
+    // Opened by hand from the source strip's "Find source" or an unlinked
+    // edition, and by itself when every source of the playing track failed
+    // here (a geoblocked upload): the track then still skips after
+    // `FIND_SKIP_S`, unless the finder is touched first.
+    const findEl = document.getElementById("player-dock-find");
+    const FIND_SKIP_S = 15;
+    // Off by more than this from the track's own length: probably another cut.
+    const FIND_LENGTH_SLACK_MS = 5000;
+    let finder = null;
+
+    function openFinder({ entryId, title, artist = null, reason = null, skipToken = null, onAttached = null }) {
+      closeFinder();
+      const query = [title, artist].filter(Boolean).join(" ");
+      finder = {
+        entryId,
+        title,
+        reason,
+        onAttached,
+        trackSeq: snap?.track_seq ?? null,
+        input: el("input", {
+          type: "search",
+          value: query,
+          placeholder: "Search YouTube Music and Spotify",
+          "aria-label": "Search for a source",
+        }),
+        results: null,
+        errors: [],
+        durationMs: null,
+        searching: false,
+        attaching: null,
+        status: null,
+        request: 0,
+        skipToken,
+        skipLeft: skipToken != null ? FIND_SKIP_S : null,
+        skipEl: null,
+        timer: null,
+      };
+      if (skipToken != null) {
+        const f = finder;
+        f.timer = setInterval(() => {
+          if (finder !== f || f.skipLeft == null) return;
+          f.skipLeft -= 1;
+          if (f.skipLeft > 0) {
+            if (f.skipEl) f.skipEl.textContent = `skipping in ${f.skipLeft}s`;
+            return;
+          }
+          closeFinder();
+          reportEnded(f.skipToken);
+        }, 1000);
+      }
+      renderFinder();
+      renderSwitcher();
+      runFind();
+    }
+
+    function findForCurrent() {
+      const cur = snap?.current;
+      if (!cur) return;
+      openFinder({
+        entryId: cur.entry_id,
+        title: cur.title,
+        artist: snap.artist || null,
+        onAttached: (res) => playAttached(cur.entry_id, res),
+      });
+    }
+
+    // Every source of the playing track failed on this device (or it has
+    // none): open the finder on it, with the skip counting down.
+    function offerFinder(token, reason) {
+      const cur = snap?.current;
+      if (!cur) {
+        setTimeout(() => reportEnded(token), 1200);
+        return;
+      }
+      openFinder({
+        entryId: cur.entry_id,
+        title: cur.title,
+        artist: snap.artist || null,
+        reason,
+        skipToken: token,
+        onAttached: (res) => playAttached(cur.entry_id, res),
+      });
+      setExpanded(true);
+    }
+
+    function playAttached(entryId, res) {
+      sourcesCache.delete(entryId);
+      if (snap?.current?.entry_id !== entryId) return;
+      Remote.command({ type: "select_source", identifier: res.identifier }).catch((err) => setStatus(err.message));
+    }
+
+    function stopFinderSkip() {
+      if (!finder) return;
+      clearInterval(finder.timer);
+      finder.timer = null;
+      finder.skipLeft = null;
+      if (finder.skipEl) finder.skipEl.textContent = "skip paused";
+    }
+
+    function closeFinder() {
+      if (!finder) return;
+      clearInterval(finder.timer);
+      finder = null;
+      findEl.hidden = true;
+      findEl.innerHTML = "";
+      renderSwitcher();
+    }
+
+    // Touching the finder means someone's looking: hold the skip. Only the
+    // countdown text changes, so the press still lands on its button.
+    for (const type of ["pointerdown", "keydown", "focusin"]) {
+      findEl.addEventListener(type, () => {
+        if (finder?.skipLeft != null) stopFinderSkip();
+      });
+    }
+
+    async function runFind() {
+      const f = finder;
+      if (!f) return;
+      const q = f.input.value.trim();
+      if (!q) return;
+      const my = ++f.request;
+      f.searching = true;
+      f.status = null;
+      renderFinder();
+      try {
+        const r = await api(`/api/entries/${f.entryId}/find-sources?q=${encodeURIComponent(q)}`);
+        if (finder !== f || my !== f.request) return;
+        f.results = r.results || [];
+        f.errors = r.errors || [];
+        f.durationMs = r.duration_ms ?? null;
+      } catch (err) {
+        if (finder !== f || my !== f.request) return;
+        f.results = [];
+        f.status = err.message;
+      }
+      f.searching = false;
+      renderFinder();
+    }
+
+    async function attachPick(c) {
+      const f = finder;
+      if (!f || f.attaching) return;
+      stopFinderSkip();
+      f.attaching = c.identifier;
+      f.status = c.entry_id ? "Linking…" : "Importing…";
+      renderFinder();
+      try {
+        const { job_id } = await postJson(`/api/entries/${f.entryId}/attach-source`, { url: c.identifier });
+        let view;
+        for (;;) {
+          view = await api(`/api/jobs/${job_id}`);
+          if (view.status !== "pending" && view.status !== "running") break;
+          if (finder === f && view.progress?.message) {
+            f.status = view.progress.message;
+            renderFinder();
+          }
+          await new Promise((r) => setTimeout(r, 700));
+        }
+        if (view.status !== "succeeded") throw new Error(view.error?.message || `Attaching ${view.status}.`);
+        LibraryChanges.changed();
+        if (finder === f) closeFinder();
+        f.onAttached?.(view.result);
+      } catch (err) {
+        if (finder !== f) {
+          setStatus(err.message);
+          return;
+        }
+        f.attaching = null;
+        f.status = err.message;
+        renderFinder();
+      }
+    }
+
+    function renderFinder() {
+      const f = finder;
+      if (!f) return;
+      findEl.hidden = false;
+      f.skipEl =
+        f.skipToken != null
+          ? el("span", { className: "find-skip", text: f.skipLeft != null ? `skipping in ${f.skipLeft}s` : "skip paused" })
+          : null;
+      const head = el("div", { className: "find-head" }, [
+        el("span", { className: "find-title", text: `Find a source · ${f.title || "this track"}`, title: f.title || null }),
+        f.skipEl,
+        f.skipToken != null
+          ? el("button", {
+              type: "button",
+              text: "Skip",
+              onclick: () => {
+                const token = f.skipToken;
+                closeFinder();
+                reportEnded(token);
+              },
+            })
+          : null,
+        el("button", { type: "button", text: "Close", onclick: closeFinder }),
+      ]);
+      const form = el(
+        "form",
+        {
+          className: "find-form",
+          onsubmit: (e) => {
+            e.preventDefault();
+            runFind();
+          },
+        },
+        [f.input, el("button", { type: "submit", text: f.searching ? "Searching…" : "Search", disabled: f.searching })]
+      );
+      const notes = [];
+      if (f.durationMs) notes.push(`Track length ${formatTime(f.durationMs / 1000)}`);
+      for (const e of f.errors) notes.push(`${e.provider}: ${e.message}`);
+      const rows = (f.results || []).map((c) => {
+        const tags = [c.provider === "spotify" ? "spotify" : `yt ${c.kind}`];
+        if (c.linked) tags.push("this track");
+        else if (c.entry_id) tags.push("in library");
+        const off = f.durationMs && c.duration_ms && Math.abs(c.duration_ms - f.durationMs) > FIND_LENGTH_SLACK_MS;
+        return el(
+          "button",
+          {
+            className: "find-row",
+            type: "button",
+            disabled: c.linked || !!f.attaching,
+            "aria-busy": String(f.attaching === c.identifier),
+            title: c.linked ? "Already a source of this track" : c.identifier,
+            onclick: () => attachPick(c),
+          },
+          [
+            c.thumbnail
+              ? el("img", { className: "find-thumb", src: c.thumbnail, alt: "", loading: "lazy", referrerpolicy: "no-referrer" })
+              : el("span", { className: "find-thumb" }),
+            el("div", {}, [
+              el("div", { className: "find-name", text: c.title || c.identifier }),
+              el("div", { className: "find-sub" }, [
+                el("span", { className: "find-tag", text: tags.join(" · ") }),
+                el("span", { text: [c.artists.join(", "), c.album].filter(Boolean).join(" · ") }),
+              ]),
+            ]),
+            el("span", {
+              className: "find-len",
+              "data-off": off ? "" : null,
+              title: off ? "Not the track's length: maybe another cut" : null,
+              text: c.duration_ms ? formatTime(c.duration_ms / 1000) : "",
+            }),
+          ]
+        );
+      });
+      findEl.replaceChildren(
+        ...[
+          head,
+          f.reason ? el("p", { className: "find-reason", text: f.reason }) : null,
+          form,
+          notes.length ? el("p", { className: "find-note", text: notes.join(" · ") }) : null,
+          f.status ? el("p", { className: "find-note", text: f.status }) : null,
+          rows.length
+            ? el("div", { className: "find-results" }, rows)
+            : f.results && !f.searching
+              ? el("p", { className: "find-note", text: "No results. Try other words." })
+              : null,
+        ].filter(Boolean)
+      );
     }
 
     // Renders either "up next" (default, floating dock) or the full queue

@@ -179,6 +179,27 @@ pub async fn route(
             let id = &p["/api/entries/".len()..p.len() - "/display-name".len()];
             set_display_name(state, id, &body).await
         }
+        p if p.starts_with("/api/entries/") && p.ends_with("/find-sources") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/find-sources".len()]) {
+                Ok(id) => {
+                    let q = parse_query(query).remove("q").unwrap_or_default();
+                    crate::find_source::search(state, id, &q).await
+                }
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/attach-source") => {
+            if *method != Method::POST {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/attach-source".len()]) {
+                Ok(id) => crate::find_source::attach(state, id, &body).await,
+                Err(resp) => resp,
+            }
+        }
         p if p.starts_with("/api/entries/") && p.ends_with("/cover") => {
             if *method != Method::GET {
                 return respond::method_not_allowed();
