@@ -58,6 +58,8 @@ pub fn handles(path: &str) -> bool {
         || path == "/player"
         || path == "/import"
         || path == "/settings"
+        || path == "/playlists"
+        || path.starts_with("/playlists/")
         || path.starts_with("/api/")
         || path.starts_with("/entry/")
         || path.starts_with("/graph/")
@@ -82,7 +84,9 @@ pub async fn route(
             || p.starts_with("/graph/")
             || p == "/player"
             || p == "/import"
-            || p == "/settings" =>
+            || p == "/settings"
+            || p == "/playlists"
+            || p.starts_with("/playlists/") =>
         {
             if *method != Method::GET {
                 return respond::method_not_allowed();

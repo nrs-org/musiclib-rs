@@ -143,14 +143,15 @@
 
   /* ---------- mode switcher: Library / Graph / Player ---------- */
 
+  /* Two rows of three: six labels don't fit the rail's width in one. */
   .mode-switcher {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
     gap: 6px;
     margin: 0 0 12px;
   }
 
   .mode-switcher button {
-    flex: 1;
     border: 1px solid var(--rail);
     background: var(--paper-deep);
     color: var(--ink-soft);
@@ -2342,6 +2343,189 @@
   .manifest-plays { min-width: 7ch; }
   .manifest-row[data-dim] .manifest-title { color: var(--ink-faint); }
 
+  /* ---------- playlists (`Playlists`) ---------- */
+
+  .playlist-new {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0 24px;
+  }
+
+  .playlist-new .rename-input { flex: 1 1 220px; }
+
+  .playlist-index {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid var(--rail);
+  }
+
+  .playlist-index-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 4px;
+    border-bottom: 1px solid var(--rail);
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .playlist-index-row:hover .playlist-index-name { text-decoration: underline; }
+
+  .playlist-index-name {
+    font-family: var(--serif);
+    font-size: 17px;
+    overflow-wrap: anywhere;
+  }
+
+  .playlist-index-meta {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+
+  .playlist-back {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .playlist-back:hover { color: var(--ink); text-decoration: underline; }
+
+  .playlist-delete { margin-left: auto; }
+  .playlist-delete.is-armed { border-color: var(--danger); color: var(--danger); }
+
+  .playlist-row-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .playlist-row-text .manifest-title { flex: none; max-width: 100%; }
+
+  .playlist-row-sub {
+    font-size: 12px;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+
+  .playlist-grip {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 24px;
+    margin-right: -8px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--ink-faint);
+    cursor: grab;
+    touch-action: none;
+  }
+
+  .playlist-grip:hover,
+  .playlist-grip:focus-visible { color: var(--ink); }
+
+  .playlist-items li.is-dragging { opacity: 0.4; }
+
+  /* The tracklist label with its add-to-playlist button at the far end. */
+  .manifest-label.has-action {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .manifest-label-action {
+    display: flex;
+    padding: 2px 4px;
+    background: transparent;
+    border: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+  }
+
+  .manifest-label-action:hover,
+  .manifest-label-action[aria-expanded="true"] { color: var(--brass-ink); }
+
+  .manifest-queue[aria-expanded="true"] { background: var(--paper-deeper); color: var(--ink); }
+
+  .playlist-picker {
+    position: fixed;
+    z-index: 90;
+    width: min(260px, calc(100vw - 16px));
+    border: 1px solid var(--rail);
+    background: var(--paper);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
+    padding: 6px 0 8px;
+  }
+
+  .playlist-picker-label {
+    margin: 4px 12px 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .playlist-picker-list {
+    max-height: 240px;
+    overflow-y: auto;
+  }
+
+  .playlist-picker-item {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 12px;
+    background: transparent;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .playlist-picker-item:hover,
+  .playlist-picker-item:focus-visible { background: var(--paper-deep); }
+
+  .playlist-picker-name { overflow-wrap: anywhere; }
+
+  .playlist-picker-count {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
+  .playlist-picker-note {
+    margin: 4px 12px;
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+
+  .playlist-picker-note:empty { display: none; }
+
+  .playlist-picker-new {
+    display: flex;
+    gap: 6px;
+    margin: 6px 12px 0;
+    padding-top: 8px;
+    border-top: 1px solid var(--rail);
+  }
+
+  .playlist-picker-new .rename-input { flex: 1; min-width: 0; }
+
   /* ---------- an artist's page (`fillArtistPage`) ---------- */
   .artist-aliases {
     font-size: 13px;
@@ -3734,6 +3918,7 @@
           <button type="button" data-mode="library" aria-pressed="true">Library</button>
           <button type="button" data-mode="graph" aria-pressed="false">Graph</button>
           <button type="button" data-mode="player" aria-pressed="false">Player</button>
+          <button type="button" data-mode="playlists" aria-pressed="false">Playlists</button>
           <button type="button" data-mode="import" aria-pressed="false">Import</button>
           <button type="button" data-mode="settings" aria-pressed="false">Settings</button>
         </nav>
@@ -3766,6 +3951,7 @@
           <p class="sub">Search your library or hit <strong>Shuffle all</strong> to start a queue.</p>
         </div>
       </div>
+      <div id="view-playlists" hidden></div>
       <div id="view-import" hidden></div>
       <div id="view-settings" hidden></div>
     </main>
@@ -3856,6 +4042,7 @@
   const viewPlayerEl = document.getElementById("view-player");
   const viewImportEl = document.getElementById("view-import");
   const viewSettingsEl = document.getElementById("view-settings");
+  const viewPlaylistsEl = document.getElementById("view-playlists");
   const playerStageWrapEl = document.getElementById("player-stage-wrap");
   const playerStageMountEl = document.getElementById("player-stage-mount");
   const playerStageEmptyEl = document.getElementById("player-stage-empty");
@@ -3960,6 +4147,7 @@
     viewPlayerEl.hidden = mode !== "player";
     viewImportEl.hidden = mode !== "import";
     viewSettingsEl.hidden = mode !== "settings";
+    viewPlaylistsEl.hidden = mode !== "playlists";
     for (const btn of modeSwitcherEl.querySelectorAll("button[data-mode]")) {
       btn.setAttribute("aria-pressed", String(btn.dataset.mode === mode));
     }
@@ -3990,6 +4178,8 @@
     } else if (mode === "player") {
       history.pushState({}, "", "/player");
       setMode("player");
+    } else if (mode === "playlists") {
+      Playlists.open();
     } else if (mode === "import") {
       history.pushState({}, "", "/import");
       setMode("import");
@@ -4043,6 +4233,10 @@
       '<polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path><text x="12.5" y="15.5" text-anchor="middle" font-size="8" font-family="sans-serif" font-weight="700" stroke="none" fill="currentColor">1</text>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"></polyline>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"></polyline>',
+    "list-plus":
+      '<line x1="3" y1="6" x2="15" y2="6"></line><line x1="3" y1="12" x2="15" y2="12"></line><line x1="3" y1="18" x2="11" y2="18"></line><line x1="18" y1="13" x2="18" y2="21"></line><line x1="14" y1="17" x2="22" y2="17"></line>',
+    grip:
+      '<circle cx="9" cy="6" r="1" fill="currentColor"></circle><circle cx="15" cy="6" r="1" fill="currentColor"></circle><circle cx="9" cy="12" r="1" fill="currentColor"></circle><circle cx="15" cy="12" r="1" fill="currentColor"></circle><circle cx="9" cy="18" r="1" fill="currentColor"></circle><circle cx="15" cy="18" r="1" fill="currentColor"></circle>',
     sliders:
       '<line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="9" cy="6" r="2" fill="var(--paper)"></circle><circle cx="15" cy="12" r="2" fill="var(--paper)"></circle><circle cx="7" cy="18" r="2" fill="var(--paper)"></circle>',
     x: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
@@ -5527,6 +5721,602 @@
     }
 
     return { render };
+  })();
+
+  // ---------- playlists: named track lists kept in the library ----------
+  //
+  // Saved lists, not queues (playlists.rs): playing one sends its playable
+  // items as an ordinary `set_queue`, with a `context` the bar shows as
+  // "from <playlist>". The server resolves each item to the entry its
+  // anchor source is in now, so an item comes back `entry_id: null` once
+  // that source has left the library; it keeps its old title.
+  const Playlists = (() => {
+    const viewEl = document.getElementById("view-playlists");
+    // The playlist page on screen (or last shown), for the mode switcher
+    // to return to and for adds to refresh.
+    let shownId = null;
+    let picker = null;
+    // Reorders go out one at a time, so the last one sent is the one kept.
+    let saving = Promise.resolve();
+
+    async function send(method, path, payload) {
+      const res = await fetch(path, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: payload === undefined ? undefined : JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        let message = res.statusText;
+        try {
+          message = (await res.json()).message || message;
+        } catch {}
+        throw new Error(message || `request failed (${res.status})`);
+      }
+      return res.json();
+    }
+
+    const list = async () => (await api("/api/playlists")).playlists;
+    const create = (name) => send("POST", "/api/playlists", { name });
+
+    function setPath(path, push) {
+      if (push && location.pathname !== path) history.pushState({}, "", path);
+      else history.replaceState({}, "", path);
+    }
+
+    function plainClick(e) {
+      return e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
+    }
+
+    // Adds `entryIds` to `pl`; returns a line saying what happened.
+    async function addTo(pl, entryIds) {
+      const r = await send("POST", `/api/playlists/${pl.id}/items`, { entry_ids: entryIds });
+      if (shownId === pl.id && currentMode === "playlists") show(pl.id, { push: false, enter: false });
+      const name = `"${pl.name}"`;
+      if (entryIds.length === 1) {
+        if (r.added.length) return `Added to ${name}.`;
+        if (r.duplicates.length) return `Already in ${name}.`;
+        return `Couldn't add that to ${name}.`;
+      }
+      const parts = [`Added ${plural(r.added.length, "track")} to ${name}`];
+      if (r.duplicates.length) parts.push(`${r.duplicates.length} already there`);
+      if (r.missing.length) parts.push(`${r.missing.length} couldn't be added`);
+      return parts.join(", ") + ".";
+    }
+
+    // ---------- "Add to playlist" popover ----------
+
+    function closePicker({ refocus = false } = {}) {
+      if (!picker) return;
+      const { menu, opener } = picker;
+      picker = null;
+      menu.remove();
+      document.removeEventListener("pointerdown", onOutside, true);
+      document.removeEventListener("keydown", onPickerKey, true);
+      document.removeEventListener("scroll", onScroll, true);
+      opener.setAttribute("aria-expanded", "false");
+      if (refocus && opener.isConnected) opener.focus();
+    }
+
+    function onOutside(e) {
+      if (picker && !picker.menu.contains(e.target) && !picker.opener.contains(e.target)) closePicker();
+    }
+
+    function onPickerKey(e) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closePicker({ refocus: true });
+      }
+    }
+
+    // Follows its button as the page scrolls; closes once that's out of view.
+    function onScroll(e) {
+      if (!picker || picker.menu.contains(e.target)) return;
+      const r = picker.opener.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight) closePicker();
+      else place(picker.menu, picker.opener);
+    }
+
+    // Under `opener` (above it when there's no room), inside the window
+    // and clear of the player bar.
+    function place(menu, opener) {
+      const r = opener.getBoundingClientRect();
+      const bottom = window.innerHeight - 8 - (document.body.classList.contains("has-player") ? 84 : 0);
+      const left = Math.min(Math.max(8, r.right - menu.offsetWidth), window.innerWidth - menu.offsetWidth - 8);
+      const below = r.bottom + 6;
+      const top = below + menu.offsetHeight > bottom ? Math.max(8, r.top - menu.offsetHeight - 6) : below;
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+    }
+
+    async function pick(opener, entryIds) {
+      if (picker?.opener === opener) {
+        closePicker();
+        return;
+      }
+      closePicker();
+      const listEl = el("div", { className: "playlist-picker-list" }, [
+        el("p", { className: "playlist-picker-note", text: "Loading…" }),
+      ]);
+      const input = el("input", {
+        type: "text",
+        className: "rename-input",
+        placeholder: "New playlist",
+        "aria-label": "New playlist name",
+        autocomplete: "off",
+        spellcheck: "false",
+      });
+      const status = el("p", { className: "playlist-picker-note", role: "status" });
+      const form = el("form", { className: "playlist-picker-new" }, [
+        input,
+        el("button", { type: "submit", className: "ghost-btn", text: "Create" }),
+      ]);
+      const menu = el("div", { className: "playlist-picker", role: "dialog", "aria-label": "Add to playlist" }, [
+        el("p", {
+          className: "playlist-picker-label",
+          text: entryIds.length === 1 ? "Add to playlist" : `Add ${plural(entryIds.length, "track")} to`,
+        }),
+        listEl,
+        form,
+        status,
+      ]);
+
+      async function choose(pl) {
+        closePicker({ refocus: true });
+        try {
+          setStatus(await addTo(pl, entryIds));
+        } catch (err) {
+          setStatus(err.message);
+        }
+      }
+
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const name = input.value.trim();
+        if (!name) return;
+        try {
+          await choose(await create(name));
+        } catch (err) {
+          status.textContent = err.message;
+        }
+      };
+
+      picker = { menu, opener };
+      opener.setAttribute("aria-expanded", "true");
+      document.body.appendChild(menu);
+      place(menu, opener);
+      document.addEventListener("pointerdown", onOutside, true);
+      document.addEventListener("keydown", onPickerKey, true);
+      document.addEventListener("scroll", onScroll, true);
+
+      let playlists = [];
+      try {
+        playlists = await list();
+      } catch (err) {
+        status.textContent = err.message;
+      }
+      if (picker?.menu !== menu) return;
+      listEl.replaceChildren(
+        ...(playlists.length
+          ? playlists.map((pl) =>
+              el("button", { type: "button", className: "playlist-picker-item", onclick: () => choose(pl) }, [
+                el("span", { className: "playlist-picker-name", text: pl.name }),
+                el("span", { className: "playlist-picker-count", text: String(pl.item_count) }),
+              ])
+            )
+          : [el("p", { className: "playlist-picker-note", text: "No playlists yet." })])
+      );
+      place(menu, opener);
+      (listEl.querySelector("button") || input).focus();
+    }
+
+    // A button that opens the picker for `entryIds()`: an icon, and `text`
+    // after it if given.
+    function addButton(className, label, entryIds, text) {
+      const btn = el("button", {
+        className,
+        type: "button",
+        "aria-label": label,
+        title: label,
+        "aria-haspopup": "dialog",
+        "aria-expanded": "false",
+      });
+      btn.innerHTML = svgIcon("list-plus", 13);
+      if (text) btn.appendChild(el("span", { text }));
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        pick(btn, entryIds());
+      };
+      return btn;
+    }
+
+    // ---------- the index ----------
+
+    async function showIndex({ push = true } = {}) {
+      shownId = null;
+      setPath("/playlists", push);
+      setMode("playlists");
+      const page = el("div", { className: "detail playlists-index enter" });
+      viewEl.replaceChildren(page);
+      page.appendChild(el("h1", { className: "card-title", text: "Playlists" }));
+
+      const input = el("input", {
+        type: "text",
+        className: "rename-input",
+        placeholder: "New playlist name",
+        "aria-label": "New playlist name",
+        autocomplete: "off",
+        spellcheck: "false",
+      });
+      const status = el("span", { className: "rename-status", role: "status" });
+      const form = el("form", { className: "playlist-new" }, [
+        input,
+        el("button", { type: "submit", className: "ghost-btn", text: "Create playlist" }),
+        status,
+      ]);
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const name = input.value.trim();
+        if (!name) {
+          input.focus();
+          return;
+        }
+        try {
+          show((await create(name)).id);
+        } catch (err) {
+          status.textContent = err.message;
+        }
+      };
+      page.appendChild(form);
+
+      let playlists;
+      try {
+        playlists = await list();
+      } catch (err) {
+        page.appendChild(el("p", { className: "note", text: err.message }));
+        return;
+      }
+      if (viewEl.firstChild !== page) return;
+      if (!playlists.length) {
+        page.appendChild(
+          el("p", {
+            className: "note",
+            text: "No playlists yet. Name one above, or add a track to a new one from its add-to-playlist button.",
+          })
+        );
+        return;
+      }
+      page.appendChild(
+        el(
+          "ul",
+          { className: "playlist-index" },
+          playlists.map((pl) =>
+            el("li", {}, [
+              el(
+                "a",
+                {
+                  className: "playlist-index-row",
+                  href: `/playlists/${pl.id}`,
+                  onclick: (e) => {
+                    if (!plainClick(e)) return;
+                    e.preventDefault();
+                    show(pl.id);
+                  },
+                },
+                [
+                  el("span", { className: "playlist-index-name", text: pl.name }),
+                  el("span", {
+                    className: "playlist-index-meta",
+                    text: `${plural(pl.item_count, "track")} · changed ${changedText(pl.updated_at)}`,
+                  }),
+                ]
+              ),
+            ])
+          )
+        )
+      );
+    }
+
+    function changedText(unix) {
+      const d = new Date(unix * 1000);
+      const today = new Date();
+      if (d.toDateString() === today.toDateString()) return "today";
+      return d.toLocaleDateString(undefined, {
+        year: d.getFullYear() === today.getFullYear() ? undefined : "numeric",
+        month: "short",
+        day: "numeric",
+      });
+    }
+
+    // ---------- one playlist ----------
+
+    async function show(id, { push = true, enter = true } = {}) {
+      shownId = id;
+      setPath(`/playlists/${id}`, push);
+      setMode("playlists");
+      let pl;
+      try {
+        pl = await api(`/api/playlists/${id}`);
+      } catch (err) {
+        if (shownId !== id) return;
+        const gone = err.message === "no such resource";
+        viewEl.replaceChildren(
+          el("div", { className: "detail" }, [
+            el("p", { className: "note", text: gone ? "This playlist doesn't exist anymore." : err.message }),
+            indexLink(),
+          ])
+        );
+        return;
+      }
+      if (shownId !== id || currentMode !== "playlists") return;
+      render(pl, enter);
+    }
+
+    function indexLink() {
+      return el("a", {
+        className: "playlist-back",
+        href: "/playlists",
+        text: "← All playlists",
+        onclick: (e) => {
+          if (!plainClick(e)) return;
+          e.preventDefault();
+          showIndex();
+        },
+      });
+    }
+
+    function play(pl, { from = null, shuffle } = {}) {
+      const playable = pl.items.filter((i) => i.playable && i.entry_id != null);
+      if (!playable.length) return;
+      let start = from == null ? 0 : Math.max(0, playable.findIndex((i) => i.item_id === from));
+      if (shuffle) start = Math.floor(Math.random() * playable.length);
+      playbackCommand({
+        type: "set_queue",
+        items: playable.map(queueItem),
+        start_index: start,
+        shuffle,
+        context: { kind: "playlist", id: pl.id, name: pl.name },
+      });
+    }
+
+    function render(pl, enter) {
+      const scroller = viewEl.closest("main");
+      const scrollTop = scroller?.scrollTop ?? 0;
+      const page = el("div", { className: "detail playlist-page" + (enter ? " enter" : "") });
+      page.appendChild(el("div", { className: "card-kicker" }, [indexLink(), el("span", { text: "Playlist" })]));
+      const titleEl = el("h1", { className: "card-title", text: pl.name });
+      page.appendChild(titleEl);
+      page.appendChild(
+        nameEditor({
+          label: "rename",
+          className: "card-rename",
+          value: pl.name,
+          aliases: [],
+          renamed: false,
+          resetLabel: "",
+          onSave: async (name) => {
+            if (!name) throw new Error("A playlist needs a name.");
+            const next = await send("PATCH", `/api/playlists/${pl.id}`, { name });
+            pl.name = next.name;
+            titleEl.textContent = next.name;
+            return { value: next.name, aliases: [], renamed: false };
+          },
+        })
+      );
+      const metaEl = el("p", { className: "card-meta" });
+      page.appendChild(metaEl);
+
+      const playIcon = el("span", { className: "play-cta-icon" });
+      playIcon.innerHTML = svgIcon("play", 13);
+      const playBtn = el("button", { className: "play-cta", type: "button", onclick: () => play(pl) }, [
+        playIcon,
+        el("span", { text: "Play" }),
+      ]);
+      const shuffleIcon = el("span", { className: "queue-cta-icon" });
+      shuffleIcon.innerHTML = svgIcon("shuffle", 12);
+      const shuffleBtn = el(
+        "button",
+        { className: "ghost-btn queue-cta", type: "button", onclick: () => play(pl, { shuffle: true }) },
+        [shuffleIcon, el("span", { text: "Shuffle" })]
+      );
+      const deleteBtn = el("button", { className: "ghost-btn playlist-delete", type: "button", text: "Delete" });
+      let armed = null;
+      deleteBtn.onclick = async () => {
+        if (!armed) {
+          deleteBtn.textContent = "Click again to delete";
+          deleteBtn.classList.add("is-armed");
+          armed = setTimeout(() => {
+            armed = null;
+            deleteBtn.textContent = "Delete";
+            deleteBtn.classList.remove("is-armed");
+          }, 4000);
+          return;
+        }
+        clearTimeout(armed);
+        deleteBtn.disabled = true;
+        try {
+          await send("DELETE", `/api/playlists/${pl.id}`);
+          setStatus(`Deleted "${pl.name}".`);
+          showIndex();
+        } catch (err) {
+          setStatus(err.message);
+          deleteBtn.disabled = false;
+        }
+      };
+      page.appendChild(el("div", { className: "play-cta-row" }, [playBtn, shuffleBtn, deleteBtn]));
+
+      const ul = el("ul", { className: "manifest playlist-items" });
+      function update() {
+        const unplayable = pl.items.filter((i) => !i.playable).length;
+        metaEl.textContent = [
+          plural(pl.items.length, "track"),
+          unplayable ? `${unplayable} can't play` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        playBtn.disabled = shuffleBtn.disabled = pl.items.length === unplayable;
+        [...ul.children].forEach((li, i) => {
+          li.querySelector(".manifest-no").textContent = String(i + 1);
+        });
+      }
+
+      function commitOrder() {
+        const ids = [...ul.children].map((li) => Number(li.dataset.itemId));
+        if (ids.every((id, i) => id === pl.items[i].item_id)) return;
+        const byId = new Map(pl.items.map((i) => [i.item_id, i]));
+        pl.items = ids.map((id) => byId.get(id));
+        update();
+        saving = saving
+          .then(() => send("PUT", `/api/playlists/${pl.id}/order`, { item_ids: ids }))
+          .catch((err) => {
+            setStatus(`Couldn't save the new order: ${err.message}`);
+            if (shownId === pl.id) show(pl.id, { push: false, enter: false });
+          });
+      }
+
+      let dragging = null;
+      ul.addEventListener("dragover", (e) => {
+        if (!dragging) return;
+        e.preventDefault();
+        const target = e.target.closest?.("li");
+        if (!target || target === dragging || target.parentNode !== ul) return;
+        const r = target.getBoundingClientRect();
+        ul.insertBefore(dragging, e.clientY > r.top + r.height / 2 ? target.nextSibling : target);
+      });
+      ul.addEventListener("drop", (e) => e.preventDefault());
+
+      for (const item of pl.items) {
+        const title = item.title || "(untitled)";
+        const playing = item.entry_id != null && Player.isPlayingEntry(item.entry_id);
+        const playIcon = el("span", { className: "manifest-play-icon" });
+        playIcon.innerHTML = svgIcon(playing ? "pause" : "play", 12);
+        const removeIcon = el("span", { className: "playlist-remove-icon" });
+        removeIcon.innerHTML = svgIcon("x", 12);
+        const grip = el("button", {
+          className: "playlist-grip",
+          type: "button",
+          "aria-label": `Move ${title} (arrow keys)`,
+          title: "Drag, or use the arrow keys, to move",
+        });
+        grip.innerHTML = svgIcon("grip", 12);
+        const li = el("li", { "data-item-id": String(item.item_id) }, [
+          el(
+            "div",
+            {
+              className: "manifest-row playlist-row" + (playing ? " is-playing" : ""),
+              "data-entry-id": item.entry_id == null ? null : String(item.entry_id),
+              "data-dim": item.playable ? null : "",
+            },
+            [
+              grip,
+              el("span", { className: "manifest-no" }),
+              el(
+                "button",
+                {
+                  className: "manifest-play",
+                  type: "button",
+                  disabled: !item.playable,
+                  "aria-label": playing ? "Pause" : "Play",
+                  onclick: item.playable
+                    ? () => {
+                        if (Player.isPlayingEntry(item.entry_id)) Player.togglePlay();
+                        else play(pl, { from: item.item_id });
+                      }
+                    : null,
+                },
+                [playIcon]
+              ),
+              artBox(item.entry_id, "track-thumb", item.title),
+              el("div", { className: "playlist-row-text" }, [
+                item.entry_id == null
+                  ? el("span", { className: "manifest-title", text: title })
+                  : el("button", {
+                      className: "manifest-title",
+                      type: "button",
+                      text: title,
+                      onclick: () => viewEntry(item.entry_id),
+                    }),
+                el("span", {
+                  className: "playlist-row-sub",
+                  text: item.entry_id == null ? "No longer in the library" : item.artists.join(", "),
+                }),
+              ]),
+              el(
+                "button",
+                {
+                  className: "manifest-queue",
+                  type: "button",
+                  "aria-label": `Remove ${title} from the playlist`,
+                  title: "Remove from the playlist",
+                  onclick: async () => {
+                    try {
+                      await saving;
+                      await send("DELETE", `/api/playlists/${pl.id}/items/${item.item_id}`);
+                    } catch (err) {
+                      setStatus(err.message);
+                      return;
+                    }
+                    const next = li.nextElementSibling || li.previousElementSibling;
+                    li.remove();
+                    pl.items = pl.items.filter((i) => i !== item);
+                    update();
+                    next?.querySelector(".manifest-queue")?.focus();
+                  },
+                },
+                [removeIcon]
+              ),
+            ]
+          ),
+        ]);
+
+        grip.addEventListener("pointerdown", () => (li.draggable = true));
+        grip.addEventListener("pointerup", () => (li.draggable = false));
+        li.addEventListener("dragstart", (e) => {
+          dragging = li;
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", title);
+          li.classList.add("is-dragging");
+        });
+        li.addEventListener("dragend", () => {
+          dragging = null;
+          li.draggable = false;
+          li.classList.remove("is-dragging");
+          commitOrder();
+        });
+        grip.addEventListener("keydown", (e) => {
+          const up = e.key === "ArrowUp";
+          if (!up && e.key !== "ArrowDown") return;
+          e.preventDefault();
+          const other = up ? li.previousElementSibling : li.nextElementSibling;
+          if (!other) return;
+          ul.insertBefore(li, up ? other : other.nextSibling);
+          grip.focus();
+          commitOrder();
+        });
+        ul.appendChild(li);
+      }
+
+      if (pl.items.length) {
+        page.appendChild(ul);
+      } else {
+        page.appendChild(
+          el("p", {
+            className: "note",
+            text: "Nothing here yet. Use the add-to-playlist button on a track, or on a release's tracklist.",
+          })
+        );
+      }
+      update();
+      viewEl.replaceChildren(page);
+      if (!enter && scroller) scroller.scrollTop = scrollTop;
+    }
+
+    return {
+      showIndex,
+      show,
+      addButton,
+      // The mode switcher: back to the playlist last shown, else the index.
+      open: () => (shownId == null ? showIndex() : show(shownId)),
+    };
   })();
 
   // ---------- spotify: connect + playback ----------
@@ -7550,12 +8340,14 @@
 
     // `artists` are the library's credited artists (`{ entry_id, name }`),
     // each a link to its entry; `rest` is plain text after them.
+    // `context` is what the queue was played from (a playlist), linked
+    // after the rest.
     let barSubKey = null;
-    function updateBarMeta(title, artists, rest, thumbUrl) {
+    function updateBarMeta(title, artists, rest, thumbUrl, context) {
       titleBtn.textContent = title || "(untitled)";
       // Snapshots arrive often; rebuilding only on change keeps a hovered
       // or focused artist link in place.
-      const subKey = JSON.stringify([artists, rest]);
+      const subKey = JSON.stringify([artists, rest, context]);
       if (subKey !== barSubKey) {
         barSubKey = subKey;
         const nodes = [];
@@ -7566,6 +8358,16 @@
         for (const text of rest) {
           if (nodes.length) nodes.push(" · ");
           nodes.push(text);
+        }
+        if (context?.kind === "playlist") {
+          if (nodes.length) nodes.push(" · ");
+          const link = el("a", { className: "player-bar-artist", href: `/playlists/${context.id}`, text: `from ${context.name}` });
+          link.addEventListener("click", (e) => {
+            if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            Playlists.show(context.id);
+          });
+          nodes.push(link);
         }
         subEl.replaceChildren(...nodes);
       }
@@ -8820,7 +9622,7 @@
         if (!isActive()) {
           rest.push(s.active_device ? `on ${deviceLabel(s.active_device)}` : "not playing");
         }
-        updateBarMeta(currentTitle, artists, rest.filter(Boolean), coverUrl(s.current.entry_id));
+        updateBarMeta(currentTitle, artists, rest.filter(Boolean), coverUrl(s.current.entry_id), s.context);
       }
       prevBtn.disabled = !s.has_prev;
       nextBtn.disabled = !s.has_next;
@@ -13460,6 +14262,7 @@
             "aria-label": "Add to queue",
             onclick: t.playable ? () => queueTrack(t.entry_id, t.title) : null,
           }, [queueIcon]),
+          Playlists.addButton("manifest-queue", `Add ${t.title || "track"} to a playlist`, () => [t.entry_id]),
         ]
       ),
     ]);
@@ -13760,7 +14563,13 @@
     } else {
       const playable = await api(`/api/entries/${entryId}/playable-sources`).catch(() => ({ sources: [] }));
       if (playable.sources.length) {
-        detail.appendChild(buildPlayCta(entryId, entry.title, playable.sources));
+        const cta = buildPlayCta(entryId, entry.title, playable.sources);
+        if (entry.entry_type === "track") {
+          cta.querySelector(".queue-cta").after(
+            Playlists.addButton("ghost-btn queue-cta", "Add to playlist", () => [entryId], "Playlist")
+          );
+        }
+        detail.appendChild(cta);
       } else if (entry.entry_type === "track") {
         detail.appendChild(buildFindCta(entry));
       }
@@ -13801,7 +14610,14 @@
           .filter((t) => t.playable)
           .map((t) => ({ entry_id: t.entry_id, title: t.title, release_id: entryId }));
 
-        detail.appendChild(el("p", { className: "manifest-label", text: "Tracklist" }));
+        detail.appendChild(
+          el("p", { className: "manifest-label has-action" }, [
+            el("span", { text: "Tracklist" }),
+            Playlists.addButton("manifest-label-action", "Add the tracklist to a playlist", () =>
+              tracks.tracks.map((t) => t.entry_id)
+            ),
+          ])
+        );
         const list = el("ul", { className: "manifest" });
         // Track numbers restart on each disc, so a multi-disc release gets
         // a heading per disc.
@@ -13861,6 +14677,7 @@
                         }
                       : null,
                   }, [queueIcon]),
+                  Playlists.addButton("manifest-queue", `Add ${t.title || "track"} to a playlist`, () => [t.entry_id]),
                 ]
               ),
             ])
@@ -13911,7 +14728,8 @@
 
   // ---------- URL routing ----------
   //
-  // `/entry/{id}`, `/graph`, `/graph/{id}`, and `/player` are the
+  // `/entry/{id}`, `/graph`, `/graph/{id}`, `/player`, and
+  // `/playlists[/{id}]` are the
   // client-side routes besides `/` — reading them on load means an F5 (or a
   // shared link) lands back on the mode/entry you were looking at instead of
   // always resetting to the empty invite screen. The server serves the
@@ -13928,6 +14746,10 @@
       setMode("graph");
     } else if (path === "/player") {
       setMode("player");
+    } else if ((m = path.match(/^\/playlists\/(\d+)$/))) {
+      Playlists.show(Number(m[1]), { push });
+    } else if (path === "/playlists") {
+      Playlists.showIndex({ push });
     } else if (path === "/import") {
       setMode("import");
     } else if (path === "/settings") {
