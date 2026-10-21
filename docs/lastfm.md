@@ -23,6 +23,12 @@ is preferred, then a complete MusicBrainz recording. These fields come from the
 same catalog pair. An available album from that pair's release is included.
 The primary listed artist is used for tracks with multiple artists.
 
+When the same identity has a MusicBrainz recording link, its recording MBID is
+included in both scrobbles and Now Playing updates, even when Spotify supplies
+the names and duration. IDs from related covers, instrumentals or other editions
+are excluded. Existing queued payloads without an MBID remain readable and keep
+their original metadata when retried.
+
 YouTube video titles and channel names are never used as scrobble metadata.
 A linked music video therefore scrobbles its Spotify/MB track even while playing
 on YouTube. Without usable catalog metadata, the play stays local and can become

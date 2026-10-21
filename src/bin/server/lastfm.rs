@@ -111,6 +111,9 @@ fn track_params(metadata: &Metadata) -> BTreeMap<String, String> {
     if let Some(album) = &metadata.album {
         params.insert("album".into(), album.clone());
     }
+    if let Some(mbid) = &metadata.mbid {
+        params.insert("mbid".into(), mbid.clone());
+    }
     params
 }
 
@@ -603,6 +606,7 @@ mod tests {
             artist: "角巻わため & guests".into(),
             track: "Song".into(),
             album: Some("Album".into()),
+            mbid: Some("1c75e623-32dc-4e2d-82d2-72d966cbe82b".into()),
             duration_seconds: 180.0,
             source: "spotify".into(),
             identifier: "spotify-track".into(),
@@ -648,6 +652,7 @@ mod tests {
                 200,
                 json!({"session":{"name":"Alice", "key":"session-key"}}),
             ),
+            (200, json!({"nowplaying":{"ignoredMessage":{"code":"0"}}})),
             (200, accepted()),
         ])
         .await;
@@ -662,6 +667,20 @@ mod tests {
         );
         auth.connect().await.unwrap();
         let entry = db.insert_entry(Some(EntryType::Track)).await.unwrap();
+        db.upsert_pair(
+            "musicbrainz",
+            "https://musicbrainz.org/recording/1c75e623-32dc-4e2d-82d2-72d966cbe82b",
+            entry,
+            None,
+            &EntrySpecificData::Track {
+                duration_ms: vec![],
+                positions: Default::default(),
+                songs: vec![],
+            },
+            None,
+        )
+        .await
+        .unwrap();
         db.upsert_pair(
             "spotify",
             "track",
@@ -731,16 +750,24 @@ mod tests {
         db.set_play_listened(skipped, 89.0).await.unwrap();
         let play = db.start_play(entry, now()).await.unwrap();
         db.set_play_listened(play, 90.0).await.unwrap();
-        auth.export(&db, &json!({})).await.unwrap();
+        let snapshot = json!({"playing":true, "play_key":"play", "current":{"entry_id":entry}});
+        auth.export(&db, &snapshot).await.unwrap();
         db.set_play_listened(play, 180.0).await.unwrap();
-        auth.export(&db, &json!({})).await.unwrap();
-        assert_eq!(seen.lock().unwrap().len(), 3);
+        auth.export(&db, &snapshot).await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 4);
         let requests = seen.lock().unwrap().clone();
         assert_eq!(requests[0].0, "GET");
         assert_eq!(requests[2].0, "POST");
-        assert_eq!(requests[2].1["track"], "Canonical Song");
+        assert_eq!(requests[2].1["method"], "track.updateNowPlaying");
+        assert_eq!(requests[3].1["method"], "track.scrobble");
+        for request in &requests[2..] {
+            assert_eq!(request.1["mbid"], "1c75e623-32dc-4e2d-82d2-72d966cbe82b");
+            assert_eq!(request.1["track"], "Canonical Song");
+            assert_eq!(request.1["artist"], "Singer");
+            assert_eq!(request.1["api_sig"], signature(&request.1, "shared-secret"));
+        }
         assert_eq!(
-            requests[2].1["timestamp"],
+            requests[3].1["timestamp"],
             db.unqueued_scrobbles("bob", 0)
                 .await
                 .unwrap()
@@ -749,10 +776,6 @@ mod tests {
                 .unwrap()
                 .started_at
                 .to_string()
-        );
-        assert_eq!(
-            requests[2].1["api_sig"],
-            signature(&requests[2].1, "shared-secret")
         );
         let status = auth.status(&db).await.unwrap().to_string();
         for secret in ["api-key", "shared-secret", "session-key"] {
@@ -800,6 +823,10 @@ mod tests {
         restored.export(&db, &json!({})).await.unwrap();
         let requests = seen.lock().unwrap().clone();
         assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[0].1["mbid"],
+            "1c75e623-32dc-4e2d-82d2-72d966cbe82b"
+        );
         assert_eq!(
             requests[0].1, requests[1].1,
             "retry keeps original Unicode metadata, timestamp and signature"
@@ -870,5 +897,20 @@ mod tests {
             Outcome::Accepted
         ));
         assert!(outcome(&json!({})).is_err());
+    }
+
+    #[test]
+    fn old_outbox_payloads_remain_readable_and_omit_missing_mbid() {
+        let payload: Payload = serde_json::from_value(json!({
+            "started_at": 100,
+            "metadata": {"artist":"Singer", "track":"Song", "album":null,
+                "duration_seconds":180.0, "source":"spotify", "identifier":"track"}
+        }))
+        .unwrap();
+        assert_eq!(payload.metadata.mbid, None);
+        let params = track_params(&payload.metadata);
+        assert!(!params.contains_key("mbid"));
+        assert_eq!(params["artist"], "Singer");
+        assert_eq!(params["track"], "Song");
     }
 }

@@ -1,8 +1,12 @@
-//! Scrobble metadata comes from a single catalog pair, never a video's title
-//! or uploader. Spotify wins over MusicBrainz within the played identity;
-//! edition-group relatives (covers, live takes, instrumentals) are excluded.
+//! Scrobble names and duration come from a single catalog pair, never a video's
+//! title or uploader. Spotify wins over MusicBrainz within the played identity.
+//! A recording MBID can supplement these from the same identity; edition-group
+//! relatives (covers, live takes, instrumentals) are excluded.
 
-use musiclib_rs::musicdb::{AliasRow, MusicDb};
+use musiclib_rs::{
+    musicdb::{AliasRow, MusicDb},
+    providers::backends::musicbrainz::canonicalize::match_recording_url,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -10,6 +14,9 @@ pub struct Metadata {
     pub artist: String,
     pub track: String,
     pub album: Option<String>,
+    /// Optional for compatibility with existing frozen outbox payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbid: Option<String>,
     pub duration_seconds: f64,
     pub source: String,
     pub identifier: String,
@@ -40,6 +47,15 @@ pub async fn resolve(db: &MusicDb, entry_id: i64) -> anyhow::Result<Option<Metad
     sources.sort_by(|a, b| {
         (a.source != "spotify", &a.identifier).cmp(&(b.source != "spotify", &b.identifier))
     });
+    // A Spotify metadata preference must not hide a linked recording MBID.
+    // Only recording URLs qualify: artist, work, release and release-track
+    // identifiers refer to different MusicBrainz entities.
+    let linked_mbid = sources
+        .iter()
+        .filter(|s| s.source == "musicbrainz")
+        .filter_map(|s| match_recording_url(&s.identifier))
+        .min()
+        .map(str::to_owned);
     for source in sources {
         let Some(ms) = source.duration_ms.iter().copied().filter(|&d| d > 0).max() else {
             continue;
@@ -122,6 +138,10 @@ pub async fn resolve(db: &MusicDb, entry_id: i64) -> anyhow::Result<Option<Metad
             artist,
             track,
             album,
+            mbid: (pair.0 == "musicbrainz")
+                .then(|| match_recording_url(&pair.1).map(str::to_owned))
+                .flatten()
+                .or_else(|| linked_mbid.clone()),
             duration_seconds: ms as f64 / 1000.0,
             source: pair.0,
             identifier: pair.1,
@@ -135,11 +155,16 @@ mod tests {
     use super::*;
     use musiclib_rs::providers::types::{Alias, Contribution, EntrySpecificData, EntryType};
 
+    const RECORDING: &str =
+        "https://musicbrainz.org/recording/1c75e623-32dc-4e2d-82d2-72d966cbe82b";
+    const COVER: &str = "https://musicbrainz.org/recording/cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391";
+
     fn metadata(duration: f64) -> Metadata {
         Metadata {
             artist: "Singer".into(),
             track: "Song".into(),
             album: None,
+            mbid: None,
             duration_seconds: duration,
             source: "spotify".into(),
             identifier: "track".into(),
@@ -238,8 +263,8 @@ mod tests {
             None,
             "never guess from video titles"
         );
-        pair(&db, id, "musicbrainz", "recording", "MB Song", 180000).await;
-        artist(&db, "musicbrainz", "recording", "MB Singer").await;
+        pair(&db, id, "musicbrainz", RECORDING, "MB Song", 180000).await;
+        artist(&db, "musicbrainz", RECORDING, "MB Singer").await;
         assert_eq!(
             resolve(&db, id).await.unwrap().unwrap().source,
             "musicbrainz"
@@ -252,6 +277,7 @@ mod tests {
         );
         artist(&db, "spotify", "track", "Spotify Singer").await;
         let resolved = resolve(&db, id).await.unwrap().unwrap();
+        assert_eq!(resolved.mbid.as_deref(), match_recording_url(RECORDING));
         assert_eq!(
             (
                 resolved.track.as_str(),
@@ -267,32 +293,84 @@ mod tests {
         let db = MusicDb::new("sqlite::memory:").await.unwrap();
         let video = db.insert_entry(Some(EntryType::Track)).await.unwrap();
         let spotify = db.insert_entry(Some(EntryType::Track)).await.unwrap();
+        let musicbrainz = db.insert_entry(Some(EntryType::Track)).await.unwrap();
         let cover = db.insert_entry(Some(EntryType::Track)).await.unwrap();
         pair(&db, video, "youtube", "mv", "Song [Official MV]", 200000).await;
         pair(&db, spotify, "spotify", "original", "Song", 180000).await;
         artist(&db, "spotify", "original", "Original singer").await;
+        pair(
+            &db,
+            musicbrainz,
+            "musicbrainz",
+            RECORDING,
+            "MB Song",
+            180000,
+        )
+        .await;
+        db.upsert_relation(spotify, musicbrainz, "same_identity", 1.0, "manual", None)
+            .await
+            .unwrap();
         db.upsert_relation(video, spotify, "same_identity", 1.0, "manual", None)
             .await
             .unwrap();
         db.upsert_relation(spotify, cover, "cover", 1.0, "manual", None)
             .await
             .unwrap();
-        assert_eq!(resolve(&db, video).await.unwrap().unwrap().track, "Song");
+        let resolved = resolve(&db, video).await.unwrap().unwrap();
+        assert_eq!(resolved.track, "Song");
+        assert_eq!(resolved.mbid.as_deref(), match_recording_url(RECORDING));
         assert_eq!(
             resolve(&db, cover).await.unwrap(),
             None,
             "never borrow the original's metadata for a cover"
         );
-        pair(&db, cover, "musicbrainz", "cover", "Song (cover)", 190000).await;
-        artist(&db, "musicbrainz", "cover", "Cover singer").await;
-        assert_eq!(
-            resolve(&db, cover).await.unwrap().unwrap().artist,
-            "Cover singer"
-        );
+        pair(&db, cover, "musicbrainz", COVER, "Song (cover)", 190000).await;
+        artist(&db, "musicbrainz", COVER, "Cover singer").await;
+        let resolved = resolve(&db, cover).await.unwrap().unwrap();
+        assert_eq!(resolved.artist, "Cover singer");
+        assert_eq!(resolved.mbid.as_deref(), match_recording_url(COVER));
         let instrumental = db.insert_entry(Some(EntryType::Track)).await.unwrap();
         db.set_edition_derivation(spotify, instrumental, Some("instrumental"))
             .await
             .unwrap();
         assert_eq!(resolve(&db, instrumental).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn omits_non_recording_ids_and_never_borrows_another_editions_mbid() {
+        let db = MusicDb::new("sqlite::memory:").await.unwrap();
+        let instrumental = db.insert_entry(Some(EntryType::Track)).await.unwrap();
+        let original = db.insert_entry(Some(EntryType::Track)).await.unwrap();
+        pair(
+            &db,
+            instrumental,
+            "spotify",
+            "instrumental",
+            "Song (Instrumental)",
+            180000,
+        )
+        .await;
+        artist(&db, "spotify", "instrumental", "Singer").await;
+        pair(&db, original, "musicbrainz", RECORDING, "Song", 180000).await;
+        db.set_edition_derivation(original, instrumental, Some("instrumental"))
+            .await
+            .unwrap();
+        for kind in ["artist", "release", "work", "track"] {
+            let identifier =
+                format!("https://musicbrainz.org/{kind}/1c75e623-32dc-4e2d-82d2-72d966cbe82b");
+            pair(
+                &db,
+                instrumental,
+                "musicbrainz",
+                &identifier,
+                "Unrelated entity",
+                180000,
+            )
+            .await;
+        }
+        assert_eq!(
+            resolve(&db, instrumental).await.unwrap().unwrap().mbid,
+            None
+        );
     }
 }
