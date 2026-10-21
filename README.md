@@ -2,6 +2,8 @@
 
 Metadata storage for music.
 
+The player supports [Last.fm scrobbling](docs/lastfm.md), configured in Settings.
+
 ## Motivation
 
 Basically we have N video sharing platforms and M music streaming services.

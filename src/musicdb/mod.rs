@@ -9,6 +9,8 @@ use tracing::warn;
 
 use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType, Privacy};
 
+pub mod listening;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Database error: {0}")]
@@ -2403,6 +2405,14 @@ impl MusicDb {
                 sea_query::Expr::value(winner),
             )
             .filter(entry_source::Column::EntryId.eq(loser))
+            .exec(&txn)
+            .await?;
+
+        // History must follow newly imported catalog metadata too. Submission
+        // payloads already queued for Last.fm remain frozen independently.
+        play_event::Entity::update_many()
+            .col_expr(play_event::Column::EntryId, sea_query::Expr::value(winner))
+            .filter(play_event::Column::EntryId.eq(loser))
             .exec(&txn)
             .await?;
 

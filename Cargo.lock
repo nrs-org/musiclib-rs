@@ -2479,6 +2479,7 @@ dependencies = [
  "libc",
  "libffi",
  "libloading",
+ "md-5",
  "owo-colors",
  "regex",
  "reqwest",

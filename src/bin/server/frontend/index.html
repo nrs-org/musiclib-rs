@@ -678,6 +678,21 @@
     margin: 0 0 16px;
   }
 
+  .lastfm-settings .ghost-btn { margin: 0 8px 12px 0; }
+  .lastfm-settings details { margin-bottom: 16px; }
+  .lastfm-settings summary { cursor: pointer; }
+  .lastfm-settings form { margin-top: 16px; }
+  .lastfm-settings label { display: grid; gap: 6px; }
+  .lastfm-settings input {
+    width: 100%;
+    max-width: 420px;
+    padding: 8px 10px;
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+    color: var(--ink);
+    font-family: var(--mono);
+  }
+
   .provider-pref-list {
     list-style: none;
     margin: 0;
@@ -5465,6 +5480,79 @@
   // making sense as more providers gain direct playback support — reordering
   // is what "prefer Spotify over YouTube, but fall back to YouTube" means
   // once there are more than two choices to fall back through.
+  const LastFmSettings = (() => {
+    async function send(method, path, payload) {
+      const response = await fetch(`/api/lastfm/${path}`, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: payload === undefined ? undefined : JSON.stringify(payload),
+      });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.message || response.statusText);
+      return value;
+    }
+
+    function section() {
+      const box = el("div", { className: "settings-section lastfm-settings" }, [
+        el("h2", { text: "Last.fm" }),
+        el("p", { className: "sub", text: "Scrobble after half a track or four minutes of listening. Spotify metadata is preferred, with MusicBrainz as a fallback." }),
+      ]);
+      const content = el("div");
+      const message = el("p", { className: "sub", role: "status", "aria-live": "polite" });
+      box.append(content, message);
+      let busy = false;
+      async function act(action) {
+        if (busy) return;
+        busy = true;
+        content.querySelectorAll("button").forEach((button) => button.disabled = true);
+        message.textContent = "";
+        try { await action(); await refresh(); }
+        catch (error) { message.textContent = error.message; }
+        finally {
+          busy = false;
+          content.querySelectorAll("button").forEach((button) => button.disabled = false);
+        }
+      }
+      async function refresh() {
+        const status = await api("/api/lastfm/status");
+        content.replaceChildren();
+        content.appendChild(el("p", { text: status.connected ? `Connected as ${status.username}` : "Scrobbling is off." }));
+        if (status.connected) {
+          const counts = status.counts || {};
+          content.appendChild(el("p", { className: "sub", text: `${counts.accepted || 0} scrobbled · ${counts.pending || 0} pending · ${(counts.ignored || 0) + (counts.rejected || 0)} skipped` }));
+          content.appendChild(el("button", { type: "button", className: "ghost-btn", text: "Disconnect", onclick: () => act(() => send("DELETE", "session")) }));
+        } else if (status.configured) {
+          if (status.authorization_url) {
+            content.appendChild(el("p", {}, [
+              el("a", { href: status.authorization_url, target: "_blank", rel: "noopener noreferrer", text: "Authorize on Last.fm" }),
+              document.createTextNode(", then return here to finish connecting."),
+            ]));
+            content.appendChild(el("button", { type: "button", className: "ghost-btn", text: "Finish connecting", onclick: () => act(() => send("POST", "connect")) }));
+          }
+          content.appendChild(el("button", { type: "button", className: "ghost-btn", text: status.authorizing ? "Restart authorization" : "Connect Last.fm", onclick: () => act(() => send("POST", "authorize")) }));
+        }
+        const apiKey = el("input", { type: "text", name: "lastfm-api-key", autocomplete: "off", required: true, placeholder: "API key" });
+        const secret = el("input", { type: "password", name: "lastfm-secret", autocomplete: "new-password", required: true, placeholder: "Shared secret" });
+        const form = el("form", { onsubmit: (event) => {
+          event.preventDefault();
+          act(async () => { await send("PUT", "config", { api_key: apiKey.value.trim(), secret: secret.value.trim() }); secret.value = ""; });
+        } }, [
+          el("p", { className: "sub" }, [el("a", { href: "https://www.last.fm/api/account/create", target: "_blank", rel: "noopener noreferrer", text: "Create a Last.fm API application" }), document.createTextNode(" and enter its key and shared secret.")]),
+          el("p", {}, [el("label", {}, [document.createTextNode("API key "), apiKey])]),
+          el("p", {}, [el("label", {}, [document.createTextNode("Shared secret "), secret])]),
+          el("button", { type: "submit", className: "ghost-btn", text: "Save API credentials" }),
+        ]);
+        content.appendChild(el("details", { open: !status.configured }, [el("summary", { text: "API credentials" }), form]));
+        content.appendChild(el("p", { className: "sub", text: "New plays are scrobbled after connecting. Tracks without usable Spotify or MusicBrainz metadata stay local." }));
+        content.appendChild(el("button", { type: "button", className: "ghost-btn", text: "Refresh status", onclick: () => act(async () => {}) }));
+        if (status.error) message.textContent = status.error;
+      }
+      refresh().catch((error) => message.textContent = error.message);
+      return box;
+    }
+    return { section };
+  })();
+
   const Settings = (() => {
     const viewEl = document.getElementById("view-settings");
 
@@ -5513,6 +5601,7 @@
       viewEl.appendChild(
         el("div", { className: "settings-view has-mix" }, [
           ShuffleMix.section(),
+          LastFmSettings.section(),
           el("div", { className: "settings-section" }, [
             el("h2", { text: "Playback source" }),
             el("p", {
@@ -6176,7 +6265,7 @@
     function report(play, useBeacon) {
       if (!play || play.playId == null || play.listened <= play.reported) return;
       const listened = Math.round(play.listened * 10) / 10;
-      const body = JSON.stringify({ listened_seconds: listened });
+      const body = JSON.stringify({ listened_seconds: listened, reporter: play.reporter });
       const url = `/api/plays/${play.playId}`;
       const previous = play.reported;
       play.reported = play.listened;
@@ -6193,13 +6282,15 @@
         });
     }
 
-    function start(entryId) {
+    function start(entryId, sessionKey) {
       finish();
-      const play = { entryId, playId: null, listened: 0, reported: 0, lastPos: null, lastAt: 0, counted: false };
+      const reporter = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      const play = { entryId, reporter, playId: null, listened: 0, base: 0, reported: 0, lastPos: null, lastAt: 0, counted: false };
       cur = play;
-      postJson("/api/plays", { entry_id: entryId })
+      postJson("/api/plays", { entry_id: entryId, session_key: sessionKey || undefined })
         .then((res) => {
           play.playId = res.play_id;
+          play.base = res.listened_seconds || 0;
           // Heard before the id arrived, or already replaced: report now.
           if (play !== cur || play.listened - play.reported >= REPORT_EVERY_S) report(play);
         })
@@ -6218,7 +6309,7 @@
       }
       play.lastPos = position;
       play.lastAt = now;
-      if (!play.counted && play.listened >= MIN_COUNTED_S) {
+      if (!play.counted && play.base + play.listened >= MIN_COUNTED_S) {
         play.counted = true;
         ShuffleMix.notePlayed(play.entryId);
       }
@@ -8043,7 +8134,7 @@
     // playing only if the session is.
     function mountEngine(s, key) {
       clearSurface();
-      if (s.track_seq !== mountedTrackSeq) PlayLog.start(s.current.entry_id);
+      if (s.track_seq !== mountedTrackSeq) PlayLog.start(s.current.entry_id, s.play_key);
       mountedKey = key;
       mountedTrackSeq = s.track_seq;
       lastSeekSeq = s.seek_seq;
