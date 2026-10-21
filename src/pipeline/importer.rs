@@ -11,7 +11,7 @@ use crate::providers::{
 use futures::future::join_all;
 use tracing::{Instrument, debug, warn};
 
-use super::state::{ChildEdge, Pair, PairMetadata, State, StubInfo};
+use super::state::{ChildEdge, LinkVia, Pair, PairMetadata, State, StubInfo};
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'static>>;
 
@@ -58,7 +58,12 @@ pub fn import(
         // 2. Link the input pair to the canonical pair if they differ. Done
         //    before the claim so a losing claimer still records the link.
         if input != canonical {
-            state.push_is_rel(input.clone(), canonical.clone());
+            state.push_is_rel(
+                input.clone(),
+                canonical.clone(),
+                canonical.clone(),
+                LinkVia::Fetch,
+            );
         }
 
         // 3. Claim (canonical pair, options). If this pair was already
@@ -206,7 +211,12 @@ pub fn import(
                 );
                 continue;
             }
-            state.push_is_rel(canonical.clone(), src.clone());
+            state.push_is_rel(
+                canonical.clone(),
+                src.clone(),
+                canonical.clone(),
+                LinkVia::Fetch,
+            );
             subs.push(import(
                 Arc::clone(&state),
                 Arc::clone(&providers),
@@ -239,7 +249,12 @@ pub fn import(
                             continue;
                         };
                         for sibling in child_pairs.iter().skip(1) {
-                            state.push_is_rel(primary.clone(), sibling.clone());
+                            state.push_is_rel(
+                                primary.clone(),
+                                sibling.clone(),
+                                canonical.clone(),
+                                LinkVia::Listing,
+                            );
                         }
                         // Used only if the child ends up never fetched.
                         state.insert_stub(

@@ -255,6 +255,53 @@ mod entry_child {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// One stated identity link: the fetch (`via = "fetch"`) or listing
+/// (`via = "listing"`) of the asserted pair said pairs `a` and `b` are one
+/// entity. `a` sorts before `b`. See docs/plan-identity-retraction.md.
+mod pair_link {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "pair_link")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source_a: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier_a: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source_b: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier_b: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub asserted_source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub asserted_identifier: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub via: String,
+        /// See `entry_source::Model::run_id`.
+        pub run_id: Option<i64>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Named DB-wide switches (`SPLIT_RETRACTED_LINKS`).
+mod setting {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "setting")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub key: String,
+        pub value: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// A pair's picture, one URL per pair (docs/plan-images.md). `origin` is
 /// `fetch` (the pair's own response) or `listing` (a parent's listing, for a
 /// pair not fetched itself); a `fetch` image replaces a `listing` one, never
@@ -1939,6 +1986,10 @@ impl MusicDb {
              CREATE INDEX IF NOT EXISTS idx_entry_alias_run_id ON entry_alias(run_id);
              CREATE INDEX IF NOT EXISTS idx_entry_child_run_id ON entry_child(run_id);
              CREATE INDEX IF NOT EXISTS idx_contribution_run_id ON contribution(run_id);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_a ON pair_link(source_a, identifier_a);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_b ON pair_link(source_b, identifier_b);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_asserted ON pair_link(asserted_source, asserted_identifier, via);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_run_id ON pair_link(run_id);
              CREATE INDEX IF NOT EXISTS idx_import_run_status ON import_run(status);
              CREATE INDEX IF NOT EXISTS idx_entry_relation_entry_b ON entry_relation(entry_b);",
         )
@@ -2406,6 +2457,105 @@ impl MusicDb {
         Ok(())
     }
 
+    /// Store identity links, skipping ones already stored. `run_id` tags
+    /// new rows, like `upsert_pair`.
+    pub async fn insert_links(&self, links: &[LinkRow], run_id: Option<i64>) -> Result<(), Error> {
+        const LINK_INSERT_CHUNK: usize = 100;
+        for chunk in links.chunks(LINK_INSERT_CHUNK) {
+            let models = chunk.iter().map(|row| {
+                let ((a, b), by) = (&row.link, &row.asserted_by);
+                pair_link::ActiveModel {
+                    source_a: Set(a.0.clone()),
+                    identifier_a: Set(a.1.clone()),
+                    source_b: Set(b.0.clone()),
+                    identifier_b: Set(b.1.clone()),
+                    asserted_source: Set(by.0.clone()),
+                    asserted_identifier: Set(by.1.clone()),
+                    via: Set(row.via.to_string()),
+                    run_id: Set(run_id),
+                }
+            });
+            pair_link::Entity::insert_many(models)
+                .on_conflict_do_nothing()
+                .exec(&self.db)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The stored links of `replaced`'s asserters that it no longer states:
+    /// what `commit_import_run` will delete.
+    pub async fn stale_links(&self, replaced: &Replacements) -> Result<Vec<LinkRow>, Error> {
+        stale_links_on(&self.db, replaced).await
+    }
+
+    /// Delete these stored link rows.
+    pub async fn delete_links(&self, rows: &[LinkRow]) -> Result<(), Error> {
+        delete_links_on(&self.db, rows).await
+    }
+
+    /// Every stored link row with both ends among `pairs`.
+    pub async fn links_among(&self, pairs: &[(String, String)]) -> Result<Vec<LinkRow>, Error> {
+        let wanted: HashSet<&(String, String)> = pairs.iter().collect();
+        let rows = chunked_pair_query(pairs, |chunk| {
+            pair_link::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    pair_link::Column::SourceA,
+                    pair_link::Column::IdentifierA,
+                ))
+                .all(&self.db)
+        })
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let b = (r.source_b, r.identifier_b);
+                wanted.contains(&b).then(|| LinkRow {
+                    link: ((r.source_a, r.identifier_a), b),
+                    asserted_by: (r.asserted_source, r.asserted_identifier),
+                    via: via_str(&r.via),
+                })
+            })
+            .collect())
+    }
+
+    /// A `setting` value, if set.
+    pub async fn setting(&self, key: &str) -> Result<Option<String>, Error> {
+        Ok(setting::Entity::find_by_id(key.to_string())
+            .one(&self.db)
+            .await?
+            .map(|m| m.value))
+    }
+
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<(), Error> {
+        setting::Entity::insert(setting::ActiveModel {
+            key: Set(key.to_string()),
+            value: Set(value.to_string()),
+        })
+        .on_conflict(
+            sea_query::OnConflict::column(setting::Column::Key)
+                .update_column(setting::Column::Value)
+                .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// Give `to` the entry type `from` has.
+    pub async fn copy_entry_type(&self, from: i64, to: i64) -> Result<(), Error> {
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "UPDATE entry SET entry_type = (SELECT entry_type FROM entry WHERE id = ?) \
+                 WHERE id = ?",
+                [from.into(), to.into()],
+            ))
+            .await?;
+        Ok(())
+    }
+
     /// Re-point a single existing pair to a different entry. Used by the
     /// importer's split path to move a stub pair (no fresh metadata) off a
     /// contaminated entry; `upsert_pair` already re-points pairs that do carry
@@ -2494,7 +2644,9 @@ impl MusicDb {
     /// cover/remix/arrangement relations go once no child edge between
     /// their two entries is left (see `UNSUPPORTED_PROVIDER_RELATIONS`).
     /// Pairs in
-    /// `replaced.gone` get `gone_at` set unless the run also fetched them. Doing it here rather than at flush time keeps rollback
+    /// `replaced.gone` get `gone_at` set unless the run also fetched them.
+    /// Identity links in `pair_link` are replaced per asserting pair (see
+    /// `Replacements::links`). Doing it here rather than at flush time keeps rollback
     /// correct: a run that fails or crashes never got to delete anything.
     pub async fn commit_import_run(
         &self,
@@ -2587,6 +2739,9 @@ impl MusicDb {
                 .rows_affected();
         }
 
+        let stale_links = stale_links_on(&txn, replaced).await?;
+        delete_links_on(&txn, &stale_links).await?;
+
         let mut stale_aliases = 0usize;
         for ((source, identifier), current) in &replaced.aliases {
             // A fetch that reported no aliases says nothing about them.
@@ -2653,6 +2808,12 @@ impl MusicDb {
                  {stale_contributions} stale contribution(s) and {stale_aliases} stale \
                  alias(es) under {} re-fetched pair(s)",
                 replaced.parents.len().max(replaced.aliases.len())
+            );
+        }
+        if !stale_links.is_empty() {
+            tracing::info!(
+                "run {run_id}: removed {} identity link(s) no longer stated",
+                stale_links.len()
             );
         }
         if stale_relations > 0 {
@@ -2731,6 +2892,10 @@ impl MusicDb {
             .await?;
         pair_image::Entity::delete_many()
             .filter(pair_image::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        pair_link::Entity::delete_many()
+            .filter(pair_link::Column::RunId.eq(run_id))
             .exec(&self.db)
             .await?;
         self.delete_orphan_entries().await?;
@@ -4654,6 +4819,37 @@ pub struct ContribRow {
 /// main_artist, extra as stored).
 pub type ContributionKey = ((String, String), String, bool, String);
 
+/// `setting` key: when "1", a final flush splits an entry whose pairs are
+/// no longer connected after a re-fetch retracted a link inside it
+/// (docs/plan-identity-retraction.md). Off unless set: a DB whose links
+/// aren't all recorded would split entries that are only missing links.
+pub const SPLIT_RETRACTED_LINKS: &str = "split_retracted_links";
+
+/// `pair_link.via` of a link from the asserting pair's own fetch result.
+pub const LINK_VIA_FETCH: &str = "fetch";
+/// `pair_link.via` of a link between one child's sibling pairs in the
+/// asserting pair's listing.
+pub const LINK_VIA_LISTING: &str = "listing";
+
+/// The two pairs of a link, smaller first.
+pub type LinkKey = ((String, String), (String, String));
+
+pub fn link_key(a: &(String, String), b: &(String, String)) -> LinkKey {
+    if a <= b {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    }
+}
+
+/// A stored link and what stated it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LinkRow {
+    pub link: LinkKey,
+    pub asserted_by: (String, String),
+    pub via: &'static str,
+}
+
 /// An alias's identity under its pair: (name, locale, extra as stored,
 /// primary).
 pub type AliasKey = (String, Option<String>, String, bool);
@@ -4677,6 +4873,86 @@ pub struct Replacements {
     pub aliases: HashMap<(String, String), HashSet<AliasKey>>,
     /// Pairs whose fetch found them deleted upstream.
     pub gone: HashSet<(String, String)>,
+    /// The links each pair's fetch or listing stated in this run, by
+    /// (asserting pair, via). Every fetched pair's `fetch` links and every
+    /// parent's `listing` links replace its older ones, so an asserter
+    /// missing here stated none.
+    pub links: HashMap<((String, String), &'static str), HashSet<LinkKey>>,
+}
+
+/// An asserting pair and `pair_link.via`.
+type LinkAsserter<'a> = (&'a (String, String), &'static str);
+
+impl Replacements {
+    /// Every (asserting pair, via) whose stored links this run replaces,
+    /// with the links it states now.
+    fn link_asserters(
+        &self,
+    ) -> impl Iterator<Item = (LinkAsserter<'_>, Option<&HashSet<LinkKey>>)> {
+        let fetch = self.aliases.keys().map(|p| (p, LINK_VIA_FETCH));
+        let listing = self.parents.keys().map(|p| (p, LINK_VIA_LISTING));
+        fetch
+            .chain(listing)
+            .map(|(p, via)| ((p, via), self.links.get(&(p.clone(), via))))
+    }
+}
+
+async fn delete_links_on<C: ConnectionTrait>(db: &C, rows: &[LinkRow]) -> Result<(), Error> {
+    for row in rows {
+        let ((a, b), by) = (&row.link, &row.asserted_by);
+        pair_link::Entity::delete_many()
+            .filter(pair_link::Column::SourceA.eq(a.0.as_str()))
+            .filter(pair_link::Column::IdentifierA.eq(a.1.as_str()))
+            .filter(pair_link::Column::SourceB.eq(b.0.as_str()))
+            .filter(pair_link::Column::IdentifierB.eq(b.1.as_str()))
+            .filter(pair_link::Column::AssertedSource.eq(by.0.as_str()))
+            .filter(pair_link::Column::AssertedIdentifier.eq(by.1.as_str()))
+            .filter(pair_link::Column::Via.eq(row.via))
+            .exec(db)
+            .await?;
+    }
+    Ok(())
+}
+
+/// A stored `pair_link.via` as its constant; anything unknown reads as
+/// `listing`, the kind fewer re-fetches replace.
+fn via_str(via: &str) -> &'static str {
+    if via == LINK_VIA_FETCH {
+        LINK_VIA_FETCH
+    } else {
+        LINK_VIA_LISTING
+    }
+}
+
+/// The stored links of `replaced`'s asserters that this run no longer
+/// states.
+async fn stale_links_on<C: ConnectionTrait>(
+    db: &C,
+    replaced: &Replacements,
+) -> Result<Vec<LinkRow>, Error> {
+    let mut out = Vec::new();
+    for ((asserted, via), current) in replaced.link_asserters() {
+        let rows = pair_link::Entity::find()
+            .filter(pair_link::Column::AssertedSource.eq(asserted.0.as_str()))
+            .filter(pair_link::Column::AssertedIdentifier.eq(asserted.1.as_str()))
+            .filter(pair_link::Column::Via.eq(via))
+            .all(db)
+            .await?;
+        for row in rows {
+            let link = (
+                (row.source_a, row.identifier_a),
+                (row.source_b, row.identifier_b),
+            );
+            if current.is_none_or(|c| !c.contains(&link)) {
+                out.push(LinkRow {
+                    link,
+                    asserted_by: asserted.clone(),
+                    via,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The edges a fully fetched non-artist parent has as of the current run.
