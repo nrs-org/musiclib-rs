@@ -10,6 +10,7 @@
 //! dedup needs nothing extra here: it already collapsed to a single
 //! `entry_id` at import time, so it's just an ordinary entry.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use musiclib_rs::musicdb::{EditionProjection, MusicDb, SoftIdentityProjection};
@@ -156,25 +157,48 @@ pub async fn component_members(db: &MusicDb, entry_id: i64) -> anyhow::Result<Ve
         .unwrap_or_else(|| vec![entry_id]))
 }
 
+/// One row of `dedupe_by_edition`: the edition group's default edition,
+/// plus the edition that actually matched when it isn't the default.
+pub struct EditionMatch {
+    pub entry_id: i64,
+    /// The identity-canonical id of the best-ranked matching edition, or
+    /// `None` when the default edition matched too.
+    pub matched_edition: Option<i64>,
+}
+
 /// Fold `ids` down to one id per *edition group* (`musicdb::EDITION_KINDS`,
 /// layered on top of soft-identity components), so a caller presenting a
 /// list — search results in particular — doesn't show the same song, or a
 /// different edition of it (a track and its instrumental), more than once.
 /// Each group is represented by its designated default edition
 /// (`EditionProjection::default_member_of`), not necessarily whichever
-/// member of `ids` triggered the fold.
-pub async fn dedupe_by_edition(db: &MusicDb, ids: &[i64]) -> anyhow::Result<Vec<i64>> {
+/// member of `ids` triggered the fold; that member is kept in
+/// `EditionMatch::matched_edition` unless the default is in `ids` too.
+/// Groups keep the order of their first member in `ids`.
+pub async fn dedupe_by_edition(db: &MusicDb, ids: &[i64]) -> anyhow::Result<Vec<EditionMatch>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     let (identity, editions) = db.display_projections_around(ids).await?;
-    let mut seen = HashSet::new();
-    let mut out = Vec::with_capacity(ids.len());
+    let mut index_by_group: HashMap<i64, usize> = HashMap::new();
+    let mut out: Vec<EditionMatch> = Vec::with_capacity(ids.len());
     for &id in ids {
         let canonical = identity.component_of(id).unwrap_or(id);
-        let group = editions.group_of(canonical);
-        if seen.insert(group) {
-            out.push(editions.default_member_of(canonical));
+        let default = editions.default_member_of(canonical);
+        let matched = (canonical != default).then_some(canonical);
+        match index_by_group.entry(editions.group_of(canonical)) {
+            Entry::Occupied(i) => {
+                if matched.is_none() {
+                    out[*i.get()].matched_edition = None;
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(out.len());
+                out.push(EditionMatch {
+                    entry_id: default,
+                    matched_edition: matched,
+                });
+            }
         }
     }
     Ok(out)
