@@ -416,7 +416,13 @@ pub async fn flush(
     let run_ids = db
         .pair_run_ids_by_entry_ids(&contested.iter().copied().collect::<Vec<_>>())
         .await?;
-    let keepers = split_keepers(&classes, &existing, &contested, &run_ids);
+    let keepers = split_keepers(
+        &classes,
+        &existing,
+        &contested,
+        &run_ids,
+        &state.preferred_keepers(),
+    );
     let owned_ids = owned_existing_ids(&classes, &existing, &keepers);
 
     let mut class_to_entry: HashMap<Pair, i64> = HashMap::new();
@@ -850,18 +856,20 @@ fn contested_existing_ids(
         .collect()
 }
 
-/// For each contested id, the class that keeps it: the one holding the most
-/// of the entry's pairs from its earliest import run (a `None` run, written
-/// before runs were tracked, counts as earliest), then the most of its pairs
-/// overall, then the smallest representative. Contamination arrives with a
-/// later import, so the earliest pairs are the entry's original identity.
-/// `run_ids` maps every pair of the contested entries, including pairs outside
-/// this flush, to its `(entry_id, run_id)`.
+/// For each contested id, the class that keeps it: one holding a pair of
+/// `preferred` (`State::prefer_keeper`, the side an unmerge keeps), then the
+/// one holding the most of the entry's pairs from its earliest import run (a
+/// `None` run, written before runs were tracked, counts as earliest), then
+/// the most of its pairs overall, then the smallest representative.
+/// Contamination arrives with a later import, so the earliest pairs are the
+/// entry's original identity. `run_ids` maps every pair of the contested
+/// entries, including pairs outside this flush, to its `(entry_id, run_id)`.
 fn split_keepers(
     classes: &HashMap<Pair, Vec<Pair>>,
     existing: &HashMap<Pair, Option<i64>>,
     contested: &BTreeSet<i64>,
     run_ids: &HashMap<Pair, (i64, Option<i64>)>,
+    preferred: &HashSet<Pair>,
 ) -> HashMap<i64, Pair> {
     let mut earliest: HashMap<i64, Option<i64>> = HashMap::new();
     for &(id, run) in run_ids.values() {
@@ -870,9 +878,11 @@ fn split_keepers(
             .and_modify(|e| *e = (*e).min(run))
             .or_insert(run);
     }
-    // Per contested id: (pairs from its earliest run, pairs, repr) of the best class.
-    let mut best: HashMap<i64, (usize, usize, &Pair)> = HashMap::new();
+    // Per contested id: (holds a preferred pair, pairs from its earliest run,
+    // pairs, repr) of the best class.
+    let mut best: HashMap<i64, (bool, usize, usize, &Pair)> = HashMap::new();
     for (repr, members) in classes {
+        let wanted = members.iter().any(|p| preferred.contains(p));
         let mut held: HashMap<i64, (usize, usize)> = HashMap::new();
         for pair in members {
             let Some(id) = existing[pair].filter(|id| contested.contains(id)) else {
@@ -884,17 +894,17 @@ fn split_keepers(
             counts.1 += 1;
         }
         for (id, (oldest, total)) in held {
-            let beats = |&(b_oldest, b_total, b_repr): &(usize, usize, &Pair)| {
-                (oldest, total, std::cmp::Reverse(repr))
-                    > (b_oldest, b_total, std::cmp::Reverse(b_repr))
+            let beats = |&(b_wanted, b_oldest, b_total, b_repr): &(bool, usize, usize, &Pair)| {
+                (wanted, oldest, total, std::cmp::Reverse(repr))
+                    > (b_wanted, b_oldest, b_total, std::cmp::Reverse(b_repr))
             };
             if best.get(&id).is_none_or(beats) {
-                best.insert(id, (oldest, total, repr));
+                best.insert(id, (wanted, oldest, total, repr));
             }
         }
     }
     best.into_iter()
-        .map(|(id, (_, _, repr))| (id, repr.clone()))
+        .map(|(id, (_, _, _, repr))| (id, repr.clone()))
         .collect()
 }
 
@@ -1133,7 +1143,7 @@ mod tests {
 
         let contested = contested_existing_ids(&classes, &existing);
         assert_eq!(contested.iter().copied().collect::<Vec<_>>(), [534]);
-        let keepers = split_keepers(&classes, &existing, &contested, &run_ids);
+        let keepers = split_keepers(&classes, &existing, &contested, &run_ids, &HashSet::new());
         let owned = owned_existing_ids(&classes, &existing, &keepers);
         // 534 is contested → B, holding its oldest pair, keeps it; A gets a new entry.
         assert!(owned[&p("a")].is_empty());
@@ -1171,7 +1181,7 @@ mod tests {
                 .zip(runs)
                 .map(|(s, run)| (p(s), (1, run)))
                 .collect();
-            split_keepers(&classes, &existing, &contested, &run_ids)[&1].clone()
+            split_keepers(&classes, &existing, &contested, &run_ids, &HashSet::new())[&1].clone()
         };
         // The lone untracked pair outranks three later ones.
         assert_eq!(keeper([Some(2), Some(2), Some(2), None]), p("b"));
@@ -1190,7 +1200,7 @@ mod tests {
             .collect();
         let contested = contested_existing_ids(&tied, &existing);
         assert_eq!(
-            split_keepers(&tied, &existing, &contested, &run_ids)[&7],
+            split_keepers(&tied, &existing, &contested, &run_ids, &HashSet::new())[&7],
             p("w")
         );
     }

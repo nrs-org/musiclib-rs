@@ -56,6 +56,15 @@ pub enum LinkVia {
 }
 
 impl LinkVia {
+    /// The `pair_link.via` value back; anything unknown reads as `Listing`.
+    pub fn from_stored(via: &str) -> Self {
+        if via == LINK_VIA_FETCH {
+            LinkVia::Fetch
+        } else {
+            LinkVia::Listing
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             LinkVia::Fetch => LINK_VIA_FETCH,
@@ -116,6 +125,9 @@ pub struct State {
     /// flush can drain). At commit, it's what replaces older edges under
     /// re-fetched parents (see `MusicDb::commit_import_run`).
     run_edges: Mutex<RunEdges>,
+    /// Pairs whose class keeps their entry's id when a flush splits it
+    /// (`prefer_keeper`).
+    preferred_keepers: Mutex<HashSet<Pair>>,
     /// Safety cap on fetches per run (see `charge_fetch`); `usize::MAX` = none.
     fetch_budget: AtomicUsize,
     fetches: AtomicUsize,
@@ -155,6 +167,7 @@ impl State {
             has_rel: Mutex::new(Vec::new()),
             stubs: Mutex::new(HashMap::new()),
             run_edges: Mutex::new(RunEdges::default()),
+            preferred_keepers: Mutex::new(HashSet::new()),
             fetch_budget: AtomicUsize::new(usize::MAX),
             fetches: AtomicUsize::new(0),
             approx_bytes: AtomicUsize::new(0),
@@ -273,6 +286,17 @@ impl State {
                 }
             }
         }
+    }
+
+    /// When a flush of this state splits the entry `pair` is in, the part
+    /// holding `pair` keeps the entry's id (and with it plays, display names
+    /// and soft relations), whatever its size or age.
+    pub fn prefer_keeper(&self, pair: Pair) {
+        self.preferred_keepers.lock().unwrap().insert(pair);
+    }
+
+    pub(super) fn preferred_keepers(&self) -> HashSet<Pair> {
+        self.preferred_keepers.lock().unwrap().clone()
     }
 
     /// Record that `pair` (canonical) was fetched completely as a non-artist

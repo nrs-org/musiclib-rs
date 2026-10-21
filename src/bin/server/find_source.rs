@@ -316,8 +316,6 @@ pub async fn attach(state: &Arc<AppState>, entry_id: i64, body: &[u8]) -> HyperR
                     &state.providers,
                     &state.pool,
                     state.root_id,
-                    &state.dedup_configs,
-                    &state.merged_dedup,
                     state.soft_cfg.as_ref(),
                     url.clone(),
                     Some(sink),

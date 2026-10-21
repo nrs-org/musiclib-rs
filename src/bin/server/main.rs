@@ -52,9 +52,10 @@ mod spotify_auth;
 mod state;
 #[cfg(feature = "store_protocol")]
 mod store_protocol;
+#[cfg(feature = "player")]
+mod unmerge;
 
 use std::{
-    ffi::OsStr,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicU64},
@@ -69,11 +70,7 @@ use musiclib_rs::{
     app_dirs,
     http::HttpClientConfig,
     musicdb::MusicDb,
-    pipeline::{
-        dedup::{DedupConfig, merge_configs},
-        progress::HttpActivityClient,
-        softmatch::default_soft_match_config,
-    },
+    pipeline::{progress::HttpActivityClient, softmatch::default_soft_match_config},
     providers::{
         fetch_options_yaml::load_from_file,
         registry::{RegistryConfig, build_providers},
@@ -99,10 +96,6 @@ struct Args {
     /// HTTP client config. Defaults to <config_dir>/http.yaml.
     #[arg(long)]
     http_config: Option<String>,
-    /// Barrier config file(s). Repeatable; overrides auto-loading from
-    /// <config_dir>/dedup_barriers/*.yaml.
-    #[arg(long)]
-    dedup_config: Vec<String>,
     /// Fetch-options YAML used by the store-protocol `ingest` job. A bare
     /// filename resolves relative to <config_dir>/fetch_options/. Defaults to
     /// a single level deep, matching the `import` CLI's fallback.
@@ -151,20 +144,6 @@ async fn load_config<T: Default + serde::de::DeserializeOwned>(
         .await
         .with_context(|| format!("reading {}", path.display()))?;
     Ok(serde_yaml_ng::from_str(&text)?)
-}
-
-fn yaml_paths_in_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == OsStr::new("yaml")))
-        .collect();
-    paths.sort();
-    Ok(paths)
 }
 
 fn resolve_fetch_options(s: &str) -> PathBuf {
@@ -240,21 +219,6 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    let dedup_paths: Vec<PathBuf> = if args.dedup_config.is_empty() {
-        yaml_paths_in_dir(&config_dir.join("dedup_barriers"))?
-    } else {
-        args.dedup_config.iter().map(PathBuf::from).collect()
-    };
-    let mut dedup_configs: Vec<(String, DedupConfig)> = Vec::new();
-    for path in &dedup_paths {
-        let text = tokio::fs::read_to_string(path)
-            .await
-            .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: DedupConfig = serde_yaml_ng::from_str(&text)?;
-        dedup_configs.push((path.display().to_string(), cfg));
-    }
-    let merged_dedup = merge_configs(&dedup_configs);
-
     let mut http_config: HttpClientConfig =
         load_config(args.http_config.as_deref(), &config_dir.join("http.yaml")).await?;
     http_config.coalescer_rules = musiclib_rs::providers::registry::coalesce_rules();
@@ -318,8 +282,6 @@ async fn main() -> anyhow::Result<()> {
         providers,
         pool,
         root_id,
-        dedup_configs,
-        merged_dedup,
         soft_cfg,
         jobs: JobManager::new(),
         activity,

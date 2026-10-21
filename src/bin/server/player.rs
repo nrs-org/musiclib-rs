@@ -223,6 +223,30 @@ pub async fn route(
             let id = &p["/api/entries/".len()..p.len() - "/appearances".len()];
             appearances(state, id).await
         }
+        p if p.starts_with("/api/entries/") && p.ends_with("/identity") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/identity".len()]) {
+                Ok(id) => crate::unmerge::identity(state, id).await,
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/split") => {
+            if *method != Method::POST {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/split".len()]) {
+                Ok(id) => recredit_after(state, crate::unmerge::split(state, id, &body).await),
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/barriers/") => {
+            if *method != Method::DELETE {
+                return respond::method_not_allowed();
+            }
+            crate::unmerge::remove_barrier(state, &p["/api/barriers/".len()..]).await
+        }
         p if p.starts_with("/api/entries/") && p.ends_with("/relations") => {
             if *method != Method::GET {
                 return respond::method_not_allowed();
@@ -687,8 +711,6 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
             &job_state.providers,
             &pool,
             options_id,
-            &job_state.dedup_configs,
-            &job_state.merged_dedup,
             job_state.soft_cfg.as_ref(),
             query,
             Some(sink),

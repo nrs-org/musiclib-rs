@@ -425,20 +425,25 @@ Both `min` and `max` are optional in `ratio` and `count`.
 
 ---
 
-## Dedup barrier files (`dedup_barriers/`)
+## Dedup barriers
 
 Dedup barriers prevent distinct real-world entities from being merged into a
 single DB entry when they share ambiguous identifiers (e.g. a URL that redirects
 to multiple artists, or a Wikipedia page shared between a group and a solo act).
 
-### Where the files live
+### Where they live
 
-The `dedup` binary auto-loads every `*.yaml` file from
-`$CONFIG_DIR/musiclib-rs/dedup_barriers/` in sorted order. Pass one or more
-explicit `--dedup-config <path>` arguments to override this and use specific
-files instead.
+Barriers are stored in the music DB (`barrier_group`, `barrier_member`). Make
+one from the player: open an entry, **Unmerge…**, tick the sources that belong
+to something else and split them off. The panel lists the barriers touching the
+entry with an undo, and `dedup --list` prints them all.
 
-### File structure
+Barriers used to be YAML files in `$CONFIG_DIR/musiclib-rs/dedup_barriers/`.
+Nothing reads that directory any more; store such files with
+`dedup --import-yaml <file|dir>...` (importing a file twice adds nothing). The
+format below is that of those files.
+
+### YAML structure
 
 A barrier file is a list of **groups**. Each group contains two or more named
 **anchors** — the distinct entities that must never be merged. Each anchor
@@ -496,20 +501,17 @@ canonical pair.
 
 ### How the dedup barrier works
 
-When `dedup` runs it:
+Every import flushes under all stored barriers: pairs of different anchors in
+one group are kept in separate entries, and an anchor's pairs are merged. An
+entry a flush touches that holds a barrier pair joins the flush whole, so a
+merge can't carry an anchor pair the barrier never saw.
 
-1. Loads all barrier files and canonicalizes every declared pair.
-2. For each file, checks whether the barrier is already satisfied in the DB
-   (no single entry holds pairs from two different anchors in the same group).
-3. Re-imports (shallow — no child traversal) only the entries that violate a
-   barrier or whose config file has changed on disk.
-4. Flushes the merged barrier: during flush, the `is_rel` graph is partitioned so
-   pairs from different anchors land in separate DB entries.
-5. Persists each file's mtime so unchanged, already-satisfied barriers are
-   skipped on subsequent runs.
-
-Re-imports are served from the HTTP cache where possible, so a no-change run is
-cheap even for large libraries.
+A barrier made or undone in the player is applied at once by regrouping the
+entries it touches (`pipeline::dedup::regroup_entries`): with the DB's links
+complete it replays their stored identity links, fetching nothing; otherwise
+it re-imports their pairs shallowly from the HTTP cache. `dedup` (and
+`import`, before importing) regroups the entries of any barrier the DB
+violates.
 
 ### When to add a barrier
 
