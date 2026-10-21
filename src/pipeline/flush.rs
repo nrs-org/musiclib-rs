@@ -191,19 +191,6 @@ pub async fn flush(
         all_pairs.insert(edge.child.clone());
     }
 
-    // 1b. Entries this run disconnected: a link inside one is no longer
-    //     stated by anything, so step 3 groups its pairs by the links it
-    //     has left instead of keeping them together (see
-    //     `SPLIT_RETRACTED_LINKS`). All of its pairs join this flush.
-    let regrouped = if final_flush {
-        disconnected_entries(&state, db, &is_rel).await?
-    } else {
-        HashMap::new()
-    };
-    for regroup in regrouped.values() {
-        all_pairs.extend(regroup.members.iter().cloned());
-    }
-
     // 2. Look up existing entry_ids.
     let mut existing: HashMap<Pair, Option<i64>> = HashMap::new();
     for pair in &all_pairs {
@@ -231,10 +218,29 @@ pub async fn flush(
         .copied()
         .filter(|id| barrier_entries.contains(id))
         .collect();
-    for id in touched_barrier_entries {
+    for &id in &touched_barrier_entries {
         for pair in db.pairs_by_entry_ids(&[id]).await? {
             existing.entry(pair.clone()).or_insert(Some(id));
             all_pairs.insert(pair);
+        }
+    }
+
+    // 2d. With `SPLIT_RETRACTED_LINKS` on, step 3 groups some entries by
+    //     their recorded links instead of keeping all their pairs together:
+    //     one in which a link this run retracted is no longer stated by
+    //     anything (it splits), and every barrier entry from 2c (a pair two
+    //     anchors share then pulls only what links to it, not the whole
+    //     entry, to the anchor that reaches it first). All of their pairs
+    //     join this flush.
+    let regrouped = if final_flush {
+        regrouped_entries(&state, db, &is_rel, &touched_barrier_entries).await?
+    } else {
+        HashMap::new()
+    };
+    for (&id, regroup) in &regrouped {
+        for pair in &regroup.members {
+            existing.entry(pair.clone()).or_insert(Some(id));
+            all_pairs.insert(pair.clone());
         }
     }
 
@@ -663,14 +669,18 @@ struct Regroup {
     stale: Vec<LinkRow>,
 }
 
-/// The entries in which a link this run retracted is no longer stated by
-/// anything (no other stored row, no fresh `is_rel`), when
-/// `SPLIT_RETRACTED_LINKS` is on. Called by the final flush, once every
-/// pair's links for the run are noted in `state`.
-async fn disconnected_entries(
+/// The entries step 3 groups by their links, when `SPLIT_RETRACTED_LINKS`
+/// is on: those in which a link this run retracted is no longer stated by
+/// anything (no other stored row, no fresh `is_rel`), and `barrier_ids`.
+/// In a barrier entry with no such link, a pair linked to nothing inside it
+/// (left there by an earlier barrier split) stays with the largest group
+/// rather than splitting off on its own. Called by the final flush, once
+/// every pair's links for the run are noted in `state`.
+async fn regrouped_entries(
     state: &State,
     db: &MusicDb,
     is_rel: &[IsRel],
+    barrier_ids: &BTreeSet<i64>,
 ) -> anyhow::Result<HashMap<i64, Regroup>> {
     if db.setting(SPLIT_RETRACTED_LINKS).await?.as_deref() != Some("1") {
         return Ok(HashMap::new());
@@ -693,6 +703,8 @@ async fn disconnected_entries(
             }
         }
     }
+    let disconnected = ids.clone();
+    ids.extend(barrier_ids);
     let mut out = HashMap::new();
     for id in ids {
         let members = db.pairs_by_entry_ids(&[id]).await?;
@@ -705,18 +717,24 @@ async fn disconnected_entries(
         let dead = rows
             .iter()
             .any(|r| stale.contains(r) && !alive.contains(&r.link) && !fresh.contains(&r.link));
-        if !dead {
+        if !dead && !barrier_ids.contains(&id) {
             continue;
         }
         let mut links: Vec<LinkKey> = alive.into_iter().cloned().collect();
         links.sort();
-        keep_gone_pairs(db, id, &members, &mut links).await?;
-        let stale_here: Vec<LinkRow> = rows.into_iter().filter(|r| stale.contains(r)).collect();
-        info!(
-            "entry {id}: a re-fetch retracted a link inside it; regrouping its {} pair(s) by {} remaining link(s)",
-            members.len(),
-            links.len()
-        );
+        keep_unlinked_pairs(db, id, &members, &mut links, !dead).await?;
+        let stale_here: Vec<LinkRow> = if dead {
+            rows.into_iter().filter(|r| stale.contains(r)).collect()
+        } else {
+            Vec::new()
+        };
+        if disconnected.contains(&id) && dead {
+            info!(
+                "entry {id}: a re-fetch retracted a link inside it; regrouping its {} pair(s) by {} remaining link(s)",
+                members.len(),
+                links.len()
+            );
+        }
         out.insert(
             id,
             Regroup {
@@ -732,18 +750,28 @@ async fn disconnected_entries(
 /// Link each of the entry's pairs found deleted upstream (`gone_at`) to its
 /// largest group: a pair that can't be fetched states no links, so missing
 /// ones say nothing about it (a merged-away MusicBrainz ID returns 404).
-async fn keep_gone_pairs(
+/// With `unlinked`, so is every pair no link inside the entry touches.
+async fn keep_unlinked_pairs(
     db: &MusicDb,
     entry_id: i64,
     members: &[Pair],
     links: &mut Vec<LinkKey>,
+    unlinked: bool,
 ) -> anyhow::Result<()> {
-    let gone: Vec<Pair> = db
-        .source_rows_by_entry_ids(&[entry_id])
-        .await?
+    let linked: HashSet<&Pair> = links.iter().flat_map(|(a, b)| [a, b]).collect();
+    let rows = db.source_rows_by_entry_ids(&[entry_id]).await?;
+    let fetched: HashSet<Pair> = rows
+        .iter()
+        .filter(|r| r.fetched_at.is_some())
+        .map(|r| (r.source.clone(), r.identifier.clone()))
+        .collect();
+    let gone: Vec<Pair> = rows
         .into_iter()
-        .filter(|r| r.gone_at.is_some())
-        .map(|r| (r.source, r.identifier))
+        .map(|r| (r.source, r.identifier, r.gone_at))
+        .filter(|(s, i, gone_at)| {
+            gone_at.is_some() || (unlinked && !linked.contains(&(s.clone(), i.clone())))
+        })
+        .map(|(s, i, _)| (s, i))
         .collect();
     if gone.is_empty() {
         return Ok(());
@@ -755,19 +783,30 @@ async fn keep_gone_pairs(
     for (a, b) in links.iter() {
         let _ = uf.union(a, b);
     }
-    let mut sizes: HashMap<Pair, usize> = HashMap::new();
+    let mut groups: HashMap<Pair, Vec<&Pair>> = HashMap::new();
     for pair in members.iter().filter(|p| !gone.contains(p)) {
-        *sizes.entry(uf.find(pair)).or_default() += 1;
+        groups.entry(uf.find(pair)).or_default().push(pair);
     }
-    let Some(largest) = sizes
-        .into_iter()
-        .max_by(|(a, n), (b, m)| n.cmp(m).then_with(|| b.cmp(a)))
-        .map(|(root, _)| root)
+    // The largest group, then attach to its smallest fetched pair: a stub in
+    // it (an ISRC two barrier anchors share) can end up with the other anchor.
+    let Some(target) = groups
+        .into_values()
+        .max_by(|a, b| {
+            a.len()
+                .cmp(&b.len())
+                .then_with(|| b.iter().min().cmp(&a.iter().min()))
+        })
+        .and_then(|group| {
+            group
+                .into_iter()
+                .min_by_key(|p| (!fetched.contains(*p), *p))
+        })
+        .cloned()
     else {
         return Ok(());
     };
     for pair in &gone {
-        links.push(link_key(pair, &largest));
+        links.push(link_key(pair, &target));
     }
     Ok(())
 }
@@ -2230,6 +2269,51 @@ mod tests {
         state.push_is_rel(s1.clone(), s2.clone(), s1.clone(), Fetch);
         flush(Arc::new(state), &[], &db, &config, None, true).await?;
         assert_ne!(entry_of(&db, &orig).await?, entry_of(&db, &club).await?);
+        Ok(())
+    }
+
+    /// An ISRC `bridge` both anchors list: with links recorded, the anchor
+    /// that reaches it takes only the bridge, and the club mix's own Spotify
+    /// track (linked to the club mix, not the bridge) stays put. A stub that
+    /// nothing inside the entry links to stays too.
+    #[tokio::test]
+    async fn barrier_entry_regroups_by_links() -> anyhow::Result<()> {
+        use LinkVia::Fetch;
+        let config: DedupConfig = serde_yaml_ng::from_str(
+            "groups:
+  - name: g
+    anchors:
+      orig: { members: ['x:orig'] }
+      club: { members: ['x:club'] }",
+        )?;
+        let (orig, club, bridge, track, leftover) =
+            (p("orig"), p("club"), p("bridge"), p("track"), p("leftover"));
+        let db = MusicDb::new("sqlite::memory:").await?;
+        db.set_setting(crate::musicdb::SPLIT_RETRACTED_LINKS, "1")
+            .await?;
+        let state = State::new();
+        state.insert_metadata(club.clone(), track_metadata());
+        state.insert_metadata(track.clone(), track_metadata());
+        for (a, b) in [(&club, &bridge), (&club, &track), (&bridge, &leftover)] {
+            state.push_is_rel(a.clone(), b.clone(), a.clone(), Fetch);
+        }
+        flush(Arc::new(state), &[], &db, &config, None, true).await?;
+        // `leftover` was linked only through the bridge, by a pair outside.
+        db.delete_links(&[LinkRow {
+            link: link_key(&bridge, &leftover),
+            asserted_by: bridge.clone(),
+            via: crate::musicdb::LINK_VIA_FETCH,
+        }])
+        .await?;
+
+        let state = State::new();
+        state.insert_metadata(orig.clone(), track_metadata());
+        state.push_is_rel(orig.clone(), bridge.clone(), orig.clone(), Fetch);
+        flush(Arc::new(state), &[], &db, &config, None, true).await?;
+        let club_entry = entry_of(&db, &club).await?;
+        assert_ne!(entry_of(&db, &orig).await?, club_entry);
+        assert_eq!(entry_of(&db, &track).await?, club_entry);
+        assert_eq!(entry_of(&db, &leftover).await?, club_entry);
         Ok(())
     }
 }

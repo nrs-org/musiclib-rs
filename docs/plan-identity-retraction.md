@@ -36,7 +36,7 @@ retracted in `commit_import_run` from a per-asserter "current" set in
 
 Splitting happens in the final flush, where the barrier is compiled: for
 an entry in which a link this run retracted is no longer stated by anything
-(`disconnected_entries`), its pairs are unioned by its remaining links, the
+(`regrouped_entries`), its pairs are unioned by its remaining links, the
 run's fresh `is_rel` and barrier anchors, instead of "everything sharing
 the entry". The existing barrier-split path then does the rest: the class
 with the entry's oldest pairs keeps the id (`split_keepers`), the others
@@ -44,6 +44,13 @@ get fresh entries with the old entry's type, pairs are re-pointed, emptied
 entries are GC'd. That entry's dead links are deleted in the same flush,
 so a run rolled back afterwards leaves the split and its links agreeing
 (like a barrier split, a final flush's split isn't undone by rollback).
+
+With splitting on, an entry holding a barrier pair that a flush touches is
+grouped by its links too (and joins the flush whole either way, so a merge
+can't carry an anchor pair the barrier never saw). A pair both anchors
+share then takes only what links to it to the anchor that reaches it
+first, instead of the whole entry; a pair nothing inside such an entry
+links to stays with its largest group.
 
 Only a retraction triggers a split. An entry that is already disconnected
 (its wrong link was removed upstream before links were recorded) stays
