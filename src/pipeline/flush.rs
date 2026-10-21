@@ -215,6 +215,29 @@ pub async fn flush(
     //     a map of canonical pair -> anchor id. Empty config => no-op.
     let (barrier, group_names) = dedup.compile(providers).await;
 
+    // 2c. An entry this flush touches that holds a barrier pair joins the
+    //     flush whole. Otherwise a merge into or out of it (`merge_entries`
+    //     re-points every pair of the losing entry) can carry an anchor pair
+    //     the union-find never saw into another anchor's entry.
+    let mut barrier_entries: HashSet<i64> = HashSet::new();
+    for pair in barrier.keys() {
+        if let Some(id) = db.find_entry_id_by_pair(&pair.0, &pair.1).await? {
+            barrier_entries.insert(id);
+        }
+    }
+    let touched_barrier_entries: BTreeSet<i64> = existing
+        .values()
+        .flatten()
+        .copied()
+        .filter(|id| barrier_entries.contains(id))
+        .collect();
+    for id in touched_barrier_entries {
+        for pair in db.pairs_by_entry_ids(&[id]).await? {
+            existing.entry(pair.clone()).or_insert(Some(id));
+            all_pairs.insert(pair);
+        }
+    }
+
     // 3. Union-find: union by fresh is_rel, then by shared existing entry_id
     //    (so the local model agrees with the DB's prior grouping). Seeded with
     //    anchor labels from the barrier map; any union that would join two
@@ -2175,6 +2198,38 @@ mod tests {
         assert_eq!(entry_of(&db, &i).await?, entry);
         assert_ne!(entry_of(&db, &s).await?, entry);
         assert_eq!(entry_of(&db, &old).await?, entry);
+        Ok(())
+    }
+
+    /// Recordings `orig` and `club` are barrier anchors in entries of their
+    /// own, each with a Spotify track. A later flush that only sees the two
+    /// Spotify tracks linked (a shared ISRC) must not merge the entries:
+    /// that would carry both anchors, never in the flush, into one.
+    #[tokio::test]
+    async fn barrier_holds_for_anchor_pairs_outside_the_flush() -> anyhow::Result<()> {
+        use LinkVia::Fetch;
+        let config: DedupConfig = serde_yaml_ng::from_str(
+            "groups:
+  - name: g
+    anchors:
+      orig: { members: ['x:orig'] }
+      club: { members: ['x:club'] }",
+        )?;
+        let (orig, club, s1, s2) = (p("orig"), p("club"), p("s1"), p("s2"));
+        let db = MusicDb::new("sqlite::memory:").await?;
+        for (anchor, track) in [(&orig, &s1), (&club, &s2)] {
+            let state = State::new();
+            state.insert_metadata(anchor.clone(), track_metadata());
+            state.push_is_rel(anchor.clone(), track.clone(), anchor.clone(), Fetch);
+            flush(Arc::new(state), &[], &db, &config, None, true).await?;
+        }
+        assert_ne!(entry_of(&db, &orig).await?, entry_of(&db, &club).await?);
+
+        let state = State::new();
+        state.insert_metadata(s1.clone(), track_metadata());
+        state.push_is_rel(s1.clone(), s2.clone(), s1.clone(), Fetch);
+        flush(Arc::new(state), &[], &db, &config, None, true).await?;
+        assert_ne!(entry_of(&db, &orig).await?, entry_of(&db, &club).await?);
         Ok(())
     }
 }
