@@ -9694,7 +9694,7 @@
       for (const r of groups.get(key)) {
         // The row shows its group's default edition; when another edition's
         // name is what matched (`matched_edition`), name it under the title
-        // and open that edition instead.
+        // and show that edition's cover and open it instead.
         const matched = r.matched_edition != null && (r.editions || []).find((ed) => ed.entry_id === r.matched_edition);
         const targetId = matched ? matched.entry_id : r.entry_id;
         resultsEl.appendChild(
@@ -9726,7 +9726,7 @@
                   onclick: () => (currentMode === "graph" ? viewGraph(targetId) : viewEntry(targetId)),
                 },
                 [
-                  artBox(r.entry_id, "result-thumb", r.title),
+                  artBox(targetId, "result-thumb", r.title),
                   el("span", { className: "result-text" }, [
                     el("span", { className: "result-title", text: r.title || "(untitled)" }),
                     matched ? el("span", { className: "result-edition", text: matchedEditionLabel(matched, r.title) }) : null,
