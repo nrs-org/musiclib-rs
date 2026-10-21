@@ -436,8 +436,8 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
     // Fold soft-linked matches, and edition-linked ones (a track and its
     // instrumental), together so the same song doesn't show up as
     // separate-looking rows.
-    let ids = match dedupe_by_edition(&state.db, &raw_ids).await {
-        Ok(ids) => ids,
+    let rows = match dedupe_by_edition(&state.db, &raw_ids).await {
+        Ok(rows) => rows,
         Err(e) => {
             return respond::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -446,6 +446,7 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
             );
         }
     };
+    let ids: Vec<i64> = rows.iter().map(|r| r.entry_id).collect();
     let summaries = match entry_summaries(&state.db, &ids).await {
         Ok(s) => s,
         Err(e) => {
@@ -456,7 +457,16 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
             );
         }
     };
-    let results: Vec<_> = ids.iter().filter_map(|id| summaries.get(id)).collect();
+    // `matched_edition`: the edition whose name matched, when it isn't the
+    // row's default edition — the player shows it under the row's title.
+    let results: Vec<_> = rows
+        .iter()
+        .filter_map(|r| {
+            let mut v = serde_json::to_value(summaries.get(&r.entry_id)?).ok()?;
+            v["matched_edition"] = json!(r.matched_edition);
+            Some(v)
+        })
+        .collect();
     respond::json(StatusCode::OK, json!({ "results": results }))
 }
 

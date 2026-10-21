@@ -234,10 +234,22 @@
     background: var(--brass);
   }
 
-  .result-title {
-    display: block;
+  .result-text {
+    display: flex;
+    flex-direction: column;
     flex: 1;
     min-width: 0;
+  }
+
+  .result-title {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+
+  /* The edition that matched, when it isn't the row's default one. */
+  .result-edition {
+    font-size: 12px;
+    color: var(--ink-faint);
     overflow-wrap: anywhere;
   }
 
@@ -9680,6 +9692,11 @@
         ])
       );
       for (const r of groups.get(key)) {
+        // The row shows its group's default edition; when another edition's
+        // name is what matched (`matched_edition`), name it under the title
+        // and open that edition instead.
+        const matched = r.matched_edition != null && (r.editions || []).find((ed) => ed.entry_id === r.matched_edition);
+        const targetId = matched ? matched.entry_id : r.entry_id;
         resultsEl.appendChild(
           el(
             "li",
@@ -9688,7 +9705,7 @@
               // entry up and drop it in as a node (see graph drop handler).
               draggable: "true",
               ondragstart: (e) => {
-                e.dataTransfer.setData("text/plain", String(r.entry_id));
+                e.dataTransfer.setData("text/plain", String(targetId));
                 e.dataTransfer.effectAllowed = "copy";
               },
             },
@@ -9699,18 +9716,21 @@
                   className: "result",
                   role: "option",
                   type: "button",
-                  "data-entry-id": String(r.entry_id),
+                  "data-entry-id": String(targetId),
                   "aria-selected":
-                    String(r.entry_id) === String(currentMode === "graph" ? graphActiveId : activeId),
+                    String(targetId) === String(currentMode === "graph" ? graphActiveId : activeId),
                   // In Graph mode, a result re-anchors the open graph in
                   // place instead of navigating away to Library mode — the
                   // graph stays the thing on screen, just pointed at a
                   // different entry.
-                  onclick: () => (currentMode === "graph" ? viewGraph(r.entry_id) : viewEntry(r.entry_id)),
+                  onclick: () => (currentMode === "graph" ? viewGraph(targetId) : viewEntry(targetId)),
                 },
                 [
                   artBox(r.entry_id, "result-thumb", r.title),
-                  el("span", { className: "result-title", text: r.title || "(untitled)" }),
+                  el("span", { className: "result-text" }, [
+                    el("span", { className: "result-title", text: r.title || "(untitled)" }),
+                    matched ? el("span", { className: "result-edition", text: matchedEditionLabel(matched, r.title) }) : null,
+                  ]),
                 ]
               ),
             ]
@@ -9718,6 +9738,16 @@
         );
       }
     }
+  }
+
+  // "Arrangement · Truths, Ironies, The Secret Lyrics": the subtitle of a
+  // search result whose match was edition `ed` of the row titled `rowTitle`.
+  // The title is left out when it only repeats the row's.
+  function matchedEditionLabel(ed, rowTitle) {
+    const kind = friendlyType(editionKind(ed));
+    const label = kind.charAt(0).toUpperCase() + kind.slice(1);
+    const title = (ed.title || "").trim();
+    return title && title.toLowerCase() !== (rowTitle || "").trim().toLowerCase() ? `${label} · ${title}` : label;
   }
 
   // ---------- entry detail (browsing only — never touches Player) ----------
