@@ -2192,6 +2192,21 @@
     color: var(--ink-soft);
   }
 
+  /* No playable source (`buildFindCta`): the play button's place, outlined
+     until something's attached, with the finder opening right under it. */
+  .find-cta { margin: 4px 0 28px; }
+  .find-cta .play-cta-row { margin: 0; }
+  .find-cta-btn {
+    background: transparent;
+    color: var(--ink);
+    border: 1px dashed var(--ink-soft);
+  }
+  .find-cta .entry-find {
+    margin-top: 12px;
+    border: 1px solid var(--rail);
+    max-height: 480px;
+  }
+
   .queue-cta {
     display: inline-flex;
     align-items: center;
@@ -4020,6 +4035,7 @@
       '<line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="9" cy="6" r="2" fill="var(--paper)"></circle><circle cx="15" cy="12" r="2" fill="var(--paper)"></circle><circle cx="7" cy="18" r="2" fill="var(--paper)"></circle>',
     x: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
     plus: '<line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>',
+    search: '<circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>',
     "volume-2":
       '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M19 5a10 10 0 0 1 0 14"></path>',
     "volume-x":
@@ -8232,7 +8248,7 @@
           entryId,
           picked,
           preferEditing,
-          !!finder,
+          dockFinderOpen(),
           ordered.map((x) => `${x.identifier}=${x.preferred_weight || 0}`).join(","),
         ].join("|");
         if (key === switcherKey) return;
@@ -8243,8 +8259,8 @@
           type: "button",
           text: "Find source",
           title: "Search YouTube Music and Spotify for this track",
-          "aria-expanded": String(!!finder),
-          onclick: () => (finder ? closeFinder() : findForCurrent()),
+          "aria-expanded": String(dockFinderOpen()),
+          onclick: () => (dockFinderOpen() ? closeFinder() : findForCurrent()),
         });
         if (ordered.length <= 1) {
           switchEl.appendChild(findBtn);
@@ -8371,17 +8387,20 @@
     // Opened by hand from the source strip's "Find source" or an unlinked
     // edition, and by itself when every source of the playing track failed
     // here (a geoblocked upload): the track then still skips after
-    // `FIND_SKIP_S`, unless the finder is touched first.
+    // `FIND_SKIP_S`, unless the finder is touched first. An entry page with
+    // nothing to play opens it in its own `host` instead of the dock, which
+    // only shows while a track is loaded. One finder is open at a time.
     const findEl = document.getElementById("player-dock-find");
     const FIND_SKIP_S = 15;
     // Off by more than this from the track's own length: probably another cut.
     const FIND_LENGTH_SLACK_MS = 5000;
     let finder = null;
 
-    function openFinder({ entryId, title, artist = null, reason = null, skipToken = null, onAttached = null }) {
+    function openFinder({ entryId, title, artist = null, reason = null, skipToken = null, onAttached = null, host = findEl }) {
       closeFinder();
       const query = [title, artist].filter(Boolean).join(" ");
       finder = {
+        host,
         entryId,
         title,
         reason,
@@ -8469,11 +8488,16 @@
 
     function closeFinder() {
       if (!finder) return;
+      const { host } = finder;
       clearInterval(finder.timer);
       finder = null;
-      findEl.hidden = true;
-      findEl.innerHTML = "";
+      host.hidden = true;
+      host.innerHTML = "";
       renderSwitcher();
+    }
+
+    function dockFinderOpen() {
+      return finder?.host === findEl;
     }
 
     // Touching the finder means someone's looking: hold the skip. Only the
@@ -8545,7 +8569,7 @@
     function renderFinder() {
       const f = finder;
       if (!f) return;
-      findEl.hidden = false;
+      f.host.hidden = false;
       f.skipEl =
         f.skipToken != null
           ? el("span", { className: "find-skip", text: f.skipLeft != null ? `skipping in ${f.skipLeft}s` : "skip paused" })
@@ -8615,7 +8639,7 @@
           ]
         );
       });
-      findEl.replaceChildren(
+      f.host.replaceChildren(
         ...[
           head,
           f.reason ? el("p", { className: "find-reason", text: f.reason }) : null,
@@ -8988,6 +9012,8 @@
     return {
       togglePlay,
       isPlayingEntry,
+      openFinder,
+      closeFinder,
       setStageMode,
       syncStagePosition,
       hasTrack,
@@ -13156,6 +13182,43 @@
     return row;
   }
 
+  // A track with nothing to play: where its play button would be, a way to
+  // find it a source (`Player.openFinder`, in a panel of its own since the
+  // dock only shows while something plays). Attaching one swaps this for
+  // the play button and starts the track.
+  function buildFindCta(entry) {
+    const entryId = entry.entry_id;
+    const panel = el("div", { className: "player-dock-find entry-find", hidden: true });
+    const find = () =>
+      Player.openFinder({
+        entryId,
+        title: entry.title,
+        artist: entry.editions?.find((ed) => ed.is_current)?.artists?.[0] ?? null,
+        host: panel,
+        onAttached: async () => {
+          playStandalone(entryId, entry.title);
+          if (activeId !== entryId || !wrap.isConnected) return;
+          const playable = await api(`/api/entries/${entryId}/playable-sources`).catch(() => ({ sources: [] }));
+          if (activeId !== entryId || !wrap.isConnected) return;
+          if (playable.sources.length) wrap.replaceWith(buildPlayCta(entryId, entry.title, playable.sources));
+          refreshAfterEdit(entryId);
+        },
+      });
+    const iconEl = el("span", { className: "play-cta-icon" });
+    iconEl.innerHTML = svgIcon("search", 13);
+    const wrap = el("div", { className: "find-cta" }, [
+      el("div", { className: "play-cta-row" }, [
+        el("button", { className: "play-cta find-cta-btn", type: "button", onclick: find }, [
+          iconEl,
+          el("span", { className: "play-cta-label", text: "Find source" }),
+        ]),
+        el("span", { className: "play-cta-hint", text: "Nothing to play yet: search YouTube Music and Spotify" }),
+      ]),
+      panel,
+    ]);
+    return wrap;
+  }
+
   // ---------- pictures: `GET /api/entries/{id}/cover` (cover.rs) ----------
   //
   // The server picks each entry's picture and redirects to it, or answers
@@ -13669,12 +13732,7 @@
       if (playable.sources.length) {
         detail.appendChild(buildPlayCta(entryId, entry.title, playable.sources));
       } else if (entry.entry_type === "track") {
-        detail.appendChild(
-          el("p", {
-            className: "note",
-            text: "No playable source for this track yet — see its sources below for where it lives.",
-          })
-        );
+        detail.appendChild(buildFindCta(entry));
       }
     }
 
