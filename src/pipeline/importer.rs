@@ -4,7 +4,8 @@ use crate::providers::{
     FetchProvider, ResolveContext,
     std_values::StandardProviderKeys,
     types::{
-        EntityResult, EntryFetchOptionsPool, EntryType, ExternalSources, OptionsId, child_next,
+        EntityResult, EntryFetchOptionsPool, EntryType, Error, ExternalSources, OptionsId,
+        child_next,
     },
 };
 use futures::future::join_all;
@@ -95,6 +96,9 @@ pub fn import(
             Err(e) => {
                 let msg = error_chain(&e);
                 warn!("fetch failed for {}:{}: {}", canonical.0, canonical.1, msg);
+                if matches!(e, Error::NotFound(_)) {
+                    state.note_gone(canonical.clone());
+                }
                 if let Some(p) = state.progress() {
                     p.fetch_failed(&canonical, &msg);
                 }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::musicdb::ParentEdges;
+use crate::musicdb::{AliasKey, ParentEdges, Replacements, alias_key};
 use crate::providers::types::{
     Alias, Contribution, EntrySpecificData, EntryType, Image, OptionsId, Privacy,
 };
@@ -38,6 +38,8 @@ pub struct StubInfo {
 struct RunEdges {
     fetched: HashSet<Pair>,
     edges: HashMap<Pair, ParentEdges>,
+    aliases: HashMap<Pair, HashSet<AliasKey>>,
+    gone: HashSet<Pair>,
 }
 
 /// A "parent has child" edge between two pairs, with the structural position
@@ -243,6 +245,26 @@ impl State {
         self.run_edges.lock().unwrap().fetched.insert(pair);
     }
 
+    /// Record the aliases a fetch of `pair` (canonical, any entry type)
+    /// reported, so they replace older ones at commit.
+    pub(super) fn note_aliases(&self, pair: &Pair, aliases: &[Alias]) {
+        let mut run_edges = self.run_edges.lock().unwrap();
+        let current = run_edges.aliases.entry(pair.clone()).or_default();
+        for a in aliases {
+            current.insert(alias_key(
+                &a.name,
+                a.locale.as_deref(),
+                &a.extra.to_string(),
+                a.primary,
+            ));
+        }
+    }
+
+    /// Record that the provider reported `pair` (canonical) deleted.
+    pub(super) fn note_gone(&self, pair: Pair) {
+        self.run_edges.lock().unwrap().gone.insert(pair);
+    }
+
     /// Record an edge (canonical pairs) as current for its parent.
     pub(super) fn note_edge(&self, edge: &ChildEdge) {
         let mut run_edges = self.run_edges.lock().unwrap();
@@ -259,16 +281,28 @@ impl State {
     }
 
     /// The current edges of every non-artist parent fetched in this run (an
-    /// empty set for one that listed nothing), for `MusicDb::commit_import_run`.
-    pub fn take_replacements(&self) -> HashMap<Pair, ParentEdges> {
-        let RunEdges { fetched, mut edges } = std::mem::take(&mut *self.run_edges.lock().unwrap());
-        fetched
+    /// empty set for one that listed nothing) and the current aliases of
+    /// every fetched pair, and the pairs found deleted upstream, for
+    /// `MusicDb::commit_import_run`.
+    pub fn take_replacements(&self) -> Replacements {
+        let RunEdges {
+            fetched,
+            mut edges,
+            aliases,
+            gone,
+        } = std::mem::take(&mut *self.run_edges.lock().unwrap());
+        let parents = fetched
             .into_iter()
             .map(|pair| {
                 let current = edges.remove(&pair).unwrap_or_default();
                 (pair, current)
             })
-            .collect()
+            .collect();
+        Replacements {
+            parents,
+            aliases,
+            gone,
+        }
     }
 
     /// Current estimated size of buffered state, in bytes.

@@ -129,11 +129,14 @@ pub async fn flush(
     // every edge seen, by canonical pair: at commit these replace older edges
     // under re-fetched parents. Recorded before deferral so it doesn't matter
     // which flush ends up writing them. (A parent's metadata and its edges can
-    // land in different flushes, so the two are tracked separately.)
+    // land in different flushes, so the two are tracked separately.) Every
+    // fetched pair's aliases replace its older ones the same way; an artist
+    // fetch lists all of them, just not all of its children.
     for (pair, meta) in &metadata {
         if meta.entry_type != EntryType::Artist {
             state.note_fetched_parent(pair.clone());
         }
+        state.note_aliases(pair, &meta.aliases);
     }
     for edge in &has_rel {
         state.note_edge(edge);
@@ -1686,6 +1689,138 @@ mod tests {
         assert_eq!(children_of(&db, &album).await?, vec!["t1"]);
         assert_eq!(credited_on(&db, &t1).await?, vec!["performer"]);
         assert_eq!(children_of(&db, &artist).await?, vec!["album", "t2"]);
+        Ok(())
+    }
+
+    fn named(mut meta: PairMetadata, names: &[(&str, bool)]) -> PairMetadata {
+        meta.aliases = names
+            .iter()
+            .map(|&(name, primary)| crate::providers::types::Alias {
+                name: name.to_string(),
+                source: "x".into(),
+                locale: None,
+                extra: serde_json::Value::Null,
+                primary,
+            })
+            .collect();
+        meta
+    }
+
+    async fn names_of(db: &MusicDb, pair: &Pair) -> anyhow::Result<Vec<(String, bool)>> {
+        let mut out = aliases_of(db, pair).await?;
+        out.sort();
+        Ok(out)
+    }
+
+    /// A re-fetch replaces a pair's aliases at commit, artists included: a
+    /// renamed primary name and a dropped alias disappear, from the search
+    /// index too, and a listing name goes once the pair itself is fetched.
+    /// A rolled-back run, or a fetch reporting no aliases, deletes nothing.
+    #[tokio::test]
+    async fn refetch_replaces_stale_aliases_at_commit() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let (artist, album, t1) = (p("artist"), p("album"), p("t1"));
+        let state = State::new();
+        state.insert_metadata(
+            artist.clone(),
+            named(artist_metadata(), &[("Old Name", true), ("Kept", false)]),
+        );
+        state.push_has_rel(edge(&artist, &album, None));
+        state.insert_stub(
+            album.clone(),
+            StubInfo {
+                entry_type: EntryType::Release,
+                name: Some("Listing Title".into()),
+                duration_ms: None,
+                image: None,
+            },
+        );
+        flush_final(&db, state).await?;
+        assert_eq!(
+            names_of(&db, &album).await?,
+            vec![("Listing Title".to_string(), false)]
+        );
+
+        let refetch = || {
+            vec![
+                (
+                    artist.clone(),
+                    named(artist_metadata(), &[("New Name", true), ("Kept", false)]),
+                ),
+                (
+                    album.clone(),
+                    named(release_metadata(), &[("Album Title", true)]),
+                ),
+                (t1.clone(), track_metadata()),
+            ]
+        };
+        run(&db, refetch(), vec![], false).await?;
+        assert_eq!(names_of(&db, &artist).await?.len(), 2);
+
+        run(&db, refetch(), vec![], true).await?;
+        assert_eq!(
+            names_of(&db, &artist).await?,
+            vec![("Kept".to_string(), false), ("New Name".to_string(), true)]
+        );
+        assert_eq!(
+            names_of(&db, &album).await?,
+            vec![("Album Title".to_string(), true)]
+        );
+        assert!(
+            db.search_entry_ids_by_alias("Old Name", 10)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            db.search_entry_ids_by_alias("Listing", 10)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(db.search_entry_ids_by_alias("New Name", 10).await?.len(), 1);
+
+        run(&db, vec![(artist.clone(), artist_metadata())], vec![], true).await?;
+        assert_eq!(names_of(&db, &artist).await?.len(), 2);
+        Ok(())
+    }
+
+    /// A pair the provider reports deleted is marked at commit, keeping its
+    /// data, and unmarked by its next successful fetch. A rolled-back run
+    /// marks nothing.
+    #[tokio::test]
+    async fn not_found_marks_pair_gone_until_refetched() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let t1 = p("t1");
+        run(&db, vec![(t1.clone(), track_metadata())], vec![], true).await?;
+        async fn gone_at(db: &MusicDb) -> anyhow::Result<Option<i64>> {
+            let id = db.find_entry_id_by_pair("x", "t1").await?.unwrap();
+            Ok(db.source_rows_by_entry_ids(&[id]).await?[0].gone_at)
+        }
+
+        for commit in [false, true] {
+            let state = Arc::new(State::new());
+            state.note_gone(t1.clone());
+            let run_id = db.start_import_run().await?;
+            flush(
+                Arc::clone(&state),
+                &[],
+                &db,
+                &DedupConfig::default(),
+                Some(run_id),
+                true,
+            )
+            .await?;
+            if commit {
+                db.commit_import_run(run_id, &state.take_replacements())
+                    .await?;
+            } else {
+                db.rollback_import_run(run_id).await?;
+            }
+            assert_eq!(gone_at(&db).await?.is_some(), commit);
+        }
+        assert!(db.find_entry_id_by_pair(&t1.0, &t1.1).await?.is_some());
+
+        run(&db, vec![(t1.clone(), track_metadata())], vec![], true).await?;
+        assert_eq!(gone_at(&db).await?, None);
         Ok(())
     }
 }

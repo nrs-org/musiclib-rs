@@ -94,6 +94,11 @@ mod entry_source {
         /// (a tracklist entry, a credit, a cross-link), whose own record was
         /// never fetched.
         pub fetched_at: Option<i64>,
+        /// When a fetch of this pair last found it deleted upstream (unix
+        /// seconds), e.g. a 404 for a merged MusicBrainz ID or a removed
+        /// video. Its stored data is kept; the next successful fetch clears
+        /// this.
+        pub gone_at: Option<i64>,
         // Track-specific
         pub duration_ms: Option<i64>,
         /// JSON array of all known durations in milliseconds, sorted and deduped.
@@ -1268,6 +1273,7 @@ fn source_row_from_model(m: entry_source::Model) -> SourceRow {
         release_date: m.release_date,
         songs: songs_from_track_extra(m.track_extra.as_deref()),
         fetched_at: m.fetched_at,
+        gone_at: m.gone_at,
     }
 }
 
@@ -1943,9 +1949,8 @@ impl MusicDb {
         // substrings anywhere in a name (like the old `LIKE '%q%'` scan) and
         // works uniformly on CJK aliases that have no word boundaries. It's
         // an external-content table over `entry_alias` (no data duplicated);
-        // the trigger keeps it in sync with the only mutation path aliases
-        // ever go through (`insert_aliases_for_pair` — entry_alias rows are
-        // never updated or deleted).
+        // the triggers keep it in sync as rows are inserted and deleted
+        // (entry_alias rows are never updated).
         sea_orm::ConnectionTrait::execute_unprepared(
             &db,
             "CREATE VIRTUAL TABLE IF NOT EXISTS entry_alias_fts USING fts5(
@@ -1953,6 +1958,10 @@ impl MusicDb {
              );
              CREATE TRIGGER IF NOT EXISTS entry_alias_ai AFTER INSERT ON entry_alias BEGIN
                  INSERT INTO entry_alias_fts(rowid, name) VALUES (new.id, new.name);
+             END;
+             CREATE TRIGGER IF NOT EXISTS entry_alias_ad AFTER DELETE ON entry_alias BEGIN
+                 INSERT INTO entry_alias_fts(entry_alias_fts, rowid, name)
+                 VALUES ('delete', old.id, old.name);
              END;",
         )
         .await?;
@@ -2004,6 +2013,16 @@ impl MusicDb {
             sea_orm::ConnectionTrait::execute_unprepared(
                 &db,
                 "DROP TABLE IF EXISTS dedup_suggestion; PRAGMA user_version = 6;",
+            )
+            .await?;
+        }
+        if user_version < 7 {
+            // Aliases deleted before `entry_alias_ad` existed (rolled-back
+            // runs) left stale rows in the index.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "INSERT INTO entry_alias_fts(entry_alias_fts) VALUES('rebuild'); \
+                 PRAGMA user_version = 7;",
             )
             .await?;
         }
@@ -2454,20 +2473,22 @@ impl MusicDb {
     /// (`run_id` doubles as provenance of which run brought in which data)
     /// but the run is no longer eligible for `recover_pending_import_runs`.
     ///
-    /// `replaced` lists parents this run fetched completely, with the edges
-    /// each one has now. Any older `entry_child`/`contribution` row under such
-    /// a parent that isn't in its current set (a track dropped from an album,
-    /// a removed credit) is deleted in the same transaction as the status
-    /// update. Doing it here rather than at flush time keeps rollback
+    /// `replaced.parents` lists parents this run fetched completely, with the
+    /// edges each one has now. Any older `entry_child`/`contribution` row
+    /// under such a parent that isn't in its current set (a track dropped
+    /// from an album, a removed credit) is deleted in the same transaction as
+    /// the status update. `replaced.aliases` does the same for the aliases of
+    /// every fetched pair (a renamed or deleted alias). Pairs in
+    /// `replaced.gone` get `gone_at` set unless the run also fetched them. Doing it here rather than at flush time keeps rollback
     /// correct: a run that fails or crashes never got to delete anything.
     pub async fn commit_import_run(
         &self,
         run_id: i64,
-        replaced: &HashMap<(String, String), ParentEdges>,
+        replaced: &Replacements,
     ) -> Result<(), Error> {
         let txn = self.db.begin().await?;
         let (mut stale_children, mut stale_contributions) = (0usize, 0usize);
-        for ((source, identifier), current) in replaced {
+        for ((source, identifier), current) in &replaced.parents {
             let children = entry_child::Entity::find()
                 .filter(entry_child::Column::ParentSource.eq(source.as_str()))
                 .filter(entry_child::Column::ParentIdentifier.eq(identifier.as_str()))
@@ -2515,6 +2536,58 @@ impl MusicDb {
                     .await?;
             }
         }
+
+        let mut stale_aliases = 0usize;
+        for ((source, identifier), current) in &replaced.aliases {
+            // A fetch that reported no aliases says nothing about them.
+            if current.is_empty() {
+                continue;
+            }
+            let stale_ids: Vec<i64> = entry_alias::Entity::find()
+                .filter(entry_alias::Column::Source.eq(source.as_str()))
+                .filter(entry_alias::Column::Identifier.eq(identifier.as_str()))
+                .all(&txn)
+                .await?
+                .into_iter()
+                .filter(|a| {
+                    !current.contains(&alias_key(
+                        &a.name,
+                        a.locale.as_deref(),
+                        a.extra.as_deref().unwrap_or("null"),
+                        a.primary,
+                    ))
+                })
+                .map(|a| a.id)
+                .collect();
+            if !stale_ids.is_empty() {
+                stale_aliases += stale_ids.len();
+                entry_alias::Entity::delete_many()
+                    .filter(entry_alias::Column::Id.is_in(stale_ids))
+                    .exec(&txn)
+                    .await?;
+            }
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let mut gone = 0u64;
+        for (source, identifier) in &replaced.gone {
+            if replaced
+                .aliases
+                .contains_key(&(source.clone(), identifier.clone()))
+            {
+                continue;
+            }
+            gone += entry_source::Entity::update_many()
+                .col_expr(entry_source::Column::GoneAt, sea_query::Expr::value(now))
+                .filter(entry_source::Column::Source.eq(source.as_str()))
+                .filter(entry_source::Column::Identifier.eq(identifier.as_str()))
+                .filter(entry_source::Column::GoneAt.is_null())
+                .exec(&txn)
+                .await?
+                .rows_affected;
+        }
         import_run::Entity::update_many()
             .col_expr(
                 import_run::Column::Status,
@@ -2524,12 +2597,16 @@ impl MusicDb {
             .exec(&txn)
             .await?;
         txn.commit().await?;
-        if stale_children + stale_contributions > 0 {
+        if stale_children + stale_contributions + stale_aliases > 0 {
             tracing::info!(
-                "run {run_id}: removed {stale_children} stale child edge(s) and \
-                 {stale_contributions} stale contribution(s) under {} re-fetched parent(s)",
-                replaced.len()
+                "run {run_id}: removed {stale_children} stale child edge(s), \
+                 {stale_contributions} stale contribution(s) and {stale_aliases} stale \
+                 alias(es) under {} re-fetched pair(s)",
+                replaced.parents.len().max(replaced.aliases.len())
             );
+        }
+        if gone > 0 {
+            tracing::info!("run {run_id}: marked {gone} pair(s) deleted upstream");
         }
         Ok(())
     }
@@ -2671,6 +2748,7 @@ impl MusicDb {
             entry_id: Set(entry_id),
             release_date: Set(release_date.map(|s| s.to_string())),
             fetched_at: Set(Some(now)),
+            gone_at: Set(None),
             duration_ms: Set(duration_ms),
             duration_ms_all: Set(duration_ms_all),
             track_extra: Set(track_extra),
@@ -2689,6 +2767,7 @@ impl MusicDb {
                 entry_source::Column::EntryId,
                 entry_source::Column::ReleaseDate,
                 entry_source::Column::FetchedAt,
+                entry_source::Column::GoneAt,
                 entry_source::Column::DurationMs,
                 entry_source::Column::DurationMsAll,
                 entry_source::Column::TrackExtra,
@@ -2952,15 +3031,8 @@ impl MusicDb {
         // Skip aliases the pair already has (a re-import, or a stub's listing
         // name seen once per reference), and repeats within `aliases`. A
         // lookup rather than a UNIQUE index: see `CONTRIBUTION_DEDUP_MIGRATION`.
-        let key = |name: &str, locale: Option<&str>, extra: &str, primary: bool| {
-            (
-                name.to_string(),
-                locale.map(str::to_string),
-                extra.to_string(),
-                primary,
-            )
-        };
-        let mut seen: HashSet<(String, Option<String>, String, bool)> = entry_alias::Entity::find()
+        let key = alias_key;
+        let mut seen: HashSet<AliasKey> = entry_alias::Entity::find()
             .filter(entry_alias::Column::Source.eq(source))
             .filter(entry_alias::Column::Identifier.eq(identifier))
             .all(&self.db)
@@ -3739,6 +3811,7 @@ impl MusicDb {
                 source: s.source,
                 identifier: s.identifier,
                 duration_ms: s.duration_ms,
+                gone_at: s.gone_at,
             })
             .collect())
     }
@@ -4478,6 +4551,9 @@ pub struct SourceRow {
     pub songs: Vec<Vec<String>>,
     /// NULL for a stub: a pair only ever seen in some listing, never fetched.
     pub fetched_at: Option<i64>,
+    /// Set when the provider last reported this pair deleted (see
+    /// `entry_source::Model::gone_at`).
+    pub gone_at: Option<i64>,
 }
 
 /// One pair of an entry, as `MusicDb::entry_pair_facts` returns it.
@@ -4486,6 +4562,8 @@ pub struct PairFacts {
     pub identifier: String,
     /// The pair's first known duration (`entry_source.duration_ms`).
     pub duration_ms: Option<i64>,
+    /// See `SourceRow::gone_at`.
+    pub gone_at: Option<i64>,
     /// Ascending `id`, i.e. insertion order.
     pub aliases: Vec<PairAlias>,
 }
@@ -4520,6 +4598,31 @@ pub struct ContribRow {
 /// A contribution's identity under its parent pair: (artist pair, role,
 /// main_artist, extra as stored).
 pub type ContributionKey = ((String, String), String, bool, String);
+
+/// An alias's identity under its pair: (name, locale, extra as stored,
+/// primary).
+pub type AliasKey = (String, Option<String>, String, bool);
+
+pub fn alias_key(name: &str, locale: Option<&str>, extra: &str, primary: bool) -> AliasKey {
+    (
+        name.to_string(),
+        locale.map(str::to_string),
+        extra.to_string(),
+        primary,
+    )
+}
+
+/// What a committed run replaces under the pairs it fetched. See
+/// `MusicDb::commit_import_run`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Replacements {
+    /// Non-artist parents fetched completely, with their current edges.
+    pub parents: HashMap<(String, String), ParentEdges>,
+    /// Every fetched pair, with the aliases its fetch reported.
+    pub aliases: HashMap<(String, String), HashSet<AliasKey>>,
+    /// Pairs whose fetch found them deleted upstream.
+    pub gone: HashSet<(String, String)>,
+}
 
 /// The edges a fully fetched non-artist parent has as of the current run.
 /// See `MusicDb::commit_import_run`.
@@ -6129,6 +6232,7 @@ mod tests {
                 entry_id: Set(1),
                 release_date: Set(None),
                 fetched_at: Set(Some(0)),
+                gone_at: Set(None),
                 duration_ms: Set(None),
                 duration_ms_all: Set(None),
                 track_extra: Set(None),
