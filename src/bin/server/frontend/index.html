@@ -5558,6 +5558,13 @@
     let deviceId = null;
     let lastError = "";
     let stateListener = null;
+    // Whether the dock currently wants this device playing: set when a play
+    // request goes out, cleared by `release`. A Web API play is only
+    // *accepted* when its request returns — the device starts later, so a
+    // pause sent in between lands on nothing and the track starts anyway,
+    // under whatever replaced it. The state listener pauses any playback
+    // that starts while this is false.
+    let wanted = false;
 
     function b64url(buffer) {
       return btoa(String.fromCharCode(...new Uint8Array(buffer)))
@@ -5827,7 +5834,13 @@
           lastError = "Spotify Premium is required for in-app playback.";
           render();
         });
-        p.addListener("player_state_changed", (state) => stateListener?.(state));
+        p.addListener("player_state_changed", (state) => {
+          if (!wanted && state && !state.paused) {
+            p.pause().catch(() => {});
+            return;
+          }
+          stateListener?.(state);
+        });
         await p.connect();
         player = p;
         return p;
@@ -5848,11 +5861,16 @@
     /// handshake) on first use. Returns once playback has been requested —
     /// UI state (playing/paused) comes from `player_state_changed` events.
     /// `positionMs` resumes mid-track (a transfer from another device).
-    async function play(spotifyId, positionMs = 0) {
+    /// `isCurrent` says whether the caller still wants this track: the
+    /// device can take seconds to come online, and a request sent after the
+    /// user has moved on would start it underneath the next source.
+    async function play(spotifyId, positionMs = 0, isCurrent = () => true) {
       await ensurePlayer();
       const device = await waitForDevice(8000);
       if (!device) throw new Error("Spotify player didn't come online in time.");
       const token = await getValidAccessToken();
+      if (!isCurrent()) return;
+      wanted = true;
       const res = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -5881,6 +5899,13 @@
     /// stop explicitly.
     async function pause() {
       if (player) await player.pause();
+    }
+
+    /// The dock moved off this track: pause, and keep pausing a play request
+    /// still in flight once the device starts it.
+    function release() {
+      wanted = false;
+      player?.pause().catch(() => {});
     }
 
     /// Raw SDK state (position/duration in ms, paused, current track id) —
@@ -6017,6 +6042,7 @@
       play,
       resume,
       pause,
+      release,
       setStateListener,
       getCurrentState,
       seek,
@@ -7683,7 +7709,7 @@
 
     function startSpotify(spotifyId, positionMs, token) {
       const status = surfaceEl.querySelector(".player-dock-spotify-sub");
-      Spotify.play(spotifyId, positionMs)
+      Spotify.play(spotifyId, positionMs, () => token === mountToken)
         .then(() => {
           // The user may have moved on while this request was in flight —
           // the device would otherwise start playing this track anyway,
@@ -7906,9 +7932,10 @@
 
     // Tears down whatever the engine has mounted. Spotify plays via a
     // Connect device, not the DOM — clearing the surface doesn't stop it
-    // like it would an iframe, so it has to be paused explicitly.
+    // like it would an iframe, so it has to be released explicitly (which
+    // also covers a play request still in flight).
     function clearSurface() {
-      if (provider === "spotify" && !spotifyPending) Spotify.pause().catch(() => {});
+      if (provider === "spotify") Spotify.release();
       mountToken++;
       surfaceEl.innerHTML = "";
       ytPlayer = null;
