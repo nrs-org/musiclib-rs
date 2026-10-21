@@ -286,7 +286,7 @@ mod pair_link {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-/// Named DB-wide switches (`SPLIT_RETRACTED_LINKS`).
+/// Named DB-wide switches (`LINKS_COMPLETE`).
 mod setting {
     use sea_orm::entity::prelude::*;
 
@@ -2089,6 +2089,19 @@ impl MusicDb {
             )
             .await?;
         }
+        if user_version < 9 {
+            // `pair_link` starts empty: complete for a DB with no pairs yet,
+            // not for one whose links were never recorded.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                &format!(
+                    "INSERT OR IGNORE INTO setting (key, value) VALUES ('{LINKS_COMPLETE}', \
+                     CASE WHEN EXISTS (SELECT 1 FROM entry_source) THEN '0' ELSE '1' END); \
+                     PRAGMA user_version = 9;"
+                ),
+            )
+            .await?;
+        }
         Ok(Self {
             db,
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -2517,6 +2530,29 @@ impl MusicDb {
                     via: via_str(&r.via),
                 })
             })
+            .collect())
+    }
+
+    /// Every fetched pair not found deleted upstream, or only those last
+    /// fetched before `before` (unix seconds): what `import
+    /// --backfill-links` re-imports, and what it failed to.
+    pub async fn live_fetched_pairs(
+        &self,
+        before: Option<i64>,
+    ) -> Result<Vec<(String, String)>, Error> {
+        let mut query = entry_source::Entity::find()
+            .filter(entry_source::Column::FetchedAt.is_not_null())
+            .filter(entry_source::Column::GoneAt.is_null());
+        if let Some(before) = before {
+            query = query.filter(entry_source::Column::FetchedAt.lt(before));
+        }
+        Ok(query
+            .order_by_asc(entry_source::Column::Source)
+            .order_by_asc(entry_source::Column::Identifier)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| (m.source, m.identifier))
             .collect())
     }
 
@@ -4819,11 +4855,13 @@ pub struct ContribRow {
 /// main_artist, extra as stored).
 pub type ContributionKey = ((String, String), String, bool, String);
 
-/// `setting` key: when "1", a final flush splits an entry whose pairs are
-/// no longer connected after a re-fetch retracted a link inside it
-/// (docs/plan-identity-retraction.md). Off unless set: a DB whose links
-/// aren't all recorded would split entries that are only missing links.
-pub const SPLIT_RETRACTED_LINKS: &str = "split_retracted_links";
+/// `setting` key: "1" once every stored identity link is recorded in
+/// `pair_link` (set for a DB created empty, and by `import
+/// --backfill-links`). Only then does a final flush group entries by their
+/// links and split one whose pairs a re-fetch disconnected
+/// (docs/plan-identity-retraction.md): with links missing, entries that are
+/// fine would look disconnected and split.
+pub const LINKS_COMPLETE: &str = "links_complete";
 
 /// `pair_link.via` of a link from the asserting pair's own fetch result.
 pub const LINK_VIA_FETCH: &str = "fetch";
@@ -6806,6 +6844,38 @@ mod tests {
     /// Opening a pre-v4 database rebuilds `entry_source` with a nullable
     /// `fetched_at` (keeping rows and indexes), and marks rows that were never
     /// fetched (no metadata, aliases or outgoing edges) as stubs.
+    /// A DB created empty records every link from the start, so its links
+    /// are complete; one that already had pairs when links started being
+    /// recorded is not, until a backfill says so.
+    #[tokio::test]
+    async fn links_complete_only_for_a_db_created_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("old.db").display());
+        {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            assert_eq!(
+                mdb.setting(LINKS_COMPLETE).await.unwrap().as_deref(),
+                Some("1")
+            );
+            // Pretend it predates `pair_link`: pairs, no setting, version 8.
+            let id = mdb.insert_entry(Some(EntryType::Track)).await.unwrap();
+            mdb.upsert_stub_pair("isrc", "JPX000000001", id, None, None)
+                .await
+                .unwrap();
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &mdb.db,
+                "DELETE FROM setting; PRAGMA user_version = 8;",
+            )
+            .await
+            .unwrap();
+        }
+        let mdb = MusicDb::new(&db_url).await.unwrap();
+        assert_eq!(
+            mdb.setting(LINKS_COMPLETE).await.unwrap().as_deref(),
+            Some("0")
+        );
+    }
+
     #[tokio::test]
     async fn stub_migration_nulls_fetched_at_for_unfetched_rows() {
         let dir = tempfile::tempdir().unwrap();

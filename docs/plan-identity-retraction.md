@@ -1,7 +1,7 @@
 # Retracting identity links
 
-Status: links are recorded and retracted; splitting is implemented behind
-`setting.split_retracted_links = '1'`, off until a DB's links are backfilled.
+Status: implemented. Splitting runs once a DB's links are complete
+(`setting.links_complete = '1'`).
 
 A re-fetch already replaces what each fetched pair owns: child edges and
 credits (non-artist parents), aliases (every pair), provider
@@ -45,7 +45,7 @@ entries are GC'd. That entry's dead links are deleted in the same flush,
 so a run rolled back afterwards leaves the split and its links agreeing
 (like a barrier split, a final flush's split isn't undone by rollback).
 
-With splitting on, an entry holding a barrier pair that a flush touches is
+With links complete, an entry holding a barrier pair that a flush touches is
 grouped by its links too (and joins the flush whole either way, so a merge
 can't carry an anchor pair the barrier never saw). A pair both anchors
 share then takes only what links to it to the anchor that reaches it
@@ -63,27 +63,25 @@ relations and `dedup_feedback`. Pair-keyed data (credits, aliases,
 images, privacy) moves with its pair. NRS binds by URL, so its references
 survive.
 
-## Why it can't split yet
+## When links are complete
 
-Connectivity needs *every* link inside an entry, and none of today's are
-recorded. Recording them on re-fetch isn't enough: a link inside entry E
-can be asserted by a pair outside it (an album listing that gives one track
-both a Spotify ID and an ISRC). E's own pairs can all be re-fetched while
-that album isn't, and E would look disconnected and split wrongly.
+Connectivity needs *every* link inside an entry. With some missing,
+entries that are fine look disconnected, and the first retraction in one
+would split them. So the regrouping above only runs once
+`setting.links_complete = '1'`:
 
-So:
+- A DB created empty gets it from its migration: every link is recorded
+  from its first import.
+- A DB that had pairs before `pair_link` existed gets `'0'`, until
+  `import --backfill-links` re-imports every fetched pair (listing
+  children, fetching none), retries the ones that fail once, and sets it.
 
-1. **Record and retract links, no splitting** (done). No behaviour change;
-   the table fills as re-imports run.
-2. **Backfill** by re-importing every fetched pair, walking non-artist
-   listings (cache-served mostly, as in the 2026-10-21 credit backfill).
-   Open question: links only an artist discography listing states are not
-   re-walked by `no_fetch_discography.yaml`; measure how many entries
-   depend on them before trusting the backfill.
-3. **Report** the entries that would split given the recorded links
-   (`dedup`-style binary, read-only), and review it.
-4. **Enable splitting**, behind a DB-level marker set by the backfill, so a
-   DB without one never splits.
+On the 2026-10-21 DB the backfill took 3 minutes from the HTTP cache and
+recorded 82,184 links. No link came from a listing (`via = 'listing'`):
+a child's sibling pairs are rare in practice, so a track's ISRC link comes
+from the track's own fetch. Of 12,139 entries with 2+ pairs, 2 weren't
+connected by their links: a merged-away MusicBrainz ID that now 404s (kept
+by the gone-pair rule) and an artist URL a barrier holds.
 
 ## Aside
 

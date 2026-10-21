@@ -12,7 +12,7 @@ use clap::Parser;
 use musiclib_rs::{
     app_dirs,
     http::HttpClientConfig,
-    musicdb::MusicDb,
+    musicdb::{LINKS_COMPLETE, MusicDb},
     pipeline::{
         dedup::{DedupConfig, dedup_db, merge_configs},
         ingest::ingest_entries,
@@ -27,14 +27,14 @@ use musiclib_rs::{
         },
     },
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
     /// URL(s) to import. All are traversed together in one run, so their
     /// fetches share API batches.
-    #[arg(required_unless_present = "url_file")]
+    #[arg(required_unless_present_any = ["url_file", "backfill_links"])]
     urls: Vec<String>,
     /// File with more URLs to import, one per line (blank lines and lines
     /// starting with `#` are ignored).
@@ -57,6 +57,12 @@ struct Args {
     /// <config_dir>/dedup_barriers/*.yaml.
     #[arg(long)]
     dedup_config: Vec<String>,
+    /// Instead of importing URLs, re-import every fetched pair (listing
+    /// children, fetching none) to record the identity links each states,
+    /// retry the ones that fail once, then mark the DB's links complete so
+    /// re-imports can split entries (docs/plan-identity-retraction.md).
+    #[arg(long, conflicts_with_all = ["urls", "url_file", "fetch_options"])]
+    backfill_links: bool,
     /// Skip the pre-import dedup pass.
     #[arg(long)]
     skip_dedup: bool,
@@ -111,6 +117,71 @@ fn resolve_fetch_options(s: &str) -> PathBuf {
     } else {
         app_dirs::config_dir().join("fetch_options").join(p)
     }
+}
+
+/// `--backfill-links`: see its doc on `Args`.
+async fn backfill_links(
+    db: &MusicDb,
+    providers: &Arc<Vec<Arc<dyn musiclib_rs::providers::FetchProvider>>>,
+    dedup_configs: &[(String, DedupConfig)],
+    merged: &DedupConfig,
+) -> anyhow::Result<()> {
+    /// Pairs per import run: each commits on its own, so an interrupted
+    /// backfill keeps what it finished.
+    const RUN_SIZE: usize = 1000;
+    let mut pool = EntryFetchOptionsPool::default();
+    let root_id = pool.insert(EntryFetchOptions {
+        child_rules: vec![],
+    });
+    let pool = Arc::new(pool);
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let mut pending = db.live_fetched_pairs(None).await?;
+    info!(
+        "Backfilling links: re-importing {} fetched pair(s)",
+        pending.len()
+    );
+    for pass in 1..=2 {
+        let urls: Vec<String> = pending.iter().map(|(_, id)| id.clone()).collect();
+        let runs = urls.len().div_ceil(RUN_SIZE);
+        for (n, chunk) in urls.chunks(RUN_SIZE).enumerate() {
+            info!("Pass {pass}, run {}/{runs}", n + 1);
+            ingest_entries(
+                db,
+                providers,
+                &pool,
+                root_id,
+                dedup_configs,
+                merged,
+                None,
+                chunk.to_vec(),
+                None,
+                None,
+            )
+            .await?;
+        }
+        pending = db.live_fetched_pairs(Some(started)).await?;
+        if pending.is_empty() {
+            break;
+        }
+        warn!(
+            "{} pair(s) failed to re-fetch{}: {:?}",
+            pending.len(),
+            if pass == 1 {
+                "; retrying them once"
+            } else {
+                ""
+            },
+            pending.iter().take(20).collect::<Vec<_>>(),
+        );
+    }
+    db.set_setting(LINKS_COMPLETE, "1").await?;
+    info!(
+        "Links backfilled ({} pair(s) never re-fetched); re-imports now split entries a removed link disconnects",
+        pending.len()
+    );
+    Ok(())
 }
 
 #[tokio::main]
@@ -199,6 +270,21 @@ async fn main() -> anyhow::Result<()> {
 
     if !args.skip_dedup && !dedup_configs.is_empty() {
         dedup_db(Arc::clone(&providers), &db, &dedup_configs).await?;
+    }
+
+    if args.backfill_links {
+        backfill_links(
+            &db,
+            &providers,
+            &dedup_configs,
+            &merge_configs(&dedup_configs),
+        )
+        .await?;
+        info!(
+            "YouTube Data API quota used: {} unit(s)",
+            youtube_quota.load(Ordering::Relaxed),
+        );
+        return Ok(());
     }
 
     let (pool, root_id) = match args.fetch_options.as_deref() {

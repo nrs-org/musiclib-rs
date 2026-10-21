@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::musicdb::{
-    ImageOrigin, LinkKey, LinkRow, MusicDb, PROVIDER_ORIGIN, SPLIT_RETRACTED_LINKS, link_key,
+    ImageOrigin, LINKS_COMPLETE, LinkKey, LinkRow, MusicDb, PROVIDER_ORIGIN, link_key,
 };
 use crate::providers::FetchProvider;
 use crate::providers::std_values::{StandardProviderKeys, normalize_isrc};
@@ -225,7 +225,7 @@ pub async fn flush(
         }
     }
 
-    // 2d. With `SPLIT_RETRACTED_LINKS` on, step 3 groups some entries by
+    // 2d. With `LINKS_COMPLETE` on, step 3 groups some entries by
     //     their recorded links instead of keeping all their pairs together:
     //     one in which a link this run retracted is no longer stated by
     //     anything (it splits), and every barrier entry from 2c (a pair two
@@ -669,7 +669,7 @@ struct Regroup {
     stale: Vec<LinkRow>,
 }
 
-/// The entries step 3 groups by their links, when `SPLIT_RETRACTED_LINKS`
+/// The entries step 3 groups by their links, when `LINKS_COMPLETE`
 /// is on: those in which a link this run retracted is no longer stated by
 /// anything (no other stored row, no fresh `is_rel`), and `barrier_ids`.
 /// In a barrier entry with no such link, a pair linked to nothing inside it
@@ -682,7 +682,7 @@ async fn regrouped_entries(
     is_rel: &[IsRel],
     barrier_ids: &BTreeSet<i64>,
 ) -> anyhow::Result<HashMap<i64, Regroup>> {
-    if db.setting(SPLIT_RETRACTED_LINKS).await?.as_deref() != Some("1") {
+    if db.setting(LINKS_COMPLETE).await?.as_deref() != Some("1") {
         return Ok(HashMap::new());
     }
     let stale: HashSet<LinkRow> = db
@@ -2126,7 +2126,7 @@ mod tests {
 
     /// Recording R wrongly links Spotify track S, merging them. Once R's
     /// re-fetch stops stating the link it is deleted, but the entry only
-    /// splits with `SPLIT_RETRACTED_LINKS` on, and only when nothing else
+    /// splits with `LINKS_COMPLETE` set, and only when nothing else
     /// (here, album A's listing) still states it. The split-off pair keeps
     /// the entry's type.
     #[tokio::test]
@@ -2138,10 +2138,12 @@ mod tests {
         }
         for enabled in [false, true] {
             let db = MusicDb::new("sqlite::memory:").await?;
-            if enabled {
-                db.set_setting(crate::musicdb::SPLIT_RETRACTED_LINKS, "1")
-                    .await?;
-            }
+            // A new DB starts complete; one with unrecorded links doesn't.
+            db.set_setting(
+                crate::musicdb::LINKS_COMPLETE,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
             run_with_links(
                 &db,
                 vec![(r.clone(), track_metadata())],
@@ -2164,8 +2166,7 @@ mod tests {
 
         // Still stated by another asserter: no split.
         let db = MusicDb::new("sqlite::memory:").await?;
-        db.set_setting(crate::musicdb::SPLIT_RETRACTED_LINKS, "1")
-            .await?;
+        db.set_setting(crate::musicdb::LINKS_COMPLETE, "1").await?;
         run_with_links(
             &db,
             vec![
@@ -2190,8 +2191,7 @@ mod tests {
         use LinkVia::Fetch;
         let (r, s, i, old) = (p("r"), p("s"), p("i"), p("old"));
         let db = MusicDb::new("sqlite::memory:").await?;
-        db.set_setting(crate::musicdb::SPLIT_RETRACTED_LINKS, "1")
-            .await?;
+        db.set_setting(crate::musicdb::LINKS_COMPLETE, "1").await?;
         // r states i, s and `old`, all one entry.
         run_with_links(
             &db,
@@ -2289,8 +2289,7 @@ mod tests {
         let (orig, club, bridge, track, leftover) =
             (p("orig"), p("club"), p("bridge"), p("track"), p("leftover"));
         let db = MusicDb::new("sqlite::memory:").await?;
-        db.set_setting(crate::musicdb::SPLIT_RETRACTED_LINKS, "1")
-            .await?;
+        db.set_setting(crate::musicdb::LINKS_COMPLETE, "1").await?;
         let state = State::new();
         state.insert_metadata(club.clone(), track_metadata());
         state.insert_metadata(track.clone(), track_metadata());
