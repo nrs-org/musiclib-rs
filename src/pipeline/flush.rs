@@ -687,6 +687,7 @@ async fn disconnected_entries(
         }
         let mut links: Vec<LinkKey> = alive.into_iter().cloned().collect();
         links.sort();
+        keep_gone_pairs(db, id, &members, &mut links).await?;
         let stale_here: Vec<LinkRow> = rows.into_iter().filter(|r| stale.contains(r)).collect();
         info!(
             "entry {id}: a re-fetch retracted a link inside it; regrouping its {} pair(s) by {} remaining link(s)",
@@ -703,6 +704,49 @@ async fn disconnected_entries(
         );
     }
     Ok(out)
+}
+
+/// Link each of the entry's pairs found deleted upstream (`gone_at`) to its
+/// largest group: a pair that can't be fetched states no links, so missing
+/// ones say nothing about it (a merged-away MusicBrainz ID returns 404).
+async fn keep_gone_pairs(
+    db: &MusicDb,
+    entry_id: i64,
+    members: &[Pair],
+    links: &mut Vec<LinkKey>,
+) -> anyhow::Result<()> {
+    let gone: Vec<Pair> = db
+        .source_rows_by_entry_ids(&[entry_id])
+        .await?
+        .into_iter()
+        .filter(|r| r.gone_at.is_some())
+        .map(|r| (r.source, r.identifier))
+        .collect();
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let mut uf = UnionFind::new();
+    for pair in members {
+        uf.make_set(pair);
+    }
+    for (a, b) in links.iter() {
+        let _ = uf.union(a, b);
+    }
+    let mut sizes: HashMap<Pair, usize> = HashMap::new();
+    for pair in members.iter().filter(|p| !gone.contains(p)) {
+        *sizes.entry(uf.find(pair)).or_default() += 1;
+    }
+    let Some(largest) = sizes
+        .into_iter()
+        .max_by(|(a, n), (b, m)| n.cmp(m).then_with(|| b.cmp(a)))
+        .map(|(root, _)| root)
+    else {
+        return Ok(());
+    };
+    for pair in &gone {
+        links.push(link_key(pair, &largest));
+    }
+    Ok(())
 }
 
 async fn write_edge_contributions(
@@ -2074,6 +2118,63 @@ mod tests {
         run(&db, vec![(r.clone(), track_metadata())], vec![], true).await?;
         assert!(merged(&db).await?);
         assert_eq!(stored_links(&db, &[&r, &s]).await?, 1);
+        Ok(())
+    }
+
+    /// A pair found deleted upstream states no links, so a split leaves it
+    /// with the entry's largest group instead of on its own.
+    #[tokio::test]
+    async fn split_keeps_gone_pair_with_largest_group() -> anyhow::Result<()> {
+        use LinkVia::Fetch;
+        let (r, s, i, old) = (p("r"), p("s"), p("i"), p("old"));
+        let db = MusicDb::new("sqlite::memory:").await?;
+        db.set_setting(crate::musicdb::SPLIT_RETRACTED_LINKS, "1")
+            .await?;
+        // r states i, s and `old`, all one entry.
+        run_with_links(
+            &db,
+            vec![
+                (r.clone(), track_metadata()),
+                (old.clone(), track_metadata()),
+            ],
+            vec![],
+            vec![
+                (&r, &i, &r, Fetch),
+                (&r, &s, &r, Fetch),
+                (&r, &old, &r, Fetch),
+            ],
+            true,
+        )
+        .await?;
+        let state = Arc::new(State::new());
+        state.note_gone(old.clone());
+        let run_id = db.start_import_run().await?;
+        flush(
+            Arc::clone(&state),
+            &[],
+            &db,
+            &DedupConfig::default(),
+            Some(run_id),
+            true,
+        )
+        .await?;
+        db.commit_import_run(run_id, &state.take_replacements())
+            .await?;
+
+        // r drops s and `old` (merged away upstream); `old` is gone, so it
+        // stays while s splits off.
+        run_with_links(
+            &db,
+            vec![(r.clone(), track_metadata())],
+            vec![],
+            vec![(&r, &i, &r, Fetch)],
+            true,
+        )
+        .await?;
+        let entry = entry_of(&db, &r).await?;
+        assert_eq!(entry_of(&db, &i).await?, entry);
+        assert_ne!(entry_of(&db, &s).await?, entry);
+        assert_eq!(entry_of(&db, &old).await?, entry);
         Ok(())
     }
 }
