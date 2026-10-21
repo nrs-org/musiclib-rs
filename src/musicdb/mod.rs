@@ -2026,6 +2026,18 @@ impl MusicDb {
             )
             .await?;
         }
+        if user_version < 8 {
+            // Provider relations left behind by re-fetches that replaced the
+            // edges they rested on, before commits removed them too.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                &format!(
+                    "DELETE FROM entry_relation WHERE origin = '{PROVIDER_ORIGIN}' \
+                     AND {UNSUPPORTED_PROVIDER_RELATIONS}; PRAGMA user_version = 8;"
+                ),
+            )
+            .await?;
+        }
         Ok(Self {
             db,
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -2478,7 +2490,10 @@ impl MusicDb {
     /// under such a parent that isn't in its current set (a track dropped
     /// from an album, a removed credit) is deleted in the same transaction as
     /// the status update. `replaced.aliases` does the same for the aliases of
-    /// every fetched pair (a renamed or deleted alias). Pairs in
+    /// every fetched pair (a renamed or deleted alias), and provider
+    /// cover/remix/arrangement relations go once no child edge between
+    /// their two entries is left (see `UNSUPPORTED_PROVIDER_RELATIONS`).
+    /// Pairs in
     /// `replaced.gone` get `gone_at` set unless the run also fetched them. Doing it here rather than at flush time keeps rollback
     /// correct: a run that fails or crashes never got to delete anything.
     pub async fn commit_import_run(
@@ -2488,6 +2503,7 @@ impl MusicDb {
     ) -> Result<(), Error> {
         let txn = self.db.begin().await?;
         let (mut stale_children, mut stale_contributions) = (0usize, 0usize);
+        let mut lost_children: Vec<i64> = Vec::new();
         for ((source, identifier), current) in &replaced.parents {
             let children = entry_child::Entity::find()
                 .filter(entry_child::Column::ParentSource.eq(source.as_str()))
@@ -2509,6 +2525,13 @@ impl MusicDb {
                     .exec(&txn)
                     .await?;
                 stale_children += 1;
+                if let Some(parent) =
+                    entry_source::Entity::find_by_id((source.clone(), identifier.clone()))
+                        .one(&txn)
+                        .await?
+                {
+                    lost_children.push(parent.entry_id);
+                }
             }
 
             let stale_ids: Vec<i64> = contribution::Entity::find()
@@ -2535,6 +2558,33 @@ impl MusicDb {
                     .exec(&txn)
                     .await?;
             }
+        }
+
+        // A provider cover/remix/arrangement relation rests on a child edge
+        // from a derived pair to its original (`pipeline::flush` step 10b).
+        // Drop the ones whose last such edge between the two entries just
+        // went with a re-fetch.
+        lost_children.sort_unstable();
+        lost_children.dedup();
+        let mut stale_relations = 0u64;
+        for chunk in lost_children.chunks(ID_QUERY_CHUNK) {
+            let ids = chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            stale_relations += txn
+                .execute_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    format!(
+                        "DELETE FROM entry_relation \
+                         WHERE origin = ? AND (entry_a IN ({ids}) OR entry_b IN ({ids})) \
+                           AND {UNSUPPORTED_PROVIDER_RELATIONS}"
+                    ),
+                    [PROVIDER_ORIGIN.into()],
+                ))
+                .await?
+                .rows_affected();
         }
 
         let mut stale_aliases = 0usize;
@@ -2603,6 +2653,11 @@ impl MusicDb {
                  {stale_contributions} stale contribution(s) and {stale_aliases} stale \
                  alias(es) under {} re-fetched pair(s)",
                 replaced.parents.len().max(replaced.aliases.len())
+            );
+        }
+        if stale_relations > 0 {
+            tracing::info!(
+                "run {run_id}: removed {stale_relations} provider relation(s) no longer listed"
             );
         }
         if gone > 0 {
@@ -4732,6 +4787,16 @@ const CONTRIBUTION_DEDUP_MIGRATION: &str = "
         GROUP BY source, identifier, artist_source, artist_identifier, role, main_artist, extra
     );
     PRAGMA user_version = 2;";
+
+/// Matches an `entry_relation` row with no `entry_child` edge between its
+/// two entries, in either direction: for a provider cover/remix/arrangement
+/// relation, nothing lists it any more.
+const UNSUPPORTED_PROVIDER_RELATIONS: &str = "NOT EXISTS (
+    SELECT 1 FROM entry_child c
+    JOIN entry_source p ON p.source = c.parent_source AND p.identifier = c.parent_identifier
+    JOIN entry_source ch ON ch.source = c.child_source AND ch.identifier = c.child_identifier
+    WHERE (p.entry_id = entry_relation.entry_a AND ch.entry_id = entry_relation.entry_b)
+       OR (p.entry_id = entry_relation.entry_b AND ch.entry_id = entry_relation.entry_a))";
 
 /// Same problem as `CONTRIBUTION_DEDUP_MIGRATION`, for aliases (~6× on a real
 /// DB); `insert_aliases_for_pair` now skips existing rows. The FTS index is

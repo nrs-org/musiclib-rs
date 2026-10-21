@@ -1823,4 +1823,51 @@ mod tests {
         assert_eq!(gone_at(&db).await?, None);
         Ok(())
     }
+
+    async fn provider_relations(db: &MusicDb) -> anyhow::Result<Vec<String>> {
+        let mut out: Vec<String> = db
+            .all_relations()
+            .await?
+            .into_iter()
+            .filter(|r| r.origin == PROVIDER_ORIGIN)
+            .map(|r| r.kind)
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    /// A cover relation goes at commit once a re-fetch of the cover no
+    /// longer links it to the original; a rolled-back run keeps it, and the
+    /// remix's relation to the same original is untouched.
+    #[tokio::test]
+    async fn refetch_drops_provider_relation_without_edge() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let (original, cover, remix) = (p("original"), p("cover"), p("remix"));
+        let derived = |from: &Pair, kind: &str| {
+            let mut e = edge(from, &original, None);
+            e.original_relation_kind = Some(kind.to_string());
+            e
+        };
+        let tracks = |pairs: &[&Pair]| {
+            pairs
+                .iter()
+                .map(|&p| (p.clone(), track_metadata()))
+                .collect::<Vec<_>>()
+        };
+        run(
+            &db,
+            tracks(&[&original, &cover, &remix]),
+            vec![derived(&cover, "cover"), derived(&remix, "remix")],
+            true,
+        )
+        .await?;
+        assert_eq!(provider_relations(&db).await?, vec!["cover", "remix"]);
+
+        run(&db, tracks(&[&cover]), vec![], false).await?;
+        assert_eq!(provider_relations(&db).await?, vec!["cover", "remix"]);
+
+        run(&db, tracks(&[&cover]), vec![], true).await?;
+        assert_eq!(provider_relations(&db).await?, vec!["remix"]);
+        Ok(())
+    }
 }
