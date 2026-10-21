@@ -19,6 +19,10 @@ cargo run --bin update_fixtures -- fixtures.yaml <filter>   # filter by path/url
 RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url>... [--url-file urls.txt] \
   --fetch-options config/fetch_options/fetch_discography.yaml
 
+# Record every identity link on an existing DB, then let re-imports split
+# entries a removed link disconnects (docs/plan-identity-retraction.md)
+cargo run --release --bin import -- --backfill-links --skip-softmatch
+
 # Re-apply dedup barrier to an existing DB (no new URLs ingested)
 RUST_LOG=musiclib_rs=info,dedup=info cargo run --bin dedup
 

@@ -1417,6 +1417,9 @@
 
   .stamp.is-via { border-style: dashed; }
 
+  /* The provider reported this source deleted; its data is kept. */
+  .stamp.is-gone { text-decoration: line-through; opacity: 0.6; }
+
   /* A playable source's privacy, beside its stamp (`privacyChip`). */
   .stamp-group { display: inline-flex; }
 
@@ -9845,8 +9848,9 @@
       name ? el("span", { text: name }) : null,
       tag ? el("span", { className: "stamp-tag", text: tag }) : null,
     ];
-    const title = s.identifier + (via != null ? `\nvia ${catalogNo(via)}` : "");
-    const className = "stamp" + (via != null ? " is-via" : "");
+    const gone = s.gone_at != null ? `\ndeleted upstream (seen ${new Date(s.gone_at * 1000).toLocaleDateString()})` : "";
+    const title = s.identifier + (via != null ? `\nvia ${catalogNo(via)}` : "") + gone;
+    const className = "stamp" + (via != null ? " is-via" : "") + (gone ? " is-gone" : "");
     if (href) {
       return el("a", { className, href, target: "_blank", rel: "noopener noreferrer", title }, children);
     }

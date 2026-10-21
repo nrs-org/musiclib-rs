@@ -21,6 +21,19 @@ use crate::player::Playability;
 pub struct SourceRef {
     pub source: String,
     pub identifier: String,
+    /// When the provider last reported this pair deleted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gone_at: Option<i64>,
+}
+
+impl From<&musiclib_rs::musicdb::SourceRow> for SourceRef {
+    fn from(s: &musiclib_rs::musicdb::SourceRow) -> Self {
+        Self {
+            source: s.source.clone(),
+            identifier: s.identifier.clone(),
+            gone_at: s.gone_at,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -371,13 +384,7 @@ pub async fn entry_titles_with(
                 .collect();
             let title = chosen_name(&members, &display_names)
                 .or_else(|| pick_title(&sources, &aliases_by_pair));
-            let refs = sources
-                .iter()
-                .map(|s| SourceRef {
-                    source: s.source.clone(),
-                    identifier: s.identifier.clone(),
-                })
-                .collect();
+            let refs = sources.iter().map(|&s| SourceRef::from(s)).collect();
             (id, (title, refs))
         })
         .collect())
@@ -531,13 +538,7 @@ pub async fn entry_summaries_with(
                 title,
                 renamed,
                 release_date,
-                sources: member_sources
-                    .iter()
-                    .map(|s| SourceRef {
-                        source: s.source.clone(),
-                        identifier: s.identifier.clone(),
-                    })
-                    .collect(),
+                sources: member_sources.iter().map(|&s| SourceRef::from(s)).collect(),
                 soft_linked_ids: members.iter().copied().filter(|&m| m != id).collect(),
                 members: members
                     .iter()
@@ -546,13 +547,7 @@ pub async fn entry_summaries_with(
                         MemberSources {
                             entry_id: m,
                             title: pick_title(&own_sources, &aliases_by_pair),
-                            sources: own_sources
-                                .iter()
-                                .map(|s| SourceRef {
-                                    source: s.source.clone(),
-                                    identifier: s.identifier.clone(),
-                                })
-                                .collect(),
+                            sources: own_sources.iter().map(|&s| SourceRef::from(s)).collect(),
                         }
                     })
                     .collect(),

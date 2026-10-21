@@ -94,6 +94,11 @@ mod entry_source {
         /// (a tracklist entry, a credit, a cross-link), whose own record was
         /// never fetched.
         pub fetched_at: Option<i64>,
+        /// When a fetch of this pair last found it deleted upstream (unix
+        /// seconds), e.g. a 404 for a merged MusicBrainz ID or a removed
+        /// video. Its stored data is kept; the next successful fetch clears
+        /// this.
+        pub gone_at: Option<i64>,
         // Track-specific
         pub duration_ms: Option<i64>,
         /// JSON array of all known durations in milliseconds, sorted and deduped.
@@ -245,6 +250,53 @@ mod entry_child {
         pub track_no: Option<i32>,
         /// See `entry_source::Model::run_id`.
         pub run_id: Option<i64>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// One stated identity link: the fetch (`via = "fetch"`) or listing
+/// (`via = "listing"`) of the asserted pair said pairs `a` and `b` are one
+/// entity. `a` sorts before `b`. See docs/plan-identity-retraction.md.
+mod pair_link {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "pair_link")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source_a: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier_a: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source_b: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier_b: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub asserted_source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub asserted_identifier: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub via: String,
+        /// See `entry_source::Model::run_id`.
+        pub run_id: Option<i64>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Named DB-wide switches (`LINKS_COMPLETE`).
+mod setting {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "setting")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub key: String,
+        pub value: String,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -1268,6 +1320,7 @@ fn source_row_from_model(m: entry_source::Model) -> SourceRow {
         release_date: m.release_date,
         songs: songs_from_track_extra(m.track_extra.as_deref()),
         fetched_at: m.fetched_at,
+        gone_at: m.gone_at,
     }
 }
 
@@ -1933,6 +1986,10 @@ impl MusicDb {
              CREATE INDEX IF NOT EXISTS idx_entry_alias_run_id ON entry_alias(run_id);
              CREATE INDEX IF NOT EXISTS idx_entry_child_run_id ON entry_child(run_id);
              CREATE INDEX IF NOT EXISTS idx_contribution_run_id ON contribution(run_id);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_a ON pair_link(source_a, identifier_a);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_b ON pair_link(source_b, identifier_b);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_asserted ON pair_link(asserted_source, asserted_identifier, via);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_run_id ON pair_link(run_id);
              CREATE INDEX IF NOT EXISTS idx_import_run_status ON import_run(status);
              CREATE INDEX IF NOT EXISTS idx_entry_relation_entry_b ON entry_relation(entry_b);",
         )
@@ -1943,9 +2000,8 @@ impl MusicDb {
         // substrings anywhere in a name (like the old `LIKE '%q%'` scan) and
         // works uniformly on CJK aliases that have no word boundaries. It's
         // an external-content table over `entry_alias` (no data duplicated);
-        // the trigger keeps it in sync with the only mutation path aliases
-        // ever go through (`insert_aliases_for_pair` — entry_alias rows are
-        // never updated or deleted).
+        // the triggers keep it in sync as rows are inserted and deleted
+        // (entry_alias rows are never updated).
         sea_orm::ConnectionTrait::execute_unprepared(
             &db,
             "CREATE VIRTUAL TABLE IF NOT EXISTS entry_alias_fts USING fts5(
@@ -1953,6 +2009,10 @@ impl MusicDb {
              );
              CREATE TRIGGER IF NOT EXISTS entry_alias_ai AFTER INSERT ON entry_alias BEGIN
                  INSERT INTO entry_alias_fts(rowid, name) VALUES (new.id, new.name);
+             END;
+             CREATE TRIGGER IF NOT EXISTS entry_alias_ad AFTER DELETE ON entry_alias BEGIN
+                 INSERT INTO entry_alias_fts(entry_alias_fts, rowid, name)
+                 VALUES ('delete', old.id, old.name);
              END;",
         )
         .await?;
@@ -2004,6 +2064,41 @@ impl MusicDb {
             sea_orm::ConnectionTrait::execute_unprepared(
                 &db,
                 "DROP TABLE IF EXISTS dedup_suggestion; PRAGMA user_version = 6;",
+            )
+            .await?;
+        }
+        if user_version < 7 {
+            // Aliases deleted before `entry_alias_ad` existed (rolled-back
+            // runs) left stale rows in the index.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "INSERT INTO entry_alias_fts(entry_alias_fts) VALUES('rebuild'); \
+                 PRAGMA user_version = 7;",
+            )
+            .await?;
+        }
+        if user_version < 8 {
+            // Provider relations left behind by re-fetches that replaced the
+            // edges they rested on, before commits removed them too.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                &format!(
+                    "DELETE FROM entry_relation WHERE origin = '{PROVIDER_ORIGIN}' \
+                     AND {UNSUPPORTED_PROVIDER_RELATIONS}; PRAGMA user_version = 8;"
+                ),
+            )
+            .await?;
+        }
+        if user_version < 9 {
+            // `pair_link` starts empty: complete for a DB with no pairs yet,
+            // not for one whose links were never recorded.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                &format!(
+                    "INSERT OR IGNORE INTO setting (key, value) VALUES ('{LINKS_COMPLETE}', \
+                     CASE WHEN EXISTS (SELECT 1 FROM entry_source) THEN '0' ELSE '1' END); \
+                     PRAGMA user_version = 9;"
+                ),
             )
             .await?;
         }
@@ -2375,6 +2470,128 @@ impl MusicDb {
         Ok(())
     }
 
+    /// Store identity links, skipping ones already stored. `run_id` tags
+    /// new rows, like `upsert_pair`.
+    pub async fn insert_links(&self, links: &[LinkRow], run_id: Option<i64>) -> Result<(), Error> {
+        const LINK_INSERT_CHUNK: usize = 100;
+        for chunk in links.chunks(LINK_INSERT_CHUNK) {
+            let models = chunk.iter().map(|row| {
+                let ((a, b), by) = (&row.link, &row.asserted_by);
+                pair_link::ActiveModel {
+                    source_a: Set(a.0.clone()),
+                    identifier_a: Set(a.1.clone()),
+                    source_b: Set(b.0.clone()),
+                    identifier_b: Set(b.1.clone()),
+                    asserted_source: Set(by.0.clone()),
+                    asserted_identifier: Set(by.1.clone()),
+                    via: Set(row.via.to_string()),
+                    run_id: Set(run_id),
+                }
+            });
+            pair_link::Entity::insert_many(models)
+                .on_conflict_do_nothing()
+                .exec(&self.db)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The stored links of `replaced`'s asserters that it no longer states:
+    /// what `commit_import_run` will delete.
+    pub async fn stale_links(&self, replaced: &Replacements) -> Result<Vec<LinkRow>, Error> {
+        stale_links_on(&self.db, replaced).await
+    }
+
+    /// Delete these stored link rows.
+    pub async fn delete_links(&self, rows: &[LinkRow]) -> Result<(), Error> {
+        delete_links_on(&self.db, rows).await
+    }
+
+    /// Every stored link row with both ends among `pairs`.
+    pub async fn links_among(&self, pairs: &[(String, String)]) -> Result<Vec<LinkRow>, Error> {
+        let wanted: HashSet<&(String, String)> = pairs.iter().collect();
+        let rows = chunked_pair_query(pairs, |chunk| {
+            pair_link::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    pair_link::Column::SourceA,
+                    pair_link::Column::IdentifierA,
+                ))
+                .all(&self.db)
+        })
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let b = (r.source_b, r.identifier_b);
+                wanted.contains(&b).then(|| LinkRow {
+                    link: ((r.source_a, r.identifier_a), b),
+                    asserted_by: (r.asserted_source, r.asserted_identifier),
+                    via: via_str(&r.via),
+                })
+            })
+            .collect())
+    }
+
+    /// Every fetched pair not found deleted upstream, or only those last
+    /// fetched before `before` (unix seconds): what `import
+    /// --backfill-links` re-imports, and what it failed to.
+    pub async fn live_fetched_pairs(
+        &self,
+        before: Option<i64>,
+    ) -> Result<Vec<(String, String)>, Error> {
+        let mut query = entry_source::Entity::find()
+            .filter(entry_source::Column::FetchedAt.is_not_null())
+            .filter(entry_source::Column::GoneAt.is_null());
+        if let Some(before) = before {
+            query = query.filter(entry_source::Column::FetchedAt.lt(before));
+        }
+        Ok(query
+            .order_by_asc(entry_source::Column::Source)
+            .order_by_asc(entry_source::Column::Identifier)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| (m.source, m.identifier))
+            .collect())
+    }
+
+    /// A `setting` value, if set.
+    pub async fn setting(&self, key: &str) -> Result<Option<String>, Error> {
+        Ok(setting::Entity::find_by_id(key.to_string())
+            .one(&self.db)
+            .await?
+            .map(|m| m.value))
+    }
+
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<(), Error> {
+        setting::Entity::insert(setting::ActiveModel {
+            key: Set(key.to_string()),
+            value: Set(value.to_string()),
+        })
+        .on_conflict(
+            sea_query::OnConflict::column(setting::Column::Key)
+                .update_column(setting::Column::Value)
+                .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// Give `to` the entry type `from` has.
+    pub async fn copy_entry_type(&self, from: i64, to: i64) -> Result<(), Error> {
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "UPDATE entry SET entry_type = (SELECT entry_type FROM entry WHERE id = ?) \
+                 WHERE id = ?",
+                [from.into(), to.into()],
+            ))
+            .await?;
+        Ok(())
+    }
+
     /// Re-point a single existing pair to a different entry. Used by the
     /// importer's split path to move a stub pair (no fresh metadata) off a
     /// contaminated entry; `upsert_pair` already re-points pairs that do carry
@@ -2454,20 +2671,28 @@ impl MusicDb {
     /// (`run_id` doubles as provenance of which run brought in which data)
     /// but the run is no longer eligible for `recover_pending_import_runs`.
     ///
-    /// `replaced` lists parents this run fetched completely, with the edges
-    /// each one has now. Any older `entry_child`/`contribution` row under such
-    /// a parent that isn't in its current set (a track dropped from an album,
-    /// a removed credit) is deleted in the same transaction as the status
-    /// update. Doing it here rather than at flush time keeps rollback
+    /// `replaced.parents` lists parents this run fetched completely, with the
+    /// edges each one has now. Any older `entry_child`/`contribution` row
+    /// under such a parent that isn't in its current set (a track dropped
+    /// from an album, a removed credit) is deleted in the same transaction as
+    /// the status update. `replaced.aliases` does the same for the aliases of
+    /// every fetched pair (a renamed or deleted alias), and provider
+    /// cover/remix/arrangement relations go once no child edge between
+    /// their two entries is left (see `UNSUPPORTED_PROVIDER_RELATIONS`).
+    /// Pairs in
+    /// `replaced.gone` get `gone_at` set unless the run also fetched them.
+    /// Identity links in `pair_link` are replaced per asserting pair (see
+    /// `Replacements::links`). Doing it here rather than at flush time keeps rollback
     /// correct: a run that fails or crashes never got to delete anything.
     pub async fn commit_import_run(
         &self,
         run_id: i64,
-        replaced: &HashMap<(String, String), ParentEdges>,
+        replaced: &Replacements,
     ) -> Result<(), Error> {
         let txn = self.db.begin().await?;
         let (mut stale_children, mut stale_contributions) = (0usize, 0usize);
-        for ((source, identifier), current) in replaced {
+        let mut lost_children: Vec<i64> = Vec::new();
+        for ((source, identifier), current) in &replaced.parents {
             let children = entry_child::Entity::find()
                 .filter(entry_child::Column::ParentSource.eq(source.as_str()))
                 .filter(entry_child::Column::ParentIdentifier.eq(identifier.as_str()))
@@ -2488,6 +2713,13 @@ impl MusicDb {
                     .exec(&txn)
                     .await?;
                 stale_children += 1;
+                if let Some(parent) =
+                    entry_source::Entity::find_by_id((source.clone(), identifier.clone()))
+                        .one(&txn)
+                        .await?
+                {
+                    lost_children.push(parent.entry_id);
+                }
             }
 
             let stale_ids: Vec<i64> = contribution::Entity::find()
@@ -2515,6 +2747,88 @@ impl MusicDb {
                     .await?;
             }
         }
+
+        // A provider cover/remix/arrangement relation rests on a child edge
+        // from a derived pair to its original (`pipeline::flush` step 10b).
+        // Drop the ones whose last such edge between the two entries just
+        // went with a re-fetch.
+        lost_children.sort_unstable();
+        lost_children.dedup();
+        let mut stale_relations = 0u64;
+        for chunk in lost_children.chunks(ID_QUERY_CHUNK) {
+            let ids = chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            stale_relations += txn
+                .execute_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    format!(
+                        "DELETE FROM entry_relation \
+                         WHERE origin = ? AND (entry_a IN ({ids}) OR entry_b IN ({ids})) \
+                           AND {UNSUPPORTED_PROVIDER_RELATIONS}"
+                    ),
+                    [PROVIDER_ORIGIN.into()],
+                ))
+                .await?
+                .rows_affected();
+        }
+
+        let stale_links = stale_links_on(&txn, replaced).await?;
+        delete_links_on(&txn, &stale_links).await?;
+
+        let mut stale_aliases = 0usize;
+        for ((source, identifier), current) in &replaced.aliases {
+            // A fetch that reported no aliases says nothing about them.
+            if current.is_empty() {
+                continue;
+            }
+            let stale_ids: Vec<i64> = entry_alias::Entity::find()
+                .filter(entry_alias::Column::Source.eq(source.as_str()))
+                .filter(entry_alias::Column::Identifier.eq(identifier.as_str()))
+                .all(&txn)
+                .await?
+                .into_iter()
+                .filter(|a| {
+                    !current.contains(&alias_key(
+                        &a.name,
+                        a.locale.as_deref(),
+                        a.extra.as_deref().unwrap_or("null"),
+                        a.primary,
+                    ))
+                })
+                .map(|a| a.id)
+                .collect();
+            if !stale_ids.is_empty() {
+                stale_aliases += stale_ids.len();
+                entry_alias::Entity::delete_many()
+                    .filter(entry_alias::Column::Id.is_in(stale_ids))
+                    .exec(&txn)
+                    .await?;
+            }
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let mut gone = 0u64;
+        for (source, identifier) in &replaced.gone {
+            if replaced
+                .aliases
+                .contains_key(&(source.clone(), identifier.clone()))
+            {
+                continue;
+            }
+            gone += entry_source::Entity::update_many()
+                .col_expr(entry_source::Column::GoneAt, sea_query::Expr::value(now))
+                .filter(entry_source::Column::Source.eq(source.as_str()))
+                .filter(entry_source::Column::Identifier.eq(identifier.as_str()))
+                .filter(entry_source::Column::GoneAt.is_null())
+                .exec(&txn)
+                .await?
+                .rows_affected;
+        }
         import_run::Entity::update_many()
             .col_expr(
                 import_run::Column::Status,
@@ -2524,12 +2838,27 @@ impl MusicDb {
             .exec(&txn)
             .await?;
         txn.commit().await?;
-        if stale_children + stale_contributions > 0 {
+        if stale_children + stale_contributions + stale_aliases > 0 {
             tracing::info!(
-                "run {run_id}: removed {stale_children} stale child edge(s) and \
-                 {stale_contributions} stale contribution(s) under {} re-fetched parent(s)",
-                replaced.len()
+                "run {run_id}: removed {stale_children} stale child edge(s), \
+                 {stale_contributions} stale contribution(s) and {stale_aliases} stale \
+                 alias(es) under {} re-fetched pair(s)",
+                replaced.parents.len().max(replaced.aliases.len())
             );
+        }
+        if !stale_links.is_empty() {
+            tracing::info!(
+                "run {run_id}: removed {} identity link(s) no longer stated",
+                stale_links.len()
+            );
+        }
+        if stale_relations > 0 {
+            tracing::info!(
+                "run {run_id}: removed {stale_relations} provider relation(s) no longer listed"
+            );
+        }
+        if gone > 0 {
+            tracing::info!("run {run_id}: marked {gone} pair(s) deleted upstream");
         }
         Ok(())
     }
@@ -2599,6 +2928,10 @@ impl MusicDb {
             .await?;
         pair_image::Entity::delete_many()
             .filter(pair_image::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        pair_link::Entity::delete_many()
+            .filter(pair_link::Column::RunId.eq(run_id))
             .exec(&self.db)
             .await?;
         self.delete_orphan_entries().await?;
@@ -2671,6 +3004,7 @@ impl MusicDb {
             entry_id: Set(entry_id),
             release_date: Set(release_date.map(|s| s.to_string())),
             fetched_at: Set(Some(now)),
+            gone_at: Set(None),
             duration_ms: Set(duration_ms),
             duration_ms_all: Set(duration_ms_all),
             track_extra: Set(track_extra),
@@ -2689,6 +3023,7 @@ impl MusicDb {
                 entry_source::Column::EntryId,
                 entry_source::Column::ReleaseDate,
                 entry_source::Column::FetchedAt,
+                entry_source::Column::GoneAt,
                 entry_source::Column::DurationMs,
                 entry_source::Column::DurationMsAll,
                 entry_source::Column::TrackExtra,
@@ -2952,15 +3287,8 @@ impl MusicDb {
         // Skip aliases the pair already has (a re-import, or a stub's listing
         // name seen once per reference), and repeats within `aliases`. A
         // lookup rather than a UNIQUE index: see `CONTRIBUTION_DEDUP_MIGRATION`.
-        let key = |name: &str, locale: Option<&str>, extra: &str, primary: bool| {
-            (
-                name.to_string(),
-                locale.map(str::to_string),
-                extra.to_string(),
-                primary,
-            )
-        };
-        let mut seen: HashSet<(String, Option<String>, String, bool)> = entry_alias::Entity::find()
+        let key = alias_key;
+        let mut seen: HashSet<AliasKey> = entry_alias::Entity::find()
             .filter(entry_alias::Column::Source.eq(source))
             .filter(entry_alias::Column::Identifier.eq(identifier))
             .all(&self.db)
@@ -3739,6 +4067,7 @@ impl MusicDb {
                 source: s.source,
                 identifier: s.identifier,
                 duration_ms: s.duration_ms,
+                gone_at: s.gone_at,
             })
             .collect())
     }
@@ -4478,6 +4807,9 @@ pub struct SourceRow {
     pub songs: Vec<Vec<String>>,
     /// NULL for a stub: a pair only ever seen in some listing, never fetched.
     pub fetched_at: Option<i64>,
+    /// Set when the provider last reported this pair deleted (see
+    /// `entry_source::Model::gone_at`).
+    pub gone_at: Option<i64>,
 }
 
 /// One pair of an entry, as `MusicDb::entry_pair_facts` returns it.
@@ -4486,6 +4818,8 @@ pub struct PairFacts {
     pub identifier: String,
     /// The pair's first known duration (`entry_source.duration_ms`).
     pub duration_ms: Option<i64>,
+    /// See `SourceRow::gone_at`.
+    pub gone_at: Option<i64>,
     /// Ascending `id`, i.e. insertion order.
     pub aliases: Vec<PairAlias>,
 }
@@ -4520,6 +4854,144 @@ pub struct ContribRow {
 /// A contribution's identity under its parent pair: (artist pair, role,
 /// main_artist, extra as stored).
 pub type ContributionKey = ((String, String), String, bool, String);
+
+/// `setting` key: "1" once every stored identity link is recorded in
+/// `pair_link` (set for a DB created empty, and by `import
+/// --backfill-links`). Only then does a final flush group entries by their
+/// links and split one whose pairs a re-fetch disconnected
+/// (docs/plan-identity-retraction.md): with links missing, entries that are
+/// fine would look disconnected and split.
+pub const LINKS_COMPLETE: &str = "links_complete";
+
+/// `pair_link.via` of a link from the asserting pair's own fetch result.
+pub const LINK_VIA_FETCH: &str = "fetch";
+/// `pair_link.via` of a link between one child's sibling pairs in the
+/// asserting pair's listing.
+pub const LINK_VIA_LISTING: &str = "listing";
+
+/// The two pairs of a link, smaller first.
+pub type LinkKey = ((String, String), (String, String));
+
+pub fn link_key(a: &(String, String), b: &(String, String)) -> LinkKey {
+    if a <= b {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    }
+}
+
+/// A stored link and what stated it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LinkRow {
+    pub link: LinkKey,
+    pub asserted_by: (String, String),
+    pub via: &'static str,
+}
+
+/// An alias's identity under its pair: (name, locale, extra as stored,
+/// primary).
+pub type AliasKey = (String, Option<String>, String, bool);
+
+pub fn alias_key(name: &str, locale: Option<&str>, extra: &str, primary: bool) -> AliasKey {
+    (
+        name.to_string(),
+        locale.map(str::to_string),
+        extra.to_string(),
+        primary,
+    )
+}
+
+/// What a committed run replaces under the pairs it fetched. See
+/// `MusicDb::commit_import_run`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Replacements {
+    /// Non-artist parents fetched completely, with their current edges.
+    pub parents: HashMap<(String, String), ParentEdges>,
+    /// Every fetched pair, with the aliases its fetch reported.
+    pub aliases: HashMap<(String, String), HashSet<AliasKey>>,
+    /// Pairs whose fetch found them deleted upstream.
+    pub gone: HashSet<(String, String)>,
+    /// The links each pair's fetch or listing stated in this run, by
+    /// (asserting pair, via). Every fetched pair's `fetch` links and every
+    /// parent's `listing` links replace its older ones, so an asserter
+    /// missing here stated none.
+    pub links: HashMap<((String, String), &'static str), HashSet<LinkKey>>,
+}
+
+/// An asserting pair and `pair_link.via`.
+type LinkAsserter<'a> = (&'a (String, String), &'static str);
+
+impl Replacements {
+    /// Every (asserting pair, via) whose stored links this run replaces,
+    /// with the links it states now.
+    fn link_asserters(
+        &self,
+    ) -> impl Iterator<Item = (LinkAsserter<'_>, Option<&HashSet<LinkKey>>)> {
+        let fetch = self.aliases.keys().map(|p| (p, LINK_VIA_FETCH));
+        let listing = self.parents.keys().map(|p| (p, LINK_VIA_LISTING));
+        fetch
+            .chain(listing)
+            .map(|(p, via)| ((p, via), self.links.get(&(p.clone(), via))))
+    }
+}
+
+async fn delete_links_on<C: ConnectionTrait>(db: &C, rows: &[LinkRow]) -> Result<(), Error> {
+    for row in rows {
+        let ((a, b), by) = (&row.link, &row.asserted_by);
+        pair_link::Entity::delete_many()
+            .filter(pair_link::Column::SourceA.eq(a.0.as_str()))
+            .filter(pair_link::Column::IdentifierA.eq(a.1.as_str()))
+            .filter(pair_link::Column::SourceB.eq(b.0.as_str()))
+            .filter(pair_link::Column::IdentifierB.eq(b.1.as_str()))
+            .filter(pair_link::Column::AssertedSource.eq(by.0.as_str()))
+            .filter(pair_link::Column::AssertedIdentifier.eq(by.1.as_str()))
+            .filter(pair_link::Column::Via.eq(row.via))
+            .exec(db)
+            .await?;
+    }
+    Ok(())
+}
+
+/// A stored `pair_link.via` as its constant; anything unknown reads as
+/// `listing`, the kind fewer re-fetches replace.
+fn via_str(via: &str) -> &'static str {
+    if via == LINK_VIA_FETCH {
+        LINK_VIA_FETCH
+    } else {
+        LINK_VIA_LISTING
+    }
+}
+
+/// The stored links of `replaced`'s asserters that this run no longer
+/// states.
+async fn stale_links_on<C: ConnectionTrait>(
+    db: &C,
+    replaced: &Replacements,
+) -> Result<Vec<LinkRow>, Error> {
+    let mut out = Vec::new();
+    for ((asserted, via), current) in replaced.link_asserters() {
+        let rows = pair_link::Entity::find()
+            .filter(pair_link::Column::AssertedSource.eq(asserted.0.as_str()))
+            .filter(pair_link::Column::AssertedIdentifier.eq(asserted.1.as_str()))
+            .filter(pair_link::Column::Via.eq(via))
+            .all(db)
+            .await?;
+        for row in rows {
+            let link = (
+                (row.source_a, row.identifier_a),
+                (row.source_b, row.identifier_b),
+            );
+            if current.is_none_or(|c| !c.contains(&link)) {
+                out.push(LinkRow {
+                    link,
+                    asserted_by: asserted.clone(),
+                    via,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// The edges a fully fetched non-artist parent has as of the current run.
 /// See `MusicDb::commit_import_run`.
@@ -4629,6 +5101,16 @@ const CONTRIBUTION_DEDUP_MIGRATION: &str = "
         GROUP BY source, identifier, artist_source, artist_identifier, role, main_artist, extra
     );
     PRAGMA user_version = 2;";
+
+/// Matches an `entry_relation` row with no `entry_child` edge between its
+/// two entries, in either direction: for a provider cover/remix/arrangement
+/// relation, nothing lists it any more.
+const UNSUPPORTED_PROVIDER_RELATIONS: &str = "NOT EXISTS (
+    SELECT 1 FROM entry_child c
+    JOIN entry_source p ON p.source = c.parent_source AND p.identifier = c.parent_identifier
+    JOIN entry_source ch ON ch.source = c.child_source AND ch.identifier = c.child_identifier
+    WHERE (p.entry_id = entry_relation.entry_a AND ch.entry_id = entry_relation.entry_b)
+       OR (p.entry_id = entry_relation.entry_b AND ch.entry_id = entry_relation.entry_a))";
 
 /// Same problem as `CONTRIBUTION_DEDUP_MIGRATION`, for aliases (~6× on a real
 /// DB); `insert_aliases_for_pair` now skips existing rows. The FTS index is
@@ -6129,6 +6611,7 @@ mod tests {
                 entry_id: Set(1),
                 release_date: Set(None),
                 fetched_at: Set(Some(0)),
+                gone_at: Set(None),
                 duration_ms: Set(None),
                 duration_ms_all: Set(None),
                 track_extra: Set(None),
@@ -6361,6 +6844,38 @@ mod tests {
     /// Opening a pre-v4 database rebuilds `entry_source` with a nullable
     /// `fetched_at` (keeping rows and indexes), and marks rows that were never
     /// fetched (no metadata, aliases or outgoing edges) as stubs.
+    /// A DB created empty records every link from the start, so its links
+    /// are complete; one that already had pairs when links started being
+    /// recorded is not, until a backfill says so.
+    #[tokio::test]
+    async fn links_complete_only_for_a_db_created_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("old.db").display());
+        {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            assert_eq!(
+                mdb.setting(LINKS_COMPLETE).await.unwrap().as_deref(),
+                Some("1")
+            );
+            // Pretend it predates `pair_link`: pairs, no setting, version 8.
+            let id = mdb.insert_entry(Some(EntryType::Track)).await.unwrap();
+            mdb.upsert_stub_pair("isrc", "JPX000000001", id, None, None)
+                .await
+                .unwrap();
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &mdb.db,
+                "DELETE FROM setting; PRAGMA user_version = 8;",
+            )
+            .await
+            .unwrap();
+        }
+        let mdb = MusicDb::new(&db_url).await.unwrap();
+        assert_eq!(
+            mdb.setting(LINKS_COMPLETE).await.unwrap().as_deref(),
+            Some("0")
+        );
+    }
+
     #[tokio::test]
     async fn stub_migration_nulls_fetched_at_for_unfetched_rows() {
         let dir = tempfile::tempdir().unwrap();

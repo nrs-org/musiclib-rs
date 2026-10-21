@@ -396,6 +396,7 @@ fn resolve_extra(pairs: &[PairFacts]) -> serde_json::Value {
                 "identifier": p.identifier,
                 "title": pair_title(p),
                 "duration_ms": p.duration_ms,
+                "gone_at": p.gone_at,
             })
         })
         .collect();
