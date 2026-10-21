@@ -41,6 +41,8 @@ mod playback;
 #[cfg(feature = "player")]
 mod player;
 #[cfg(feature = "player")]
+mod playlists;
+#[cfg(feature = "player")]
 mod plays;
 #[cfg(feature = "player")]
 mod preferences;
@@ -172,6 +174,10 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
     #[cfg(feature = "player")]
     if spotify_auth::handles(&path) {
         return Ok(spotify_auth::route(&state, &method, &path, body).await);
+    }
+    #[cfg(feature = "player")]
+    if playlists::handles(&path) {
+        return Ok(playlists::route(&state, &method, &path, body).await);
     }
     #[cfg(feature = "player")]
     if plays::handles(&path) {

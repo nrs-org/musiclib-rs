@@ -78,6 +78,16 @@ enum Repeat {
     One,
 }
 
+/// What the queue was played from (a playlist), for the dock to name and
+/// link back to. Set by `set_queue`; anything else that replaces the whole
+/// queue clears it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct QueueContext {
+    pub kind: String,
+    pub id: i64,
+    pub name: String,
+}
+
 /// Play order, shuffle and repeat — a port of what used to be the
 /// frontend's `Queue` module, same semantics.
 ///
@@ -97,6 +107,8 @@ struct Queue {
     queue_end: usize,
     shuffled: bool,
     repeat: Repeat,
+    #[serde(default)]
+    context: Option<QueueContext>,
 }
 
 impl Queue {
@@ -479,6 +491,7 @@ impl Session {
             "has_prev": self.queue.has_prev(),
             "has_next": self.queue.has_next(),
             "queue": self.queue.rows(),
+            "context": self.queue.context,
             "wants_recommend": self.needs_recommend(),
             "volume": self.volume,
         })
@@ -928,6 +941,12 @@ enum Command {
         items: Vec<QueueItem>,
         #[serde(default)]
         start_index: usize,
+        /// Turns shuffle on or off first (a playlist's Shuffle button);
+        /// `None` keeps the session's setting.
+        #[serde(default)]
+        shuffle: Option<bool>,
+        #[serde(default)]
+        context: Option<QueueContext>,
     },
     Queue {
         item: QueueItem,
@@ -1071,11 +1090,20 @@ fn apply(s: &mut Session, device: &str, command: Command) -> Result<(), CommandE
                 return Err((StatusCode::BAD_REQUEST, "can't remove that row"));
             }
         }
-        Command::SetQueue { items, start_index } => {
+        Command::SetQueue {
+            items,
+            start_index,
+            shuffle,
+            context,
+        } => {
             if items.is_empty() {
                 return Err((StatusCode::BAD_REQUEST, "empty queue"));
             }
+            if let Some(shuffle) = shuffle {
+                s.queue.shuffled = shuffle;
+            }
             s.queue.set(items, start_index);
+            s.queue.context = context;
             s.claim_if_idle(device);
             s.start_track(false);
         }
@@ -1086,6 +1114,7 @@ fn apply(s: &mut Session, device: &str, command: Command) -> Result<(), CommandE
                 // Nothing to queue *behind*: a lone "Queue" click on an
                 // idle player just starts it.
                 s.queue.set(vec![item], 0);
+                s.queue.context = None;
                 s.claim_if_idle(device);
                 s.start_track(false);
             }
@@ -1096,6 +1125,7 @@ fn apply(s: &mut Session, device: &str, command: Command) -> Result<(), CommandE
             }
             s.queue.shuffled = false;
             s.queue.set(items, 0);
+            s.queue.context = None;
             s.claim_if_idle(device);
             s.start_track(false);
         }
@@ -1360,6 +1390,8 @@ mod tests {
             Command::SetQueue {
                 items: vec![item(1), item(2)],
                 start_index: 0,
+                shuffle: None,
+                context: None,
             },
         )
         .unwrap();
@@ -1369,6 +1401,44 @@ mod tests {
         apply(&mut s, "b", Command::Next).unwrap();
         assert_eq!(s.active_device.as_deref(), Some("a"));
         assert_eq!(s.track_seq, 2);
+    }
+
+    #[test]
+    fn a_playlist_names_the_queue_until_something_replaces_it() {
+        let mut s = session_with_device("a");
+        let context = QueueContext {
+            kind: "playlist".into(),
+            id: 7,
+            name: "Mix".into(),
+        };
+        apply(
+            &mut s,
+            "a",
+            Command::SetQueue {
+                items: vec![item(1), item(2), item(3)],
+                start_index: 2,
+                shuffle: Some(true),
+                context: Some(context.clone()),
+            },
+        )
+        .unwrap();
+        // Shuffled, starting from the picked item.
+        assert!(s.queue.shuffled);
+        assert_eq!(s.queue.current().map(|i| i.entry_id), Some(3));
+        assert_eq!(s.snapshot()["context"]["name"], "Mix");
+        // Queueing a track keeps it; a library shuffle replaces it.
+        apply(&mut s, "a", Command::Queue { item: item(4) }).unwrap();
+        assert_eq!(s.queue.context, Some(context));
+        apply(
+            &mut s,
+            "a",
+            Command::ShuffleLibrary {
+                items: vec![item(5)],
+            },
+        )
+        .unwrap();
+        assert_eq!(s.queue.context, None);
+        assert!(s.snapshot()["context"].is_null());
     }
 
     #[test]
@@ -1517,6 +1587,8 @@ mod tests {
             Command::SetQueue {
                 items: vec![item(1), item(2)],
                 start_index: 0,
+                shuffle: None,
+                context: None,
             },
         )
         .unwrap();
@@ -1572,6 +1644,8 @@ mod tests {
             Command::SetQueue {
                 items: vec![item(1)],
                 start_index: 0,
+                shuffle: None,
+                context: None,
             },
         )
         .unwrap();
@@ -1612,6 +1686,8 @@ mod tests {
             Command::SetQueue {
                 items: vec![item(1), item(2), item(3)],
                 start_index: 1,
+                shuffle: None,
+                context: None,
             },
         )
         .unwrap();
@@ -1631,6 +1707,8 @@ mod tests {
             Command::SetQueue {
                 items: vec![item(1)],
                 start_index: 0,
+                shuffle: None,
+                context: None,
             },
         )
         .unwrap();
