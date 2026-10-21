@@ -353,6 +353,8 @@ struct Device {
 struct Persisted {
     queue: Queue,
     #[serde(default)]
+    play_key: String,
+    #[serde(default)]
     source: Option<String>,
     #[serde(default)]
     position_ms: u64,
@@ -367,6 +369,8 @@ struct Persisted {
 #[derive(Default)]
 struct Session {
     queue: Queue,
+    /// Stable across reloads, transfers and restarts; renewed for every replay.
+    play_key: String,
     /// Bumped every time the current item (re)starts, including a
     /// repeat-one replay or a jump to the same row: the active device
     /// remounts when it changes, and stale reports are told apart by it.
@@ -441,6 +445,7 @@ impl Session {
     /// replay of the same one).
     fn start_track(&mut self, keep_source: bool) {
         self.track_seq += 1;
+        self.play_key = format!("{:032x}", fastrand::u128(..));
         if !keep_source {
             self.source = self.queue.current().and_then(|it| it.source.clone());
         }
@@ -480,6 +485,7 @@ impl Session {
             "artist": self.artist(),
             "artists": self.artists(),
             "track_seq": self.track_seq,
+            "play_key": self.play_key,
             "source": self.source,
             "mounted": self.mounted,
             "playing": self.playing,
@@ -532,6 +538,7 @@ impl Session {
     fn persisted(&self) -> Persisted {
         Persisted {
             queue: self.queue.clone(),
+            play_key: self.play_key.clone(),
             source: self.source.clone(),
             position_ms: self.position_now(),
             duration_ms: self.duration_ms,
@@ -563,6 +570,11 @@ impl PlaybackHub {
             .unwrap_or_default();
         let session = Session {
             queue: persisted.queue,
+            play_key: if persisted.play_key.is_empty() {
+                format!("{:032x}", fastrand::u128(..))
+            } else {
+                persisted.play_key
+            },
             source: persisted.source,
             position_ms: persisted.position_ms,
             position_at: Some(Instant::now()),
@@ -1372,6 +1384,37 @@ mod tests {
             },
         );
         s
+    }
+
+    #[test]
+    fn play_key_survives_transfer_and_restart_but_changes_on_replay() {
+        let mut s = session_with_device("a");
+        s.queue.set(vec![item(1)], 0);
+        s.start_track(false);
+        let key = s.play_key.clone();
+        s.devices.insert(
+            "b".into(),
+            Device {
+                name: "b".into(),
+                connections: 1,
+            },
+        );
+        apply(&mut s, "a", Command::Transfer { to: "b".into() }).unwrap();
+        assert_eq!(s.play_key, key);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playback.json");
+        std::fs::write(&path, serde_json::to_vec(&s.persisted()).unwrap()).unwrap();
+        let restored = PlaybackHub::load(path);
+        assert_eq!(restored.lock().play_key, key);
+        apply(
+            &mut restored.lock(),
+            "b",
+            Command::SelectSource {
+                identifier: "spotify:track".into(),
+            },
+        )
+        .unwrap();
+        assert_ne!(restored.lock().play_key, key);
     }
 
     #[test]

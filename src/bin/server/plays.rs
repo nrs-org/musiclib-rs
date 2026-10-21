@@ -74,10 +74,16 @@ fn db_error(e: DbError) -> HyperResponse {
 #[derive(Deserialize)]
 struct StartBody {
     entry_id: i64,
+    #[serde(default)]
+    session_key: Option<String>,
 }
 
 async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
-    let Ok(StartBody { entry_id }) = serde_json::from_slice(body) else {
+    let Ok(StartBody {
+        entry_id,
+        session_key,
+    }) = serde_json::from_slice(body)
+    else {
         return bad_request("expected {\"entry_id\": <number>}");
     };
     match state.db.entry_rows_by_ids(&[entry_id]).await {
@@ -86,6 +92,21 @@ async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
         Err(e) => return db_error(e),
     }
     let started_at = now();
+    if let Some(key) = session_key {
+        return match state
+            .db
+            .start_play_session(entry_id, started_at, &key)
+            .await
+        {
+            Ok(play) => respond::json(
+                StatusCode::OK,
+                json!({
+                    "play_id": play.id, "started_at": play.started_at, "listened_seconds": play.listened_seconds,
+                }),
+            ),
+            Err(e) => db_error(e),
+        };
+    }
     match state.db.start_play(entry_id, started_at).await {
         Ok(play_id) => respond::json(
             StatusCode::OK,
@@ -98,16 +119,31 @@ async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
 #[derive(Deserialize)]
 struct ProgressBody {
     listened_seconds: f64,
+    #[serde(default)]
+    reporter: Option<String>,
 }
 
 async fn progress(state: &Arc<AppState>, id: &str, body: &[u8]) -> HyperResponse {
     let Ok(play_id) = id.parse::<i64>() else {
         return bad_request("play id must be numeric");
     };
-    let Ok(ProgressBody { listened_seconds }) = serde_json::from_slice(body) else {
+    let Ok(ProgressBody {
+        listened_seconds,
+        reporter,
+    }) = serde_json::from_slice(body)
+    else {
         return bad_request("expected {\"listened_seconds\": <number>}");
     };
-    match state.db.set_play_listened(play_id, listened_seconds).await {
+    let result = match reporter {
+        Some(reporter) => {
+            state
+                .db
+                .report_play_listened(play_id, &reporter, listened_seconds)
+                .await
+        }
+        None => state.db.set_play_listened(play_id, listened_seconds).await,
+    };
+    match result {
         Ok(true) => respond::json(StatusCode::OK, json!({ "ok": true })),
         Ok(false) => respond::not_found(),
         Err(e) => db_error(e),

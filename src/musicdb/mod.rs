@@ -9,6 +9,8 @@ use tracing::warn;
 
 use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType, Privacy};
 
+pub mod listening;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Database error: {0}")]
@@ -427,6 +429,8 @@ pub struct PairImageRow {
     pub source: String,
     pub identifier: String,
     pub url: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
     pub fetched: bool,
 }
 
@@ -2406,6 +2410,14 @@ impl MusicDb {
             .exec(&txn)
             .await?;
 
+        // History must follow newly imported catalog metadata too. Submission
+        // payloads already queued for Last.fm remain frozen independently.
+        play_event::Entity::update_many()
+            .col_expr(play_event::Column::EntryId, sea_query::Expr::value(winner))
+            .filter(play_event::Column::EntryId.eq(loser))
+            .exec(&txn)
+            .await?;
+
         // Keep entry_relation referentially consistent: the loser entry is about
         // to be deleted, so re-point every relation that referenced it onto the
         // winner, drop the resulting self-relations, and collapse duplicates.
@@ -3344,6 +3356,8 @@ impl MusicDb {
             source: m.source,
             identifier: m.identifier,
             url: m.url,
+            width: m.width,
+            height: m.height,
         })
         .collect())
     }

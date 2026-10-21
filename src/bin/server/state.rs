@@ -64,4 +64,6 @@ pub struct AppState {
     /// `spotify_auth`.
     #[cfg(feature = "player")]
     pub spotify: crate::spotify_auth::SpotifyAuth,
+    #[cfg(feature = "player")]
+    pub lastfm: crate::lastfm::LastFm,
 }

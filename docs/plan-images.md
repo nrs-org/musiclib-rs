@@ -174,6 +174,11 @@ this order:
 3. **Derived, reliable only:** an `i.ytimg.com` thumbnail from a YouTube
    video id.
 
+Every consumer shows the cover in a square box, so steps 1 and 2 first take
+only square images (aspect ratio within 1.25), and a track with its own 16:9
+video thumbnail shows its release's album art instead. Without one, steps 1
+and 2 run again with any shape.
+
 It never redirects to a guess: no Cover Art Archive URL without the
 `cover-art-archive.front` flag behind it, and no Spotify oEmbed. A redirect
 to a broken image is worse than a 404.

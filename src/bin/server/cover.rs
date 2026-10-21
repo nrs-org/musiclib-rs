@@ -2,15 +2,20 @@
 //! (docs/plan-images.md). The server only picks the URL; the browser (or the
 //! OS media controls) loads the image straight from the provider.
 //!
-//! Resolved over the entry's soft-identity component, in this order:
+//! Every consumer shows it in a square box, so a square picture comes
+//! first: a track shows its release's album art rather than its own
+//! video's 16:9 thumbnail. Resolved over the entry's soft-identity
+//! component, in this order:
 //!
-//! 1. its own stored images (`pair_image`): from a pair's own fetch before
-//!    one from a parent's listing, then by provider (`PROVIDER_ORDER`);
-//! 2. an inherited one, for an entry with none of its own: a track takes a
-//!    release's that lists it (Spotify no longer returns album art with a
-//!    track, and Discogs and MusicBrainz tracks have none), a release group
-//!    one of its releases', a release its release group's;
-//! 3. a YouTube video's thumbnail, derived from its id.
+//! 1. its own stored images (`pair_image`), square ones: from a pair's own
+//!    fetch before one from a parent's listing, then by provider
+//!    (`PROVIDER_ORDER`);
+//! 2. an inherited square one: a track takes a release's that lists it
+//!    (Spotify no longer returns album art with a track, and Discogs and
+//!    MusicBrainz tracks have none), a release group one of its releases',
+//!    a release its release group's;
+//! 3. steps 1 then 2 again, any shape;
+//! 4. a YouTube video's thumbnail, derived from its id.
 //!
 //! Nothing else: a redirect to a broken image is worse than the 404, which
 //! the frontend shows as a placeholder.
@@ -52,7 +57,20 @@ pub(crate) fn provider_rank(source: &str) -> usize {
         .unwrap_or(PROVIDER_ORDER.len())
 }
 
-fn best(rows: Vec<PairImageRow>) -> Option<String> {
+/// Whether `row` is square enough to fill a square box. Discogs scans run a
+/// little off square; a 16:9 thumbnail is 1.78. Unknown dimensions
+/// (Niconico thumbnails) don't count.
+fn is_square(row: &PairImageRow) -> bool {
+    match (row.width, row.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => {
+            let (w, h) = (f64::from(w), f64::from(h));
+            w.max(h) / w.min(h) <= 1.25
+        }
+        _ => false,
+    }
+}
+
+fn best<'a>(rows: impl IntoIterator<Item = &'a PairImageRow>) -> Option<String> {
     let rank = provider_rank;
     rows.into_iter()
         .min_by(|a, b| {
@@ -63,7 +81,12 @@ fn best(rows: Vec<PairImageRow>) -> Option<String> {
                 &b.identifier,
             ))
         })
-        .map(|r| r.url)
+        .map(|r| r.url.clone())
+}
+
+/// The best square one of `rows`.
+fn best_square(rows: &[PairImageRow]) -> Option<String> {
+    best(rows.iter().filter(|r| is_square(r)))
 }
 
 /// Every pair of `ids` and of their soft-identity components.
@@ -118,7 +141,8 @@ pub async fn resolve(db: &MusicDb, entry_id: i64) -> anyhow::Result<Option<Strin
     if pairs.is_empty() {
         return Ok(None);
     }
-    if let Some(url) = best(db.pair_image_rows(&pairs).await?) {
+    let own = db.pair_image_rows(&pairs).await?;
+    if let Some(url) = best_square(&own) {
         return Ok(Some(url));
     }
 
@@ -152,10 +176,13 @@ pub async fn resolve(db: &MusicDb, entry_id: i64) -> anyhow::Result<Option<Strin
         Some("release_group") => entries_of_type(db, &children().await?, "release").await?,
         _ => Vec::new(),
     };
-    if let Some(url) = best(
-        db.pair_image_rows(&component_pairs(db, &related).await?)
-            .await?,
-    ) {
+    let inherited = db
+        .pair_image_rows(&component_pairs(db, &related).await?)
+        .await?;
+    if let Some(url) = best_square(&inherited)
+        .or_else(|| best(&own))
+        .or_else(|| best(&inherited))
+    {
         return Ok(Some(url));
     }
 
@@ -196,13 +223,19 @@ pub async fn cover(db: &MusicDb, entry_id: i64) -> HyperResponse {
 mod tests {
     use musiclib_rs::musicdb::PairImageRow;
 
-    use super::best;
+    use super::{best, best_square};
 
     fn row(source: &str, url: &str, fetched: bool) -> PairImageRow {
+        sized(source, url, fetched, (300, 300))
+    }
+
+    fn sized(source: &str, url: &str, fetched: bool, (w, h): (i32, i32)) -> PairImageRow {
         PairImageRow {
             source: source.to_owned(),
             identifier: url.to_owned(),
             url: url.to_owned(),
+            width: Some(w),
+            height: Some(h),
             fetched,
         }
     }
@@ -215,11 +248,28 @@ mod tests {
             row("musicbrainz", "caa", true),
             row("spotify", "sp", true),
         ];
-        assert_eq!(best(rows).as_deref(), Some("sp"));
+        assert_eq!(best(&rows).as_deref(), Some("sp"));
         assert_eq!(
-            best(vec![row("spotify", "sp-listed", false)]).as_deref(),
+            best(&[row("spotify", "sp-listed", false)]).as_deref(),
             Some("sp-listed")
         );
-        assert_eq!(best(vec![]), None);
+        assert_eq!(best(&[]), None);
+    }
+
+    #[test]
+    fn square_skips_video_thumbnails() {
+        let rows = vec![
+            sized("youtube", "thumb", true, (320, 180)),
+            sized("discogs", "scan", true, (600, 640)),
+            PairImageRow {
+                width: None,
+                height: None,
+                ..row("nicovideo", "nico", true)
+            },
+        ];
+        assert_eq!(best_square(&rows).as_deref(), Some("scan"));
+        // Only a thumbnail: none square, so the fallback takes it as it is.
+        assert_eq!(best_square(&rows[..1]), None);
+        assert_eq!(best(&rows[..1]).as_deref(), Some("thumb"));
     }
 }

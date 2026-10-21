@@ -30,6 +30,10 @@ mod fetch_options;
 mod find_source;
 mod ingest_progress;
 mod jobs;
+#[cfg(feature = "player")]
+mod lastfm;
+#[cfg(feature = "player")]
+mod lastfm_metadata;
 #[cfg(feature = "media_controls")]
 mod media_controls;
 #[cfg(feature = "nrs")]
@@ -172,6 +176,10 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
         return Ok(nrs_bridge::route(&state, &method, &path, &query, body).await);
     }
     #[cfg(feature = "player")]
+    if lastfm::handles(&path) {
+        return Ok(lastfm::route(&state, &method, &path, body).await);
+    }
+    #[cfg(feature = "player")]
     if spotify_auth::handles(&path) {
         return Ok(spotify_auth::route(&state, &method, &path, body).await);
     }
@@ -303,6 +311,8 @@ async fn main() -> anyhow::Result<()> {
         playback: playback::PlaybackHub::load(db_path.with_file_name("playback.json")),
         #[cfg(feature = "player")]
         spotify: spotify_auth::SpotifyAuth::load(db_path.with_file_name("spotify.json")),
+        #[cfg(feature = "player")]
+        lastfm: lastfm::LastFm::load(db_path.with_file_name("lastfm.json")),
         #[cfg(feature = "nrs")]
         nrs_bridge: Default::default(),
     });
@@ -321,6 +331,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let local = tokio::task::LocalSet::new();
+    #[cfg(feature = "player")]
+    local.spawn_local(lastfm::run(Arc::clone(&state)));
     #[cfg(feature = "player")]
     local.spawn_local(Arc::clone(&state.playback).persist_loop());
     #[cfg(feature = "player")]

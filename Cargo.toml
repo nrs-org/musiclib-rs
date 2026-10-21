@@ -112,6 +112,7 @@ urlencoding = "2.1.3"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"], optional = true }
 regex = "1.12.3"
 sha2 = "0.10"
+md-5 = "0.10"
 fancy-regex = "0.18.0"
 base64 = "0.22"
 bytes = "1.11.1"
