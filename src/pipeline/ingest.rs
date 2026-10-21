@@ -66,8 +66,6 @@ pub async fn ingest_entry(
     providers: &Arc<Vec<Arc<dyn FetchProvider>>>,
     pool: &Arc<EntryFetchOptionsPool>,
     options_id: crate::providers::types::OptionsId,
-    dedup_configs: &[(String, DedupConfig)],
-    merged_dedup: &DedupConfig,
     soft_cfg: Option<&SoftMatchConfig>,
     url: String,
     progress: Option<Arc<dyn ImportProgress>>,
@@ -77,8 +75,6 @@ pub async fn ingest_entry(
         providers,
         pool,
         options_id,
-        dedup_configs,
-        merged_dedup,
         soft_cfg,
         vec![url],
         progress,
@@ -92,17 +88,13 @@ pub async fn ingest_entry(
 }
 
 /// Ingest every URL in `urls` as one run: fetch via `providers`/`pool` starting at `options_id`, flush
-/// into `db`, reconcile barrier tags, and (if `soft_cfg` is given) run online
-/// soft-dedup against the newly touched entries.
+/// into `db` under its stored barriers (`DedupConfig::load`), and (if
+/// `soft_cfg` is given) run online soft-dedup against the newly touched
+/// entries.
 ///
 /// All URLs are traversed concurrently against one shared `State`, so their
 /// fetches land in the same coalescer batches and an entity reachable from
 /// several URLs is fetched once.
-///
-/// `dedup_configs` is the raw `(source_label, DedupConfig)` list (used for tag
-/// reconciliation); `merged_dedup` is `dedup::merge_configs(dedup_configs)`,
-/// passed separately since callers that already have it (the CLI binaries do,
-/// to avoid recompiling the barrier on every call) shouldn't have to redo it.
 ///
 /// `progress`, if given, is wired straight into the `State` driving this
 /// run's `import()` traversal — see `state::ImportProgress`. The CLI passes
@@ -126,8 +118,6 @@ pub async fn ingest_entries(
     providers: &Arc<Vec<Arc<dyn FetchProvider>>>,
     pool: &Arc<EntryFetchOptionsPool>,
     options_id: crate::providers::types::OptionsId,
-    dedup_configs: &[(String, DedupConfig)],
-    merged_dedup: &DedupConfig,
     soft_cfg: Option<&SoftMatchConfig>,
     urls: Vec<String>,
     progress: Option<Arc<dyn ImportProgress>>,
@@ -181,6 +171,7 @@ pub async fn ingest_entries(
         );
     }
 
+    let merged_dedup = &DedupConfig::load(db).await?;
     let run_id = db.start_import_run().await?;
 
     let state = Arc::new(State::with_progress(progress));
@@ -211,9 +202,6 @@ pub async fn ingest_entries(
         }
     };
 
-    if !dedup_configs.is_empty() {
-        super::dedup::reconcile_tags(providers.as_slice(), db, dedup_configs).await?;
-    }
     if let Some(cfg) = soft_cfg {
         match_new_entries_offloaded(
             db.clone(),

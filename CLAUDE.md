@@ -23,7 +23,8 @@ RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url>... [--url-
 # entries a removed link disconnects (docs/plan-identity-retraction.md)
 cargo run --release --bin import -- --backfill-links --skip-softmatch
 
-# Re-apply dedup barrier to an existing DB (no new URLs ingested)
+# Re-apply violated dedup barriers to an existing DB (no new URLs ingested);
+# --list prints them, --import-yaml <files|dirs> stores old YAML barrier files
 RUST_LOG=musiclib_rs=info,dedup=info cargo run --bin dedup
 
 # MusicBrainz local mirror (URL table only)
@@ -54,7 +55,6 @@ Default paths for each binary:
 | `providers.yaml` | `<config_dir>/providers.yaml` |
 | `http.yaml` | `<config_dir>/http.yaml` |
 | fetch-options (name only) | `<config_dir>/fetch_options/<name>` |
-| dedup barriers (auto-loaded) | `<config_dir>/dedup_barriers/*.yaml` |
 
 Copy `config/providers.example.yaml` → `<config_dir>/providers.yaml` and `config/http.example.yaml` → `<config_dir>/http.yaml`, then edit. The relevant env vars are: `YOUTUBE_API_KEY`, `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET`, `MUSICBRAINZ_TOKEN`, `MUSICBRAINZ_BASE_URL`, `MUSICBRAINZ_MIRROR_DB`, `DISCOGS_USER_TOKEN`, `YTDLP_SERVER_URL`, `YTMUSICAPI_SERVER_URL`, plus `METABRAINZ_ACCESS_TOKEN` for replication.
 
@@ -125,12 +125,12 @@ Shared by the `import` and `dedup` binaries. Modules:
 - `importer.rs` — structured-concurrency traversal (see below).
 - `state.rs` — in-memory `State` accumulator; `claim` prevents duplicate processing.
 - `flush.rs` — persists `State` into SeaORM/SQLite.
-- `dedup.rs` — re-imports already-stored entities shallow (no new URLs) to re-apply the dedup barrier.
+- `dedup.rs` — barriers stored in the DB: loading, YAML import, and `regroup_entries`, which re-applies them to existing entries (replaying stored links, or a shallow re-import).
 - `progress.rs` — wraps `HttpClient` in `indicatif` bars; routes `tracing` through `MultiProgressMakeWriter`.
 
 #### Dedup barriers (`pipeline/dedup.rs`)
 
-A barrier declares that two (or more) entities must never be merged into one DB entry even if the importer would normally unify them (e.g. two tracks sharing an ISRC). Configuration lives in `DedupConfig` (loaded from `<config_dir>/dedup_barriers/*.yaml`, or overridden via `--dedup-config`).
+A barrier declares that two (or more) entities must never be merged into one DB entry even if the importer would normally unify them (e.g. two tracks sharing an ISRC). Barriers are stored in the DB (`barrier_group`/`barrier_member`, loaded per run by `DedupConfig::load`) and made from the player: an entry's **Unmerge…** panel splits sources off into a barrier and applies it at once, and lists the barriers touching the entry with an undo (`src/bin/server/unmerge.rs`). The old YAML files (below) are only read by `dedup --import-yaml`.
 
 ```yaml
 groups:
@@ -145,7 +145,7 @@ groups:
           - "spotify:track:xyz"
 ```
 
-Each string is `source:identifier` (split on the first `:`). Pairs are canonicalized at load time so any URL form works. An anchor's members are force-merged into one entry, and two pairs assigned to different anchors within the same group can never share an entry. There is no `claim` key (unknown keys are ignored): list a shared pair as a member of the anchor it belongs to; the `dedup` binary re-runs the barrier against an existing DB without ingesting new URLs.
+Each string is `source:identifier` (split on the first `:`). Pairs are canonicalized when imported so any URL form works. An anchor's members are force-merged into one entry, and two pairs assigned to different anchors within the same group can never share an entry. There is no `claim` key (unknown keys are ignored): list a shared pair as a member of the anchor it belongs to. A pair under anchors of two groups takes the later group's. The `dedup` binary re-applies violated barriers to an existing DB without ingesting new URLs.
 
 ### Importer (`src/pipeline/importer.rs`)
 
@@ -172,7 +172,7 @@ Each backend ships checked-in JSON fixtures next to its source (e.g. `youtube_ap
 - `scripts/dedup.sh` and `scripts/clear_yt_cache.sh` are similar convenience wrappers.
 - Edition: 2024.
 - `docs/BATCHING_PROVIDERS.md` is the original design doc for the coalescer; its firing rule section is superseded (see the status note at its top).
-- `docs/CONFIG_REFERENCE.md` has full annotated examples for `providers.yaml`, `http.yaml`, fetch-options files, and dedup barrier files.
+- `docs/CONFIG_REFERENCE.md` has full annotated examples for `providers.yaml`, `http.yaml`, fetch-options files, and the YAML barrier format.
 - NRS is an optional extension of the player, never a dependency: everything that talks to the NRS app sits behind the `nrs` Cargo feature (`src/bin/server/nrs_pool.rs`, `nrs_bridge.rs`) and degrades to "unavailable" when NRS isn't running. The play log (`play_event`, `/api/plays`) and edition folding (`EditionProjection::rank_target`) are musiclib's own. See `docs/plan-listen-and-score.md`.
 - `docs/DEV.md` covers dev environment setup (Nix and non-Nix paths).
 - Learned soft-dedup lives in a separate repo, `nrs-org/learned-matcher` (checked out next to this one at `../learned-matcher`): the training pipeline, the `inference` cdylib (`libinference.so`), `rhai/match.learned.rhai`, the Jev refine step and the design docs (`plan-learned-matcher.md`, `plan-v15-runtime.md`, `plan-jev-in-script.md`). This repo keeps the host contract: the `ffi` module, the lazy `Entry` type, `pair_facts_json(...)` (`src/pipeline/pair_facts.rs`, `musiclib-pair-facts/1`; scripts get extra per-pair DB data from it, not from new `EntryInfo` fields), `relation_facts(a, b)` (provider cover/remix/arrangement graph over identity components; softmatch skips pairs an edition relation already links, and provider edition relations are cannot-link for soft identity), `defer`/`refine`. Its pipeline reads and writes this repo's `data/`. Host tests for its scripts and cdylib skip when `../learned-matcher` (or `MUSICLIB_LEARNED_MATCHER`) is absent.

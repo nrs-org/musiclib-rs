@@ -4,7 +4,7 @@ use std::sync::{Arc, atomic::AtomicU64};
 
 use musiclib_rs::{
     musicdb::MusicDb,
-    pipeline::{dedup::DedupConfig, progress::HttpActivityClient, softmatch::SoftMatchConfig},
+    pipeline::{progress::HttpActivityClient, softmatch::SoftMatchConfig},
     providers::{
         FetchProvider,
         types::{EntryFetchOptionsPool, OptionsId},
@@ -30,8 +30,6 @@ pub struct AppState {
     /// that module's doc comment.
     pub pool: Arc<EntryFetchOptionsPool>,
     pub root_id: OptionsId,
-    pub dedup_configs: Vec<(String, DedupConfig)>,
-    pub merged_dedup: DedupConfig,
     /// `None` disables online soft-dedup after an ingest (no
     /// `<config_dir>/match.rhai`), matching the `import` CLI's behavior.
     pub soft_cfg: Option<SoftMatchConfig>,

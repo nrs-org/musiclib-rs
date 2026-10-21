@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsStr,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -14,9 +13,7 @@ use musiclib_rs::{
     http::HttpClientConfig,
     musicdb::{LINKS_COMPLETE, MusicDb},
     pipeline::{
-        dedup::{DedupConfig, dedup_db, merge_configs},
-        ingest::ingest_entries,
-        progress,
+        dedup::enforce_barriers, ingest::ingest_entries, progress,
         softmatch::default_soft_match_config,
     },
     providers::{
@@ -53,17 +50,13 @@ struct Args {
     /// HTTP client config. Defaults to <config_dir>/http.yaml.
     #[arg(long)]
     http_config: Option<String>,
-    /// Barrier config file(s). Repeatable; overrides auto-loading from
-    /// <config_dir>/dedup_barriers/*.yaml.
-    #[arg(long)]
-    dedup_config: Vec<String>,
     /// Instead of importing URLs, re-import every fetched pair (listing
     /// children, fetching none) to record the identity links each states,
     /// retry the ones that fail once, then mark the DB's links complete so
     /// re-imports can split entries (docs/plan-identity-retraction.md).
     #[arg(long, conflicts_with_all = ["urls", "url_file", "fetch_options"])]
     backfill_links: bool,
-    /// Skip the pre-import dedup pass.
+    /// Skip the pre-import pass that re-applies violated barriers.
     #[arg(long)]
     skip_dedup: bool,
     /// Skip the post-import online soft-match pass.
@@ -96,20 +89,6 @@ async fn load_config<T: Default + serde::de::DeserializeOwned>(
     Ok(serde_yaml_ng::from_str(&text)?)
 }
 
-fn dedup_paths_from_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == OsStr::new("yaml")))
-        .collect();
-    paths.sort();
-    Ok(paths)
-}
-
 fn resolve_fetch_options(s: &str) -> PathBuf {
     let p = Path::new(s);
     if p.is_absolute() || p.components().count() > 1 {
@@ -123,8 +102,6 @@ fn resolve_fetch_options(s: &str) -> PathBuf {
 async fn backfill_links(
     db: &MusicDb,
     providers: &Arc<Vec<Arc<dyn musiclib_rs::providers::FetchProvider>>>,
-    dedup_configs: &[(String, DedupConfig)],
-    merged: &DedupConfig,
 ) -> anyhow::Result<()> {
     /// Pairs per import run: each commits on its own, so an interrupted
     /// backfill keeps what it finished.
@@ -152,8 +129,6 @@ async fn backfill_links(
                 providers,
                 &pool,
                 root_id,
-                dedup_configs,
-                merged,
                 None,
                 chunk.to_vec(),
                 None,
@@ -197,20 +172,6 @@ async fn main() -> anyhow::Result<()> {
         &config_dir.join("providers.yaml"),
     )
     .await?;
-
-    let dedup_paths: Vec<PathBuf> = if args.dedup_config.is_empty() {
-        dedup_paths_from_dir(&config_dir.join("dedup_barriers"))?
-    } else {
-        args.dedup_config.iter().map(PathBuf::from).collect()
-    };
-    let mut dedup_configs: Vec<(String, DedupConfig)> = Vec::new();
-    for path in &dedup_paths {
-        let text = tokio::fs::read_to_string(path)
-            .await
-            .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: DedupConfig = serde_yaml_ng::from_str(&text)?;
-        dedup_configs.push((path.display().to_string(), cfg));
-    }
 
     let mut http_config: HttpClientConfig =
         load_config(args.http_config.as_deref(), &config_dir.join("http.yaml")).await?;
@@ -268,18 +229,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(db_path.parent().unwrap()).await?;
     let db = MusicDb::new(&format!("sqlite://{}?mode=rwc", db_path.display())).await?;
 
-    if !args.skip_dedup && !dedup_configs.is_empty() {
-        dedup_db(Arc::clone(&providers), &db, &dedup_configs).await?;
+    if !args.skip_dedup {
+        enforce_barriers(&providers, &db).await?;
     }
 
     if args.backfill_links {
-        backfill_links(
-            &db,
-            &providers,
-            &dedup_configs,
-            &merge_configs(&dedup_configs),
-        )
-        .await?;
+        backfill_links(&db, &providers).await?;
         info!(
             "YouTube Data API quota used: {} unit(s)",
             youtube_quota.load(Ordering::Relaxed),
@@ -307,7 +262,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let merged = merge_configs(&dedup_configs);
     let mut soft_cfg = (!args.skip_softmatch)
         .then(default_soft_match_config)
         .flatten();
@@ -336,8 +290,6 @@ async fn main() -> anyhow::Result<()> {
         &providers,
         &pool,
         root_id,
-        &dedup_configs,
-        &merged,
         soft_cfg.as_ref(),
         urls.clone(),
         None,

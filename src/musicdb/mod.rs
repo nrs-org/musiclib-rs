@@ -286,6 +286,47 @@ mod pair_link {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// A dedup barrier: pairs under different `anchor`s of one group never share
+/// an entry, and an anchor's pairs are merged into one. Made by an unmerge in
+/// the player, or imported from the old YAML files (`origin`).
+mod barrier_group {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "barrier_group")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        /// Human label, for logs and the player.
+        pub name: String,
+        /// `"ui"`, or `"yaml:<file name>"` for one imported from a file.
+        pub origin: String,
+        pub created_at: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+mod barrier_member {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "barrier_member")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub group_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub anchor: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// Named DB-wide switches (`LINKS_COMPLETE`).
 mod setting {
     use sea_orm::entity::prelude::*;
@@ -489,43 +530,6 @@ mod dedup_feedback {
         pub note: Option<String>,
         pub supersedes_id: Option<i64>,
         pub created_at: i64,
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-// Dedup bookkeeping. `dedup_state` records the last-applied mtime of each barrier
-// config file (the cheap "did it change" gate). `entry_dedup` is a many-to-many
-// tag table recording which config files currently affect which entries, so when
-// a config is changed or removed we can recover the entries it used to touch
-// (needed to re-merge after a barrier is relaxed — its anchors are gone from the
-// new config, so only the persisted tag knows which entries to re-import).
-mod dedup_state {
-    use sea_orm::entity::prelude::*;
-
-    #[sea_orm::model]
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "dedup_state")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub config_path: String,
-        pub mtime_ns: i64,
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-mod entry_dedup {
-    use sea_orm::entity::prelude::*;
-
-    #[sea_orm::model]
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "entry_dedup")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub entry_id: i64,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub config_path: String,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -2102,6 +2106,16 @@ impl MusicDb {
             )
             .await?;
         }
+        if user_version < 10 {
+            // Barriers moved from YAML files into `barrier_group`; these
+            // tracked which entries each file touched and its mtime.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "DROP TABLE IF EXISTS entry_dedup; DROP TABLE IF EXISTS dedup_state; \
+                 PRAGMA user_version = 10;",
+            )
+            .await?;
+        }
         Ok(Self {
             db,
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -2554,6 +2568,105 @@ impl MusicDb {
             .into_iter()
             .map(|m| (m.source, m.identifier))
             .collect())
+    }
+
+    /// Every stored barrier, oldest first.
+    pub async fn barrier_groups(&self) -> Result<Vec<BarrierGroupRow>, Error> {
+        let groups = barrier_group::Entity::find()
+            .order_by_asc(barrier_group::Column::Id)
+            .all(&self.db)
+            .await?;
+        let mut members: HashMap<i64, BTreeMap<String, Vec<(String, String)>>> = HashMap::new();
+        for m in barrier_member::Entity::find()
+            .order_by_asc(barrier_member::Column::Source)
+            .order_by_asc(barrier_member::Column::Identifier)
+            .all(&self.db)
+            .await?
+        {
+            members
+                .entry(m.group_id)
+                .or_default()
+                .entry(m.anchor)
+                .or_default()
+                .push((m.source, m.identifier));
+        }
+        Ok(groups
+            .into_iter()
+            .map(|g| BarrierGroupRow {
+                anchors: members.remove(&g.id).unwrap_or_default(),
+                id: g.id,
+                name: g.name,
+                origin: g.origin,
+                created_at: g.created_at,
+            })
+            .collect())
+    }
+
+    /// Store a barrier and return its id. A pair listed under two anchors
+    /// keeps the last.
+    pub async fn insert_barrier_group(
+        &self,
+        name: &str,
+        origin: &str,
+        anchors: &BTreeMap<String, Vec<(String, String)>>,
+    ) -> Result<i64, Error> {
+        let txn = self.db.begin().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let id = barrier_group::Entity::insert(barrier_group::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            name: Set(name.to_string()),
+            origin: Set(origin.to_string()),
+            created_at: Set(now),
+        })
+        .exec(&txn)
+        .await?
+        .last_insert_id;
+        let mut seen: HashMap<&(String, String), &str> = HashMap::new();
+        for (anchor, pairs) in anchors {
+            for pair in pairs {
+                seen.insert(pair, anchor);
+            }
+        }
+        let rows: Vec<barrier_member::ActiveModel> = seen
+            .into_iter()
+            .map(
+                |((source, identifier), anchor)| barrier_member::ActiveModel {
+                    group_id: Set(id),
+                    source: Set(source.clone()),
+                    identifier: Set(identifier.clone()),
+                    anchor: Set(anchor.to_string()),
+                },
+            )
+            .collect();
+        for chunk in rows.chunks(200) {
+            barrier_member::Entity::insert_many(chunk.to_vec())
+                .exec(&txn)
+                .await?;
+        }
+        txn.commit().await?;
+        Ok(id)
+    }
+
+    /// Delete a barrier, returning what it was.
+    pub async fn delete_barrier_group(&self, id: i64) -> Result<Option<BarrierGroupRow>, Error> {
+        let Some(row) = self
+            .barrier_groups()
+            .await?
+            .into_iter()
+            .find(|g| g.id == id)
+        else {
+            return Ok(None);
+        };
+        let txn = self.db.begin().await?;
+        barrier_member::Entity::delete_many()
+            .filter(barrier_member::Column::GroupId.eq(id))
+            .exec(&txn)
+            .await?;
+        barrier_group::Entity::delete_by_id(id).exec(&txn).await?;
+        txn.commit().await?;
+        Ok(Some(row))
     }
 
     /// A `setting` value, if set.
@@ -3419,88 +3532,6 @@ impl MusicDb {
         self.db.execute_raw(stmt).await?;
         Ok(())
     }
-
-    /// Last-applied mtime (ns since epoch) of a barrier config file, if recorded.
-    pub async fn get_dedup_mtime(&self, config_path: &str) -> Result<Option<i64>, Error> {
-        Ok(dedup_state::Entity::find_by_id(config_path.to_string())
-            .one(&self.db)
-            .await?
-            .map(|m| m.mtime_ns))
-    }
-
-    /// Record (upsert) the last-applied mtime for a barrier config file.
-    pub async fn set_dedup_mtime(&self, config_path: &str, mtime_ns: i64) -> Result<(), Error> {
-        dedup_state::Entity::insert(dedup_state::ActiveModel {
-            config_path: Set(config_path.to_string()),
-            mtime_ns: Set(mtime_ns),
-        })
-        .on_conflict(
-            sea_query::OnConflict::column(dedup_state::Column::ConfigPath)
-                .update_column(dedup_state::Column::MtimeNs)
-                .to_owned(),
-        )
-        .exec(&self.db)
-        .await?;
-        Ok(())
-    }
-
-    /// Forget a barrier config file's recorded mtime (used when the file is gone).
-    pub async fn delete_dedup_mtime(&self, config_path: &str) -> Result<(), Error> {
-        dedup_state::Entity::delete_by_id(config_path.to_string())
-            .exec(&self.db)
-            .await?;
-        Ok(())
-    }
-
-    /// Entry ids currently tagged as affected by a given barrier config file.
-    pub async fn entries_for_config(&self, config_path: &str) -> Result<Vec<i64>, Error> {
-        Ok(entry_dedup::Entity::find()
-            .filter(entry_dedup::Column::ConfigPath.eq(config_path))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(|m| m.entry_id)
-            .collect())
-    }
-
-    /// Every config path that currently tags at least one entry. Used to spot
-    /// config files that were removed since the last run.
-    pub async fn tagged_config_paths(&self) -> Result<Vec<String>, Error> {
-        let mut paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for m in entry_dedup::Entity::find().all(&self.db).await? {
-            paths.insert(m.config_path);
-        }
-        Ok(paths.into_iter().collect())
-    }
-
-    /// Replace the set of entries tagged for `config_path` with `entry_ids`.
-    /// Called after every flush so the tags reflect the latest grouping.
-    pub async fn set_config_entries(
-        &self,
-        config_path: &str,
-        entry_ids: &[i64],
-    ) -> Result<(), Error> {
-        entry_dedup::Entity::delete_many()
-            .filter(entry_dedup::Column::ConfigPath.eq(config_path))
-            .exec(&self.db)
-            .await?;
-        if entry_ids.is_empty() {
-            return Ok(());
-        }
-        let models: Vec<entry_dedup::ActiveModel> = entry_ids
-            .iter()
-            .map(|id| entry_dedup::ActiveModel {
-                entry_id: Set(*id),
-                config_path: Set(config_path.to_string()),
-            })
-            .collect();
-        entry_dedup::Entity::insert_many(models)
-            .exec(&self.db)
-            .await?;
-        Ok(())
-    }
-
-    // ── Bulk-fetch helpers (used by the soft-match pipeline) ──────────────────
 
     /// Every entry row (id, entry_type). Used to seed the match candidate set.
     pub async fn all_entry_rows(&self) -> Result<Vec<EntryRow>, Error> {
@@ -4886,6 +4917,16 @@ pub struct LinkRow {
     pub link: LinkKey,
     pub asserted_by: (String, String),
     pub via: &'static str,
+}
+
+/// A stored dedup barrier (see `barrier_group`), anchors by name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BarrierGroupRow {
+    pub id: i64,
+    pub name: String,
+    pub origin: String,
+    pub created_at: i64,
+    pub anchors: BTreeMap<String, Vec<(String, String)>>,
 }
 
 /// An alias's identity under its pair: (name, locale, extra as stored,

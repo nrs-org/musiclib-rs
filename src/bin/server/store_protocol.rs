@@ -808,8 +808,6 @@ async fn ingest(state: &Arc<AppState>, body: Bytes) -> HyperResponse {
             &job_state.providers,
             &job_state.pool,
             job_state.root_id,
-            &job_state.dedup_configs,
-            &job_state.merged_dedup,
             job_state.soft_cfg.as_ref(),
             req.query,
             Some(sink),

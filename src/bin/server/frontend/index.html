@@ -2099,6 +2099,60 @@
     margin: 8px 0 0;
   }
 
+  /* ---------- splitting an entry's sources apart (`mountUnmerge`) ---------- */
+  .unmerge { margin-bottom: 20px; }
+
+  .unmerge-list {
+    list-style: none;
+    margin: 0 0 10px;
+    padding: 0;
+  }
+
+  .unmerge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    align-items: baseline;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--rail);
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .unmerge-row input { flex: none; margin: 0; }
+
+  .unmerge-name { color: var(--ink-soft); overflow-wrap: anywhere; }
+
+  .unmerge-flag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
+  .unmerge-cut {
+    list-style: none;
+    margin: 0 0 10px;
+    padding: 0;
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+
+  .unmerge-cut li { padding: 2px 0; overflow-wrap: anywhere; }
+
+  .unmerge-cut li::before { content: "✂ "; color: var(--brass-ink); }
+
+  .unmerge-barrier {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    align-items: baseline;
+    padding: 5px 0;
+    border-top: 1px solid var(--rail);
+    font-size: 12px;
+  }
+
+  .unmerge-barrier-name { overflow-wrap: anywhere; }
+
   /* ---------- play call-to-action (on an entry's own page) ---------- */
 
   .play-cta-row {
@@ -9794,6 +9848,176 @@
     }
   }
 
+  // ---------- splitting an entry's sources apart (see `unmerge.rs`) ----------
+  //
+  // An entry's own sources and the links that merged them (with what stated
+  // each), so the ones that belong to something else can be split off. A
+  // split is stored as a barrier: the two sides stay apart from then on,
+  // re-imports included, until it's undone from the list below.
+  function mountUnmerge(host, entry) {
+    const entryId = entry.entry_id;
+    const panel = el("div", { className: "merge-picker", hidden: true });
+    const toggle = el("button", {
+      className: "ghost-btn",
+      type: "button",
+      text: "Unmerge…",
+      onclick: () => {
+        panel.hidden = !panel.hidden;
+        if (!panel.hidden) loadUnmerge(panel, entryId);
+      },
+    });
+    host.replaceChildren(toggle, panel);
+  }
+
+  async function loadUnmerge(panel, entryId) {
+    panel.replaceChildren(el("p", { className: "merge-picker-hint", text: "Loading…" }));
+    let data;
+    try {
+      data = await api(`/api/entries/${entryId}/identity`);
+    } catch (err) {
+      panel.replaceChildren(el("p", { className: "merge-picker-error", text: err.message }));
+      return;
+    }
+    panel.replaceChildren();
+    const key = (p) => `${p.source}\u0000${p.identifier}`;
+    const names = new Map(data.pairs.map((p) => [key(p), p.name]));
+    // The same tag `fillSources` gives a stamp: an ISRC in full, a link's host.
+    const tagOf = (p) =>
+      CODE_SOURCES.includes(p.source)
+        ? p.identifier
+        : LINK_SOURCES.includes(p.source)
+          ? hostOf(p.identifier)
+          : shortSourceId(p.identifier);
+    const pairLabel = (p) => {
+      const source = SOURCE_LABEL[p.source] || friendlyType(p.source);
+      const name = names.get(key(p));
+      return name ? `${source} “${name}”` : `${source} ${tagOf(p)}`;
+    };
+    const errorEl = el("p", { className: "merge-picker-error", hidden: true });
+
+    if (data.pairs.length < 2) {
+      panel.appendChild(el("p", { className: "merge-picker-hint", text: "Only one source here; nothing to split off." }));
+    } else {
+      panel.appendChild(
+        el("p", {
+          className: "merge-picker-hint",
+          text: "Tick the sources that belong to something else. They become their own entry and stay apart from the rest, re-imports included.",
+        })
+      );
+      if (!data.links_complete) {
+        panel.appendChild(
+          el("p", {
+            className: "merge-picker-hint",
+            text: "This library's links aren't all recorded yet, so a split re-fetches these sources and may take a while.",
+          })
+        );
+      }
+      const picked = new Set();
+      const degree = new Map();
+      for (const l of data.links) {
+        for (const end of [l.a, l.b]) degree.set(key(end), (degree.get(key(end)) || 0) + 1);
+      }
+      const list = el("ul", { className: "unmerge-list" });
+      const cutLabel = el("p", { className: "merge-picker-hint", hidden: true });
+      const cutList = el("ul", { className: "unmerge-cut" });
+      const submit = el("button", { className: "ghost-btn", type: "button", text: "Split off", disabled: true });
+      const update = () => {
+        const crossing = data.links.filter((l) => picked.has(key(l.a)) !== picked.has(key(l.b)));
+        cutList.replaceChildren(
+          ...crossing.map((l) => {
+            const by = l.stated_by.map((s) => `${pairLabel(s)}${s.via === "listing" ? " (listing)" : ""}`).join(", ");
+            return el("li", { text: `${pairLabel(l.a)} ↔ ${pairLabel(l.b)} — stated by ${by}` });
+          })
+        );
+        cutLabel.hidden = !picked.size;
+        cutLabel.textContent = crossing.length
+          ? `Links this cuts (${crossing.length}):`
+          : "No recorded link joins these to the rest.";
+        const n = picked.size;
+        submit.disabled = n === 0 || n === data.pairs.length;
+        submit.textContent = n ? `Split off ${n} source${n === 1 ? "" : "s"}` : "Split off";
+      };
+      for (const p of data.pairs) {
+        const box = el("input", { type: "checkbox" });
+        box.onchange = () => {
+          if (box.checked) picked.add(key(p));
+          else picked.delete(key(p));
+          update();
+        };
+        const flags = [];
+        if (!p.fetched) flags.push("only linked");
+        const links = degree.get(key(p)) || 0;
+        flags.push(`${links} link${links === 1 ? "" : "s"}`);
+        list.appendChild(
+          el("li", {}, [
+            el("label", { className: "unmerge-row" }, [
+              box,
+              sourceStamp(p, tagOf(p)),
+              p.name ? el("span", { className: "unmerge-name", text: p.name }) : null,
+              el("span", { className: "unmerge-flag", text: flags.join(" · ") }),
+            ]),
+          ])
+        );
+      }
+      submit.onclick = async () => {
+        submit.disabled = true;
+        errorEl.hidden = true;
+        const move = data.pairs
+          .filter((p) => picked.has(key(p)))
+          .map(({ source, identifier }) => ({ source, identifier }));
+        try {
+          const res = await postJson(`/api/entries/${entryId}/split`, { move });
+          setStatus(`Split ${move.length} source${move.length === 1 ? "" : "s"} off into ${catalogNo(res.split_entry_id)}`);
+          await refreshAfterEdit(entryId);
+          await loadUnmerge(panel, entryId);
+        } catch (err) {
+          errorEl.textContent = err.message;
+          errorEl.hidden = false;
+          update();
+        }
+      };
+      panel.append(list, cutLabel, cutList, submit);
+    }
+
+    if (data.barriers.length) {
+      panel.appendChild(el("p", { className: "merge-picker-hint", text: "Kept apart" }));
+      for (const b of data.barriers) {
+        const others = [
+          ...new Set(
+            b.anchors.flatMap((a) => a.pairs.map((p) => p.entry_id)).filter((id) => id != null && id !== entryId)
+          ),
+        ];
+        const origin = b.origin === "ui"
+          ? `split ${new Date(b.created_at * 1000).toLocaleDateString()}`
+          : b.origin.replace(/^yaml:/, "from ");
+        const undo = el("button", { className: "ghost-btn", type: "button", text: "Undo" });
+        undo.onclick = async () => {
+          undo.disabled = true;
+          errorEl.hidden = true;
+          try {
+            await del(`/api/barriers/${b.id}`);
+            setStatus(`Removed “${b.name}”; whatever links still join them is merged back`);
+            await refreshAfterEdit(entryId);
+            await loadUnmerge(panel, entryId);
+          } catch (err) {
+            errorEl.textContent = err.message;
+            errorEl.hidden = false;
+            undo.disabled = false;
+          }
+        };
+        panel.appendChild(
+          el("div", { className: "unmerge-barrier" }, [
+            el("span", { className: "unmerge-barrier-name", text: b.name }),
+            el("span", { className: "unmerge-flag", text: origin }),
+            ...others.map((id) => entryLink(id, catalogNo(id))),
+            undo,
+          ])
+        );
+      }
+    }
+    panel.appendChild(errorEl);
+  }
+
   // Who can see a YouTube source, as the server decides what it may share
   // (the player's Discord status): the user's call, else YouTube's. Only
   // "public" is shared; every other provider's sources always are.
@@ -13456,6 +13680,9 @@
 
     detail.appendChild(editionsEl);
     detail.appendChild(sourcesEl);
+    const unmergeEl = el("section", { className: "unmerge" });
+    mountUnmerge(unmergeEl, entry);
+    detail.appendChild(unmergeEl);
 
     // Relations/dedup calibration lives in its own full-screen mode now
     // (see `viewGraph`) rather than embedded here — just a way in.

@@ -1,6 +1,5 @@
 use std::{
     collections::HashSet,
-    ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -12,7 +11,7 @@ use musiclib_rs::{
     http::HttpClientConfig,
     musicdb::MusicDb,
     pipeline::{
-        dedup::{DedupConfig, merge_configs},
+        dedup::DedupConfig,
         progress,
         softmatch::{SoftMatchConfig, match_db, match_entries, print_summary},
     },
@@ -37,10 +36,6 @@ struct Args {
     /// HTTP client config. Defaults to <config_dir>/http.yaml.
     #[arg(long)]
     http_config: Option<String>,
-    /// Barrier config file(s). Repeatable; overrides auto-loading from
-    /// <config_dir>/dedup_barriers/*.yaml.
-    #[arg(long)]
-    dedup_config: Vec<String>,
     /// Rhai match script. Defaults to <config_dir>/match.rhai.
     #[arg(long)]
     script: Option<String>,
@@ -100,20 +95,6 @@ async fn load_config<T: Default + serde::de::DeserializeOwned>(
     Ok(serde_yaml_ng::from_str(&text)?)
 }
 
-fn dedup_paths_from_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == OsStr::new("yaml")))
-        .collect();
-    paths.sort();
-    Ok(paths)
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
@@ -131,21 +112,6 @@ async fn main() -> anyhow::Result<()> {
         &config_dir.join("providers.yaml"),
     )
     .await?;
-
-    let dedup_paths: Vec<PathBuf> = if args.dedup_config.is_empty() {
-        dedup_paths_from_dir(&config_dir.join("dedup_barriers"))?
-    } else {
-        args.dedup_config.iter().map(PathBuf::from).collect()
-    };
-    let mut dedup_configs: Vec<(String, DedupConfig)> = Vec::new();
-    for path in &dedup_paths {
-        let text = tokio::fs::read_to_string(path)
-            .await
-            .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: DedupConfig = serde_yaml_ng::from_str(&text)?;
-        dedup_configs.push((path.display().to_string(), cfg));
-    }
-    let merged_dedup = merge_configs(&dedup_configs);
 
     let script_path = args
         .script
@@ -177,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| app_dirs::data_dir().join("musiclib.db"));
     let db = MusicDb::new(&format!("sqlite://{}?mode=rwc", db_path.display())).await?;
+    let merged_dedup = DedupConfig::load(&db).await?;
 
     let embed_db_path: Option<String> = if args.no_embed {
         None
