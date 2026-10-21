@@ -1986,11 +1986,6 @@
     stroke: var(--brass);
     stroke-width: 3.5px;
   }
-  .node.placeholder circle {
-    fill: var(--paper);
-    stroke: var(--ink-faint);
-    stroke-dasharray: 3 3;
-  }
   /* Several uploads of one recording: a second ring, like a stack. */
   .node.stacked circle:first-child {
     stroke-width: 1.5px;
@@ -2011,7 +2006,6 @@
     stroke-width: 1.6px;
     pointer-events: none;
   }
-  .edge.tree.unknown { stroke-dasharray: 5 4; }
   .edge-item:hover .edge.tree { stroke-width: 2.6px; }
   .edge.identity-link {
     stroke: var(--ink-faint);
@@ -10163,7 +10157,6 @@
         "made from → version",
       ],
       [node("song-original"), "the original"],
-      [node("placeholder"), "original not in the library"],
       [node("stacked"), "several uploads of one recording"],
       [node("edition-folded"), "scores its original"],
       [node("conflict"), "contradictory relations"],
@@ -10433,7 +10426,7 @@
       const year = d.release_date && releaseYear(d.release_date);
       if (year && year !== "—") bits.push(year);
       if (d.duration_ms) bits.push(clockTime(d.duration_ms));
-      if (!d.placeholder) bits.push(catalogNo(d.entry_id));
+      bits.push(catalogNo(d.entry_id));
       if (d.identitySize > 1) bits.push(`${d.identitySize} uploads`);
       return bits.join(" · ");
     }
@@ -10445,7 +10438,7 @@
     function nodeName(n) {
       if (!n) return "?";
       const title = n.title || catalogNo(n.entry_id);
-      if (n.placeholder || !n.title) return title;
+      if (!n.title) return title;
       // Versions mostly share a title: name the performer, else the entry.
       return `${title} (${n.artists?.length ? n.artists[0] : catalogNo(n.entry_id)})`;
     }
@@ -10457,14 +10450,12 @@
     }
     const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
     function roleText(d) {
-      if (d.placeholder) return "This song's original isn't in the library, or no relation says which version it is.";
       if (d.detached) return "Detached from this song. It stays here, faded, until you leave this song.";
       if (!d.inSong) return viewMode === "song" ? "Not in this song." : null;
       if (d.isOriginal) return "The original.";
       const kind = songKindText(d.songKind);
       const parent = d.songParent ?? d.songOriginal;
       const what = kind ? capitalize(kind) : "A version";
-      if (parent == null) return `${what} of an unknown original.`;
       return `${what} of ${nodeName(currentNodesById.get(String(parent))) || catalogNo(parent)}.`;
     }
     const button = (text, onclick, extra = {}) => el("button", { className: "ghost-btn", type: "button", text, onclick, ...extra });
@@ -10499,7 +10490,7 @@
         const stamps = el("div", { className: "stamps" });
         for (const s of sources) stamps.appendChild(stamp(s.source, s.identifier, s.source in PLATFORM_COLOR));
         detailPanel.appendChild(stamps);
-      } else if (!data.placeholder) {
+      } else {
         detailPanel.appendChild(el("p", { className: "graph-detail-empty", text: "No sources." }));
       }
       if (data.foldsInto != null) {
@@ -10507,17 +10498,6 @@
         detailPanel.appendChild(
           el("p", { className: "graph-detail-empty", text: `Plays score ${target ? nodeName(target) : catalogNo(data.foldsInto)}.` })
         );
-      }
-      if (data.placeholder) {
-        detailPanel.appendChild(
-          el("p", {
-            className: "graph-detail-empty",
-            text: editing
-              ? "Select the original and use Set as original, or drag it in from search and connect it."
-              : "Switch to Edit to set the original.",
-          })
-        );
-        return;
       }
       const actions = el("div", { className: "graph-detail-actions" });
       if (viewMode === "song" && data.identitySize > 1) {
@@ -10559,7 +10539,7 @@
     function songActions(nodes) {
       const box = el("div", { className: "graph-detail-edition" });
       const inSong = nodes.filter((n) => n.inSong);
-      const outside = nodes.filter((n) => !n.inSong && !n.placeholder);
+      const outside = nodes.filter((n) => !n.inSong);
       const ids = (list) => list.map((n) => n.entry_id);
       if (outside.length) {
         box.appendChild(
@@ -10586,7 +10566,7 @@
           byParent.get(parent).push(n.entry_id);
         }
         if (!byParent.size) {
-          showError("Set the song's original first: a kind says what a version was made from.");
+          showError("The original isn't made from anything: pick a version to give it a kind.");
           return;
         }
         const rows = [];
@@ -10632,7 +10612,7 @@
     }
 
     function detachNodes(nodes) {
-      const leaving = nodes.filter((n) => n.inSong && !n.placeholder && !n.detached);
+      const leaving = nodes.filter((n) => n.inSong && !n.detached);
       const entries = leaving.map((n) => n.entry_id);
       if (!entries.length) return;
       for (const n of leaving) {
@@ -10680,10 +10660,6 @@
     function chooseParent({ nodes, transformation }, parent) {
       pickParent = null;
       syncToolbar();
-      if (parent.placeholder) {
-        showError("Pick a version in the library: the unknown original can't be a parent.");
-        return;
-      }
       const entries = nodes.map((n) => n.entry_id).filter((id) => id !== parent.entry_id);
       if (!entries.length) return;
       const who = entries.length > 1 ? `${entries.length} versions` : nodeName(nodes.find((n) => n.entry_id === entries[0]));
@@ -11193,7 +11169,6 @@
         d.editionSize > 1 && d.defaultEdition && viewMode === "raw" ? "edition-default" : "",
         d.foldsInto != null ? "edition-folded" : "",
         d.isOriginal ? "song-original" : "",
-        d.placeholder ? "placeholder" : "",
         d.detached ? "detached" : "",
         d.identitySize > 1 && !expanded.has(d.identity) ? "stacked" : "",
         d.conflict ? "conflict" : "",
@@ -11203,7 +11178,7 @@
     }
     function edgeClass(d) {
       if (d.edgeType === "structural") return "edge structural";
-      if (d.edgeType === "tree") return d.placeholderParent ? "edge tree unknown" : "edge tree";
+      if (d.edgeType === "tree") return "edge tree";
       if (d.edgeType === "identity") return "edge identity-link";
       return [
         "edge",
@@ -11318,7 +11293,7 @@
       // click's link-selection, so the two gestures can't be confused for
       // each other on the same node. Only Library mode's `viewEntry` leaves
       // the graph behind entirely; nothing here should do that.
-      if (event.sourceEvent?.shiftKey && !d.placeholder) {
+      if (event.sourceEvent?.shiftKey) {
         if (currentMode === "graph") viewGraph(d.entry_id);
         else viewEntry(d.entry_id);
         return;
@@ -11335,11 +11310,11 @@
         chooseParent(pickParent, d);
         return;
       }
-      if (editing && tool === "connect" && !d.placeholder) {
+      if (editing && tool === "connect") {
         onNodeClick(d.entry_id);
         return;
       }
-      if (editing && (source.ctrlKey || source.metaKey) && !d.placeholder) {
+      if (editing && (source.ctrlKey || source.metaKey)) {
         if (selection.has(d.id)) selection.delete(d.id);
         else selection.add(d.id);
       } else {
@@ -11692,7 +11667,6 @@
       buildRawGraph(data);
     }
 
-    const PLACEHOLDER_ID = "unknown-original";
     const anchorOriginal = () => lastData?.nodes.find((n) => n.entry_id === currentEntryId)?.song_original ?? null;
 
     // The anchor's song: every track node in its edition group. Null when
@@ -11727,8 +11701,8 @@
     }
 
     // One node per recording (its uploads collapsed unless `expanded`),
-    // each version under what it was made from, else under the original,
-    // else under a placeholder for the unknown original.
+    // each version under what it was made from, else under the original
+    // (the server names one for every song).
     function buildSongGraph(data, members) {
       removedToggleText.textContent = "Show removed links";
       const anchor = members.find((n) => n.entry_id === currentEntryId);
@@ -11785,9 +11759,6 @@
           });
         }
       }
-      if (original == null) {
-        nodes.push({ id: PLACEHOLDER_ID, placeholder: true, title: "Unknown original", kind: "member", inSong: true });
-      }
       for (const [identity, ghost] of detachedHere) {
         if (byIdentity.has(identity)) continue; // put back since
         nodes.push({ ...ghost, id: String(identity), entry_id: identity, inSong: false, detached: true, kind: "member" });
@@ -11798,16 +11769,15 @@
         const parent = rep.song_parent ?? original;
         links.push({
           id: `tree-${identity}`,
-          source: parent == null ? PLACEHOLDER_ID : String(parent),
+          source: String(parent),
           target: String(identity),
           edgeType: "tree",
           kindText: songKindText(rep.song_kind),
           child: identity,
           parent,
-          placeholderParent: parent == null,
         });
       }
-      layoutSongTree(nodes, links, original == null ? PLACEHOLDER_ID : String(original));
+      layoutSongTree(nodes, links, String(original));
       update(nodes, links);
       // Every node is pinned, so the simulation has nothing to settle and
       // its "end" (which frames the view) may never come.
@@ -12200,7 +12170,7 @@
         detailPanel.appendChild(
           el("p", {
             className: "graph-detail-title",
-            text: d.placeholderParent ? `${capitalize(kindText)} of an unknown original` : `${capitalize(kindText)} of ${nodeName(d.source)}`,
+            text: `${capitalize(kindText)} of ${nodeName(d.source)}`,
           })
         );
         detailPanel.appendChild(el("p", { className: "graph-detail-type", text: `${nodeName(child)} · ${nodeMeta(child)}` }));
