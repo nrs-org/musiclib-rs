@@ -137,17 +137,15 @@ groups:
   - name: "human label (logs only)"
     anchors:
       anchor_a:
-        members:    # canonical pairs that define this entity
-          - "spotify:track:abc"
-          - "isrc:USRC12345678"
-        claim:      # ambiguous pairs that belong exclusively to this anchor
+        members:    # pairs that define this entity, including any
+          - "spotify:track:abc"   # pair two anchors share that belongs here
           - "isrc:USRC12345678"
       anchor_b:
         members:
           - "spotify:track:xyz"
 ```
 
-Each string is `source:identifier` (split on the first `:`). Pairs are canonicalized at load time so any URL form works. Two pairs assigned to different anchors within the same group can never share an entry; the `dedup` binary re-runs the barrier against an existing DB without ingesting new URLs.
+Each string is `source:identifier` (split on the first `:`). Pairs are canonicalized at load time so any URL form works. An anchor's members are force-merged into one entry, and two pairs assigned to different anchors within the same group can never share an entry. There is no `claim` key (unknown keys are ignored): list a shared pair as a member of the anchor it belongs to; the `dedup` binary re-runs the barrier against an existing DB without ingesting new URLs.
 
 ### Importer (`src/pipeline/importer.rs`)
 
