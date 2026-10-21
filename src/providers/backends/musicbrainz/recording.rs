@@ -61,6 +61,8 @@ pub(crate) struct RecordingRelation {
     /// Populated when `target_type == "work"` (a `performance` relation —
     /// how MB models cover/live/karaoke/etc., see `work.rs`).
     pub work: Option<RecordingRelationTarget>,
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +172,14 @@ pub async fn get_recording(
                         continue;
                     }
                     let Some(artist) = &rel.artist else { continue };
+                    let mut extra = rel.extra.clone();
+                    extra["attributes"] = serde_json::json!(rel.attributes);
+                    extra["direction"] = serde_json::json!(rel.direction);
+                    let credited_name = rel.extra["target-credit"]
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&artist.name);
+                    extra["credited_name"] = serde_json::json!(credited_name);
                     artist_refs.push(ChildRef {
                         entry_type: EntryType::Artist,
                         external_type: EXTERNAL_TYPE_ARTIST.into(),
@@ -179,13 +189,11 @@ pub async fn get_recording(
                             role: rel.relation_type.clone(),
                             main_artist: false,
                             source: SOURCE.into(),
-                            extra: serde_json::Value::Null,
+                            extra,
                         }],
                         ..Default::default()
                     });
                 }
-
-                let artist_children = CachedChildSource::from_children(artist_refs);
 
                 let mut sources: crate::providers::types::ExternalSources =
                     [(SOURCE.into(), HashSet::from([url]))].into();
@@ -253,18 +261,20 @@ pub async fn get_recording(
                 // is checked unconditionally per work below — it's a
                 // Work<->Work fact, independent of this performance's own
                 // attributes.
-                let work_relations: Vec<(String, bool)> = r
+                let work_relations: Vec<RecordingRelation> = r
                     .relations
                     .iter()
-                    .filter(|rel| rel.target_type == "work" && rel.relation_type == "performance")
-                    .filter_map(|rel| {
-                        rel.work
-                            .as_ref()
-                            .map(|w| (w.id.clone(), rel.attributes.iter().any(|a| a == "cover")))
+                    .filter(|rel| {
+                        rel.target_type == "work"
+                            && rel.relation_type == "performance"
+                            && rel.work.is_some()
                     })
+                    .cloned()
                     .collect();
-                let mut works: Vec<String> =
-                    work_relations.iter().map(|(id, _)| id.clone()).collect();
+                let mut works: Vec<String> = work_relations
+                    .iter()
+                    .filter_map(|rel| rel.work.as_ref().map(|w| w.id.clone()))
+                    .collect();
                 works.sort_unstable();
                 works.dedup();
 
@@ -272,7 +282,15 @@ pub async fn get_recording(
                 let extra = r.extra.clone();
 
                 async move {
-                    let songs = work::group_into_songs(&client, &works).await;
+                    let work_details = work::lookup_works(&client, &works).await?;
+                    for performance in &work_relations {
+                        let Some(performed) = &performance.work else { continue };
+                        if let Some(detail) = work_details.get(&performed.id) {
+                            artist_refs.extend(detail.artist_credits(&performed.id, performance));
+                        }
+                    }
+                    let artist_children = CachedChildSource::from_children(artist_refs);
+                    let songs = work::group_into_songs(&works, &work_details);
                     // An edition means "the same song". A recording performing
                     // several songs (karaoke stream, medley) is a container of
                     // songs, so it is never a cover/arrangement of any one of
@@ -288,7 +306,10 @@ pub async fn get_recording(
                         for (rec_id, title) in remix_targets {
                             original_refs.push(original_child_ref(&rec_id, &title, "remix"));
                         }
-                        for (work_id, is_cover) in work_relations {
+                        for performance in work_relations {
+                            let Some(performed) = performance.work else { continue };
+                            let work_id = performed.id;
+                            let is_cover = performance.attributes.iter().any(|a| a == "cover");
                             if is_cover {
                                 match work::find_original_anchors(&client, &work_id).await {
                                     Ok(originals) => {
@@ -302,29 +323,26 @@ pub async fn get_recording(
                                     ),
                                 }
                             }
-                            match work::find_arrangement_source_work(&client, &work_id).await {
-                                Ok(Some(source_work_id)) => {
-                                    match work::find_original_anchors(&client, &source_work_id)
-                                        .await
-                                    {
-                                        Ok(originals) => {
-                                            for (rec_id, title) in originals {
-                                                original_refs.push(original_child_ref(
-                                                    &rec_id,
-                                                    &title,
-                                                    "arrangement",
-                                                ));
-                                            }
+                            if let Some(source_work_id) = work_details
+                                .get(&work_id)
+                                .and_then(work::find_arrangement_source_work)
+                            {
+                                match work::find_original_anchors(&client, &source_work_id)
+                                    .await
+                                {
+                                    Ok(originals) => {
+                                        for (rec_id, title) in originals {
+                                            original_refs.push(original_child_ref(
+                                                &rec_id,
+                                                &title,
+                                                "arrangement",
+                                            ));
                                         }
-                                        Err(e) => warn!(
-                                            "musicbrainz: arrangement-original lookup failed for work {source_work_id}: {e}"
-                                        ),
                                     }
+                                    Err(e) => warn!(
+                                        "musicbrainz: arrangement-original lookup failed for work {source_work_id}: {e}"
+                                    ),
                                 }
-                                Ok(None) => {}
-                                Err(e) => warn!(
-                                    "musicbrainz: arrangement-source lookup failed for work {work_id}: {e}"
-                                ),
                             }
                         }
                     }
@@ -542,6 +560,14 @@ mod tests {
         );
         http_client.add_route_json::<serde_json::Value>(
             Method::GET,
+            &MusicBrainzClient::build_url(
+                &format!("work/{work_mbid}"),
+                &[("inc", super::work::CREDIT_PARTS)],
+            ),
+            include_str!("./work_king.json"),
+        );
+        http_client.add_route_json::<serde_json::Value>(
+            Method::GET,
             &work_recordings_api_url(work_mbid),
             include_str!("./work_king_recordings.json"),
         );
@@ -589,9 +615,8 @@ mod tests {
 
     /// A recording that performs several songs (a karaoke stream, a medley)
     /// is a container of songs, not a cover of any one of them: it records
-    /// its songs but resolves no originals. The mock has no `work/` routes,
-    /// so the works can't be grouped and count as separate songs, and an
-    /// original lookup would fail the test's child expectations.
+    /// its songs but resolves no originals. These works have no version
+    /// links, so they count as separate songs.
     #[tokio::test]
     async fn test_multi_work_recording_resolves_no_originals() -> anyhow::Result<()> {
         let mbid = "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391";
@@ -615,6 +640,22 @@ mod tests {
             &recording_api_url(mbid),
             Box::leak(recording.to_string().into_boxed_str()),
         );
+        for id in [
+            "7b11aea3-c733-42a5-a8cb-de0becb5f6ba",
+            "11111111-2222-3333-4444-555555555555",
+        ] {
+            http_client.add_route(
+                Method::GET,
+                &MusicBrainzClient::build_url(
+                    &format!("work/{id}"),
+                    &[("inc", super::work::CREDIT_PARTS)],
+                ),
+                crate::http::ResponseStatus::OK,
+                serde_json::json!({"title": id, "relations": []})
+                    .to_string()
+                    .into(),
+            );
+        }
         let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
         let rec = get_recording(
             &client,
@@ -675,18 +716,49 @@ mod tests {
         Ok(())
     }
 
-    /// `resolve_original_recordings: false` must skip both the direct-relation
-    /// and Work-lookup paths entirely — no extra child source, no extra HTTP
-    /// call (the mock has no `work/` route registered).
+    /// Writing credits are independent of original-recording discovery.
+    /// With discovery disabled, only the performed work is looked up;
+    /// neither its originals nor linked versions are visited for credits.
     #[tokio::test]
-    async fn test_resolve_original_recordings_false_skips_lookup() -> anyhow::Result<()> {
+    async fn test_resolve_original_recordings_false_still_fetches_work_credits()
+    -> anyhow::Result<()> {
         let mbid = "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391";
+        let work_id = "7b11aea3-c733-42a5-a8cb-de0becb5f6ba";
         let mut http_client = MockHttpClient::new();
         http_client.add_route_json::<RecordingResponse>(
             Method::GET,
             &recording_api_url(mbid),
             include_str!("./recording_king_cover.json"),
         );
+        let work_url = MusicBrainzClient::build_url(
+            &format!("work/{work_id}"),
+            &[("inc", super::work::CREDIT_PARTS)],
+        );
+        http_client.add_route(
+            Method::GET,
+            &work_url,
+            crate::http::ResponseStatus::OK,
+            serde_json::json!({
+                "title": "KING", "languages": ["jpn"],
+                "relations": [
+                    {"type": "composer", "target-type": "artist", "direction": "backward",
+                     "target-credit": "Credited writer", "attributes": ["additional"],
+                     "attribute-ids": {"additional": "attribute-id"},
+                     "artist": {"id": "writer", "name": "Writer"}},
+                    {"type": "lyricist", "target-type": "artist", "direction": "backward",
+                     "artist": {"id": "writer", "name": "Writer"}},
+                    {"type": "other version", "target-type": "work", "direction": "forward",
+                     "work": {"id": "unperformed-translation", "title": "Translation"}},
+                    {"type": "performance", "target-type": "recording", "direction": "backward",
+                     "recording": {"id": "original", "title": "Original"}}
+                ]
+            })
+            .to_string()
+            .into(),
+        );
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        http_client.set_on_route_callback(move |_, url| seen.lock().unwrap().push(url.to_owned()));
 
         let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
         let rec = get_recording(
@@ -698,7 +770,194 @@ mod tests {
         .await?;
 
         assert_eq!(rec.children.len(), 1);
+        let mut cursor = rec.children[0].owned_cursor();
+        let mut writing = Vec::new();
+        while let Some((artist, _)) = child_next(&mut cursor).await? {
+            for credit in artist.contributions {
+                if credit.extra["scope"] == "work" {
+                    writing.push(credit);
+                }
+            }
+        }
+        assert_eq!(writing.len(), 2);
+        assert_eq!(writing[0].role, "composer");
+        assert!(!writing[0].main_artist);
+        assert_eq!(writing[0].extra["credited_name"], "Credited writer");
+        assert_eq!(
+            writing[0].extra["attributes"],
+            serde_json::json!(["additional"])
+        );
+        assert_eq!(
+            writing[0].extra["attribute-ids"]["additional"],
+            "attribute-id"
+        );
+        assert_eq!(writing[0].extra["work"]["id"], work_id);
+        assert_eq!(
+            writing[0].extra["work"]["languages"],
+            serde_json::json!(["jpn"])
+        );
+        assert_eq!(
+            writing[0].extra["performance"]["attributes"],
+            serde_json::json!(["cover"])
+        );
+        assert_eq!(writing[1].role, "lyricist");
+        assert_eq!(writing[1].extra["credited_name"], "Writer");
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [recording_api_url(mbid), work_url]
+        );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_medley_keeps_work_credits_separate_and_reuses_work_lookups() -> anyhow::Result<()>
+    {
+        use crate::http::ResponseStatus;
+        use serde_json::json;
+        let mut http_client = MockHttpClient::new();
+        let performance = |id: &str, title: &str, attrs: &[&str], begin: &str, end: &str| {
+            json!({
+                "type": "performance", "target-type": "work", "direction": "forward",
+                "attributes": attrs, "begin": begin, "end": end,
+                "work": {"id": id, "title": title}
+            })
+        };
+        http_client.add_route(
+            Method::GET,
+            &recording_api_url("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            ResponseStatus::OK,
+            json!({"id": "medley", "title": "Medley", "relations": [
+                performance("orig", "Original", &["partial", "medley"], "2020-01-01", "2020-01-01"),
+                performance("ja", "Translation", &["partial", "medley"], "2020-01-02", "2020-01-02"),
+                performance("other", "Other song", &["partial", "medley"], "2020-01-03", "2020-01-03"),
+                performance("orig", "Original", &["partial", "medley"], "2021-01-01", "2021-01-01")
+            ]})
+            .to_string()
+            .into(),
+        );
+        let credit = |role: &str, name: &str| {
+            json!({
+                "type": role, "target-type": "artist", "direction": "backward",
+                "artist": {"id": name, "name": name}
+            })
+        };
+        for (id, title, relations) in [
+            (
+                "orig",
+                "Original",
+                vec![
+                    credit("composer", "Shared composer"),
+                    credit("lyricist", "Original lyricist"),
+                ],
+            ),
+            (
+                "ja",
+                "Translation",
+                vec![
+                    credit("composer", "Shared composer"),
+                    credit("translator", "Translator"),
+                    json!({"type": "other version", "target-type": "work", "direction": "backward",
+                       "work": {"id": "orig", "title": "Original"}}),
+                ],
+            ),
+            (
+                "other",
+                "Other song",
+                vec![credit("writer", "Other writer")],
+            ),
+        ] {
+            http_client.add_route(
+                Method::GET,
+                &MusicBrainzClient::build_url(
+                    &format!("work/{id}"),
+                    &[("inc", super::work::CREDIT_PARTS)],
+                ),
+                ResponseStatus::OK,
+                json!({"title": title, "relations": relations})
+                    .to_string()
+                    .into(),
+            );
+        }
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        http_client.set_on_route_callback(move |_, url| seen.lock().unwrap().push(url.to_owned()));
+        let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
+        let result = get_recording(
+            &client,
+            "https://musicbrainz.org/recording/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            false,
+            true,
+        )
+        .await?;
+        assert_eq!(result.children.len(), 1); // No originals for a multi-song recording.
+        assert!(
+            matches!(result.specific_data, EntrySpecificData::Track { ref songs, .. }
+            if songs == &vec![vec!["ja".to_owned(), "orig".to_owned()], vec!["other".to_owned()]])
+        );
+        let mut cursor = result.children[0].owned_cursor();
+        let mut credits = Vec::new();
+        while let Some((artist, _)) = child_next(&mut cursor).await? {
+            credits.extend(artist.contributions);
+        }
+        assert_eq!(credits.len(), 7);
+        assert!(
+            credits
+                .iter()
+                .any(|c| c.role == "translator" && c.extra["work"]["id"] == "ja")
+        );
+        assert!(
+            credits
+                .iter()
+                .filter(|c| c.role == "lyricist")
+                .all(|c| c.extra["work"]["id"] == "orig")
+        );
+        let composer: Vec<_> = credits.iter().filter(|c| c.role == "composer").collect();
+        assert_eq!(composer.len(), 3);
+        assert!(
+            composer
+                .iter()
+                .any(|c| c.extra["performance"]["begin"] == "2021-01-01")
+        );
+        assert_eq!(requests.lock().unwrap().len(), 4); // Recording + three unique works.
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_work_credit_lookup_errors_do_not_silently_drop_credits() -> anyhow::Result<()> {
+        use crate::http::ResponseStatus;
+        let mbid = "cfe0e8fb-2e0d-4a8c-81bb-5448cbc3d391";
+        for (status, body) in [
+            (ResponseStatus::NOT_FOUND, "{}"),
+            (ResponseStatus::SERVICE_UNAVAILABLE, "{}"),
+            (ResponseStatus::OK, "{broken json"),
+            (ResponseStatus::OK, "{\"error\":\"unexpected response\"}"),
+        ] {
+            let mut http_client = MockHttpClient::new();
+            http_client.add_route_json::<RecordingResponse>(
+                Method::GET,
+                &recording_api_url(mbid),
+                include_str!("./recording_king_cover.json"),
+            );
+            http_client.add_route(
+                Method::GET,
+                &MusicBrainzClient::build_url(
+                    "work/7b11aea3-c733-42a5-a8cb-de0becb5f6ba",
+                    &[("inc", super::work::CREDIT_PARTS)],
+                ),
+                status,
+                bytes::Bytes::from_static(body.as_bytes()),
+            );
+            let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
+            let result = get_recording(
+                &client,
+                &format!("https://musicbrainz.org/recording/{mbid}"),
+                false,
+                false,
+            )
+            .await;
+            assert_eq!(result.is_ok(), status == ResponseStatus::NOT_FOUND);
+        }
         Ok(())
     }
 }

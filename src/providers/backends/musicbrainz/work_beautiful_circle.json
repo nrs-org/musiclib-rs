@@ -1,0 +1,61 @@
+{
+  "id": "449529aa-9206-48da-85e5-07e663cfb494",
+  "iswcs": [],
+  "type-id": "f061270a-2fd6-32f1-a641-f0f8676d14e6",
+  "relations": [
+    {
+      "source-credit": "",
+      "type": "composer",
+      "target-type": "artist",
+      "artist": {
+        "name": "佐藤純一",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "sort-name": "Sato, Junichi",
+        "id": "cf1d1cbc-db14-43f4-aeb1-4e9eb8787ab0",
+        "type": "Person",
+        "country": "JP",
+        "disambiguation": "fhána"
+      },
+      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+      "attribute-values": {},
+      "target-credit": "",
+      "begin": null,
+      "ended": false,
+      "attribute-ids": {},
+      "end": null,
+      "attributes": [],
+      "direction": "backward"
+    },
+    {
+      "direction": "backward",
+      "end": null,
+      "attributes": [],
+      "attribute-ids": {},
+      "target-credit": "",
+      "begin": null,
+      "ended": false,
+      "attribute-values": {},
+      "artist": {
+        "disambiguation": "anime/J‐pop lyricist",
+        "country": "JP",
+        "type": "Person",
+        "id": "425ea6b5-766d-4fe6-baf5-fd14cda7bceb",
+        "sort-name": "Hayashi, Hideki",
+        "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+        "name": "林英樹"
+      },
+      "type-id": "3e48faba-ec01-47fd-8e89-30e81161661c",
+      "target-type": "artist",
+      "type": "lyricist",
+      "source-credit": ""
+    }
+  ],
+  "languages": [
+    "jpn"
+  ],
+  "disambiguation": "",
+  "title": "Beautiful Circle",
+  "type": "Song",
+  "attributes": [],
+  "language": "jpn"
+}

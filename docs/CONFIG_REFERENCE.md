@@ -58,6 +58,14 @@ standard environment variables listed below).
 | `mirror_db` | Credential? | `MUSICBRAINZ_MIRROR_DB` | Path to local `mb_mirror.db`; auto-detected from the data dir if omitted |
 | `dump_base_url` | Credential? | `MUSICBRAINZ_DUMP_BASE_URL` | Used by `mb_extract_urls` only; defaults to the public MetaBrainz server |
 
+Recording imports look up each performed work with `artist-rels+work-rels`
+to collect writing credits and group versions of the same song. These
+lookups also run when `resolve_original_recordings: false`; that setting
+only disables original-recording discovery. A missing work (404) is skipped,
+while other work lookup failures fail the recording fetch rather than
+silently discarding existing credits on re-import. See
+[artist credits](ARTIST_CREDITS.md) for metadata and scope details.
+
 If `mirror_db` is set (or found automatically), URL lookups skip the network for
 URLs not in the mirror. Build the mirror with `mb_extract_urls` and keep it fresh
 with `mb_sync_replication`.

@@ -8,8 +8,9 @@
 //! `ingest` (as a job, per spec §7), the generic job resource, and
 //! `suggest_relations`, which proposes `contains` between a release and its
 //! tracks, in both directions. Credits are not mapped to NRS relation kinds
-//! yet. `ingest` is reported unsupported when the server started without any
-//! provider (no credentials).
+//! yet; `resolve.extra.credits` exposes their artist identities, roles and
+//! provider evidence for clients to interpret. `ingest` is reported
+//! unsupported when the server started without any provider (no credentials).
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -28,10 +29,12 @@ use musiclib_rs::{
 };
 
 use crate::{
-    entries::{EntrySummary, SourceRef, credit_name, entry_summaries},
+    entries::{EntrySummary, SourceRef, entry_summaries},
     respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
+
+mod credits;
 
 const PREFIX: &str = "/nrs-store/v1";
 
@@ -160,20 +163,28 @@ const URL_PRIORITY: &[&str] = &[
     "discogs",
 ];
 
-/// What an entry summary carries beyond `EntrySummary`: per entry id, its
-/// `subtitle` (`artist_subtitles`) and `edition_group` (`edition_groups`).
+/// What a protocol summary carries beyond `EntrySummary`: its subtitle and
+/// edition group, plus the credits used by both subtitle and resolve.
+#[derive(Default)]
 struct SummaryExtras {
     subtitles: HashMap<i64, String>,
     edition_groups: HashMap<i64, String>,
+    credits: HashMap<i64, Vec<credits::Credit>>,
 }
 
 async fn summary_extras(
     state: &Arc<AppState>,
     entries: &[&EntrySummary],
 ) -> anyhow::Result<SummaryExtras> {
+    let credits = credits::load(&state.db, entries).await?;
+    let subtitles = credits
+        .iter()
+        .filter_map(|(&id, credits)| credits::subtitle(credits).map(|s| (id, s)))
+        .collect();
     Ok(SummaryExtras {
-        subtitles: artist_subtitles(state, entries).await?,
+        subtitles,
         edition_groups: edition_groups(state, entries).await?,
+        credits,
     })
 }
 
@@ -302,95 +313,6 @@ async fn edition_groups(
     Ok(out)
 }
 
-/// Each non-artist entry's main artists, comma-joined: its `listed_artist`
-/// credits, else its other main-artist credits (a YouTube uploader), each
-/// by the name the entry credits it as (`credit_name`). Only
-/// credits naming an artist entry count; some release credits name a
-/// recording or release instead.
-async fn artist_subtitles(
-    state: &Arc<AppState>,
-    entries: &[&EntrySummary],
-) -> anyhow::Result<HashMap<i64, String>> {
-    let db = &state.db;
-    let credited: Vec<&EntrySummary> = entries
-        .iter()
-        .copied()
-        .filter(|e| e.entry_type != "artist")
-        .collect();
-    let pairs: Vec<(String, String)> = credited
-        .iter()
-        .flat_map(|e| &e.sources)
-        .map(|s| (s.source.clone(), s.identifier.clone()))
-        .collect();
-    let contribs: Vec<_> = db
-        .contrib_rows_for_track_pairs(&pairs)
-        .await?
-        .into_iter()
-        .filter(|c| c.main_artist)
-        .collect();
-    let artist_pairs: Vec<(String, String)> = contribs
-        .iter()
-        .map(|c| (c.artist_source.clone(), c.artist_identifier.clone()))
-        .collect();
-    let artist_of_pair: HashMap<(String, String), i64> = db
-        .source_rows_for_pairs(&artist_pairs)
-        .await?
-        .into_iter()
-        .map(|s| ((s.source, s.identifier), s.entry_id))
-        .collect();
-    let candidate_ids: Vec<i64> = artist_of_pair.values().copied().collect();
-    let artist_ids: Vec<i64> = db
-        .entry_rows_by_ids(&candidate_ids)
-        .await?
-        .into_iter()
-        .filter(|e| e.entry_type == "artist")
-        .map(|e| e.id)
-        .collect();
-    let artists = entry_summaries(db, &artist_ids).await?;
-    let credited_ids: Vec<i64> = credited
-        .iter()
-        .flat_map(|e| &e.members)
-        .map(|m| m.entry_id)
-        .collect();
-    let overrides = db.credit_display_names(&credited_ids).await?;
-
-    let mut out = HashMap::new();
-    for entry in credited {
-        let members: Vec<i64> = entry.members.iter().map(|m| m.entry_id).collect();
-        let own: HashSet<(&str, &str)> = entry
-            .sources
-            .iter()
-            .map(|s| (s.source.as_str(), s.identifier.as_str()))
-            .collect();
-        let names_for = |listed: bool| {
-            let mut names: Vec<&str> = Vec::new();
-            for c in &contribs {
-                if !own.contains(&(c.source.as_str(), c.identifier.as_str()))
-                    || (c.role == "listed_artist") != listed
-                {
-                    continue;
-                }
-                let name = artist_of_pair
-                    .get(&(c.artist_source.clone(), c.artist_identifier.clone()))
-                    .and_then(|id| artists.get(id))
-                    .and_then(|a| credit_name(&overrides, &members, a).or(a.title.as_deref()));
-                if let Some(name) = name.filter(|n| !names.contains(n)) {
-                    names.push(name);
-                }
-            }
-            names
-        };
-        let mut names = names_for(true);
-        if names.is_empty() {
-            names = names_for(false);
-        }
-        if !names.is_empty() {
-            out.insert(entry.entry_id, names.join(", "));
-        }
-    }
-    Ok(out)
-}
-
 /// Default and maximum `search` result counts.
 const SEARCH_LIMIT: (usize, usize) = (20, 100);
 
@@ -513,6 +435,7 @@ async fn resolve(state: &Arc<AppState>, store_id: &str) -> HyperResponse {
         Ok(extras) => extras,
         Err(e) => return internal(e),
     };
+    extra["credits"] = credits::json(extras.credits.get(&entry_id).map_or(&[], Vec::as_slice));
     let mut body = summary_json(entry, &extras);
     body["cover_url"] = Value::Null;
     body["extra"] = extra;

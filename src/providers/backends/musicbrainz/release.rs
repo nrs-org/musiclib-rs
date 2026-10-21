@@ -347,6 +347,14 @@ mod tests {
             &recording_api_url(recording_mbid),
             include_str!("./recording_beautiful_circle.json"),
         );
+        http_client.add_route_json::<serde_json::Value>(
+            Method::GET,
+            &MusicBrainzClient::build_url(
+                "work/449529aa-9206-48da-85e5-07e663cfb494",
+                &[("inc", super::super::work::CREDIT_PARTS)],
+            ),
+            include_str!("./work_beautiful_circle.json"),
+        );
 
         let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
         let rel = get_release(&client, &format!("https://musicbrainz.org/release/{mbid}")).await?;
@@ -424,7 +432,7 @@ mod tests {
             &HashSet::from(["JPV752307972".to_string()])
         );
 
-        // 1 child source containing: 1 artist-credit (Watame) + 15 artist-rels
+        // Recording and work-level artist credits share one child source.
         assert_eq!(rec.children.len(), 1);
         let mut rec_artists = rec.children[0].cursor();
         let (main_artist, _) = child_next(&mut rec_artists)
@@ -440,6 +448,43 @@ mod tests {
         assert_eq!(arranger.name.as_deref(), Some("佐藤純一"));
         assert_eq!(arranger.contributions[0].role, "arranger");
         assert!(!arranger.contributions[0].main_artist);
+        assert_eq!(arranger.contributions[0].extra["credited_name"], "佐藤純一");
+        assert_eq!(arranger.contributions[0].extra["direction"], "backward");
+
+        let (saxophonist, _) = child_next(&mut rec_artists)
+            .await?
+            .expect("expected saxophonist");
+        assert_eq!(saxophonist.contributions[0].role, "instrument");
+        assert_eq!(
+            saxophonist.contributions[0].extra["attributes"],
+            serde_json::json!(["alto saxophone"])
+        );
+        assert_eq!(
+            saxophonist.contributions[0].extra["attribute-ids"]["alto saxophone"],
+            "9c977091-b27a-4a0e-b54e-b5ab89420e22"
+        );
+
+        let mut writing = Vec::new();
+        while let Some((artist, _)) = child_next(&mut rec_artists).await? {
+            for credit in artist.contributions {
+                if credit.extra["scope"] == "work" {
+                    writing.push((artist.name.clone().unwrap_or_default(), credit));
+                }
+            }
+        }
+        assert!(
+            writing
+                .iter()
+                .any(|(name, c)| name == "佐藤純一" && c.role == "composer")
+        );
+        assert!(
+            writing
+                .iter()
+                .any(|(name, c)| name == "林英樹" && c.role == "lyricist")
+        );
+        assert!(writing.iter().all(|(_, c)| {
+            !c.main_artist && c.extra["work"]["id"] == "449529aa-9206-48da-85e5-07e663cfb494"
+        }));
 
         Ok(())
     }

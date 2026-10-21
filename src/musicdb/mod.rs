@@ -1306,12 +1306,14 @@ pub fn merge_songs(groups: impl IntoIterator<Item = Vec<String>>) -> Vec<Vec<Str
 
 fn contrib_row_from_model(m: contribution::Model) -> ContribRow {
     ContribRow {
+        id: m.id,
         source: m.source,
         identifier: m.identifier,
         artist_source: m.artist_source,
         artist_identifier: m.artist_identifier,
         role: m.role,
         main_artist: m.main_artist,
+        extra: m.extra,
     }
 }
 
@@ -4503,12 +4505,16 @@ pub struct AliasRow {
 }
 
 pub struct ContribRow {
+    pub id: i64,
     pub source: String,
     pub identifier: String,
     pub artist_source: String,
     pub artist_identifier: String,
     pub role: String,
     pub main_artist: bool,
+    /// Provider-specific credit facts, including order, credited name and
+    /// performance attributes. Older rows may have no extra metadata.
+    pub extra: Option<String>,
 }
 
 /// A contribution's identity under its parent pair: (artist pair, role,
