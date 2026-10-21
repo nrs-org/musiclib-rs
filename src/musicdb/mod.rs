@@ -427,6 +427,8 @@ pub struct PairImageRow {
     pub source: String,
     pub identifier: String,
     pub url: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
     pub fetched: bool,
 }
 
@@ -3342,6 +3344,8 @@ impl MusicDb {
             source: m.source,
             identifier: m.identifier,
             url: m.url,
+            width: m.width,
+            height: m.height,
         })
         .collect())
     }
