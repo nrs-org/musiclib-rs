@@ -65,6 +65,38 @@ main:
           - { name_regex: "お歌の動画だよ" }    # Tokino Sora
       fetch: playlist_all
 
+    # Exact music playlist titles from the Hololive audit (2026-10-23).
+    # Anchors matter: game titles, radio shows and music-making streams
+    # also contain words such as "music" and "song".
+    - match:
+        all:
+          - { external_type: "youtube:playlist" }
+          - any:
+              # JP: Botan, Towa (covers), La+ (solo/collaboration covers)
+              - { name_regex: "^(歌/song|SONG|歌|コラボうた)$" }
+              # ReGLOSS / FLOW GLOW: Ao, Su, Chihaya
+              - { name_regex: "^歌った動画／SingingMove$" }
+              - { name_regex: "^(歌みた|コラボ 歌みた)$" }
+              - { name_regex: "^(official|1st single Flat out)$" }
+              # ID: Moona, Ollie (solo/group songs), Kaela
+              - { name_regex: "^Moona Music Playlist$" }
+              - { name_regex: "^KUREIJI OLLIE - (SOLO|GROUP) SONGS$" }
+              - { name_regex: "^Music 🎵$" }
+              # EN: Calliope, Ina, Kiara
+              - { name_regex: "^Mori Calliope Music$" }
+              - { name_regex: "^🎤$" }
+              - { name_regex: "^❁(ORIGINALS|MUSIC)❁$" }
+              # Gura/Baelz originals; IRyS/Kronii/Cecilia music; Bijou covers
+              - { name_regex: "(?i)^((original )?music!?|songs|cover)$" }
+              # Fauna, Mumei (Music above), Shiori, Nerissa, FUWAMOCO
+              - { name_regex: "^✿ Music ✿$" }
+              - { name_regex: "^Music uploads$" }
+              - { name_regex: "^(MY MUSIC|FUWAMOCO MUSIC)$" }
+              # Elizabeth originals/covers; Gigi
+              - { name_regex: "^(ORIGINAL MUSIC|MUSIC) - Elizabeth Rose Bloodflame$" }
+              - { name_regex: "^🎵 Music$" }
+      fetch: playlist_all
+
     # Priority 10 — generic music keywords whitelist
     - match:
         all:
