@@ -119,6 +119,8 @@ pub struct EditionRef {
     /// this; `entry_summaries` leaves it empty, since search and the queue
     /// summarize far more entries than they show editions for.
     pub artists: Vec<String>,
+    /// Complete rendered credit, including the source's join phrases.
+    pub artist_credit: Option<String>,
     /// How strongly the user prefers this edition when its group is queued
     /// (`preferences`); 0 for no preference. Filled like `artists`.
     pub preferred_weight: u32,
@@ -279,6 +281,8 @@ pub struct Credit {
     pub name: String,
     /// The artist's own display name.
     pub artist_name: String,
+    /// This entry's imported name, restored when a rename is cleared.
+    pub credited_name: Option<String>,
     pub renamed: bool,
     /// The artist's aliases (`entry_aliases`).
     pub aliases: Vec<String>,
@@ -289,8 +293,12 @@ pub struct Credit {
 pub async fn entry_credits(db: &MusicDb, entry_id: i64) -> anyhow::Result<Vec<Credit>> {
     let members = component_members(db, entry_id).await?;
     let mut artist_ids: Vec<i64> = Vec::new();
+    let mut imported_names = HashMap::new();
     for &m in &members {
         for c in db.main_artist_credits(m).await? {
+            if let Some(name) = c.credited_name.filter(|n| !n.is_empty()) {
+                imported_names.entry(c.artist_entry_id).or_insert(name);
+            }
             if !artist_ids.contains(&c.artist_entry_id) {
                 artist_ids.push(c.artist_entry_id);
             }
@@ -311,10 +319,15 @@ pub async fn entry_credits(db: &MusicDb, entry_id: i64) -> anyhow::Result<Vec<Cr
         seen.extend(&artist.soft_linked_ids);
         let artist_name = artist.title.clone().unwrap_or_default();
         let chosen = credit_name(&overrides, &members, artist);
+        let credited_name = imported_names.get(&id).cloned();
         out.push(Credit {
             artist_id: id,
-            name: chosen.map_or_else(|| artist_name.clone(), str::to_owned),
+            name: chosen
+                .or(credited_name.as_deref())
+                .unwrap_or(&artist_name)
+                .to_owned(),
             artist_name,
+            credited_name,
             renamed: chosen.is_some(),
             aliases: entry_aliases(db, id).await?,
         });
@@ -543,6 +556,7 @@ pub async fn entry_summaries_with(
                         kinds
                     }),
                     artists: Vec::new(),
+                    artist_credit: None,
                     preferred_weight: 0,
                     playability: Playability::of(
                         sib_sources

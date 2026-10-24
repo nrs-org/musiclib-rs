@@ -297,18 +297,6 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
                 {
                     max_disc = max_disc.max(d);
                 }
-                // Main artists: per-track if present, otherwise release-level.
-                let main_artists = if !t.artists.is_empty() {
-                    artist_child_refs(&t.artists)
-                } else {
-                    artist_child_refs(&r.artists)
-                };
-                let extra_artists = artist_child_refs(&t.extraartists);
-                let contributions = main_artists
-                    .iter()
-                    .chain(extra_artists.iter())
-                    .flat_map(|c| c.contributions.clone())
-                    .collect();
                 // Fall back to an index-based synthetic position (disc_no=0 is the sentinel)
                 // when the Discogs position string can't be parsed (e.g. "Video", "").
                 let effective_pos = position.clone().unwrap_or(TrackPosition {
@@ -329,7 +317,9 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
                     duration_ms: t.duration.as_deref().and_then(parse_duration_ms),
                     appears_on: false,
                     position: Some(effective_pos),
-                    contributions,
+                    // This edge lists a track on the release; its credits
+                    // come from the track's own artist children when fetched.
+                    contributions: vec![],
                     original_relation_kind: None,
                 }
             })
@@ -543,6 +533,7 @@ mod tests {
         assert_eq!(track1.entry_type, EntryType::Track);
         assert_eq!(track1.external_type.as_ref(), EXTERNAL_TYPE_TRACK);
         assert_eq!(track1.name.as_deref(), Some("Beautiful Circle"));
+        assert!(track1.contributions.is_empty());
         let pos = track1.position.as_ref().expect("expected position");
         assert_eq!(pos.track_no, 1);
         assert_eq!(pos.disc_no, None);

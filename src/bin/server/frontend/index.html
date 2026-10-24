@@ -8455,7 +8455,7 @@
     // switch between a video and the compact Spotify surface).
     new ResizeObserver(syncStagePosition).observe(dockEl);
 
-    // `artists` are the library's credited artists (`{ entry_id, name }`),
+    // `artists` are the library's ordered credit parts, including punctuation,
     // each a link to its entry; `rest` is plain text after them.
     // `context` is what the queue was played from (a playlist), linked
     // after the rest.
@@ -8469,8 +8469,8 @@
         barSubKey = subKey;
         const nodes = [];
         artists.forEach((a, i) => {
-          if (i) nodes.push(", ");
           nodes.push(entryLink(a.entry_id, a.name, "player-bar-artist"));
+          nodes.push(a.join_phrase ?? (i + 1 < artists.length ? ", " : ""));
         });
         for (const text of rest) {
           if (nodes.length) nodes.push(" · ");
@@ -10299,12 +10299,17 @@
     unavailable: "Only a local file — nothing to play",
   };
 
+  function editionArtistLine(ed) {
+    return ed?.artist_credit ?? (ed?.artists || []).join(", ");
+  }
+
   function fillEditions(host, editionsList, onPick = (ed) => viewEntry(ed.entry_id), prefs = null) {
     host.innerHTML = "";
     const list = editionsList || [];
     host.hidden = list.length <= 1;
     for (const ed of list) {
-      const who = ed.artists?.length ? ` · ${ed.artists.join(", ")}` : "";
+      const artist = editionArtistLine(ed);
+      const who = artist ? ` · ${artist}` : "";
       const label = friendlyType(editionKind(ed)) + who;
       if (prefs) {
         const playability = ed.is_current ? null : ed.playability;
@@ -10429,8 +10434,8 @@
     const originalTitle = (original?.title || "").trim().toLowerCase();
     // Performers only tell editions apart when they differ — the same
     // artist's remix and instrumental read better by title.
-    const originalArtists = (original?.artists || []).join(", ");
-    const showArtists = list.some((ed) => (ed.artists || []).join(", ") !== originalArtists);
+    const originalArtists = editionArtistLine(original);
+    const showArtists = list.some((ed) => editionArtistLine(ed) !== originalArtists);
     const groups = new Map();
     for (const ed of list) {
       const kind = editionKind(ed);
@@ -10480,7 +10485,7 @@
   // when `showArtists`, its own title when that says more than the
   // original's, the platforms it plays on, and its date.
   function editionRow(ed, originalTitle, showArtists) {
-    const who = showArtists && ed.artists?.length ? ed.artists.join(", ") : null;
+    const who = showArtists ? editionArtistLine(ed) || null : null;
     const title = ed.title || "(untitled)";
     const titleSaysMore = title.trim().toLowerCase() !== originalTitle;
     const dots = el("span", { className: "edition-dots" });
@@ -13853,25 +13858,26 @@
   // The artists `entryId` credits, each a link to the artist with a rename
   // for how this entry credits them.
   async function loadCredits(entryId, container, byline) {
-    let credits;
+    let data;
     try {
-      ({ credits } = await api(`/api/entries/${entryId}/credits`));
+      data = await api(`/api/entries/${entryId}/credits`);
     } catch {
       return;
     }
-    if (activeId === entryId) fillCredits(entryId, container, credits, byline);
+    if (activeId === entryId) fillCredits(entryId, container, data.credits, byline, data.artist_credit);
   }
 
   // `byline` (the card meta's "by …" span) gets the credited names as
   // links plus a toggle for `container`, the rename editors, which stay
   // closed until asked for.
-  function fillCredits(entryId, container, credits, byline) {
+  function fillCredits(entryId, container, credits, byline, artistCredit) {
     byline.replaceChildren();
-    if (credits.length) {
+    const line = artistCredit ?? credits.map((c) => ({ entry_id: c.artist_id, name: c.name }));
+    if (line.length) {
       byline.appendChild(document.createTextNode("by "));
-      credits.forEach((c, i) => {
-        if (i) byline.appendChild(document.createTextNode(", "));
-        byline.appendChild(entryLink(c.artist_id, c.name, "credit-name"));
+      line.forEach((c, i) => {
+        byline.appendChild(entryLink(c.entry_id, c.name, "credit-name"));
+        byline.appendChild(document.createTextNode(c.join_phrase ?? (i + 1 < line.length ? ", " : "")));
       });
       byline.appendChild(
         el("button", {
@@ -13899,10 +13905,10 @@
           value: c.name,
           aliases: c.aliases,
           renamed: c.renamed,
-          resetLabel: `Use “${c.artist_name}”`,
+          resetLabel: `Use “${c.credited_name || c.artist_name}”`,
           onSave: async (name) => {
             const next = await postJson(`/api/entries/${entryId}/credits/${c.artist_id}/display-name`, { name });
-            fillCredits(entryId, container, next.credits, byline);
+            fillCredits(entryId, container, next.credits, byline, next.artist_credit);
             return null;
           },
         })

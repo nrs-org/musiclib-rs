@@ -618,6 +618,10 @@ pub struct MainCredit {
     pub role: String,
     /// The credited artist's own entry.
     pub artist_entry_id: i64,
+    /// This source's name for the artist on this entry.
+    pub credited_name: Option<String>,
+    /// Literal text after the name, including any closing punctuation.
+    pub join_phrase: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2122,6 +2126,12 @@ impl MusicDb {
             )
             .await?;
         }
+        if user_version < 11 {
+            let txn = db.begin().await?;
+            txn.execute_unprepared(NON_ARTIST_CONTRIBUTION_MIGRATION)
+                .await?;
+            txn.commit().await?;
+        }
         Ok(Self {
             db,
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -2299,16 +2309,21 @@ impl MusicDb {
     /// The main-artist credits on each of `entry_id`'s sources, in credit
     /// order. Every source credits the artists separately (MusicBrainz,
     /// Spotify and a YouTube uploader for one track), so callers pick one
-    /// source's list rather than merging them.
+    /// source's list rather than merging them. Ignore historical rows that
+    /// incorrectly target a track or release instead of an artist.
     pub async fn main_artist_credits(&self, entry_id: i64) -> Result<Vec<MainCredit>, Error> {
         let stmt = Statement::from_sql_and_values(
             self.db.get_database_backend(),
             "SELECT c.source AS source, c.identifier AS identifier, c.role AS role, \
-                    artist.entry_id AS artist_entry_id \
+                    artist.entry_id AS artist_entry_id, \
+                    json_extract(c.extra, '$.credited_name') AS credited_name, \
+                    json_extract(c.extra, '$.joinphrase') AS join_phrase \
              FROM entry_source es \
              JOIN contribution c ON c.source = es.source AND c.identifier = es.identifier \
              JOIN entry_source artist \
                ON artist.source = c.artist_source AND artist.identifier = c.artist_identifier \
+             JOIN entry artist_entry ON artist_entry.id = artist.entry_id \
+               AND artist_entry.entry_type = 'artist' \
              WHERE es.entry_id = ? AND c.main_artist \
              ORDER BY c.source, c.identifier, json_extract(c.extra, '$.index'), c.id",
             [entry_id.into()],
@@ -2323,6 +2338,8 @@ impl MusicDb {
                     identifier: row.try_get("", "identifier")?,
                     role: row.try_get("", "role")?,
                     artist_entry_id: row.try_get("", "artist_entry_id")?,
+                    credited_name: row.try_get("", "credited_name")?,
+                    join_phrase: row.try_get("", "join_phrase")?,
                 })
             })
             .collect()
@@ -5173,6 +5190,22 @@ const CONTRIBUTION_DEDUP_MIGRATION: &str = "
     );
     PRAGMA user_version = 2;";
 
+/// Release tracklists once copied their tracks' credits onto the
+/// release-to-track edge, making recordings appear to be artists. Remove
+/// contributions whose target is a known musical object, across all roles
+/// and providers. Keep unresolved pairs and unknown entry types: those can
+/// still turn out to be artists when fetched. Containment edges, artist
+/// credits, and manual display names are independent and remain intact.
+const NON_ARTIST_CONTRIBUTION_MIGRATION: &str = "
+    DELETE FROM contribution WHERE EXISTS (
+        SELECT 1 FROM entry_source artist
+        JOIN entry e ON e.id = artist.entry_id
+        WHERE artist.source = contribution.artist_source
+          AND artist.identifier = contribution.artist_identifier
+          AND e.entry_type IN ('track', 'release', 'release_group')
+    );
+    PRAGMA user_version = 11;";
+
 /// Matches an `entry_relation` row with no `entry_child` edge between its
 /// two entries, in either direction: for a provider cover/remix/arrangement
 /// relation, nothing lists it any more.
@@ -6718,6 +6751,70 @@ mod tests {
         assert_eq!(ids, vec![1]);
     }
 
+    #[tokio::test]
+    async fn main_artist_credits_exclude_non_artist_targets() {
+        let mdb = mem_db().await;
+        let release = mdb.insert_entry(Some(EntryType::Release)).await.unwrap();
+        mdb.upsert_stub_pair("musicbrainz", "release", release, None, None)
+            .await
+            .unwrap();
+
+        let mut artist_id = 0;
+        for (identifier, kind) in [
+            ("track", Some(EntryType::Track)),
+            ("artist", Some(EntryType::Artist)),
+            ("other-release", Some(EntryType::Release)),
+            ("release-group", Some(EntryType::ReleaseGroup)),
+            ("unknown", None),
+        ] {
+            let id = mdb.insert_entry(kind).await.unwrap();
+            mdb.upsert_stub_pair("musicbrainz", identifier, id, None, None)
+                .await
+                .unwrap();
+            if identifier == "artist" {
+                artist_id = id;
+            }
+            mdb.insert_contribution(
+                "musicbrainz",
+                "release",
+                "musicbrainz",
+                identifier,
+                &Contribution {
+                    role: "listed_artist".into(),
+                    main_artist: true,
+                    source: "musicbrainz".into(),
+                    extra: serde_json::json!({"credited_name": "Singer", "index": 0}),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Keep repeated, differently credited appearances of a real artist.
+        mdb.insert_contribution(
+            "musicbrainz",
+            "release",
+            "musicbrainz",
+            "artist",
+            &Contribution {
+                role: "listed_artist".into(),
+                main_artist: true,
+                source: "musicbrainz".into(),
+                extra: serde_json::json!({"credited_name": "Alias", "index": 1}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let credits = mdb.main_artist_credits(release).await.unwrap();
+        assert_eq!(credits.len(), 2);
+        assert!(credits.iter().all(|c| c.artist_entry_id == artist_id));
+        assert_eq!(credits[0].credited_name.as_deref(), Some("Singer"));
+        assert_eq!(credits[1].credited_name.as_deref(), Some("Alias"));
+    }
+
     fn contribution_row(role: &str, extra: Option<&str>) -> contribution::ActiveModel {
         contribution::ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
@@ -6813,6 +6910,130 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(contribution_count(&mdb).await, 2);
+    }
+
+    #[tokio::test]
+    async fn contribution_migration_removes_non_artists_and_preserves_real_credits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("v10.db").display());
+        let (parent, expected, sources, children, names) = {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            let parent = mdb.insert_entry(Some(EntryType::Release)).await.unwrap();
+            mdb.upsert_stub_pair("musicbrainz", "parent", parent, None, None)
+                .await
+                .unwrap();
+            for (identifier, kind) in [
+                ("track", Some(EntryType::Track)),
+                ("release", Some(EntryType::Release)),
+                ("group", Some(EntryType::ReleaseGroup)),
+                ("artist", Some(EntryType::Artist)),
+                ("unknown", None),
+            ] {
+                let id = mdb.insert_entry(kind).await.unwrap();
+                mdb.upsert_stub_pair("musicbrainz", identifier, id, None, None)
+                    .await
+                    .unwrap();
+                if identifier == "artist" {
+                    mdb.set_credit_display_name(parent, &[parent], id, &[id], Some("Chosen name"))
+                        .await
+                        .unwrap();
+                }
+            }
+            mdb.insert_child_edge(
+                "musicbrainz",
+                "parent",
+                "musicbrainz",
+                "track",
+                None,
+                Some(1),
+                None,
+            )
+            .await
+            .unwrap();
+            for identifier in [
+                "track",
+                "release",
+                "group",
+                "artist",
+                "unknown",
+                "unresolved",
+            ] {
+                for source in ["musicbrainz", "discogs"] {
+                    for (role, main_artist) in [("listed_artist", true), ("composer", false)] {
+                        mdb.insert_contribution(
+                            source,
+                            "parent",
+                            "musicbrainz",
+                            identifier,
+                            &Contribution {
+                                source: source.into(),
+                                role: role.into(),
+                                main_artist,
+                                extra: serde_json::json!({"credited_name": "Singer", "index": 0}),
+                            },
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+            }
+            let expected: Vec<_> = contribution::Entity::find()
+                .order_by_asc(contribution::Column::Id)
+                .all(&mdb.db)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|c| {
+                    matches!(
+                        c.artist_identifier.as_str(),
+                        "artist" | "unknown" | "unresolved"
+                    )
+                })
+                .collect();
+            let sources = entry_source::Entity::find().all(&mdb.db).await.unwrap();
+            let children = entry_child::Entity::find().all(&mdb.db).await.unwrap();
+            let names = mdb.credit_display_names(&[parent]).await.unwrap();
+            mdb.db
+                .execute_unprepared("PRAGMA user_version = 10;")
+                .await
+                .unwrap();
+            (parent, expected, sources, children, names)
+        };
+
+        // Reopening runs the real upgrade; a second open must be a no-op.
+        for _ in 0..2 {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            assert_eq!(
+                contribution::Entity::find()
+                    .order_by_asc(contribution::Column::Id)
+                    .all(&mdb.db)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                entry_source::Entity::find().all(&mdb.db).await.unwrap(),
+                sources
+            );
+            assert_eq!(
+                entry_child::Entity::find().all(&mdb.db).await.unwrap(),
+                children
+            );
+            assert_eq!(mdb.credit_display_names(&[parent]).await.unwrap(), names);
+            let version: i64 = mdb
+                .db
+                .query_one_raw(Statement::from_string(
+                    mdb.db.get_database_backend(),
+                    "PRAGMA user_version",
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get("", "user_version")
+                .unwrap();
+            assert_eq!(version, 11);
+        }
     }
 
     async fn alias_count(mdb: &MusicDb) -> u64 {

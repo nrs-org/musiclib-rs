@@ -144,17 +144,6 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
                 medium.tracks.iter().map(move |track| {
                     let rec = track.recording.as_ref();
                     let recording_mbid = rec.map(|r| r.id.as_str());
-                    // Prefer track-level artist credit; fall back to recording's.
-                    let credits = if !track.artist_credit.is_empty() {
-                        &track.artist_credit
-                    } else {
-                        rec.map(|r| &r.artist_credit)
-                            .unwrap_or(&track.artist_credit)
-                    };
-                    let contributions = artist_credit_child_refs(credits)
-                        .into_iter()
-                        .flat_map(|c| c.contributions)
-                        .collect();
                     let sources = if let Some(id) = recording_mbid {
                         [(SOURCE.into(), HashSet::from([recording_url(id)]))].into()
                     } else {
@@ -180,7 +169,10 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
                             track_no: track.position,
                             synthetic: false,
                         }),
-                        contributions,
+                        // Contributions on this edge would credit the recording
+                        // itself as an artist of the release. The recording's
+                        // own artist children supply its credits when fetched.
+                        contributions: vec![],
                         original_relation_kind: None,
                     }
                 })
@@ -325,6 +317,7 @@ mod tests {
             ])
         );
         assert_eq!(track.name.as_deref(), Some("Watame Lullaby"));
+        assert!(track.contributions.is_empty());
         let pos = track.position.as_ref().expect("expected position");
         assert_eq!(pos.track_no, 1);
         assert_eq!(pos.disc_no, None); // single-disc: disc_no is None

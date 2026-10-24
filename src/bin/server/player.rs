@@ -793,9 +793,11 @@ async fn entry_details(state: &Arc<AppState>, id: &str) -> HyperResponse {
         for (ed, line) in summary.editions.iter_mut().zip(lines) {
             // A missing artist line just leaves the edition unlabelled —
             // never worth failing the whole entry page over.
-            ed.artists = line
-                .map(|artists| artists.into_iter().map(|a| a.name).collect())
-                .unwrap_or_default();
+            if let Ok(artists) = line {
+                ed.artist_credit =
+                    (!artists.is_empty()).then(|| crate::playback::credit_line(&artists));
+                ed.artists = artists.into_iter().map(|a| a.name).collect();
+            }
         }
         let ids: Vec<i64> = summary.editions.iter().map(|ed| ed.entry_id).collect();
         match crate::preferences::edition_weights(&state.db, &ids).await {
@@ -913,8 +915,14 @@ async fn credits(state: &Arc<AppState>, id: &str) -> HyperResponse {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    match entry_credits(&state.db, entry_id).await {
-        Ok(credits) => respond::json(StatusCode::OK, json!({ "credits": credits })),
+    match tokio::try_join!(
+        entry_credits(&state.db, entry_id),
+        crate::playback::artist_line(&state.db, entry_id, None),
+    ) {
+        Ok((credits, artist_credit)) => respond::json(
+            StatusCode::OK,
+            json!({ "credits": credits, "artist_credit": artist_credit }),
+        ),
         Err(e) => respond::error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

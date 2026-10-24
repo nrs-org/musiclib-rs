@@ -415,6 +415,14 @@ struct Credited {
 pub(crate) struct CreditedArtist {
     pub(crate) entry_id: i64,
     pub(crate) name: String,
+    pub(crate) join_phrase: String,
+}
+
+pub(crate) fn credit_line(artists: &[CreditedArtist]) -> String {
+    artists
+        .iter()
+        .map(|a| format!("{}{}", a.name, a.join_phrase))
+        .collect()
 }
 
 impl Session {
@@ -514,8 +522,7 @@ impl Session {
 
     /// `artists` as one line, for the OS media controls.
     fn artist(&self) -> Option<String> {
-        let names: Vec<&str> = self.artists().iter().map(|a| a.name.as_str()).collect();
-        (!names.is_empty()).then(|| names.join(", "))
+        (!self.artists().is_empty()).then(|| credit_line(self.artists()))
     }
 
     /// What `artist_loop` should look up next, if the current track or its
@@ -804,20 +811,69 @@ pub(crate) async fn artist_line(
     for &m in &members {
         credits.extend(db.main_artist_credits(m).await?);
     }
-    let ids = credited_artists(&credits, mounted);
+    let credits = credited_artists(&credits, mounted);
+    let ids: Vec<_> = credits.iter().map(|c| c.artist_entry_id).collect();
     let summaries = crate::entries::entry_summaries(db, &ids).await?;
     let overrides = db.credit_display_names(&members).await?;
-    let mut artists: Vec<CreditedArtist> = Vec::new();
-    for id in &ids {
-        let name = summaries.get(id).and_then(|s| {
-            crate::entries::credit_name(&overrides, &members, s).or(s.title.as_deref())
-        });
-        if let Some(name) = name
-            && !artists.iter().any(|a| a.name == name)
-        {
-            artists.push(CreditedArtist {
-                entry_id: *id,
+    // A manual whole-line rename can predate structured credit rendering.
+    // When it exactly matches the imported line, keep the original parts
+    // clickable instead of collapsing them back into one name.
+    let mut use_imported_credit = false;
+    if credits.len() > 1
+        && let Some(artist) = summaries.get(&credits[0].artist_entry_id)
+        && credits.iter().all(|c| {
+            c.artist_entry_id == artist.entry_id
+                || artist.soft_linked_ids.contains(&c.artist_entry_id)
+        })
+        && let Some(name) = crate::entries::credit_name(&overrides, &members, artist)
+    {
+        let imported_line: Option<String> = credits
+            .iter()
+            .map(|c| {
+                c.credited_name
+                    .as_ref()
+                    .map(|part| format!("{}{}", part, c.join_phrase.as_deref().unwrap_or_default()))
+            })
+            .collect();
+        if imported_line.as_deref() == Some(name) {
+            use_imported_credit = true;
+        } else {
+            // A different rename still replaces this single library artist's
+            // whole line once, even when catalog artists were merged.
+            return Ok(vec![CreditedArtist {
+                entry_id: artist.entry_id,
                 name: name.to_owned(),
+                join_phrase: String::new(),
+            }]);
+        }
+    }
+    let mut artists: Vec<CreditedArtist> = Vec::new();
+    for (i, c) in credits.iter().enumerate() {
+        let Some(artist) = summaries.get(&c.artist_entry_id) else {
+            continue;
+        };
+        let name = crate::entries::credit_name(&overrides, &members, artist)
+            .filter(|_| !use_imported_credit)
+            .or(c.credited_name.as_deref().filter(|n| !n.is_empty()))
+            .or(artist.title.as_deref());
+        if let Some(name) = name {
+            // MusicBrainz omits an empty final join phrase on import. Other
+            // providers with no punctuation use the usual comma separator.
+            let join_phrase = c.join_phrase.clone().unwrap_or_else(|| {
+                if (c.source == "musicbrainz"
+                    && c.role == "listed_artist"
+                    && c.credited_name.is_some())
+                    || i + 1 == credits.len()
+                {
+                    String::new()
+                } else {
+                    ", ".into()
+                }
+            });
+            artists.push(CreditedArtist {
+                entry_id: c.artist_entry_id,
+                name: name.to_owned(),
+                join_phrase,
             });
         }
     }
@@ -827,7 +883,7 @@ pub(crate) async fn artist_line(
 /// The artists one source credits as main artists, in credit order. The
 /// mounted source's own credits win, then MusicBrainz's, then any other
 /// source's; an uploader only when nothing lists artists.
-fn credited_artists(credits: &[MainCredit], mounted: Option<&str>) -> Vec<i64> {
+fn credited_artists<'a>(credits: &'a [MainCredit], mounted: Option<&str>) -> Vec<&'a MainCredit> {
     let mut by_source: BTreeMap<(&str, &str), Vec<&MainCredit>> = BTreeMap::new();
     for c in credits {
         by_source
@@ -847,13 +903,10 @@ fn credited_artists(credits: &[MainCredit], mounted: Option<&str>) -> Vec<i64> {
     else {
         return Vec::new();
     };
-    let mut ids = Vec::new();
-    for c in best {
-        if !ids.contains(&c.artist_entry_id) {
-            ids.push(c.artist_entry_id);
-        }
-    }
-    ids
+    let listed = best.iter().any(|c| c.role == "listed_artist");
+    best.into_iter()
+        .filter(|c| !listed || c.role == "listed_artist")
+        .collect()
 }
 
 /// `GET /api/playback` — the current snapshot (debugging; the frontend
@@ -1491,6 +1544,8 @@ mod tests {
             identifier: identifier.into(),
             role: role.into(),
             artist_entry_id: artist,
+            credited_name: None,
+            join_phrase: None,
         };
         let credits = [
             credit("musicbrainz", "mb", "listed_artist", 1),
@@ -1498,12 +1553,18 @@ mod tests {
             credit("spotify", "sp", "listed_artist", 3),
             credit("youtube", "yt", "uploader", 4),
         ];
-        assert_eq!(credited_artists(&credits, Some("sp")), [2, 3]);
+        let ids = |credits: &[MainCredit], mounted| {
+            credited_artists(credits, mounted)
+                .into_iter()
+                .map(|c| c.artist_entry_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&credits, Some("sp")), [2, 3]);
         // Not the mounted source's (or it credits nobody): MusicBrainz first.
-        assert_eq!(credited_artists(&credits, Some("other")), [1]);
+        assert_eq!(ids(&credits, Some("other")), [1]);
         // An uploader only when nothing lists artists.
-        assert_eq!(credited_artists(&credits, Some("yt")), [1]);
-        assert_eq!(credited_artists(&credits[3..], Some("yt")), [4]);
+        assert_eq!(ids(&credits, Some("yt")), [1]);
+        assert_eq!(ids(&credits[3..], Some("yt")), [4]);
         assert!(credited_artists(&[], None).is_empty());
     }
 
@@ -1518,6 +1579,7 @@ mod tests {
             artists: vec![CreditedArtist {
                 entry_id: 9,
                 name: "Ado".into(),
+                join_phrase: String::new(),
             }],
             stale: false,
         });
@@ -1544,6 +1606,132 @@ mod tests {
         apply(&mut s, "d", Command::Next).unwrap();
         assert_eq!((s.artist(), s.uncredited()), (None, Some((2, None))));
         assert!(s.artists().is_empty());
+    }
+
+    #[tokio::test]
+    async fn artist_credits_preserve_names_punctuation_and_renames() {
+        use musiclib_rs::providers::types::{Alias, Contribution, EntryType};
+
+        let db = MusicDb::new("sqlite::memory:").await.unwrap();
+        let mut ids = Vec::new();
+        for (identifier, name, kind) in [
+            ("recording", "DIVE!", EntryType::Track),
+            ("character", "Character's usual name", EntryType::Artist),
+            ("actor", "Actor's usual name", EntryType::Artist),
+        ] {
+            let id = db.insert_entry(Some(kind)).await.unwrap();
+            db.upsert_stub_pair("musicbrainz", identifier, id, None, None)
+                .await
+                .unwrap();
+            db.insert_aliases_for_pair(
+                "musicbrainz",
+                identifier,
+                &[Alias {
+                    name: name.into(),
+                    source: "musicbrainz".into(),
+                    primary: true,
+                    ..Default::default()
+                }],
+                None,
+            )
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        // Import out of order. Two identities intentionally share a credited
+        // name, and one artist occurs again at the end of the credit.
+        for (artist, index, name, join_phrase) in [
+            ("actor", 1, "Same name", ") & "),
+            ("character", 2, "Another credit", ""),
+            ("character", 0, "Same name", "(CV."),
+        ] {
+            db.insert_contribution(
+                "musicbrainz",
+                "recording",
+                "musicbrainz",
+                artist,
+                &Contribution {
+                    role: "listed_artist".into(),
+                    main_artist: true,
+                    source: "musicbrainz".into(),
+                    extra: json!({
+                        "index": index, "credited_name": name, "joinphrase": join_phrase,
+                    }),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let line = artist_line(&db, ids[0], None).await.unwrap();
+        assert_eq!(
+            line.iter().map(|a| a.entry_id).collect::<Vec<_>>(),
+            [ids[1], ids[2], ids[1]]
+        );
+        assert_eq!(
+            credit_line(&line),
+            "Same name(CV.Same name) & Another credit"
+        );
+
+        db.set_credit_display_name(ids[0], &[ids[0]], ids[2], &[ids[2]], Some("Renamed actor"))
+            .await
+            .unwrap();
+        let renamed = artist_line(&db, ids[0], None).await.unwrap();
+        assert_eq!(
+            credit_line(&renamed),
+            "Same name(CV.Renamed actor) & Another credit"
+        );
+        assert_eq!(
+            serde_json::to_value(&renamed).unwrap()[1]["join_phrase"],
+            ") & "
+        );
+        let edited = crate::entries::entry_credits(&db, ids[0]).await.unwrap();
+        assert_eq!(
+            edited.iter().find(|c| c.artist_id == ids[2]).unwrap().name,
+            "Renamed actor"
+        );
+
+        db.set_credit_display_name(ids[0], &[ids[0]], ids[2], &[ids[2]], None)
+            .await
+            .unwrap();
+        assert_eq!(artist_line(&db, ids[0], None).await.unwrap(), line);
+        let reset = crate::entries::entry_credits(&db, ids[0]).await.unwrap();
+        assert_eq!(
+            reset.iter().find(|c| c.artist_id == ids[2]).unwrap().name,
+            "Same name"
+        );
+
+        // Existing libraries can have merged the character and voice actor.
+        // Keep source-specific names until a manual credit replaces the line.
+        db.merge_entries(ids[2], ids[1]).await.unwrap();
+        assert_eq!(
+            credit_line(&artist_line(&db, ids[0], None).await.unwrap()),
+            credit_line(&line)
+        );
+        db.set_credit_display_name(
+            ids[0],
+            &[ids[0]],
+            ids[1],
+            &[ids[1]],
+            Some("Character (CV.Actor)"),
+        )
+        .await
+        .unwrap();
+        let merged = artist_line(&db, ids[0], None).await.unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(credit_line(&merged), "Character (CV.Actor)");
+
+        let original_line = credit_line(&line);
+        db.set_credit_display_name(ids[0], &[ids[0]], ids[1], &[ids[1]], Some(&original_line))
+            .await
+            .unwrap();
+        let original_parts = artist_line(&db, ids[0], None).await.unwrap();
+        assert_eq!(original_parts.len(), 3);
+        assert_eq!(credit_line(&original_parts), original_line);
+        assert_eq!(original_parts[0].name, "Same name");
+        assert_eq!(original_parts[0].join_phrase, "(CV.");
+        assert_eq!(original_parts[1].name, "Same name");
+        assert_eq!(original_parts[1].join_phrase, ") & ");
     }
 
     /// A hub with a two-track queue, `device` connected and having played
