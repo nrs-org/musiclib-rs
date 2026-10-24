@@ -109,6 +109,18 @@ absolute path, or by a path relative to another entry file), so its identity
 survives moving the files. Any other file is identified by its absolute path,
 `local:///abs/path.yaml`.
 
+While `server` is running, it discovers new YAML entries in the namespaces
+and checks them and imported absolute local paths every second. It imports
+new files and re-imports edits after their contents stay unchanged for a
+second. This also works through namespace symlinks and with editors that replace files on
+save. Local children and source references are followed recursively; remote
+providers are not fetched by the reload. Aliases, links, and child relations
+use the normal import replacement rules. Invalid or missing files leave the
+last imported metadata in place; fixing the file resumes reloading. Startup
+also refreshes existing entries, picking up edits made while the server was
+stopped. New files outside a namespace still need an explicit first import.
+`namespace.yaml` settings are already read fresh by each soft-dedup pass.
+
 In an entry file, a child's `relation` (`cover`, `remix`, `arrangement`, ...)
 marks it as the original the entry derives from; child URLs from other
 providers are canonicalized, so they meet that provider's own entries.

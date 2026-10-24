@@ -34,6 +34,7 @@ mod jobs;
 mod lastfm;
 #[cfg(feature = "player")]
 mod lastfm_metadata;
+mod local_reload;
 #[cfg(feature = "media_controls")]
 mod media_controls;
 #[cfg(feature = "nrs")]
@@ -331,6 +332,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let local = tokio::task::LocalSet::new();
+    if let Some(config) = &registry_config.local {
+        let base_dir = config.base_dir.clone().unwrap_or(std::env::current_dir()?);
+        local.spawn_local(local_reload::run(state.db.clone(), base_dir));
+    }
     #[cfg(feature = "player")]
     local.spawn_local(lastfm::run(Arc::clone(&state)));
     #[cfg(feature = "player")]

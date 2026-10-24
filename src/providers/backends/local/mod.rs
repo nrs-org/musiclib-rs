@@ -39,6 +39,48 @@ impl Provider {
             base_dir: &self.base_dir,
         }
     }
+
+    /// Resolve an imported local identifier for file-change detection. Follows
+    /// the same namespace rules as fetching; the file may be temporarily absent
+    /// while an editor replaces it.
+    pub fn entry_file(&self, identifier: &str) -> Option<PathBuf> {
+        identifier.strip_prefix("local://")?;
+        self.resolver().file_of(identifier, &self.base_dir)
+    }
+
+    /// YAML entries in the configured namespaces, including entries not yet
+    /// imported. Namespace directories may be symlinks. Settings and temporary
+    /// files are excluded by scanning only the entry-kind directories.
+    pub fn namespace_identifiers(&self) -> Vec<String> {
+        let Ok(namespaces) = std::fs::read_dir(&self.base_dir) else {
+            return Vec::new();
+        };
+        let mut identifiers = Vec::new();
+        for namespace in namespaces.flatten() {
+            let name = namespace.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !namespace.path().is_dir() {
+                continue;
+            }
+            for (kind, dir) in KIND_DIRS {
+                let Ok(files) = std::fs::read_dir(namespace.path().join(dir)) else {
+                    continue;
+                };
+                for file in files.flatten() {
+                    let filename = file.file_name();
+                    let filename = filename.to_string_lossy();
+                    if let Some(id) = filename.strip_suffix(".yaml")
+                        && !id.is_empty()
+                        && !id.starts_with('.')
+                        && file.path().is_file()
+                    {
+                        identifiers.push(format!("local://{name}/{kind}/{id}"));
+                    }
+                }
+            }
+        }
+        identifiers.sort();
+        identifiers
+    }
 }
 
 impl TryDefault for Provider {

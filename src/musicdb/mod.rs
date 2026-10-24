@@ -3572,6 +3572,20 @@ impl MusicDb {
             .collect())
     }
 
+    /// Imported identifiers owned by a provider, excluding unfetched stubs.
+    /// Used by the server to watch local files without scanning other providers.
+    pub async fn fetched_identifiers_for_source(&self, source: &str) -> Result<Vec<String>, Error> {
+        Ok(entry_source::Entity::find()
+            .select_only()
+            .column(entry_source::Column::Identifier)
+            .filter(entry_source::Column::Source.eq(source))
+            .filter(entry_source::Column::FetchedAt.is_not_null())
+            .order_by_asc(entry_source::Column::Identifier)
+            .into_tuple::<String>()
+            .all(&self.db)
+            .await?)
+    }
+
     /// Every alias row. Used to build the alias list per pair.
     pub async fn all_alias_rows(&self) -> Result<Vec<AliasRow>, Error> {
         Ok(entry_alias::Entity::find()
