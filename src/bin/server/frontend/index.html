@@ -7138,7 +7138,7 @@
   // browser hear about them over a BroadcastChannel. A burst of writes
   // (a batch merge) reloads once.
   const LibraryChanges = (() => {
-    const WRITES = /^\/api\/(relations\/|nrs\/merge|source-privacy|entries\/\d+\/(display-name|credits\/))/;
+    const WRITES = /^\/api\/(relations\/|songs\/edit|nrs\/merge|source-privacy|entries\/\d+\/(display-name|credits\/))/;
     const listeners = new Set();
     let timer = null;
     let channel = null;
@@ -11580,6 +11580,8 @@
         else showError(body.message || `request failed (${res.status})`);
         return false;
       }
+      // This request handles conflicts itself; report successful writes to the player.
+      LibraryChanges.wrote("/api/songs/edit");
       if (body.undo?.length) record({ label, rows: body.undo });
       flash(label);
       refreshAfterEdit(currentEntryId);
