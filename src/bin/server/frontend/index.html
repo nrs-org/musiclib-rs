@@ -11118,6 +11118,61 @@
     };
   }
 
+  // Keep layouts beyond the visible node join: changing focus, collapsing
+  // uploads or hiding a removed link must not forget where its nodes were.
+  // Song and raw views have separate arrangements. Bound both caches so
+  // browsing the library cannot grow localStorage indefinitely.
+  function createGraphLayoutMemory() {
+    const key = "musiclib_graph_layout_v1";
+    const layouts = new Map();
+    let timer = null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) || "{}");
+      for (const mode of ["song", "raw"]) {
+        const positions = new Map((saved[mode]?.positions || []).filter(([id, p]) =>
+          typeof id === "string" && Number.isFinite(p?.x) && Number.isFinite(p?.y)
+        ).slice(-4000));
+        const cameras = new Map((saved[mode]?.cameras || []).filter(([id, t]) =>
+          typeof id === "string" && Number.isFinite(t?.x) && Number.isFinite(t?.y) && t?.k >= 0.15 && t.k <= 3
+        ).slice(-100));
+        layouts.set(mode, { positions, cameras });
+      }
+    } catch {}
+    function layout(mode) {
+      if (!layouts.has(mode)) layouts.set(mode, { positions: new Map(), cameras: new Map() });
+      return layouts.get(mode);
+    }
+    function put(map, id, value, limit) {
+      map.delete(id);
+      map.set(id, value);
+      if (map.size > limit) map.delete(map.keys().next().value);
+    }
+    function flush() {
+      clearTimeout(timer);
+      timer = null;
+      try {
+        localStorage.setItem(key, JSON.stringify(Object.fromEntries(
+          [...layouts].map(([mode, { positions, cameras }]) => [mode, { positions: [...positions], cameras: [...cameras] }])
+        )));
+      } catch {}
+    }
+    return {
+      position: (mode, id) => layout(mode).positions.get(id),
+      camera: (mode, entryId) => layout(mode).cameras.get(String(entryId)),
+      remember(mode, nodes, entryId, transform) {
+        const { positions, cameras } = layout(mode);
+        for (const n of nodes) {
+          if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) continue;
+          put(positions, n.id, { x: n.x, y: n.y, userPinned: Boolean(n.userPinned) }, 4000);
+        }
+        put(cameras, String(entryId), { x: transform.x, y: transform.y, k: transform.k }, 100);
+        clearTimeout(timer);
+        timer = setTimeout(flush, 200);
+      },
+      flush,
+    };
+  }
+
   // The kinds `/api/relations/relate` accepts — mirrors the server's
   // `RELATE_KINDS` allowlist (`src/bin/server/player.rs`). `unrelate` and
   // `restore` also take `derived_from` (the server's `TOGGLE_KINDS`).
@@ -11471,7 +11526,8 @@
     });
     const undoBtn = el("button", { className: "ghost-btn", type: "button", text: "Undo", onclick: () => undo() });
     const redoBtn = el("button", { className: "ghost-btn", type: "button", text: "Redo", onclick: () => redo() });
-    const toolbar = el("div", { className: "graph-toolbar" }, [modeSeg, viewSeg, toolSeg, undoBtn, redoBtn, removedLabel]);
+    const fitBtn = el("button", { className: "ghost-btn", type: "button", text: "Fit view", onclick: () => fitToContent() });
+    const toolbar = el("div", { className: "graph-toolbar" }, [modeSeg, viewSeg, toolSeg, undoBtn, redoBtn, fitBtn, removedLabel]);
     const stage = el("div", { className: "graph-stage" }, [graphHost, detailPanel]);
     const songLegend = buildSongLegend();
     const rawLegend = buildGraphLegend();
@@ -12007,7 +12063,8 @@
         currentZoomK = event.transform.k;
         d3.select(labelLayer).selectAll(".node-label").attr("transform", labelTransform);
         updateLabelVisibility();
-      });
+      })
+      .on("end", () => rememberLayout());
     d3.select(svg).call(zoomBehavior);
 
     // Cytoscape's `cy.fit()` used to re-center/re-scale the camera onto
@@ -12020,10 +12077,6 @@
     // positions and pan/scale to fit it, with a mild zoom-in cap so a
     // single-node graph doesn't fill the container edge-to-edge.
     function fitToContent() {
-      if (suppressNextFit) {
-        suppressNextFit = false;
-        return;
-      }
       const nodes = Array.from(currentNodesById.values());
       if (!nodes.length) return;
       const minX = Math.min(...nodes.map((n) => n.x));
@@ -12129,23 +12182,27 @@
     // The current node/link datum objects, keyed by id — the single source
     // of truth for both the simulation and the DOM. Kept across renderGraph
     // calls (rather than rebuilt from scratch) so a re-fetch after a click
-    // or edit carries over each existing node's live position/velocity/pin
+    // or edit carries over each existing node's placement
     // instead of visibly resetting it.
     let currentNodesById = new Map();
     let currentLinks = [];
-    // The simulation's "end" event also fires after a drag's reheat cools
-    // back down — fitting the camera to content at that point would yank
-    // the view out from under a rearrangement the user just made by hand.
-    // Only a genuine data change (fresh load, a dropped-in node) should
-    // trigger a re-fit; dragStarted sets this so the next settle is skipped.
-    let suppressNextFit = false;
+    const layoutMemory = createGraphLayoutMemory();
+    let renderedViewMode = null;
+    let renderedEntryId = null;
+    function rememberLayout() {
+      if (!currentNodesById.size || renderedEntryId === null) return;
+      layoutMemory.remember(renderedViewMode, currentNodesById.values(), renderedEntryId, d3.zoomTransform(svg));
+    }
+    window.addEventListener("pagehide", () => {
+      rememberLayout();
+      layoutMemory.flush();
+    });
     // True for the ~300ms window right after `update()` plays the
     // old-position -> new-position morph transition (see `update()`'s end)
     // — `ticked()` skips repositioning while this is set, since the physics
     // has *already* fully settled by then (the fixed-tick-count settle
-    // below runs synchronously before any of this) and the live timer's
-    // first post-restart tick would otherwise snap every node straight to
-    // its final spot, canceling the transition out from under it.
+    // below runs synchronously before any of this). A drag during the
+    // transition must not snap every node straight to its final spot.
     let morphing = false;
     // Bumped every time `update()` starts a new morph — its `.end()`
     // handler only clears `morphing` if it's still the most recent one, so
@@ -12246,7 +12303,7 @@
       .force("collide", d3.forceCollide(GRAPH_LABEL_RADIUS).strength(0.6).iterations(2))
       .velocityDecay(0.75)
       .on("tick", ticked)
-      .on("end", fitToContent)
+      .on("end", rememberLayout)
       .stop();
     // Reheating this hot during a drag is what feeds the collide jiggle
     // above: alpha scales every force's per-tick impulse, so a high sustained
@@ -12462,7 +12519,8 @@
     function dragStarted(event, d) {
       d.__dragStartEventX = event.x;
       d.__dragStartEventY = event.y;
-      suppressNextFit = true;
+      d.__dragStartPlacement = { x: d.x, y: d.y, fx: d.fx, fy: d.fy, userPinned: d.userPinned };
+      d.__dragMoved = false;
       // Reheating here (on mousedown, before any movement) used to mean a
       // plain press-and-hold with the pointer never moving still kept the
       // whole simulation "hot" for as long as the button stayed down —
@@ -12473,6 +12531,8 @@
       // there's an actual drag to respond to.
     }
     function dragged(event, d) {
+      if (!d.__dragMoved && Math.hypot(event.x - d.__dragStartEventX, event.y - d.__dragStartEventY) < 5) return;
+      d.__dragMoved = true;
       // `alphaTarget` alone only *aims* the simulation at that temperature
       // — alpha itself still has to climb there tick by tick (an
       // exponential approach at the default decay rate takes roughly a
@@ -12483,21 +12543,26 @@
       // Cheap to call on every drag event — `restart()` is a no-op if the
       // simulation's timer is already running.
       simulation.alphaTarget(ALPHA_DRAG).alpha(Math.max(simulation.alpha(), ALPHA_DRAG)).restart();
-      d.fx = event.x;
-      d.fy = event.y;
+      d.x = d.fx = event.x;
+      d.y = d.fy = event.y;
       d.userPinned = true;
+      ticked();
     }
     function dragEnded(event, d) {
       simulation.alphaTarget(0);
-      const moved = Math.hypot(event.x - d.__dragStartEventX, event.y - d.__dragStartEventY);
-      if (moved >= 5) return;
-      // A click that wobbled a pixel or two isn't a placement: back to its
-      // spot in the tree.
-      if (d.treeX != null && d.userPinned) {
-        d.userPinned = false;
-        d.fx = centerX + d.treeX;
-        d.fy = centerY + d.treeY;
+      const moved = d.__dragMoved;
+      const start = d.__dragStartPlacement;
+      delete d.__dragStartPlacement;
+      delete d.__dragMoved;
+      if (moved) {
+        rememberLayout();
+        return;
       }
+      // A click (including a slight wobble) keeps the previous placement,
+      // whether it came from the layout or an earlier deliberate drag.
+      Object.assign(d, start);
+      ticked();
+      rememberLayout();
       // Shift-click re-anchors the graph on that entry (a real navigation —
       // pushes history, morphs onto its relations, same as clicking it in
       // the rail search while Graph mode is open) rather than the plain
@@ -12539,21 +12604,10 @@
     }
     const dragBehavior = d3.drag().on("start", dragStarted).on("drag", dragged).on("end", dragEnded);
 
-    // Builds/updates the DOM and (re)starts the simulation from `nodes`/
-    // `links` — called both for a fresh fetch and for a local drag-in, so
-    // it always re-seeds only truly new nodes (anything already in
-    // `currentNodesById` keeps its live x/y/velocity/pin, exactly like the
-    // old refresh() bridge did).
-    function update(nodes, links) {
-      const nodeById = new Map(nodes.map((n) => [n.id, n]));
-      const rect = graphHost.getBoundingClientRect();
-      const w = Math.max(rect.width, 200);
-      const h = Math.max(rect.height, 200);
-      svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    // Restore known placements before settling only the unfamiliar nodes.
+    function restoreNodePositions(nodes, layoutMode, w, h) {
+      const sameLayout = layoutMode === renderedViewMode;
       const anchorId = String(currentEntryId);
-      centerX = w / 2;
-      centerY = h / 2;
-
       // Where each persisting node/label/edge-endpoint is sitting on screen
       // *before* this update's settle moves it — the morph transition below
       // animates from here to the freshly-computed `n.x`/`n.y`, instead of
@@ -12561,25 +12615,26 @@
       // Genuinely new nodes have no entry and just appear at their final
       // spot — nothing to morph from.
       const fromPositions = new Map();
+      const releaseAfterSettle = [];
 
       for (const n of nodes) {
         const prev = currentNodesById.get(n.id);
-        if (prev) {
-          fromPositions.set(n.id, { x: prev.x, y: prev.y });
-          n.x = prev.x;
-          n.y = prev.y;
-          n.vx = prev.vx;
-          n.vy = prev.vy;
-          // A dragged node's own `fx`/`fy` (set by `dragged()`) is a
-          // deliberate, user-placed pin and carries over across refetches —
-          // unlike the old auto-pin on the anchor node, this one only ever
-          // exists because the user put it there. Song view's tree pins
-          // (below) don't carry over: they're recomputed every time.
-          if (prev.userPinned) {
-            n.fx = prev.fx;
-            n.fy = prev.fy;
-            n.userPinned = true;
-          }
+        if (prev) fromPositions.set(n.id, { x: prev.x, y: prev.y });
+        const remembered = sameLayout && prev ? prev : layoutMemory.position(layoutMode, n.id);
+        // Explicit placement on a newly dropped node takes precedence over
+        // its cached location. Existing nodes stay fixed during the settle
+        // so an added/removed connection only lays out unfamiliar nodes.
+        const placement = n.userPinned ? n : remembered;
+        n.userPinned = Boolean(placement?.userPinned);
+        n.vx = n.vy = 0;
+        n.fx = n.fy = null;
+        if (placement) {
+          n.x = n.fx = placement.x;
+          n.y = n.fy = placement.y;
+          if (layoutMode === "raw" && !n.userPinned) releaseAfterSettle.push(n);
+        } else if (n.treeX != null) {
+          n.x = n.fx = centerX + n.treeX;
+          n.y = n.fy = centerY + n.treeY;
         } else if (n.id === anchorId) {
           // Seed (not pin) the anchor at the container's center so the
           // first layout starts from a sensible spot — it's still fully
@@ -12590,17 +12645,28 @@
           n.x = hashUnit(n.id, "x") * w;
           n.y = hashUnit(n.id, "y") * h;
         }
-        // Song view lays the tree out itself (`layoutSongTree`): pin each
-        // node to its spot unless the user placed it.
-        if (n.treeX != null && !n.userPinned) {
-          n.fx = centerX + n.treeX;
-          n.fy = centerY + n.treeY;
-          if (!prev) {
-            n.x = n.fx;
-            n.y = n.fy;
-          }
-        }
       }
+
+      return { fromPositions, releaseAfterSettle };
+    }
+
+    // Join fresh data or a dropped-in node onto the existing graph. Keep
+    // known nodes and the camera in place, settling only new raw nodes.
+    function update(nodes, links, layoutMode = renderedViewMode || viewMode) {
+      d3.select(svg).interrupt();
+      rememberLayout();
+      const sameLayout = layoutMode === renderedViewMode;
+      const keepCamera = sameLayout && nodes.some((n) => currentNodesById.has(n.id));
+      const savedCamera = layoutMemory.camera(layoutMode, currentEntryId);
+      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+      const rect = graphHost.getBoundingClientRect();
+      const w = Math.max(rect.width, 200);
+      const h = Math.max(rect.height, 200);
+      svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+      centerX = w / 2;
+      centerY = h / 2;
+
+      const { fromPositions, releaseAfterSettle } = restoreNodePositions(nodes, layoutMode, w, h);
 
       // `nodeById.get(l.source)` resolves a fresh (string-id) link from a
       // server re-fetch; when `links` is instead the same array reused from
@@ -12615,6 +12681,8 @@
 
       currentNodesById = nodeById;
       currentLinks = links;
+      renderedViewMode = layoutMode;
+      renderedEntryId = currentEntryId;
 
       // Each join below is given an explicit `exit` (fade out, then
       // detach — `.remove()` chained onto a transition is d3's idiom for
@@ -12750,6 +12818,10 @@
         .style("stroke-width", edgeStrokeWidth);
       updateHulls();
 
+      simulation.stop();
+      // Clear the old links before initializing nodes: a previous fetch's
+      // endpoints may no longer be in this join.
+      linkForce.links([]);
       simulation.nodes(nodes);
       linkForce.links(links);
       simulation.alpha(Math.max(simulation.alpha(), 0.4));
@@ -12767,12 +12839,19 @@
       // graph shape (the same class of chaotic sensitivity Cytoscape's cose
       // layout turned out to have, just resurfacing here instead).
       // Ticking a fixed count synchronously has no such dependency: same
-      // inputs, same iteration count, same output, always. `.restart()`
-      // afterward re-arms the live timer purely so a later drag's reheat
-      // still works — alpha is already low enough that nothing visibly
-      // animates again until then.
+      // inputs, same iteration count, same output, always. Dragging restarts
+      // the timer itself; keeping it stopped here also prevents an extra
+      // live tick from moving the nodes we just preserved.
       for (let i = 0; i < 300; i++) simulation.tick();
-      simulation.restart();
+      for (const n of releaseAfterSettle) n.fx = n.fy = null;
+      rememberLayout();
+      if (!keepCamera) {
+        if (savedCamera) {
+          d3.select(svg).call(zoomBehavior.transform, d3.zoomIdentity.translate(savedCamera.x, savedCamera.y).scale(savedCamera.k));
+        } else {
+          fitToContent();
+        }
+      }
 
       // Play the visual move from each persisting element's prior spot
       // (`fromPositions`) to the position the settle above just computed,
@@ -12989,11 +13068,7 @@
         });
       }
       layoutSongTree(nodes, links, String(original));
-      update(nodes, links);
-      // Every node is pinned, so the simulation has nothing to settle and
-      // its "end" (which frames the view) may never come.
-      suppressNextFit = false;
-      fitToContent();
+      update(nodes, links, "song");
     }
 
     // Rings by depth around the root: the original's versions on the
@@ -13115,7 +13190,7 @@
         });
       }
 
-      update(nodes, links);
+      update(nodes, links, "raw");
     }
 
     // Every dedup edit (link/unlink/relate/unrelate/force-block/…) lands
@@ -13681,6 +13756,7 @@
     // re-fetch/re-join as `load()`, just without touching which entry is
     // anchored.
     function refresh() {
+      if (currentEntryId === null) return;
       resetSelection();
       renderGraph();
     }
@@ -13714,6 +13790,7 @@
     try {
       entry = await api(`/api/entries/${entryId}`);
     } catch (err) {
+      if (graphActiveId !== entryId) return;
       graphEditor.section.hidden = true;
       graphEmptyEl.hidden = false;
       graphEmptyEl.innerHTML = "";
@@ -13722,6 +13799,7 @@
       setMode("graph");
       return;
     }
+    if (graphActiveId !== entryId) return;
     const url = `/graph/${entryId}`;
     if (opts.push !== false && location.pathname !== url) {
       history.pushState({ graphEntryId: entryId }, "", url);
