@@ -11,7 +11,9 @@
 //!
 //! - `+1` while a [`track`](Activity::track)ed root future is being polled.
 //!   Traversal CPU work between awaits (parsing a response, spawning child
-//!   fetches) happens inside such a poll, so it is covered with no gaps.
+//!   fetches) happens inside such a poll, so it is covered with no gaps. A
+//!   task started with [`spawn`](Activity::spawn) also counts while it waits
+//!   for its first poll.
 //! - `+1` while a request is anywhere inside the HTTP stack
 //!   ([`layer`](Activity::layer), the outermost layer): cache lookups, scheduler
 //!   queues, retry backoff, network I/O.
@@ -41,6 +43,7 @@ use std::{
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::{BodyExtractorCow, Error, HttpClient, Request, Response};
 
@@ -88,7 +91,23 @@ impl Activity {
         Tracked {
             activity: self.clone(),
             fut: Box::pin(fut),
+            queued: None,
         }
+    }
+
+    /// Run `fut` as its own task, tracked like [`track`](Self::track). It
+    /// also counts as running from now until its first poll, so its wait in
+    /// the runtime's queue doesn't look like idleness. Dropping the handle
+    /// aborts the task, which keeps a tree of these structured: cancelling
+    /// the root cancels everything under it.
+    pub fn spawn<F>(&self, fut: F) -> AbortOnDropHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let mut tracked = self.track(fut);
+        tracked.queued = Some(self.busy());
+        AbortOnDropHandle::new(tokio::spawn(tracked))
     }
 
     /// Wrap `inner` so every request counts as running while inside it. Must
@@ -143,6 +162,8 @@ impl Drop for BusyGuard {
 pub struct Tracked<F> {
     activity: Activity,
     fut: Pin<Box<F>>,
+    /// Held from [`Activity::spawn`] until the first poll.
+    queued: Option<BusyGuard>,
 }
 
 impl<F: Future> Future for Tracked<F> {
@@ -150,6 +171,7 @@ impl<F: Future> Future for Tracked<F> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let _guard = self.activity.busy();
+        self.queued = None;
         self.fut.as_mut().poll(cx)
     }
 }
@@ -168,5 +190,38 @@ impl HttpClient for ActivityLayer {
     ) -> Result<Arc<Response>, Error> {
         let _guard = self.activity.busy();
         self.inner.make_request(req, body_extractor).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Activity;
+
+    /// A spawned task counts as running while it waits for its first poll,
+    /// and stops counting once it has finished.
+    #[tokio::test]
+    async fn spawned_task_is_busy_until_first_poll() {
+        let activity = Activity::new();
+        let handle = activity.spawn(async {});
+        // Current-thread runtime: the task can't have been polled yet.
+        assert!(!activity.is_idle());
+        handle.await.unwrap();
+        assert!(activity.is_idle());
+    }
+
+    /// Dropping the handle aborts the task.
+    #[tokio::test]
+    async fn dropping_handle_aborts_task() {
+        let activity = Activity::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = activity.spawn(async move {
+            let _tx = tx;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        drop(handle);
+        // The task's future, and the sender it owns, are dropped on abort.
+        assert!(rx.await.is_err());
+        assert!(activity.is_idle());
     }
 }
