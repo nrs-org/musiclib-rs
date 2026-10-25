@@ -114,9 +114,11 @@ the job meanwhile.
    fetches, so a rule needing a child's own data reports it undecided);
    `pipeline::update::preview_root` fetches the root and drains its
    listings; `POST /api/roots/preview`.
-5. **UI**: a Roots panel next to the ingest form: list with last-run status,
-   add (with preview), edit options, enable/disable, remove, "update now",
-   job progress reusing the ingest job view.
+5. **UI** (done): in the import view. The form gains Preview (with "Decide"
+   to fetch the items a rule needs the data of: `fetch_children`) and Add as
+   root; below the jobs, the roots list (last run, Update, Preview,
+   Options, Disable, two-click Remove) and Update all. Update jobs reuse the
+   ingest job cards.
 6. **Scheduling**, later.
 
 ## Decisions (2026-10-26)

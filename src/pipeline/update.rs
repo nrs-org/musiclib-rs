@@ -261,14 +261,17 @@ pub struct RootPreview {
 /// Fetch `url` with the fetch options `pool`/`root_id` and report what they
 /// decide for each of its direct children (`matcher::preview`): fetched,
 /// skipped, or undecided because the deciding rule needs the child's own
-/// data. Nothing is written to the library, and no child is fetched; reading
-/// the root's listings costs what it costs (a few YouTube units for a
-/// channel), and the responses land in the HTTP cache for the real import.
+/// data. Nothing is written to the library. Without `fetch_children` no
+/// child is fetched; with it, the children those rules need are (about a
+/// YouTube unit per 50 videos). Reading the root's listings costs what it
+/// costs (a few units for a channel); every response lands in the HTTP
+/// cache for the real import.
 pub async fn preview_root(
     providers: &[Arc<dyn crate::providers::FetchProvider>],
     url: &str,
     pool: Arc<crate::providers::types::EntryFetchOptionsPool>,
     root_id: crate::providers::types::OptionsId,
+    fetch_children: bool,
 ) -> anyhow::Result<RootPreview> {
     use crate::providers::{matcher::preview, std_values::StandardProviderKeys, types::child_next};
     let mut found = None;
@@ -283,26 +286,29 @@ pub async fn preview_root(
     };
     let source = canonical.canonical_source_key.into_owned();
     let identifier = canonical.canonical_identifier;
-    let (result, listings) = preview(async {
-        let entity = Arc::clone(&provider)
-            .fetch_entry(&source, &identifier, pool, root_id)
-            .await?;
-        let mut errors = Vec::new();
-        for listing in &entity.children {
-            let mut cursor = listing.cursor();
-            loop {
-                match child_next(&mut cursor).await {
-                    Ok(Some(_)) => {}
-                    Ok(None) => break,
-                    Err(e) => {
-                        errors.push(e.to_string());
-                        break;
+    let (result, listings) = preview(
+        async {
+            let entity = Arc::clone(&provider)
+                .fetch_entry(&source, &identifier, pool, root_id)
+                .await?;
+            let mut errors = Vec::new();
+            for listing in &entity.children {
+                let mut cursor = listing.cursor();
+                loop {
+                    match child_next(&mut cursor).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(e) => {
+                            errors.push(e.to_string());
+                            break;
+                        }
                     }
                 }
             }
-        }
-        Ok::<_, crate::providers::types::Error>((entity, errors))
-    })
+            Ok::<_, crate::providers::types::Error>((entity, errors))
+        },
+        fetch_children,
+    )
     .await;
     let (entity, errors) = result?;
     Ok(RootPreview {

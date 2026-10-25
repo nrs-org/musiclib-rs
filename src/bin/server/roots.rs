@@ -11,9 +11,11 @@
 //!   edits (`"label": null` clears it); `DELETE` removes. Removing a root
 //!   only stops updating it: what it imported stays in the library.
 //!
-//! - `POST /api/roots/preview` `{"url", "fetch_options"}`: what those fetch
-//!   options decide for each of the URL's direct children (fetched, skipped,
-//!   undecided), without importing anything: `{"root", "existing_root_id",
+//! - `POST /api/roots/preview` `{"url", "fetch_options", "fetch_children"?}`:
+//!   what those fetch options decide for each of the URL's direct children
+//!   (fetched, skipped, undecided), without importing anything. With
+//!   `fetch_children`, children a rule needs the data of are fetched instead
+//!   of left undecided: `{"root", "existing_root_id",
 //!   "rules", "listings", "errors"}`. `rules` are the entry point's
 //!   `child_rules` as written; each child's `rule` is a 1-based index into
 //!   them (`pipeline::update::preview_root`).
@@ -281,6 +283,8 @@ async fn delete(state: &Arc<AppState>, id: i64) -> HyperResponse {
 struct PreviewBody {
     url: String,
     fetch_options: FetchOptionsBody,
+    #[serde(default)]
+    fetch_children: bool,
 }
 
 /// The entry point's rules as written in its file (the built-in preset's
@@ -332,7 +336,8 @@ async fn preview(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
             "unknown fetch_options file/entry_point {file:?}/{entry_point:?}"
         ));
     };
-    let report = match preview_root(&state.providers, &url, pool, root_id).await {
+    let report = match preview_root(&state.providers, &url, pool, root_id, req.fetch_children).await
+    {
         Ok(report) => report,
         Err(e) => return bad_request(&format!("{e:#}")),
     };

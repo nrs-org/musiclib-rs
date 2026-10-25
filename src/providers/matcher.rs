@@ -188,10 +188,11 @@ fn filtering_stream(
     exhaustive: bool,
     preview: Option<(Arc<PreviewLog>, usize)>,
 ) -> BoxStream<'static, Result<(ChildRef, ChildFetchOptions), Error>> {
-    // A preview decides from what the listing says, never fetching a child.
-    let provider: Arc<dyn FetchProvider> = match preview {
-        Some(_) => Arc::new(NoFetch),
-        None => provider,
+    // A preview decides from what the listing says, never fetching a child,
+    // unless it was asked to fetch them.
+    let provider: Arc<dyn FetchProvider> = match &preview {
+        Some((log, _)) if !log.fetch_children => Arc::new(NoFetch),
+        _ => provider,
     };
     // Matcher eval may fetch the child's entity (duration_range, youtube/MB
     // data matchers). Serial eval = one fetch RTT per child, which collapses
@@ -343,6 +344,7 @@ pub fn filter_children(
     let preview = PREVIEW
         .try_with(Arc::clone)
         .ok()
+        .filter(|log| !log.muted)
         .map(|log| (Arc::clone(&log), log.open_listing(parent_type)));
 
     // An artist's listing whose every item the rules would drop is never read,
@@ -383,11 +385,16 @@ tokio::task_local! {
 }
 
 /// Run `fut`, recording what `filter_children` decides for every child of
-/// every listing filtered inside it, without fetching any child: a rule that
-/// needs a child's own data (`duration_range`, a YouTube description) leaves
-/// it `Undecided`. Listings are in the order they were filtered.
-pub async fn preview<F: Future>(fut: F) -> (F::Output, Vec<PreviewListing>) {
-    let log = Arc::new(PreviewLog::default());
+/// every listing filtered inside it. Without `fetch_children`, no child is
+/// fetched: a rule that needs a child's own data (`duration_range`, a YouTube
+/// description) leaves it `Undecided`. With it, those children are fetched
+/// as the import would (batched, and cached for it). Listings are in the
+/// order they were filtered.
+pub async fn preview<F: Future>(fut: F, fetch_children: bool) -> (F::Output, Vec<PreviewListing>) {
+    let log = Arc::new(PreviewLog {
+        fetch_children,
+        ..Default::default()
+    });
     let out = PREVIEW.scope(Arc::clone(&log), fut).await;
     let mut listings = std::mem::take(&mut *log.listings.lock().unwrap());
     for listing in &mut listings {
@@ -398,10 +405,20 @@ pub async fn preview<F: Future>(fut: F) -> (F::Output, Vec<PreviewListing>) {
 
 #[derive(Default)]
 pub struct PreviewLog {
+    fetch_children: bool,
+    /// Records nothing: the scope of a fetch a preview made to decide a child.
+    muted: bool,
     listings: std::sync::Mutex<Vec<PreviewListing>>,
 }
 
 impl PreviewLog {
+    fn muted() -> Self {
+        Self {
+            muted: true,
+            ..Default::default()
+        }
+    }
+
     fn open_listing(&self, parent_type: EntryType) -> usize {
         let mut listings = self.listings.lock().unwrap();
         listings.push(PreviewListing {
@@ -544,9 +561,18 @@ impl MatchContext<'_> {
                 // UNKNOWN_URL lets them re-canonicalize the identifier for dispatch.
                 let pool = Arc::new(EntryFetchOptionsPool::default());
                 let root_id = EntryFetchOptionsPool::DEFAULT_ID;
-                provider
-                    .fetch_entry(StandardProviderKeys::UNKNOWN_URL, identifier, pool, root_id)
-                    .await
+                let fetch = provider.fetch_entry(
+                    StandardProviderKeys::UNKNOWN_URL,
+                    identifier,
+                    pool,
+                    root_id,
+                );
+                // A preview that fetches children records only the root's own
+                // listings, not the listings of the children it fetched.
+                match PREVIEW.try_with(|_| ()) {
+                    Ok(()) => PREVIEW.scope(Arc::new(PreviewLog::muted()), fetch).await,
+                    Err(_) => fetch.await,
+                }
             })
             .await
     }
@@ -901,22 +927,25 @@ mod tests {
             (make_child(EntryType::Release, "Album", "youtube"), ()),
         ]));
         let pool = Arc::new(pool);
-        let (fetched, listings) = preview(async {
-            let filtered = filter_children(
-                source,
-                pool,
-                root,
-                Arc::new(PanicProvider),
-                EntryType::Artist,
-            )
-            .unwrap();
-            let mut cursor = filtered.cursor();
-            let mut fetched = Vec::new();
-            while let Some((c, _)) = child_next(&mut cursor).await.unwrap() {
-                fetched.push(c.name.unwrap());
-            }
-            fetched
-        })
+        let (fetched, listings) = preview(
+            async {
+                let filtered = filter_children(
+                    source,
+                    pool,
+                    root,
+                    Arc::new(PanicProvider),
+                    EntryType::Artist,
+                )
+                .unwrap();
+                let mut cursor = filtered.cursor();
+                let mut fetched = Vec::new();
+                while let Some((c, _)) = child_next(&mut cursor).await.unwrap() {
+                    fetched.push(c.name.unwrap());
+                }
+                fetched
+            },
+            false,
+        )
         .await;
         assert_eq!(fetched, ["Song"]);
         assert_eq!(listings.len(), 1);

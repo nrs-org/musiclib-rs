@@ -655,6 +655,94 @@
     font-size: 12px;
   }
 
+  /* ---------- update roots: the URLs the library update walks, and the
+     filtering preview (see roots.rs / update.rs) ---------- */
+
+  .root-btn {
+    flex: none;
+    border: 1px solid var(--rail);
+    background: none;
+    color: var(--ink-soft);
+    padding: 4px 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .root-btn:hover:not(:disabled) { border-color: var(--brass); color: var(--brass); }
+  .root-btn:disabled { opacity: 0.6; cursor: default; }
+  .root-btn.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  .root-btn.armed { border-color: var(--danger); color: var(--danger); }
+
+  .roots-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 28px;
+  }
+  .roots-head .manifest-label { flex: 1; }
+
+  .roots-list { list-style: none; margin: 0; padding: 0; }
+  .root-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    padding: 9px 0;
+    border-top: 1px solid var(--rail);
+  }
+  .root-row:first-child { border-top: none; }
+  .root-row.disabled .root-title { color: var(--ink-soft); text-decoration: line-through; }
+  .root-main { flex: 1 1 240px; min-width: 0; }
+  .root-title { font-size: 14px; overflow-wrap: anywhere; }
+  .root-meta {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    overflow-wrap: anywhere;
+  }
+  .root-meta .ok { color: var(--verdigris); }
+  .root-meta .failed { color: var(--danger); }
+  .root-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .root-edit { display: flex; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
+
+  .preview {
+    margin: 10px 0 4px;
+    padding: 12px 14px;
+    border: 1px solid var(--rail);
+    background: var(--paper-deep);
+  }
+  .preview-head { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+  .preview-title { font-size: 14px; margin: 0; overflow-wrap: anywhere; }
+  .preview-note { font-size: 12px; color: var(--ink-soft); margin: 4px 0; }
+  .preview details { margin-top: 8px; }
+  .preview summary { cursor: pointer; font-family: var(--mono); font-size: 12px; }
+  .preview-rules, .preview-children { list-style: none; margin: 6px 0 0; padding: 0; }
+  .preview-rules li {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 0;
+    overflow-wrap: anywhere;
+  }
+  .preview-children li {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    font-size: 13px;
+    padding: 2px 0;
+  }
+  .preview-child-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .preview-child-name a { color: inherit; }
+  .decision {
+    flex: none;
+    min-width: 7.5em;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+  .decision.fetch { color: var(--verdigris); }
+  .decision.undecided { color: var(--brass); }
+
   /* ---------- settings mode ---------- */
 
   .settings-view {
@@ -4331,10 +4419,23 @@
     let entryPoints = [];
     let selectedEntryPoint = "main";
 
-    // { id, query, status, stage, message, detail, entryId, errorMessage, canceling }
+    // { id, kind, query, status, stage, message, detail, entryId, result,
+    //   errorMessage, canceling }; `kind` is "ingest" or "update".
     let jobs = [];
     let inputValue = "";
     let submitError = null;
+
+    // Update roots (GET /api/roots): the URLs the library update walks.
+    let roots = [];
+    let rootsError = null;
+    // The filtering preview of the URL in the form:
+    // { url, loading } | { url, data } | { url, error }.
+    let preview = null;
+    // The root whose Remove was clicked once (a second click removes it).
+    let armedRemove = null;
+    // The root whose fetch options are being edited:
+    // { id, file, entryPoint, entryPoints }.
+    let editing = null;
 
     function findJob(id) {
       return jobs.find((j) => j.id === id);
@@ -4428,7 +4529,9 @@
 
     function renderJob(job) {
       let statusEl;
-      if (job.status === "succeeded") {
+      if (job.status === "succeeded" && job.kind === "update" && (job.result?.roots || []).some((r) => r.error)) {
+        statusEl = el("span", { className: "ingest-job-status error", text: "!", title: "Some roots failed" });
+      } else if (job.status === "succeeded") {
         statusEl = el("span", { className: "ingest-job-status done", text: "✓" });
       } else if (job.status === "failed" || job.status === "canceled") {
         statusEl = el("span", { className: "ingest-job-status error", text: "✕" });
@@ -4442,7 +4545,22 @@
         el("p", { className: "ingest-job-query", text: job.query }),
       ]);
 
-      if (job.status === "succeeded") {
+      if (job.status === "succeeded" && job.kind === "update") {
+        body.appendChild(el("p", { className: "ingest-job-detail", text: updateSummary(job.result) }));
+        const failed = (job.result?.roots || []).filter((r) => r.error);
+        if (failed.length) {
+          body.appendChild(
+            el("details", { className: "ingest-job-failures" }, [
+              el("summary", { text: `${failed.length} root${failed.length === 1 ? "" : "s"} failed` }),
+              el(
+                "ul",
+                { className: "ingest-job-failures-list" },
+                failed.map((r) => el("li", { text: `${r.url}: ${r.error}` }))
+              ),
+            ])
+          );
+        }
+      } else if (job.status === "succeeded") {
         body.appendChild(
           el("button", {
             className: "ingest-job-link",
@@ -4655,6 +4773,21 @@
         text: "Start import",
         onclick: submit,
       });
+      const previewBtn = el("button", {
+        className: "root-btn",
+        type: "button",
+        text: preview?.loading ? "Previewing…" : "Preview",
+        title: "Show which of this URL's playlists, releases and tracks these fetch options would take, without importing anything",
+        disabled: !!preview?.loading,
+        onclick: () => previewUrl(),
+      });
+      const addRootBtn = el("button", {
+        className: "root-btn",
+        type: "button",
+        text: "Add as root",
+        title: "Add this URL to the roots the library update walks, with these fetch options",
+        onclick: addRoot,
+      });
 
       const jobsList = jobs.length
         ? el(
@@ -4670,14 +4803,431 @@
           el("h1", { className: "card-title", text: "Add to your library" }),
           el("p", {
             className: "card-meta",
-            text: "Paste a URL from any source musiclib-rs understands, pick a fetch-options file from your config directory (and which entry point in it to start from, if it defines more than one), and it runs through the same pipeline as the import CLI.",
+            text: "Paste a URL from any source musiclib-rs understands, pick a fetch-options file from your config directory (and which entry point in it to start from, if it defines more than one), and it runs through the same pipeline as the import CLI. Preview shows what those options would take; Add as root keeps the URL in the library update.",
           }),
-          el("div", { className: "import-form" }, [urlInput, fileSelect, entryPointSelect, submitBtn]),
+          el("div", { className: "import-form" }, [
+            urlInput,
+            fileSelect,
+            entryPointSelect,
+            submitBtn,
+            previewBtn,
+            addRootBtn,
+          ]),
           submitError ? el("p", { className: "rail-foot-error", text: submitError }) : null,
-          el("p", { className: "manifest-label", text: jobs.length ? "Recent imports" : "No imports yet" }),
+          renderPreview(),
+          el("p", { className: "manifest-label", text: jobs.length ? "Recent jobs" : "No imports yet" }),
           jobsList,
+          ...renderRoots(),
         ])
       );
+    }
+
+    const fetchOptions = () => ({ file: selectedFile, entry_point: selectedEntryPoint || "main" });
+
+    function presetLabel(fo) {
+      const file = fo.file === "__shallow__" ? "quick" : fo.file;
+      return fo.entry_point && fo.entry_point !== "main" ? `${file}::${fo.entry_point}` : file;
+    }
+
+    const rootName = (r) => r.label || r.title || r.url;
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+    function updateSummary(r) {
+      if (!r) return "done";
+      const all = r.roots || [];
+      const failed = all.filter((x) => x.error).length;
+      const newItems = Object.values(r.listings || {}).reduce((n, k) => n + (k.new_items || 0), 0);
+      const parts = [plural(all.length, "root")];
+      if (failed) parts.push(`${failed} failed`);
+      parts.push(plural(newItems, "new listing item"));
+      parts.push(
+        plural(r.youtube_units ?? 0, "YouTube unit") +
+          (r.youtube_units_today != null ? ` (${r.youtube_units_today} today)` : "")
+      );
+      if (r.mirror && r.mirror.to !== r.mirror.from) {
+        parts.push(`MusicBrainz mirror ${r.mirror.from} → ${r.mirror.to}`);
+      }
+      return parts.join(" · ");
+    }
+
+    async function loadRoots() {
+      try {
+        roots = (await api("/api/roots")).roots || [];
+        rootsError = null;
+      } catch (e) {
+        rootsError = e.message;
+      }
+      render();
+    }
+
+    // `fetchChildren`: fetch the items whose deciding rule needs their own
+    // data instead of leaving them undecided.
+    async function previewUrl(fetchChildren = false) {
+      const url = inputValue.trim();
+      if (!url) return;
+      preview = { url, loading: true };
+      render();
+      try {
+        const data = await postJson("/api/roots/preview", {
+          url,
+          fetch_options: fetchOptions(),
+          fetch_children: fetchChildren === true,
+        });
+        preview = { url, data };
+      } catch (e) {
+        preview = { url, error: e.message };
+      }
+      render();
+    }
+
+    async function addRoot() {
+      const url = inputValue.trim();
+      if (!url) return;
+      submitError = null;
+      try {
+        await postJson("/api/roots", { url, fetch_options: fetchOptions() });
+        inputValue = "";
+        preview = null;
+      } catch (e) {
+        submitError = e.message;
+      }
+      await loadRoots();
+    }
+
+    // Every enabled root, or just `root` (even a disabled one).
+    async function startUpdate(root) {
+      submitError = null;
+      let res;
+      try {
+        res = await postJson("/api/update", root ? { root_ids: [root.id] } : {});
+      } catch (e) {
+        submitError = e.message;
+        render();
+        return;
+      }
+      const query = root
+        ? `Update: ${rootName(root)}`
+        : `Library update: ${plural(roots.filter((r) => r.enabled).length, "root")}`;
+      jobs = [
+        { id: res.job_id, kind: "update", query, status: "pending", stage: null, message: null, detail: null },
+        ...jobs,
+      ];
+      render();
+      poll(res.job_id);
+    }
+
+    async function editRoot(root, change) {
+      try {
+        await patchJson(`/api/roots/${root.id}`, change);
+        rootsError = null;
+      } catch (e) {
+        rootsError = e.message;
+      }
+      editing = null;
+      await loadRoots();
+    }
+
+    async function removeRoot(root) {
+      if (armedRemove !== root.id) {
+        armedRemove = root.id;
+        render();
+        return;
+      }
+      armedRemove = null;
+      try {
+        await del(`/api/roots/${root.id}`);
+        rootsError = null;
+      } catch (e) {
+        rootsError = e.message;
+      }
+      await loadRoots();
+    }
+
+    async function startEditing(root) {
+      editing = { id: root.id, file: root.fetch_options.file, entryPoint: root.fetch_options.entry_point, entryPoints: [] };
+      render();
+      await loadEditEntryPoints();
+    }
+
+    async function loadEditEntryPoints() {
+      if (!editing) return;
+      const fileId = editing.file;
+      let names = [];
+      if (fileId !== "__shallow__") {
+        try {
+          const data = await api(`/api/fetch-options/entry-points?file=${encodeURIComponent(fileId)}`);
+          names = Array.isArray(data.entry_points) ? data.entry_points : [];
+        } catch {}
+      }
+      if (!editing || editing.file !== fileId) return;
+      editing.entryPoints = names;
+      if (!names.includes(editing.entryPoint)) editing.entryPoint = names.includes("main") ? "main" : names[0] || "main";
+      render();
+    }
+
+    function renderRootEdit(root) {
+      const fileSelect = el(
+        "select",
+        {
+          className: "import-select",
+          onchange: (e) => {
+            editing.file = e.target.value;
+            loadEditEntryPoints();
+          },
+        },
+        files.map((f) => el("option", { value: f.id, text: f.label || `${f.id}.yaml` }))
+      );
+      fileSelect.value = editing.file;
+      const epSelect =
+        editing.entryPoints.length > 1
+          ? el(
+              "select",
+              { className: "import-select", onchange: (e) => (editing.entryPoint = e.target.value) },
+              editing.entryPoints.map((n) => el("option", { value: n, text: n }))
+            )
+          : null;
+      if (epSelect) epSelect.value = editing.entryPoint;
+      return el("div", { className: "root-edit" }, [
+        fileSelect,
+        epSelect,
+        el("button", {
+          className: "root-btn",
+          type: "button",
+          text: "Save",
+          onclick: () =>
+            editRoot(root, { fetch_options: { file: editing.file, entry_point: editing.entryPoint || "main" } }),
+        }),
+        el("button", {
+          className: "root-btn",
+          type: "button",
+          text: "Cancel",
+          onclick: () => {
+            editing = null;
+            render();
+          },
+        }),
+      ]);
+    }
+
+    function renderRoot(root) {
+      const last = root.last_run;
+      const meta = [el("span", { text: presetLabel(root.fetch_options) })];
+      if (last) {
+        meta.push(el("span", { text: " · " }));
+        meta.push(
+          el("span", {
+            className: last.status === "ok" ? "ok" : "failed",
+            text: `${last.status === "ok" ? "updated" : "failed"} ${new Date(last.at * 1000).toLocaleString()}`,
+            title: last.error || "",
+          })
+        );
+      } else {
+        meta.push(el("span", { text: " · never updated" }));
+      }
+      const main = el("div", { className: "root-main" }, [
+        root.entry_id
+          ? el("a", {
+              className: "root-title",
+              href: "#",
+              text: rootName(root),
+              onclick: (e) => {
+                e.preventDefault();
+                viewEntry(root.entry_id);
+              },
+            })
+          : el("span", { className: "root-title", text: rootName(root) }),
+        el("div", { className: "root-meta" }, [el("span", { text: root.url })]),
+        el("div", { className: "root-meta" }, meta),
+        last?.error ? el("div", { className: "root-meta failed", text: last.error }) : null,
+      ]);
+      const btn = (text, onclick, extra = {}) => el("button", { className: "root-btn", type: "button", text, onclick, ...extra });
+      const actions = el("div", { className: "root-actions" }, [
+        btn("Update", () => startUpdate(root), { title: "Update just this root now" }),
+        btn("Preview", async () => {
+          inputValue = root.url;
+          selectedFile = root.fetch_options.file;
+          await loadEntryPoints(selectedFile);
+          if (entryPoints.includes(root.fetch_options.entry_point)) {
+            selectedEntryPoint = root.fetch_options.entry_point;
+          }
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          previewUrl();
+        }),
+        btn("Options", () => startEditing(root), { title: "Change this root's fetch options" }),
+        btn(root.enabled ? "Disable" : "Enable", () => editRoot(root, { enabled: !root.enabled }), {
+          title: root.enabled ? "Skip this root in library updates" : "Include this root in library updates",
+        }),
+        btn(armedRemove === root.id ? "Remove?" : "Remove", () => removeRoot(root), {
+          className: `root-btn danger${armedRemove === root.id ? " armed" : ""}`,
+          title: "Stop updating this root. What it imported stays in the library.",
+        }),
+      ]);
+      return el("li", { className: `root-row${root.enabled ? "" : " disabled"}` }, [
+        main,
+        actions,
+        editing?.id === root.id ? renderRootEdit(root) : null,
+      ]);
+    }
+
+    function renderRoots() {
+      const enabled = roots.filter((r) => r.enabled).length;
+      const updating = jobs.some((j) => j.kind === "update" && RUNNING(j));
+      return [
+        el("div", { className: "roots-head" }, [
+          el("p", {
+            className: "manifest-label",
+            text: roots.length
+              ? `Update roots · ${enabled} of ${roots.length} enabled`
+              : "No update roots yet: preview a URL above, then add it as a root",
+          }),
+          roots.length
+            ? el("button", {
+                className: "root-btn",
+                type: "button",
+                text: updating ? "Updating…" : "Update all",
+                disabled: updating || !enabled,
+                title: "Sync the MusicBrainz mirror, then refresh every enabled root's listings within today's YouTube budget",
+                onclick: () => startUpdate(null),
+              })
+            : null,
+        ]),
+        rootsError ? el("p", { className: "rail-foot-error", text: rootsError }) : null,
+        roots.length ? el("ul", { className: "roots-list" }, roots.map(renderRoot)) : null,
+      ];
+    }
+
+    // How a child fares, from its decision and whether its listing is a
+    // discography (where children not fetched are dropped) or structural
+    // (they're kept as stubs).
+    function decisionLabel(c, discography) {
+      const rule = c.rule ? ` (rule ${c.rule})` : "";
+      switch (c.decision) {
+        case "fetch":
+          return `fetch${rule}`;
+        case "undecided":
+          return `undecided${rule}`;
+        case "skip":
+          return `${discography ? "skip" : "stub"}${rule}`;
+        default:
+          return discography ? "no rule" : "stub";
+      }
+    }
+
+    function describeRule(rule) {
+      const fetch =
+        rule.fetch === null || rule.fetch === undefined
+          ? "skip"
+          : typeof rule.fetch === "string"
+            ? `fetch with ${rule.fetch}`
+            : "fetch (inline options)";
+      return `${JSON.stringify(rule.match)} → ${fetch}`;
+    }
+
+    const DECISION_ORDER = { fetch: 0, undecided: 1, skip: 2, no_rule: 3 };
+
+    function renderPreview() {
+      if (!preview) return null;
+      const close = el("button", {
+        className: "ingest-job-dismiss",
+        type: "button",
+        "aria-label": "Close preview",
+        text: "×",
+        onclick: () => {
+          preview = null;
+          render();
+        },
+      });
+      if (preview.loading) {
+        return el("div", { className: "preview" }, [el("p", { className: "preview-note", text: `Previewing ${preview.url}…` })]);
+      }
+      if (preview.error) {
+        return el("div", { className: "preview" }, [
+          el("div", { className: "preview-head" }, [el("p", { className: "rail-foot-error", text: preview.error }), close]),
+        ]);
+      }
+      const d = preview.data;
+      const notes = [];
+      if (d.existing_root_id != null) notes.push(`Already a root (#${d.existing_root_id}).`);
+      if (d.errors?.length) notes.push(`Listing errors: ${d.errors.join("; ")}`);
+      const rules = Array.isArray(d.rules) ? d.rules : [];
+      const body = [
+        el("div", { className: "preview-head" }, [
+          el("p", { className: "preview-title", text: `${d.root.name || d.root.identifier} · ${d.root.entry_type}` }),
+          close,
+        ]),
+        ...notes.map((n) => el("p", { className: "preview-note", text: n })),
+      ];
+      if (!d.listings.length) {
+        body.push(el("p", { className: "preview-note", text: "These fetch options read none of its listings." }));
+      }
+      d.listings.forEach((l, i) => {
+        if (l.skipped) {
+          body.push(el("p", { className: "preview-note", text: `Listing ${i + 1}: not read (${l.skipped}).` }));
+          return;
+        }
+        const counts = {};
+        for (const c of l.children) counts[c.decision] = (counts[c.decision] || 0) + 1;
+        const types = [...new Set(l.children.map((c) => c.external_type))].join(", ");
+        const summary =
+          `Listing ${i + 1}${types ? ` (${types})` : ""}: ${plural(l.children.length, "item")} · ` +
+          `${counts.fetch || 0} fetched` +
+          (counts.undecided ? ` · ${counts.undecided} undecided` : "") +
+          ` · ${(counts.skip || 0) + (counts.no_rule || 0)} ${l.discography ? "skipped" : "stubs"}`;
+        const children = [...l.children].sort(
+          (a, b) => DECISION_ORDER[a.decision] - DECISION_ORDER[b.decision] || a.index - b.index
+        );
+        const details = el("details", { open: l.children.length <= 40 }, [
+          el("summary", { text: summary }),
+          el(
+            "ul",
+            { className: "preview-children" },
+            children.map((c) =>
+              el("li", {}, [
+                el("span", { className: `decision ${c.decision}`, text: decisionLabel(c, l.discography) }),
+                el("span", { className: "preview-child-name" }, [
+                  c.url
+                    ? el("a", { href: c.url, target: "_blank", rel: "noopener", text: c.name || c.url })
+                    : el("span", { text: c.name || "(untitled)" }),
+                ]),
+              ])
+            )
+          ),
+        ]);
+        body.push(details);
+      });
+      const undecided = d.listings.reduce(
+        (n, l) => n + l.children.filter((c) => c.decision === "undecided").length,
+        0
+      );
+      if (undecided) {
+        body.push(
+          el("p", { className: "preview-note" }, [
+            el("span", {
+              text: "Undecided: the deciding rule needs the item's own data (its duration or description). ",
+            }),
+            el("button", {
+              className: "root-btn",
+              type: "button",
+              text: `Decide ${plural(undecided, "item")}`,
+              title: "Fetch those items' details (YouTube: about 1 unit per 50 videos; the import reuses them)",
+              onclick: () => previewUrl(true),
+            }),
+          ])
+        );
+      }
+      if (rules.length) {
+        body.push(
+          el("details", {}, [
+            el("summary", { text: `${plural(rules.length, "rule")} in ${presetLabel(fetchOptions())}` }),
+            el(
+              "ol",
+              { className: "preview-rules" },
+              rules.map((r, i) => el("li", { text: `${i + 1}. ${describeRule(r)}` }))
+            ),
+          ])
+        );
+      }
+      return el("div", { className: "preview" }, body);
     }
 
     // Polls one job until it reaches a terminal status. Stops silently if the
@@ -4705,12 +5255,16 @@
       job.updatedAt = view.updated_at || null;
       if (view.status === "succeeded") {
         job.entryId = view.result?.entry_id ?? null;
+        job.result = view.result || null;
       } else if (view.status === "failed" || view.status === "canceled") {
         job.errorMessage = view.error?.message || null;
       }
       render();
       if (view.status === "pending" || view.status === "running") {
         setTimeout(() => poll(id), POLL_MS);
+      } else if (job.kind === "update") {
+        if (view.status === "succeeded") LibraryChanges.changed();
+        loadRoots();
       }
     }
 
@@ -4731,7 +5285,7 @@
         return;
       }
       jobs = [
-        { id: res.job_id, query, status: "pending", stage: null, message: null, detail: null },
+        { id: res.job_id, kind: "ingest", query, status: "pending", stage: null, message: null, detail: null },
         ...jobs,
       ];
       render();
@@ -4779,6 +5333,7 @@
     function init() {
       render();
       loadFiles();
+      loadRoots();
     }
 
     return { render: init };
@@ -10217,6 +10772,22 @@
       throw new Error(message || `request failed (${res.status})`);
     }
     LibraryChanges.wrote(path);
+    return res.json();
+  }
+
+  async function patchJson(path, payload) {
+    const res = await fetch(path, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        message = (await res.json()).message || message;
+      } catch {}
+      throw new Error(message || `request failed (${res.status})`);
+    }
     return res.json();
   }
 
