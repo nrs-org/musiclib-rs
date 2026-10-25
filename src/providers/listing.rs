@@ -547,17 +547,28 @@ impl ListingStore {
                 s.served, s.built, s.incremental, s.full, s.skipped_budget, s.failed, s.new_items
             );
         }
-        let oldest = self
+        // `created_at = 0` is unknown age (built from the HTTP cache), not 1970.
+        let ages = self
             .db
             .query_one_raw(Statement::from_sql_and_values(
                 self.db.get_database_backend(),
-                "SELECT MIN(created_at) AS oldest FROM listing_snapshot
+                "SELECT MIN(NULLIF(created_at, 0)) AS oldest,
+                        SUM(created_at = 0) AS unknown
+                 FROM listing_snapshot
                  WHERE kind LIKE 'youtube:%' AND last_used_at >= ?",
                 [(now() - PASS_MAX_IDLE_SECS).into()],
             ))
             .await;
-        if let Ok(Some(row)) = oldest
-            && let Ok(Some(oldest)) = row.try_get::<Option<i64>>("", "oldest")
+        let Ok(Some(row)) = ages else { return };
+        if let Ok(Some(unknown)) = row.try_get::<Option<i64>>("", "unknown")
+            && unknown > 0
+        {
+            info!(
+                "{unknown} YouTube listing snapshot(s) built from the HTTP cache \
+                 have not been fully refreshed yet"
+            );
+        }
+        if let Ok(Some(oldest)) = row.try_get::<Option<i64>>("", "oldest")
             && now() - oldest > STALE_WARN_SECS
         {
             let days = (now() - oldest) / (24 * 60 * 60);
