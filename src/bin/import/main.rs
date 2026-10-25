@@ -161,6 +161,13 @@ async fn backfill_links(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let res = run().await;
+    // Responses still queued for the HTTP cache would be lost on exit.
+    musiclib_rs::httpcache::db::flush_all().await;
+    res
+}
+
+async fn run() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     let args = Args::parse();
