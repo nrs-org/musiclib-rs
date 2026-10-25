@@ -313,7 +313,9 @@ with `Retry-After` either way.
 Growing listings (a channel's uploads and playlists, playlist items, artist
 discographies on Spotify, MusicBrainz, Discogs and YouTube Music) are cached as
 one snapshot each, in the `db_cache` database. Updates only add: removed items
-stay. Design: `docs/plan-update.md`.
+stay. Tracklists don't grow, so they stay on the per-page HTTP cache and are
+never refreshed; that includes YouTube Music albums and singles, which YouTube
+lists as `OLAK5uy_…` playlists. Design: `docs/plan-update.md`.
 
 | Invocation | Listings |
 |---|---|
