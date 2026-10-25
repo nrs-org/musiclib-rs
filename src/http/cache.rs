@@ -111,15 +111,13 @@ impl HttpClient for CacheHttpClient {
             .client
             .make_request(req.clone(), body_extractor)
             .await?;
+        // A failed write only costs a later refetch; failing the request would
+        // throw away a response already paid for (quota, rate limit).
         if !no_cache {
             let policy = self.config.resolve_policy(&req.url);
-            self.cache
-                .set_req(&req, policy, res.clone())
-                .await
-                .map_err(|source| super::Error::Cache {
-                    url: req.url.clone(),
-                    source,
-                })?;
+            if let Err(e) = self.cache.set_req(&req, policy, res.clone()).await {
+                tracing::warn!("caching {} failed: {e}", req.url);
+            }
         }
         Ok(res)
     }
@@ -238,6 +236,53 @@ mod tests {
 
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
 
+        Ok(())
+    }
+
+    /// A cache that misses on every read and fails every write.
+    struct FailingWrites;
+
+    #[async_trait::async_trait]
+    impl crate::httpcache::HttpCache for FailingWrites {
+        async fn set(
+            &self,
+            _key: String,
+            _method: &crate::http::Method,
+            _policy: Option<&crate::httpcache::CachePolicy>,
+            _value: Arc<crate::http::Response>,
+        ) -> Result<(), crate::httpcache::Error> {
+            Err(
+                crate::httpcache::db::Error::Database(sea_orm::DbErr::Custom(
+                    "pool timed out".into(),
+                ))
+                .into(),
+            )
+        }
+
+        async fn get(
+            &self,
+            _key: &str,
+            _extractor: crate::http::BodyExtractorCow<'static>,
+        ) -> Result<Option<Arc<crate::http::Response>>, crate::httpcache::Error> {
+            Ok(None)
+        }
+    }
+
+    /// A failed cache write still returns the fetched response.
+    #[tokio::test]
+    async fn failed_cache_write_returns_response() -> anyhow::Result<()> {
+        init_test_logger();
+        let server = MockServer::new(|_| async {
+            Ok(HyperResponse::new(Full::new(Bytes::from("Hello, World!"))))
+        })
+        .await?;
+        let client = default_http_client().into_cached_with_cache(Arc::new(FailingWrites));
+        let req = Request {
+            url: server.route("/"),
+            ..Default::default()
+        };
+        let res = client.get_text(req).await?;
+        assert_eq!(&*res.text().await?, "Hello, World!");
         Ok(())
     }
 }

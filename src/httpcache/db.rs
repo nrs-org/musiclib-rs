@@ -1,17 +1,31 @@
-use std::{borrow::Cow, io::Read, io::Write, str::FromStr, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    io::Read,
+    io::Write,
+    str::FromStr,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use reqwest::StatusCode;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ConnectOptions, ConnectionTrait, Database,
-    DatabaseConnection, DbErr, EntityTrait, FromJsonQueryResult, sea_query,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectOptions, ConnectionTrait, Database,
+    DatabaseConnection, DbErr, EntityTrait, FromJsonQueryResult, QueryFilter, QuerySelect,
+    TransactionTrait, sea_query,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     http::{BodyExtractorCow, HeaderName, HeaderValue, RawResponse, Response},
-    httpcache::{CachePolicy, HttpCache},
+    httpcache::{CachePolicy, HttpCache, ResponseCachePolicy},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +42,8 @@ pub enum Error {
     BodyDecompression(#[source] std::io::Error),
     #[error("Unsupported HTTP cache body encoding: {0}")]
     UnsupportedBodyEncoding(String),
+    #[error("HTTP cache writer has stopped")]
+    WriterStopped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -61,8 +77,217 @@ mod cache_entry {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// SQLite-backed HTTP cache. SQLite takes one writer at a time, so writes
+/// don't go through a pool: `set` queues the row and one writer task commits
+/// queued rows in batches, one transaction each. Reads use their own pool and,
+/// under WAL, never wait on the writer. A row is served from `pending` until
+/// its batch commits.
 pub struct DbHttpCache {
+    /// On a file, a read-only pool. In memory, the writer's connection: an
+    /// in-memory database is private to the connection that opened it.
+    readers: DatabaseConnection,
+    /// The one writing connection, shared by the writer task and maintenance.
+    writer: DatabaseConnection,
+    queue: mpsc::Sender<Op>,
+    pending: Arc<DashMap<String, Pending>>,
+    seq: AtomicU64,
+}
+
+/// Rows wait at most this long in the queue before their batch commits.
+const BATCH_WINDOW: Duration = Duration::from_millis(50);
+const BATCH_MAX: usize = 500;
+/// A full queue makes `set` wait: backpressure, not an error.
+const QUEUE_CAPACITY: usize = 1024;
+const READERS: u32 = 16;
+/// Waiting for a pooled connection is queueing, not a failure, so the wait is
+/// long enough never to cut a busy import short.
+const ACQUIRE_WAIT: Duration = Duration::from_secs(600);
+
+/// Every open cache's queue, for `flush_all`.
+static QUEUES: Mutex<Vec<mpsc::WeakSender<Op>>> = Mutex::new(Vec::new());
+
+/// Commit every open DB cache's queued rows. Binaries that write the cache
+/// call this before exiting: rows still queued are lost with the runtime.
+pub async fn flush_all() {
+    let queues: Vec<mpsc::Sender<Op>> = {
+        let mut queues = QUEUES.lock().unwrap();
+        queues.retain(|q| q.upgrade().is_some());
+        queues
+            .iter()
+            .filter_map(mpsc::WeakSender::upgrade)
+            .collect()
+    };
+    for queue in queues {
+        flush_queue(&queue).await;
+    }
+}
+
+async fn flush_queue(queue: &mpsc::Sender<Op>) {
+    let (tx, rx) = oneshot::channel();
+    if queue.send(Op::Flush(tx)).await.is_ok() {
+        let _ = rx.await;
+    }
+}
+
+struct Pending {
+    seq: u64,
+    response: Arc<Response>,
+}
+
+enum Op {
+    Put(Box<Row>),
+    /// Answered once every row queued before it has been written.
+    Flush(oneshot::Sender<()>),
+}
+
+struct Row {
+    seq: u64,
+    key: String,
+    method: String,
+    status: i32,
+    headers: HeaderMap,
+    body: Vec<u8>,
+    body_encoding: Option<String>,
+    created_at: time::OffsetDateTime,
+    /// `None`: no cache policy configured at all (see `set`).
+    policy: Option<ResponseCachePolicy>,
+}
+
+async fn run_writer(
     db: DatabaseConnection,
+    mut queue: mpsc::Receiver<Op>,
+    pending: Arc<DashMap<String, Pending>>,
+) {
+    while let Some(first) = queue.recv().await {
+        let mut rows = Vec::new();
+        let mut flushes = Vec::new();
+        let mut next = Some(first);
+        let deadline = tokio::time::Instant::now() + BATCH_WINDOW;
+        while let Some(op) = next.take() {
+            match op {
+                Op::Put(row) => rows.push(*row),
+                Op::Flush(done) => flushes.push(done),
+            }
+            // A flush is waiting on this batch: write it now.
+            if rows.len() >= BATCH_MAX || !flushes.is_empty() {
+                break;
+            }
+            next = tokio::time::timeout_at(deadline, queue.recv())
+                .await
+                .ok()
+                .flatten();
+        }
+        if !rows.is_empty() {
+            // Only cache: a lost batch costs a refetch, never a failed request.
+            if let Err(e) = write_batch(&db, &rows).await {
+                tracing::warn!("HTTP cache: dropping {} response(s): {e}", rows.len());
+            }
+            for row in &rows {
+                pending.remove_if(&row.key, |_, p| p.seq == row.seq);
+            }
+        }
+        for done in flushes {
+            let _ = done.send(());
+        }
+    }
+}
+
+/// `try_write_batch`, retried once when another process holds the lock past
+/// `busy_timeout` (the server and an import can share the file).
+async fn write_batch(db: &DatabaseConnection, rows: &[Row]) -> Result<(), DbErr> {
+    match try_write_batch(db, rows).await {
+        Err(e) if e.to_string().contains("database is locked") => {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            try_write_batch(db, rows).await
+        }
+        res => res,
+    }
+}
+
+async fn try_write_batch(db: &DatabaseConnection, rows: &[Row]) -> Result<(), DbErr> {
+    let txn = db.begin().await?;
+
+    // The previous status and streak of every key, for `consecutive_count`.
+    // Read in the batch's own transaction, so with one writer it can't race.
+    let keys: HashSet<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+    let mut streaks: HashMap<String, (i32, i32)> = cache_entry::Entity::find()
+        .select_only()
+        .column(cache_entry::Column::Key)
+        .column(cache_entry::Column::Status)
+        .column(cache_entry::Column::ConsecutiveCount)
+        .filter(cache_entry::Column::Key.is_in(keys))
+        .into_tuple::<(String, i32, i32)>()
+        .all(&txn)
+        .await?
+        .into_iter()
+        .map(|(key, status, count)| (key, (status, count)))
+        .collect();
+
+    // In queue order, so a key set twice in one batch keeps the later row
+    // and counts both.
+    let mut latest: HashMap<&str, cache_entry::ActiveModel> = HashMap::new();
+    for row in rows {
+        let consecutive_count = match streaks.get(&row.key) {
+            Some(&(status, count)) if status == row.status => count.max(0) + 1,
+            _ => 0,
+        };
+        streaks.insert(row.key.clone(), (row.status, consecutive_count));
+        let (expires_at, stale_at) = expiry(row.policy.as_ref(), consecutive_count, row.created_at);
+        latest.insert(
+            &row.key,
+            cache_entry::ActiveModel {
+                key: Set(row.key.clone()),
+                method: Set(row.method.clone()),
+                url: Set(String::new()),
+                status: Set(row.status),
+                headers: Set(row.headers.clone()),
+                body: Set(row.body.clone()),
+                body_encoding: Set(row.body_encoding.clone()),
+                created_at: Set(row.created_at),
+                expires_at: Set(expires_at),
+                stale_at: Set(stale_at),
+                consecutive_count: Set(consecutive_count),
+            },
+        );
+    }
+
+    cache_entry::Entity::insert_many(latest.into_values())
+        .on_conflict(
+            sea_query::OnConflict::column(cache_entry::Column::Key)
+                .update_columns([
+                    cache_entry::Column::Body,
+                    cache_entry::Column::BodyEncoding,
+                    cache_entry::Column::Method,
+                    cache_entry::Column::Url,
+                    cache_entry::Column::Headers,
+                    cache_entry::Column::Status,
+                    cache_entry::Column::CreatedAt,
+                    cache_entry::Column::ExpiresAt,
+                    cache_entry::Column::StaleAt,
+                    cache_entry::Column::ConsecutiveCount,
+                ])
+                .to_owned(),
+        )
+        .exec(&txn)
+        .await?;
+    txn.commit().await
+}
+
+/// `(expires_at, stale_at)` for a response stored at `now`.
+fn expiry(
+    policy: Option<&ResponseCachePolicy>,
+    consecutive_count: i32,
+    now: time::OffsetDateTime,
+) -> (time::OffsetDateTime, time::OffsetDateTime) {
+    match policy {
+        None => (now + time::Duration::days(1), now),
+        Some(p) => {
+            let ttl = p.ttl.compute(consecutive_count.max(0) as u32);
+            let ttl = time::Duration::try_from(ttl).unwrap_or(time::Duration::days(1));
+            let swr = time::Duration::try_from(p.swr).unwrap_or(time::Duration::ZERO);
+            (now + ttl, now + ttl + swr)
+        }
+    }
 }
 
 const ZLIB_ENCODING: &str = "zlib";
@@ -107,71 +332,90 @@ fn decode_body(body: Vec<u8>, encoding: Option<&str>) -> Result<Vec<u8>, Error> 
 
 impl DbHttpCache {
     pub async fn new(db_url: String) -> Result<Self, Error> {
-        let db = Self::init_db(db_url).await?;
-        Ok(Self { db })
+        Self::open(db_url).await
     }
 
     pub async fn new_in_memory() -> Result<Self, Error> {
-        let db = Self::init_db("sqlite::memory:".to_string()).await?;
-        Ok(Self { db })
+        Self::open("sqlite::memory:".to_string()).await
     }
 
-    async fn init_db(db_url: String) -> Result<DatabaseConnection, Error> {
-        let db = connect(db_url).await?;
-        db.get_schema_registry("musiclib_rs::httpcache::db::*")
-            .sync(&db)
+    async fn open(db_url: String) -> Result<Self, Error> {
+        let is_memory = db_url.contains(":memory:") || db_url.contains("mode=memory");
+        let db_url = if db_url.starts_with("sqlite://") && !db_url.contains('?') {
+            format!("{db_url}?mode=rwc")
+        } else {
+            db_url
+        };
+
+        let writer = Database::connect(connect_options(&db_url, 1, false, is_memory)).await?;
+        writer
+            .get_schema_registry("musiclib_rs::httpcache::db::*")
+            .sync(&writer)
             .await?;
-        Ok(db)
+        let readers = if is_memory {
+            writer.clone()
+        } else {
+            Database::connect(connect_options(&db_url, READERS, true, false)).await?
+        };
+
+        let (queue, rx) = mpsc::channel(QUEUE_CAPACITY);
+        QUEUES.lock().unwrap().push(queue.downgrade());
+        let pending = Arc::new(DashMap::new());
+        tokio::spawn(run_writer(writer.clone(), rx, Arc::clone(&pending)));
+
+        Ok(Self {
+            readers,
+            writer,
+            queue,
+            pending,
+            seq: AtomicU64::new(0),
+        })
+    }
+
+    /// Commit every row queued so far.
+    pub async fn flush(&self) {
+        flush_queue(&self.queue).await;
     }
 }
 
-/// Open the HTTP cache DB at `db_url` with the pool and per-connection
-/// settings it needs, without touching its schema. Other stores kept in the
-/// same file (listing snapshots, the quota ledger) open it through this too.
-pub async fn connect(db_url: String) -> Result<DatabaseConnection, DbErr> {
-    // A `:memory:` database is private per connection, so it must use a
-    // single pooled connection or every cursor sees an empty DB.
-    let is_memory = db_url.contains(":memory:") || db_url.contains("mode=memory");
+fn connect_options(
+    db_url: &str,
+    connections: u32,
+    read_only: bool,
+    is_memory: bool,
+) -> ConnectOptions {
+    let mut opts = ConnectOptions::new(db_url.to_owned());
+    opts.sqlx_logging(false)
+        .max_connections(connections)
+        .acquire_timeout(ACQUIRE_WAIT);
+    if !is_memory {
+        // Per-connection settings, so they go on the template every pooled
+        // connection is opened from, not in a one-off `PRAGMA`. The busy
+        // timeout covers other processes writing the same file.
+        opts.map_sqlx_sqlite_opts(move |o| {
+            use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
+            o.journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal)
+                .busy_timeout(Duration::from_secs(30))
+                .read_only(read_only)
+        });
+    }
+    opts
+}
 
+/// Open the HTTP cache DB at `db_url` for the other stores kept in the same
+/// file (listing snapshots, the quota ledger), without touching its schema.
+/// Their traffic is about one read and one write per listing, so a few
+/// connections suffice; the busy timeout covers the cache's writer.
+pub async fn connect(db_url: String) -> Result<DatabaseConnection, DbErr> {
+    let is_memory = db_url.contains(":memory:") || db_url.contains("mode=memory");
     let db_url = if db_url.starts_with("sqlite://") && !db_url.contains('?') {
         format!("{db_url}?mode=rwc")
     } else {
         db_url
     };
-
-    let mut opts = ConnectOptions::new(db_url);
-    opts.sqlx_logging(false);
-    if is_memory {
-        opts.max_connections(1);
-    } else {
-        // A real connection pool (not a single serialized connection) is
-        // required: the importer fans out cache reads/writes via
-        // `buffer_unordered`, and funnelling them all through one connection
-        // — or, worse, a global mutex held across body extraction —
-        // deadlocks. sqlx applies a 5s `busy_timeout` per connection by
-        // default, so concurrent writers wait rather than erroring.
-        opts.max_connections(32)
-            .acquire_timeout(std::time::Duration::from_secs(30));
-
-        // journal_mode/synchronous/busy_timeout are per-*connection*
-        // SQLite settings, so they must go through `map_sqlx_sqlite_opts`
-        // (which customizes the template `SqliteConnectOptions` the pool
-        // uses to establish every connection) rather than a `PRAGMA ...`
-        // statement run once against the pooled `DatabaseConnection`
-        // after connecting -- that only ever lands on whichever single
-        // connection happens to service it, leaving the other 31 at
-        // sqlx-sqlite's bare default (5s busy_timeout) instead of the 30s
-        // intended here to cover worst-case write queues when
-        // `buffer_unordered` fans out many concurrent cache writes.
-        opts.map_sqlx_sqlite_opts(|o| {
-            use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
-            o.journal_mode(SqliteJournalMode::Wal)
-                .synchronous(SqliteSynchronous::Normal)
-                .busy_timeout(std::time::Duration::from_secs(30))
-        });
-    }
-
-    Database::connect(opts).await
+    let connections = if is_memory { 1 } else { 4 };
+    Database::connect(connect_options(&db_url, connections, false, is_memory)).await
 }
 
 impl DbHttpCache {
@@ -179,7 +423,7 @@ impl DbHttpCache {
     /// zlib. This is intentionally separate from opening the cache so normal
     /// startup never rewrites the whole database.
     pub async fn recompress_existing(&self) -> Result<RecompressionStats, Error> {
-        let entries = cache_entry::Entity::find().all(&self.db).await?;
+        let entries = cache_entry::Entity::find().all(&self.writer).await?;
         let mut stats = RecompressionStats {
             scanned: entries.len(),
             ..Default::default()
@@ -202,7 +446,7 @@ impl DbHttpCache {
             let mut active: cache_entry::ActiveModel = model.into();
             active.body = Set(body);
             active.body_encoding = Set(encoding);
-            active.update(&self.db).await?;
+            active.update(&self.writer).await?;
 
             stats.compressed += 1;
             stats.saved_bytes += (old_len - new_len) as u64;
@@ -212,7 +456,7 @@ impl DbHttpCache {
     }
 
     pub async fn vacuum(&self) -> Result<(), Error> {
-        self.db.execute_unprepared("VACUUM").await?;
+        self.writer.execute_unprepared("VACUUM").await?;
         Ok(())
     }
 
@@ -255,18 +499,6 @@ impl HttpCache for DbHttpCache {
     ) -> Result<(), super::Error> {
         let status = value.status.as_u16();
 
-        // Fetch the previous entry for this key to determine consecutive_count.
-        let prev = cache_entry::Entity::find_by_id(&key)
-            .one(&self.db)
-            .await
-            .map_err(Error::Database)?;
-
-        let consecutive_count = match &prev {
-            Some(m) if m.status == status as i32 => m.consecutive_count.max(0) + 1,
-            _ => 0,
-        };
-
-        // Resolve cache policy for this status code, then compute expiry times.
         // Two distinct "no policy" cases, handled differently:
         //   - No `CachePolicy` configured at all: cache with a short default,
         //     no SWR — a reasonable default for a minimal setup.
@@ -281,22 +513,13 @@ impl HttpCache for DbHttpCache {
         //     for a day" — caching is an opt-in optimization, and the safe
         //     default on the "I didn't think about this" path is to just make
         //     the live request again next time.
-        let (expires_at, stale_at) = match policy {
-            None => {
-                let now = time::OffsetDateTime::now_utc();
-                (now + time::Duration::days(1), now)
-            }
+        // Expiry itself is computed by the writer, which knows the previous
+        // entry's streak (`consecutive_count`).
+        let policy = match policy {
+            None => None,
             Some(p) => match p.resolve(status) {
                 None => return Ok(()),
-                Some(response_policy) => {
-                    let ttl = response_policy.ttl.compute(consecutive_count as u32);
-                    let ttl = time::Duration::try_from(ttl).unwrap_or(time::Duration::days(1));
-                    let swr = time::Duration::try_from(response_policy.swr)
-                        .unwrap_or(time::Duration::ZERO);
-
-                    let now = time::OffsetDateTime::now_utc();
-                    (now + ttl, now + ttl + swr)
-                }
+                Some(response_policy) => Some(response_policy.clone()),
             },
         };
 
@@ -306,48 +529,37 @@ impl HttpCache for DbHttpCache {
             .map_err(|err| Error::BodyRead(Box::new(err)))?
             .to_vec();
         let (body, body_encoding) = encode_body(&body)?;
+        let headers = HeaderMap(
+            value
+                .headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect(),
+        );
 
-        let entry = cache_entry::ActiveModel {
-            key: Set(key),
-            method: Set(method.to_string()),
-            url: Set("".to_string()),
-            status: Set(status as i32),
-            headers: Set(HeaderMap(
-                value
-                    .headers
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                    .collect(),
-            )),
-            body: Set(body),
-            body_encoding: Set(body_encoding),
-            created_at: Set(time::OffsetDateTime::now_utc()),
-            expires_at: Set(expires_at),
-            stale_at: Set(stale_at),
-            consecutive_count: Set(consecutive_count),
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.pending.insert(
+            key.clone(),
+            Pending {
+                seq,
+                response: Arc::clone(&value),
+            },
+        );
+        let row = Row {
+            seq,
+            key: key.clone(),
+            method: method.to_string(),
+            status: status as i32,
+            headers,
+            body,
+            body_encoding,
+            created_at: time::OffsetDateTime::now_utc(),
+            policy,
         };
-
-        cache_entry::Entity::insert(entry)
-            .on_conflict(
-                sea_query::OnConflict::column(cache_entry::Column::Key)
-                    .update_columns([
-                        cache_entry::Column::Body,
-                        cache_entry::Column::BodyEncoding,
-                        cache_entry::Column::Method,
-                        cache_entry::Column::Url,
-                        cache_entry::Column::Headers,
-                        cache_entry::Column::Status,
-                        cache_entry::Column::CreatedAt,
-                        cache_entry::Column::ExpiresAt,
-                        cache_entry::Column::StaleAt,
-                        cache_entry::Column::ConsecutiveCount,
-                    ])
-                    .to_owned(),
-            )
-            .exec(&self.db)
-            .await
-            .map_err(Error::Database)?;
-
+        if self.queue.send(Op::Put(Box::new(row))).await.is_err() {
+            self.pending.remove_if(&key, |_, p| p.seq == seq);
+            return Err(Error::WriterStopped.into());
+        }
         Ok(())
     }
 
@@ -356,8 +568,11 @@ impl HttpCache for DbHttpCache {
         key: &str,
         extractor: BodyExtractorCow<'static>,
     ) -> Result<Option<Arc<Response>>, super::Error> {
+        if let Some(pending) = self.pending.get(key) {
+            return Ok(Some(Arc::clone(&pending.response)));
+        }
         match cache_entry::Entity::find_by_id(key)
-            .one(&self.db)
+            .one(&self.readers)
             .await
             .map_err(Error::Database)?
         {
@@ -513,5 +728,91 @@ mod tests {
             hit.is_some(),
             "a status with a configured rule must still cache"
         );
+    }
+
+    /// The stored `(status, consecutive_count)` of `key`, read past the queue.
+    async fn streak(cache: &DbHttpCache, key: &str) -> Option<(i32, i32)> {
+        use sea_orm::EntityTrait;
+        super::cache_entry::Entity::find_by_id(key)
+            .one(&cache.writer)
+            .await
+            .unwrap()
+            .map(|m| (m.status, m.consecutive_count))
+    }
+
+    async fn put(cache: &DbHttpCache, key: &str, status: reqwest::StatusCode) {
+        let res = std::sync::Arc::new(response_with_status(status).await);
+        cache
+            .set(key.to_string(), &Method::GET, None, res)
+            .await
+            .unwrap();
+    }
+
+    /// A queued row is served before its batch commits, and from the DB after.
+    #[tokio::test]
+    async fn queued_row_is_readable_before_and_after_commit() {
+        let cache = DbHttpCache::new_in_memory().await.unwrap();
+        put(&cache, "k", reqwest::StatusCode::OK).await;
+        let hit = cache.get("k", bytes_body_extractor().into()).await.unwrap();
+        assert!(hit.is_some());
+
+        cache.flush().await;
+        assert!(cache.pending.is_empty());
+        assert_eq!(streak(&cache, "k").await, Some((200, 0)));
+        let hit = cache.get("k", bytes_body_extractor().into()).await.unwrap();
+        assert_eq!(hit.unwrap().status, reqwest::StatusCode::OK);
+    }
+
+    /// `consecutive_count` counts repeats of one status across batches and
+    /// within one, and resets when the status changes.
+    #[tokio::test]
+    async fn consecutive_count_tracks_status_streaks() {
+        let cache = DbHttpCache::new_in_memory().await.unwrap();
+        put(&cache, "k", reqwest::StatusCode::NOT_FOUND).await;
+        cache.flush().await;
+        put(&cache, "k", reqwest::StatusCode::NOT_FOUND).await;
+        put(&cache, "k", reqwest::StatusCode::NOT_FOUND).await;
+        cache.flush().await;
+        assert_eq!(streak(&cache, "k").await, Some((404, 2)));
+
+        put(&cache, "k", reqwest::StatusCode::OK).await;
+        cache.flush().await;
+        assert_eq!(streak(&cache, "k").await, Some((200, 0)));
+    }
+
+    /// More rows than one batch holds all land, and `flush_all` commits them.
+    #[tokio::test]
+    async fn flush_all_commits_every_queued_row() {
+        let cache = DbHttpCache::new_in_memory().await.unwrap();
+        let n = super::BATCH_MAX * 2 + 7;
+        for i in 0..n {
+            put(&cache, &format!("k{i}"), reqwest::StatusCode::OK).await;
+        }
+        super::flush_all().await;
+        assert!(cache.pending.is_empty());
+        for i in [0, super::BATCH_MAX, n - 1] {
+            assert!(streak(&cache, &format!("k{i}")).await.is_some());
+        }
+    }
+
+    /// On a file, reads go through the read-only pool and see committed rows,
+    /// including from a cache opened later on the same file.
+    #[tokio::test]
+    async fn file_cache_reads_committed_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("cache.db").display());
+        let cache = DbHttpCache::new(url.clone()).await.unwrap();
+        put(&cache, "k", reqwest::StatusCode::OK).await;
+        cache.flush().await;
+        let hit = cache.get("k", bytes_body_extractor().into()).await.unwrap();
+        assert!(hit.is_some());
+        drop(cache);
+
+        let reopened = DbHttpCache::new(url).await.unwrap();
+        let hit = reopened
+            .get("k", bytes_body_extractor().into())
+            .await
+            .unwrap();
+        assert_eq!(hit.unwrap().status, reqwest::StatusCode::OK);
     }
 }

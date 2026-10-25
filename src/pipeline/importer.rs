@@ -1,5 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
+use crate::http::Activity;
 use crate::providers::{
     FetchProvider, ResolveContext,
     std_values::StandardProviderKeys,
@@ -9,6 +10,7 @@ use crate::providers::{
     },
 };
 use futures::future::join_all;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, debug, warn};
 
 use super::state::{ChildEdge, LinkVia, Pair, PairMetadata, State, StubInfo};
@@ -191,7 +193,11 @@ pub fn import(
             }
         }
 
-        let mut subs: Vec<BoxFuture<()>> = vec![];
+        // Each subtask is its own task, so the traversal's CPU work (parsing,
+        // matching, cache decoding) spreads over the runtime's threads rather
+        // than all being polled from the root's.
+        let mut subs: Vec<AbortOnDropHandle<()>> = vec![];
+        let spawn = |fut| Activity::global().spawn(fut);
 
         // 6. is_rel + recursive import for every other source returned by this
         //    fetch. Passing the full pair (not just the URL) lets the recursive
@@ -217,13 +223,13 @@ pub fn import(
                 canonical.clone(),
                 LinkVia::Fetch,
             );
-            subs.push(import(
+            subs.push(spawn(import(
                 Arc::clone(&state),
                 Arc::clone(&providers),
                 Arc::clone(&pool),
                 src,
                 options_id,
-            ));
+            )));
         }
 
         // 7. has_rel for every child. Pick one pair from the child's sources
@@ -281,13 +287,13 @@ pub fn import(
                         // `None`: listed but not to be fetched; the edge and
                         // stub info above are all it gets.
                         if let Some(child_options) = child_fetch_opts.id {
-                            subs.push(import(
+                            subs.push(spawn(import(
                                 Arc::clone(&state),
                                 Arc::clone(&providers),
                                 Arc::clone(&pool),
                                 primary,
                                 child_options,
-                            ));
+                            )));
                         }
                     }
                     Ok(None) => break,
@@ -330,8 +336,15 @@ pub fn import(
         // hangs. Dropping the streams cancels those requests.
         drop(children);
 
-        // 8. Await all sub-tasks. Each handles its own errors.
-        join_all(subs).await;
+        // 8. Await all sub-tasks. Each handles its own errors; a panic is
+        //    re-raised here, as it would be from a future polled in place.
+        for res in join_all(subs).await {
+            if let Err(e) = res
+                && e.is_panic()
+            {
+                std::panic::resume_unwind(e.into_panic());
+            }
+        }
     })
 }
 
