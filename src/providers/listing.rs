@@ -39,7 +39,7 @@ use tracing::{info, warn};
 
 use crate::{
     http::{bypass_cache, quota::QuotaLedger},
-    providers::types::{ChildRef, Error, PageFetcher, PaginatedChildSource},
+    providers::types::{ChildRef, CycleGuard, Error, PageFetcher, PaginatedChildSource},
 };
 
 /// How a listing's items are ordered, which decides how it can be refreshed.
@@ -249,8 +249,9 @@ impl ListingStore {
         &self,
         key: &ListingKey,
         order: ListingOrder,
-        mut fetcher: Box<dyn PageFetcher>,
+        fetcher: Box<dyn PageFetcher>,
     ) -> (Vec<ChildRef>, Option<Error>) {
+        let mut fetcher = CycleGuard::new(fetcher);
         let db_key = key.db_key();
         let lock = Arc::clone(&self.locks.entry(db_key.clone()).or_default());
         let _guard = lock.lock().await;
@@ -511,7 +512,7 @@ impl ListingStore {
             let _guard = lock.lock().await;
             // Only used to count new items; an unreadable one is replaced.
             let old = self.load(&db_key).await.ok().flatten();
-            let mut fetcher = factory(id);
+            let mut fetcher = CycleGuard::new(factory(id));
             match self.fetch_fresh(&key, fetcher.as_mut()).await {
                 Ok(items) => {
                     let no_baseline = usize::from(old.is_none());
@@ -958,6 +959,44 @@ mod tests {
         assert_eq!((stats.full, stats.new_items, stats.no_baseline), (1, 0, 1));
         let stats = refresh(&["d", "c", "b", "a"]).await;
         assert_eq!((stats.full, stats.new_items, stats.no_baseline), (1, 1, 0));
+    }
+
+    /// A page whose next token is its own (YouTube's empty last page of some
+    /// playlists) ends the refresh instead of looping on it.
+    #[tokio::test]
+    async fn self_referencing_page_token_ends_the_refresh() {
+        struct Looping(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl PageFetcher for Looping {
+            async fn fetch_page(&mut self, token: Option<&str>) -> Result<ChildPage, Error> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                assert!(n < 10, "still paging after {n} calls");
+                Ok(match token {
+                    None => ChildPage {
+                        children: vec![child("a")],
+                        next_page_token: Some("x".into()),
+                    },
+                    Some(_) => ChildPage {
+                        children: vec![],
+                        next_page_token: Some("x".into()),
+                    },
+                })
+            }
+        }
+        let db = db().await;
+        for mode in [ListingMode::Cached, ListingMode::Full] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let s = store(&db, mode).await;
+            let key = ListingKey::new(KIND, "PL1");
+            let fetcher = Box::new(Looping(Arc::clone(&calls)));
+            let mut source = s.listing(key, ListingOrder::Unordered, fetcher);
+            let mut out = Vec::new();
+            while let Some((c, ())) = child_next(&mut source).await.unwrap() {
+                out.push(c.sources.first_identifier().unwrap().to_owned());
+            }
+            assert_eq!(out, ["a"], "{mode:?}");
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "{mode:?}");
+        }
     }
 
     /// Concurrent readers of one listing share a single refresh, and a

@@ -707,6 +707,44 @@ pub trait PageFetcher: Send {
     async fn fetch_page(&mut self, page_token: Option<&str>) -> Result<ChildPage, Error>;
 }
 
+/// Ends a walk whose next page token was already requested in it. YouTube
+/// returns, for some playlists with hidden items, an empty last page whose
+/// `nextPageToken` is its own token; followed blindly, that costs a unit per
+/// request forever. A walk starts at a `None` token.
+pub struct CycleGuard {
+    inner: Box<dyn PageFetcher>,
+    seen: std::collections::HashSet<String>,
+}
+
+impl CycleGuard {
+    pub fn new(inner: Box<dyn PageFetcher>) -> Box<dyn PageFetcher> {
+        Box::new(Self {
+            inner,
+            seen: Default::default(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl PageFetcher for CycleGuard {
+    async fn fetch_page(&mut self, page_token: Option<&str>) -> Result<ChildPage, Error> {
+        match page_token {
+            None => self.seen.clear(),
+            Some(t) => {
+                self.seen.insert(t.to_owned());
+            }
+        }
+        let mut page = self.inner.fetch_page(page_token).await?;
+        if let Some(next) = &page.next_page_token
+            && self.seen.contains(next)
+        {
+            tracing::warn!("page token {next:?} repeats; treating the listing as ended there");
+            page.next_page_token = None;
+        }
+        Ok(page)
+    }
+}
+
 /// `ChildSource` that lazily paginates through children using a `PageFetcher`.
 ///
 /// The inner stream is built with `stream::unfold` so the `PageFetcher` moves
@@ -779,7 +817,7 @@ fn paginated_stream(
     // State: (fetcher, buffered items, next page token, exhausted flag)
     futures::stream::unfold(
         (
-            fetcher,
+            CycleGuard::new(fetcher),
             std::collections::VecDeque::<ChildRef>::new(),
             None::<String>,
             false,
