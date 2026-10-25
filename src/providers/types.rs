@@ -723,7 +723,7 @@ pub struct CycleGuard {
 }
 
 impl CycleGuard {
-    pub fn new(inner: Box<dyn PageFetcher>) -> Box<dyn PageFetcher> {
+    pub fn wrap(inner: Box<dyn PageFetcher>) -> Box<dyn PageFetcher> {
         Box::new(Self {
             inner,
             seen: Default::default(),
@@ -823,7 +823,7 @@ fn paginated_stream(
     // State: (fetcher, buffered items, next page token, exhausted flag)
     futures::stream::unfold(
         (
-            CycleGuard::new(fetcher),
+            CycleGuard::wrap(fetcher),
             std::collections::VecDeque::<ChildRef>::new(),
             None::<String>,
             false,

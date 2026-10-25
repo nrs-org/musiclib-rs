@@ -251,7 +251,7 @@ impl ListingStore {
         order: ListingOrder,
         fetcher: Box<dyn PageFetcher>,
     ) -> (Vec<ChildRef>, Option<Error>) {
-        let mut fetcher = CycleGuard::new(fetcher);
+        let mut fetcher = CycleGuard::wrap(fetcher);
         let db_key = key.db_key();
         let lock = Arc::clone(&self.locks.entry(db_key.clone()).or_default());
         let _guard = lock.lock().await;
@@ -512,7 +512,7 @@ impl ListingStore {
             let _guard = lock.lock().await;
             // Only used to count new items; an unreadable one is replaced.
             let old = self.load(&db_key).await.ok().flatten();
-            let mut fetcher = CycleGuard::new(factory(id));
+            let mut fetcher = CycleGuard::wrap(factory(id));
             match self.fetch_fresh(&key, fetcher.as_mut()).await {
                 Ok(items) => {
                     let no_baseline = usize::from(old.is_none());
