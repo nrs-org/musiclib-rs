@@ -9,7 +9,7 @@
 //!   The job's result is `pipeline::update::UpdateReport`.
 
 use std::{
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -17,7 +17,7 @@ use hyper::{Method, StatusCode};
 use musiclib_rs::{
     fetch_presets,
     http::HttpClient,
-    pipeline::update::{UpdateContext, UpdateOptions, run_update},
+    pipeline::update::{RootOutcome, UpdateContext, UpdateOptions, UpdateStep, run_update},
     providers::{
         FetchProvider,
         listing::{ListingMode, ListingStore},
@@ -83,6 +83,54 @@ impl Drop for Running {
     }
 }
 
+/// Reports each `UpdateStep` as the job's stage, with an `update` detail
+/// field: the current step and every root's outcome so far.
+fn step_reporter(
+    sink: Arc<JobProgressSink>,
+    total: usize,
+) -> Arc<dyn Fn(UpdateStep) + Send + Sync> {
+    let done: Mutex<Vec<RootOutcome>> = Mutex::new(Vec::new());
+    Arc::new(move |step: UpdateStep| {
+        let (stage, message) = match &step {
+            UpdateStep::Mirror { at, target } => (
+                "mirror".to_string(),
+                match (at, target) {
+                    (Some(at), Some(target)) => {
+                        format!("syncing the MusicBrainz mirror: packet {at} of {target}")
+                    }
+                    (Some(at), None) => format!("syncing the MusicBrainz mirror: packet {at}"),
+                    _ => "syncing the MusicBrainz mirror".to_string(),
+                },
+            ),
+            UpdateStep::Preset {
+                index,
+                of,
+                file,
+                roots,
+                ..
+            } => (
+                format!("preset {index}/{of}"),
+                format!("{file}: {roots} root(s)"),
+            ),
+            UpdateStep::RootDone(outcome) => {
+                done.lock().unwrap().push(outcome.clone());
+                let n = done.lock().unwrap().len();
+                (sink.current_stage(), format!("{n} of {total} root(s) done"))
+            }
+            UpdateStep::FullRefresh => (
+                "full_refresh".to_string(),
+                "refreshing the oldest listings with the budget left".to_string(),
+            ),
+        };
+        let value = json!({
+            "step": step,
+            "roots_total": total,
+            "roots_done": *done.lock().unwrap(),
+        });
+        sink.step(stage, "update", value, message);
+    })
+}
+
 async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     let req: UpdateBody = if body.iter().all(u8::is_ascii_whitespace) {
         UpdateBody::default()
@@ -134,11 +182,22 @@ async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     let running = Running(Arc::clone(state));
 
     let job_state = Arc::clone(state);
+    let meta = crate::jobs::JobMeta {
+        label: match roots.as_slice() {
+            [root] => format!("Update {}", root.label.as_deref().unwrap_or(&root.url)),
+            _ => format!("Library update: {} roots", roots.len()),
+        },
+        trigger: crate::jobs::Trigger::Manual,
+        params: json!({
+            "root_ids": roots.iter().map(|r| r.id).collect::<Vec<_>>(),
+            "quota_budget": req.quota_budget,
+        }),
+    };
     let opts = UpdateOptions {
         quota_budget: Some(req.quota_budget.unwrap_or(8000)),
         ..UpdateOptions::default()
     };
-    let job_id = state.jobs.spawn("update", move |handle| async move {
+    let job_id = state.jobs.spawn("update", meta, move |handle| async move {
         let _running = running;
         handle.progress(
             "updating",
@@ -152,6 +211,7 @@ async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
             Arc::clone(&job_state.activity),
             Arc::clone(&job_state.youtube_quota),
         );
+        let on_step = step_reporter(Arc::clone(&sink), roots.len());
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
@@ -165,6 +225,7 @@ async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
                 youtube_quota: Arc::clone(&job_state.youtube_quota),
                 soft_cfg: job_state.soft_cfg.as_ref(),
                 progress: Some(sink),
+                on_step: Some(on_step),
                 fetch_options_dir: fetch_presets::dir(),
             },
             &roots,

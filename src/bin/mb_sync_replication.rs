@@ -86,6 +86,7 @@ fn main() -> Result<()> {
             base_url: cli.base_url,
             until: cli.until,
             max_server_lag: cli.max_server_lag,
+            on_packet: None,
         },
     )?;
     Ok(())

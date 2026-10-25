@@ -50,8 +50,34 @@ pub struct UpdateContext<'a> {
     pub youtube_quota: Arc<AtomicU64>,
     pub soft_cfg: Option<&'a SoftMatchConfig>,
     pub progress: Option<Arc<dyn ImportProgress>>,
+    /// Told where the update is, as it moves on.
+    pub on_step: Option<Arc<dyn Fn(UpdateStep) + Send + Sync>>,
     /// Where fetch-options presets are read from.
     pub fetch_options_dir: PathBuf,
+}
+
+/// Where an update is (`UpdateContext::on_step`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum UpdateStep {
+    /// Syncing the MusicBrainz mirror: applied up to `at`, syncing up to
+    /// `target` (`None` for the newest published packet).
+    Mirror {
+        at: Option<i64>,
+        target: Option<i64>,
+    },
+    /// Importing the roots of one preset: the `index`th of `of` (1-based).
+    Preset {
+        index: usize,
+        of: usize,
+        file: String,
+        entry_point: String,
+        roots: usize,
+    },
+    /// A root's run ended.
+    RootDone(RootOutcome),
+    /// Spending the leftover budget on the oldest snapshots.
+    FullRefresh,
 }
 
 pub struct UpdateOptions {
@@ -103,7 +129,16 @@ pub async fn run_update(
     now: i64,
 ) -> anyhow::Result<UpdateReport> {
     let units_before = ctx.youtube_quota.load(Ordering::Relaxed);
-    let mirror = sync_mirror(ctx.registry, opts.mb_max_server_lag).await?;
+    let step = |s: UpdateStep| {
+        if let Some(f) = &ctx.on_step {
+            f(s);
+        }
+    };
+    step(UpdateStep::Mirror {
+        at: None,
+        target: None,
+    });
+    let mirror = sync_mirror(ctx.registry, opts.mb_max_server_lag, ctx.on_step.clone()).await?;
 
     let mut listings = ListingStore::new(ctx.listing_db.clone(), ListingMode::Auto)
         .await?
@@ -135,8 +170,16 @@ pub async fn run_update(
     }
 
     let mut outcomes = Vec::with_capacity(roots.len());
-    for ((file, entry_point), members) in groups {
+    let preset_count = groups.len();
+    for (index, ((file, entry_point), members)) in groups.into_iter().enumerate() {
         info!("== {file}::{entry_point}: {} root(s)", members.len());
+        step(UpdateStep::Preset {
+            index: index + 1,
+            of: preset_count,
+            file: file.to_owned(),
+            entry_point: entry_point.to_owned(),
+            roots: members.len(),
+        });
         let result = match fetch_presets::resolve(&ctx.fetch_options_dir, file, entry_point).await {
             None => Err(format!(
                 "fetch options {file}/{entry_point} don't load (missing or invalid)"
@@ -185,11 +228,13 @@ pub async fn run_update(
             if let Err(e) = recorded {
                 warn!("recording root {}'s outcome failed: {e}", root.id);
             }
+            step(UpdateStep::RootDone(outcome.clone()));
             outcomes.push(outcome);
         }
     }
 
     // Full refreshes of the oldest snapshots with what the walk left.
+    step(UpdateStep::FullRefresh);
     listings
         .full_refresh_pass()
         .await
@@ -223,6 +268,7 @@ pub async fn run_update(
 async fn sync_mirror(
     registry: &RegistryConfig,
     max_server_lag: Option<i64>,
+    on_step: Option<Arc<dyn Fn(UpdateStep) + Send + Sync>>,
 ) -> anyhow::Result<Option<SyncOutcome>> {
     let Some(mb) = registry.musicbrainz.clone() else {
         return Ok(None);
@@ -234,6 +280,14 @@ async fn sync_mirror(
             &token,
             &SyncOptions {
                 max_server_lag,
+                on_packet: on_step.map(|f| {
+                    Box::new(move |at, target| {
+                        f(UpdateStep::Mirror {
+                            at: Some(at),
+                            target,
+                        })
+                    }) as Box<dyn Fn(i64, Option<i64>) + Send>
+                }),
                 ..SyncOptions::default()
             },
         ),

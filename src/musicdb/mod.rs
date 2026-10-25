@@ -486,9 +486,11 @@ mod dedup_block_key {
 // at insertion time so there is at most one row per (entry_a, entry_b, kind)
 // triple regardless of which side was passed first. Disabling a row (enabled=0)
 // tombstones the decision without losing history.
+mod jobs;
 mod playlists;
 mod roots;
 mod songs;
+pub use jobs::JobRunRow;
 pub use playlists::{NewPlaylistItem, PlaylistItemRow, PlaylistRow};
 pub use roots::{NewUpdateRoot, UpdateRootEdit, UpdateRootRow};
 pub use songs::{RowImage, RowState, SongEdit};

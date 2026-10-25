@@ -35,6 +35,9 @@ pub struct SyncOptions {
     /// one an hour) behind the newest published one: its own replication
     /// has likely stopped.
     pub max_server_lag: Option<i64>,
+    /// Called after each packet is applied, with the mirror's sequence and
+    /// the one it's syncing up to (`None` for the newest published).
+    pub on_packet: Option<Box<dyn Fn(i64, Option<i64>) + Send>>,
 }
 
 impl Default for SyncOptions {
@@ -44,6 +47,7 @@ impl Default for SyncOptions {
             base_url: mb_freshness::PACKETS_BASE_URL.to_owned(),
             until: None,
             max_server_lag: None,
+            on_packet: None,
         }
     }
 }
@@ -165,6 +169,9 @@ pub fn sync(
             pkt_start.elapsed().as_secs_f64()
         );
         current_seq = pkt.replication_sequence;
+        if let Some(f) = &opts.on_packet {
+            f(current_seq, cap);
+        }
     }
 
     info!(

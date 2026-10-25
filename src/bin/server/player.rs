@@ -114,8 +114,8 @@ pub async fn route(
         p if p.starts_with("/api/jobs/") => {
             let id = &p["/api/jobs/".len()..];
             match *method {
-                Method::GET => job_status(state, id),
-                Method::DELETE => job_cancel(state, id),
+                Method::GET => job_status(state, id).await,
+                Method::DELETE => job_cancel(state, id).await,
                 _ => respond::method_not_allowed(),
             }
         }
@@ -733,7 +733,19 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     };
 
     let job_state = Arc::clone(state);
-    let job_id = state.jobs.spawn("ingest", move |handle| async move {
+    let meta = crate::jobs::JobMeta {
+        label: format!("Import {query}"),
+        trigger: crate::jobs::Trigger::Manual,
+        params: json!({
+            "query": query,
+            "fetch_options": req.fetch_options.as_ref().map(|fo| json!({
+                "file": fo.file,
+                "entry_point": fo.entry_point,
+            })),
+            "refresh": req.refresh,
+        }),
+    };
+    let job_id = state.jobs.spawn("ingest", meta, move |handle| async move {
         handle.progress("fetching", "running import pipeline");
         let sink = crate::ingest_progress::JobProgressSink::new(
             handle.clone(),
@@ -765,16 +777,16 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     )
 }
 
-fn job_status(state: &Arc<AppState>, id: &str) -> HyperResponse {
-    match state.jobs.view(id) {
+async fn job_status(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    match state.jobs.find(id).await {
         Some(view) => respond::json_typed(StatusCode::OK, &view),
         None => respond::not_found(),
     }
 }
 
-fn job_cancel(state: &Arc<AppState>, id: &str) -> HyperResponse {
+async fn job_cancel(state: &Arc<AppState>, id: &str) -> HyperResponse {
     if state.jobs.cancel(id) {
-        job_status(state, id)
+        job_status(state, id).await
     } else {
         respond::not_found()
     }

@@ -371,6 +371,7 @@ async fn run() -> anyhow::Result<()> {
                 youtube_quota: Arc::clone(&youtube_quota),
                 soft_cfg: soft_cfg.as_ref(),
                 progress: None,
+                on_step: None,
                 fetch_options_dir: fetch_presets::dir(),
             },
             &roots,

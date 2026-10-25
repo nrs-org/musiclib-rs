@@ -49,6 +49,10 @@ pub struct JobProgressSink {
     failed: AtomicU64,
     recent: Mutex<VecDeque<String>>,
     failures: Mutex<Vec<String>>,
+    /// The job's stage (`fetching` unless a job sets its own) and any extra
+    /// detail fields it adds (the update's `update` progress).
+    stage: Mutex<String>,
+    extra: Mutex<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl JobProgressSink {
@@ -65,7 +69,20 @@ impl JobProgressSink {
             failed: AtomicU64::new(0),
             recent: Mutex::new(VecDeque::with_capacity(RECENT_LINES)),
             failures: Mutex::new(Vec::new()),
+            stage: Mutex::new("fetching".to_string()),
+            extra: Mutex::new(serde_json::Map::new()),
         })
+    }
+
+    pub fn current_stage(&self) -> String {
+        self.stage.lock().unwrap().clone()
+    }
+
+    /// Set the stage, and the extra detail field `key`, and report.
+    pub fn step(&self, stage: String, key: &str, value: serde_json::Value, message: String) {
+        *self.stage.lock().unwrap() = stage;
+        self.extra.lock().unwrap().insert(key.to_string(), value);
+        self.report(message);
     }
 
     fn push_line(&self, line: String) {
@@ -79,18 +96,21 @@ impl JobProgressSink {
     fn report(&self, message: String) {
         let recent: Vec<String> = self.recent.lock().unwrap().iter().cloned().collect();
         let failures = self.failures.lock().unwrap().clone();
-        self.handle.progress_detail(
-            "fetching",
-            message,
-            Some(json!({
-                "entries_fetched": self.fetched.load(Ordering::Relaxed),
-                "entries_failed": self.failed.load(Ordering::Relaxed),
-                "recent": recent,
-                "failures": failures,
-                "http": self.activity.snapshot(),
-                "youtube_quota_units": self.youtube_quota.load(Ordering::Relaxed),
-            })),
-        );
+        let mut detail = json!({
+            "entries_fetched": self.fetched.load(Ordering::Relaxed),
+            "entries_failed": self.failed.load(Ordering::Relaxed),
+            "recent": recent,
+            "failures": failures,
+            "http": self.activity.snapshot(),
+            "youtube_quota_units": self.youtube_quota.load(Ordering::Relaxed),
+        });
+        if let serde_json::Value::Object(detail) = &mut detail {
+            for (k, v) in self.extra.lock().unwrap().iter() {
+                detail.insert(k.clone(), v.clone());
+            }
+        }
+        let stage = self.stage.lock().unwrap().clone();
+        self.handle.progress_detail(&stage, message, Some(detail));
     }
 }
 

@@ -31,6 +31,8 @@ mod find_source;
 mod ingest_progress;
 mod jobs;
 #[cfg(feature = "player")]
+mod jobs_api;
+#[cfg(feature = "player")]
 mod lastfm;
 #[cfg(feature = "player")]
 mod lastfm_metadata;
@@ -203,6 +205,10 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
         return Ok(update::route(&state, &method, &body).await);
     }
     #[cfg(feature = "player")]
+    if jobs_api::handles(&path) {
+        return Ok(jobs_api::route(&state, &method, &path, &respond::parse_query(&query)).await);
+    }
+    #[cfg(feature = "player")]
     if plays::handles(&path) {
         return Ok(plays::route(&state, &method, &path, &query, body).await);
     }
@@ -337,6 +343,11 @@ async fn main() -> anyhow::Result<()> {
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| nrs_url.clone());
 
+    // Jobs are recorded in the library DB; ones a previous run left
+    // unfinished are closed as interrupted.
+    let jobs = JobManager::new(Some(db.clone()));
+    jobs.close_stale().await;
+
     let state = Arc::new(AppState {
         db,
         providers,
@@ -347,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
         pool,
         root_id,
         soft_cfg,
-        jobs: JobManager::new(),
+        jobs,
         activity,
         youtube_quota,
         #[cfg(feature = "nrs")]
