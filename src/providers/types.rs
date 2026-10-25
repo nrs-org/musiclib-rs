@@ -313,7 +313,12 @@ pub enum EntryDataMatcher {
     EntryType(EntryType),
     ExternalType(String),
     NameRegex(String),
-    DurationRange { min: Option<u64>, max: Option<u64> },
+    /// Matches when any of the child's source identifiers (URLs) does.
+    UrlRegex(String),
+    DurationRange {
+        min: Option<u64>,
+        max: Option<u64>,
+    },
     HasSource(String),
     AppearsOn(bool),
 
@@ -435,6 +440,7 @@ pub enum CompiledEntryDataMatcher {
     EntryType(EntryType),
     ExternalType(String),
     NameRegex(Arc<Regex>),
+    UrlRegex(Arc<Regex>),
     DurationRange { min: Option<u64>, max: Option<u64> },
     HasSource(String),
     AppearsOn(bool),
@@ -1049,6 +1055,13 @@ fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: u
                 // fetched entity's name.
                 None => Tribool::Indeterminate,
             },
+            CompiledEntryDataMatcher::UrlRegex(regex) => child
+                .sources
+                .0
+                .values()
+                .flatten()
+                .any(|id| regex.is_match(id))
+                .into(),
             CompiledEntryDataMatcher::HasSource(source) => {
                 if child.sources.get(source).is_some() {
                     Tribool::True

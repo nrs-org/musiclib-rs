@@ -67,6 +67,7 @@ fn compiled_expr_cost(expr: &CompiledMatcherExpr) -> u32 {
                 CompiledEntryDataMatcher::HasSource(_) => 2,
                 CompiledEntryDataMatcher::AppearsOn(_) => 1,
                 CompiledEntryDataMatcher::NameRegex(_) => 5,
+                CompiledEntryDataMatcher::UrlRegex(_) => 5,
                 CompiledEntryDataMatcher::DurationRange { .. } => 20,
                 CompiledEntryDataMatcher::YouTube(_) => 20,
                 CompiledEntryDataMatcher::MusicBrainz(_) => 20,
@@ -121,6 +122,9 @@ fn compile_entry_data(d: &EntryDataMatcher) -> Result<CompiledEntryDataMatcher, 
         EntryDataMatcher::EntryType(t) => CompiledEntryDataMatcher::EntryType(*t),
         EntryDataMatcher::ExternalType(s) => CompiledEntryDataMatcher::ExternalType(s.clone()),
         EntryDataMatcher::NameRegex(p) => CompiledEntryDataMatcher::NameRegex(Arc::new(
+            Regex::new(p).map_err(|e| Error::InvalidPattern(e.to_string()))?,
+        )),
+        EntryDataMatcher::UrlRegex(p) => CompiledEntryDataMatcher::UrlRegex(Arc::new(
             Regex::new(p).map_err(|e| Error::InvalidPattern(e.to_string()))?,
         )),
         EntryDataMatcher::DurationRange { min, max } => CompiledEntryDataMatcher::DurationRange {
@@ -662,6 +666,13 @@ async fn evaluate_entry_data(
                 .or_else(|| entity.aliases.first());
             Ok(name.is_some_and(|a| regex.is_match(&a.name)))
         }
+        CompiledEntryDataMatcher::UrlRegex(regex) => Ok(ctx
+            .child
+            .sources
+            .0
+            .values()
+            .flatten()
+            .any(|id| regex.is_match(id))),
         CompiledEntryDataMatcher::HasSource(source) => Ok(ctx.child.sources.get(source).is_some()),
         CompiledEntryDataMatcher::AppearsOn(want) => Ok(ctx.child.appears_on == *want),
         CompiledEntryDataMatcher::DurationRange { min, max } => {
@@ -900,6 +911,51 @@ mod tests {
             )),
             options_id: Some(pool.insert(options)),
         }
+    }
+
+    /// `url_regex` matches a child by any of its source URLs: a YouTube Music
+    /// album (`OLAK5uy_…` playlist) and a channel playlist look alike
+    /// otherwise.
+    #[tokio::test]
+    async fn url_regex_matches_source_urls() {
+        let yaml = r#"
+main:
+  child_rules:
+    - match: { url_regex: "[?&]list=OLAK5uy_" }
+      fetch: main
+    - match: always
+      fetch: null
+"#;
+        let doc: crate::providers::fetch_options_yaml::YamlFetchDocument =
+            serde_yaml_ng::from_str(yaml).unwrap();
+        let (pool, root) = doc.into_pool().unwrap();
+        let playlist = |id: &str| {
+            let url = format!("https://www.youtube.com/playlist?list={id}");
+            ChildRef {
+                entry_type: EntryType::Release,
+                name: Some(id.into()),
+                sources: [(Cow::Borrowed("youtube"), HashSet::from([url]))].into(),
+                ..Default::default()
+            }
+        };
+        let source = Arc::new(CachedChildSource::from_vec(vec![
+            (playlist("OLAK5uy_album"), ()),
+            (playlist("PLchannel"), ()),
+        ]));
+        let filtered = filter_children(
+            source,
+            pool,
+            root,
+            Arc::new(PanicProvider),
+            EntryType::Artist,
+        )
+        .unwrap();
+        let mut cursor = filtered.cursor();
+        let mut fetched = Vec::new();
+        while let Some((c, _)) = child_next(&mut cursor).await.unwrap() {
+            fetched.push(c.name.unwrap());
+        }
+        assert_eq!(fetched, ["OLAK5uy_album"]);
     }
 
     /// A preview records each child's deciding rule, and leaves a child

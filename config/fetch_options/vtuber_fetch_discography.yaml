@@ -7,7 +7,8 @@
 # when fetched.
 #
 # - YouTube videos are skipped at channel level; only playlists are traversed.
-# - Playlists are whitelisted/blacklisted by title (priority order, first match wins).
+# - YouTube Music albums and singles are always fetched.
+# - Other playlists are whitelisted/blacklisted by title (priority order, first match wins).
 # - Whitelisted playlists fetch all their tracks via `playlist_all`.
 # - Non-YouTube releases (MusicBrainz, Spotify, …) are fetched with `main`.
 # - Every discography track fetches its album(s), credited artists and, for a
@@ -29,6 +30,16 @@ main:
     # these become stubs rather than being dropped.
     - match: { external_type: "nicovideo:video" }
       fetch: null
+
+    # YouTube Music albums and singles (`OLAK5uy_…` playlists, from the
+    # channel's YouTube Music discography): the artist's own releases, so
+    # they're fetched whatever their title. Without this the catch-all below
+    # drops them like any other playlist.
+    - match:
+        all:
+          - { external_type: "youtube:playlist" }
+          - { url_regex: "[?&]list=OLAK5uy_" }
+      fetch: playlist_all
 
     # Playlist title filters (priority order, first match wins)
 

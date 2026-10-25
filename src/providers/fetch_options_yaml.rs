@@ -127,6 +127,7 @@ pub enum YamlMatcherExpr {
     EntryType(EntryType),
     ExternalType(String),
     NameRegex(String),
+    UrlRegex(String),
     HasSource(String),
     AppearsOn(bool),
     DurationRange { min: Option<u64>, max: Option<u64> },
@@ -183,6 +184,7 @@ impl Serialize for YamlMatcherExpr {
             Self::EntryType(t) => serialize_single_map(s, "entry_type", t),
             Self::ExternalType(t) => serialize_single_map(s, "external_type", t),
             Self::NameRegex(p) => serialize_single_map(s, "name_regex", p),
+            Self::UrlRegex(p) => serialize_single_map(s, "url_regex", p),
             Self::HasSource(src) => serialize_single_map(s, "has_source", src),
             Self::AppearsOn(b) => serialize_single_map(s, "appears_on", b),
             Self::DurationRange { min, max } => serialize_single_map(
@@ -238,6 +240,7 @@ impl<'de> Deserialize<'de> for YamlMatcherExpr {
                     "entry_type" => YamlMatcherExpr::EntryType(map.next_value()?),
                     "external_type" => YamlMatcherExpr::ExternalType(map.next_value()?),
                     "name_regex" => YamlMatcherExpr::NameRegex(map.next_value()?),
+                    "url_regex" => YamlMatcherExpr::UrlRegex(map.next_value()?),
                     "has_source" => YamlMatcherExpr::HasSource(map.next_value()?),
                     "appears_on" => YamlMatcherExpr::AppearsOn(map.next_value()?),
                     "duration_range" => {
@@ -267,6 +270,7 @@ impl<'de> Deserialize<'de> for YamlMatcherExpr {
                                 "entry_type",
                                 "external_type",
                                 "name_regex",
+                                "url_regex",
                                 "has_source",
                                 "appears_on",
                                 "duration_range",
@@ -637,6 +641,10 @@ fn convert_matcher_expr(expr: &YamlMatcherExpr) -> Result<ChildMatcherExpr, Yaml
             EntryDataMatcher::NameRegex(p.clone()),
         )),
 
+        YamlMatcherExpr::UrlRegex(p) => ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+            EntryDataMatcher::UrlRegex(p.clone()),
+        )),
+
         YamlMatcherExpr::AppearsOn(b) => {
             ChildMatcherExpr::Matcher(ChildMatcher::EntryData(EntryDataMatcher::AppearsOn(*b)))
         }
@@ -850,6 +858,7 @@ fn emit_matcher_expr(expr: &ChildMatcherExpr) -> YamlMatcherExpr {
                 EntryDataMatcher::EntryType(t) => YamlMatcherExpr::EntryType(*t),
                 EntryDataMatcher::ExternalType(t) => YamlMatcherExpr::ExternalType(t.clone()),
                 EntryDataMatcher::NameRegex(p) => YamlMatcherExpr::NameRegex(p.clone()),
+                EntryDataMatcher::UrlRegex(p) => YamlMatcherExpr::UrlRegex(p.clone()),
                 EntryDataMatcher::HasSource(s) => YamlMatcherExpr::HasSource(s.clone()),
                 EntryDataMatcher::AppearsOn(b) => YamlMatcherExpr::AppearsOn(*b),
                 EntryDataMatcher::DurationRange { min, max } => YamlMatcherExpr::DurationRange {
