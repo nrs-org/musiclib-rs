@@ -119,6 +119,9 @@ pub struct KindStats {
     pub failed: usize,
     /// Items a refresh found that its snapshot didn't have.
     pub new_items: usize,
+    /// Refreshes of a listing without a snapshot: nothing to compare with,
+    /// so none of their items count in `new_items`.
+    pub no_baseline: usize,
 }
 
 struct Snapshot {
@@ -326,6 +329,7 @@ impl ListingStore {
                         s.incremental += 1
                     }
                     s.new_items += new_items;
+                    s.no_baseline += usize::from(snapshot.is_none());
                 });
                 (items, None)
             }
@@ -510,6 +514,7 @@ impl ListingStore {
             let mut fetcher = factory(id);
             match self.fetch_fresh(&key, fetcher.as_mut()).await {
                 Ok(items) => {
+                    let no_baseline = usize::from(old.is_none());
                     let new_items = old.map_or(0, |s| {
                         let known: HashSet<String> = s.items.iter().filter_map(item_key).collect();
                         items
@@ -523,6 +528,7 @@ impl ListingStore {
                     self.bump(kind, |s| {
                         s.full += 1;
                         s.new_items += new_items;
+                        s.no_baseline += no_baseline;
                     });
                     refreshed += 1;
                 }
@@ -543,8 +549,16 @@ impl ListingStore {
         for (kind, s) in self.stats() {
             info!(
                 "listings {kind}: {} served, {} built, {} incremental, {} full, \
-                 {} skipped (budget), {} failed, {} new item(s)",
-                s.served, s.built, s.incremental, s.full, s.skipped_budget, s.failed, s.new_items
+                 {} skipped (budget), {} failed, {} new item(s) \
+                 ({} listing(s) had no earlier copy to compare with)",
+                s.served,
+                s.built,
+                s.incremental,
+                s.full,
+                s.skipped_budget,
+                s.failed,
+                s.new_items,
+                s.no_baseline
             );
         }
         // `created_at = 0` is unknown age (built from the HTTP cache), not 1970.
@@ -919,6 +933,31 @@ mod tests {
         assert_eq!(fake.calls(), 3);
         let stats = &s.stats()[KIND];
         assert_eq!((stats.built, stats.incremental), (1, 1));
+    }
+
+    /// An unordered listing without a snapshot is fetched in full with
+    /// nothing to compare against: no new items, one without a baseline.
+    /// Its next refresh has one.
+    #[tokio::test]
+    async fn first_unordered_refresh_has_no_baseline() {
+        let db = db().await;
+        let fake = Fake::new(&["c", "b", "a"]);
+        let refresh = |items: &'static [&'static str]| {
+            let (db, fake) = (db.clone(), fake.clone());
+            async move {
+                fake.set(items);
+                let s = store(&db, ListingMode::Auto).await;
+                let key = ListingKey::new(KIND, "PL1");
+                let mut source = s.listing(key, ListingOrder::Unordered, fake.fetcher());
+                while child_next(&mut source).await.unwrap().is_some() {}
+                s.stats()[KIND].clone()
+            }
+        };
+
+        let stats = refresh(&["c", "b", "a"]).await;
+        assert_eq!((stats.full, stats.new_items, stats.no_baseline), (1, 0, 1));
+        let stats = refresh(&["d", "c", "b", "a"]).await;
+        assert_eq!((stats.full, stats.new_items, stats.no_baseline), (1, 1, 0));
     }
 
     /// Concurrent readers of one listing share a single refresh, and a
