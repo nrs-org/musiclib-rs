@@ -31,8 +31,9 @@ db_cache:
               swr: "0s"
 
 schedulers:
+  # The import walk runs on every core, so an unlisted host needs a cap too.
   "*":
-    max_concurrent: ~  # unlimited
+    max_concurrent: 16
     retry:
       retry_after_attempts: 5
       backoff_attempts: 3
@@ -75,3 +76,13 @@ schedulers:
       initial_backoff: "1s"
       backoff_multiplier: 2.0
       max_backoff: "1m"
+
+  # Self-hosted services, keyed by host:port. Cap them below what they can
+  # serve at once: an uncapped import walk overloads them.
+  # MusicBrainz mirror (`musicbrainz.base_url`); Starlet runs 10 workers.
+  localhost:5000:
+    max_concurrent: 8
+
+  # yt-dlp server (YTDLP_SERVER_URL): each request is a yt-dlp extraction.
+  localhost:3000:
+    max_concurrent: 4
