@@ -65,7 +65,17 @@ class Handler(BaseHTTPRequestHandler):
             # Returns a flat list of all albums+singles, resolving pagination internally.
             elif parts[1] == "discography":
                 try:
-                    artist = yt.get_artist(channel_id)
+                    try:
+                        artist = yt.get_artist(channel_id)
+                    except KeyError as exc:
+                        # A channel without a YouTube Music artist page gets
+                        # a plain channel page (musicVisualHeaderRenderer:
+                        # Videos and Playlists shelves only), which
+                        # get_artist can't parse. It has no albums or singles.
+                        if exc.args != ("musicImmersiveHeaderRenderer",):
+                            raise
+                        self._send_json(200, b"[]")
+                        return
                     results = []
                     for section_key in ("albums", "singles"):
                         section = artist.get(section_key) or {}
