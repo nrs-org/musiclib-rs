@@ -2,6 +2,8 @@
 
 Metadata storage for music.
 
+The player supports [Last.fm scrobbling](docs/lastfm.md), configured in Settings.
+
 ## Motivation
 
 Basically we have N video sharing platforms and M music streaming services.
@@ -24,6 +26,23 @@ retrying, etc.) and API providers can be configured by modifying
 your system config dir, look it up). See [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md)
 for a full reference of all config files, and [docs/DEV.md](docs/DEV.md) for
 setup instructions, binary usage, and development workflow.
+
+The NRS Store Protocol exposes structured artist credits in
+`resolve.extra.credits`; see [artist credits for NRS](docs/ARTIST_CREDITS.md)
+for the response format, provider coverage, and remaining work.
+
+### Nix packages
+
+The flake provides three packages, one for each service:
+
+| Package | Executables |
+| --- | --- |
+| `musiclib` (default) | Every binary except `update_fixtures`, prefixed `musiclib-` (for example `musiclib-server`, `musiclib-import`), built with `ffi-system` |
+| `ytdlp-server` | `ytdlp-server`; `YTDLP_PATH` defaults to the locked yt-dlp |
+| `ytmusicapi-server` | `ytmusicapi-server`, with ytmusicapi from Nixpkgs |
+
+yt-dlp often needs a newer release than the lock provides. Set `YTDLP_PATH`
+to use another yt-dlp without rebuilding.
 
 ### Self-hosting
 

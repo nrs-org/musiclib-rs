@@ -7,13 +7,18 @@
 # ///
 """Minimal HTTP server exposing ytmusicapi artist data.
 
-Endpoint:
+Endpoints:
   GET /artists/<channel_id>
     Calls ytmusicapi.YTMusic().get_artist(channel_id) and returns the JSON response.
     <channel_id> must be a YouTube channel ID starting with "UC".
+  GET /search?q=<query>[&limit=<n>]
+    Songs, then videos, matching <query>, flattened to the fields the player's
+    source finder shows (see musiclib-rs's `find_source`).
 
 Usage:
   PORT=9001 uv run src/bin/ytmusicapi_server.py
+
+HOST picks the address to bind (default 0.0.0.0, every interface).
 
 The musiclib-rs youtube_api channel provider reads YTMUSICAPI_SERVER_URL and calls
 this server to supplement the Data API v3 channel fetch with YTMusic discography
@@ -79,6 +84,35 @@ class Handler(BaseHTTPRequestHandler):
 
             else:
                 self._send_error(404, f"unknown sub-path: {parts[1]}")
+        elif path == "/search":
+            q = (query.get("q") or [""])[0].strip()
+            if not q:
+                self._send_error(400, "missing q")
+                return
+            try:
+                limit = max(1, min(20, int((query.get("limit") or ["8"])[0])))
+            except ValueError:
+                limit = 8
+            try:
+                results = []
+                for kind in ("songs", "videos"):
+                    for r in yt.search(q, filter=kind, limit=limit)[:limit]:
+                        if not r.get("videoId"):
+                            continue
+                        album = r.get("album") or {}
+                        thumbs = r.get("thumbnails") or []
+                        results.append({
+                            "video_id": r["videoId"],
+                            "kind": kind[:-1],
+                            "title": r.get("title"),
+                            "artists": [a.get("name") for a in r.get("artists") or [] if a.get("name")],
+                            "album": album.get("name"),
+                            "duration_seconds": r.get("duration_seconds"),
+                            "thumbnail": thumbs[0]["url"] if thumbs else None,
+                        })
+                self._send_json(200, json.dumps(results).encode())
+            except Exception as exc:
+                self._send_error(500, str(exc))
         elif path.startswith("/albums/"):
             browse_id = urllib.parse.unquote(path[len("/albums/"):])
             if not browse_id:
@@ -106,9 +140,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", 9001))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    print(f"[ytmusicapi_server] listening on http://0.0.0.0:{port}", file=sys.stderr)
+    server = HTTPServer((host, port), Handler)
+    print(f"[ytmusicapi_server] listening on http://{host}:{port}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -7,7 +7,9 @@ use sea_orm::{
 };
 use tracing::warn;
 
-use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType};
+use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType, Privacy};
+
+pub mod listening;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -15,6 +17,9 @@ pub enum Error {
     Database(#[from] DbErr),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    /// A `different_song` row keeps the two songs an edit would join apart.
+    #[error("Blocked: {0}")]
+    Blocked(String),
 }
 
 // Pair-centric schema. Metadata lives on `entry_source` (keyed by the
@@ -91,6 +96,11 @@ mod entry_source {
         /// (a tracklist entry, a credit, a cross-link), whose own record was
         /// never fetched.
         pub fetched_at: Option<i64>,
+        /// When a fetch of this pair last found it deleted upstream (unix
+        /// seconds), e.g. a 404 for a merged MusicBrainz ID or a removed
+        /// video. Its stored data is kept; the next successful fetch clears
+        /// this.
+        pub gone_at: Option<i64>,
         // Track-specific
         pub duration_ms: Option<i64>,
         /// JSON array of all known durations in milliseconds, sorted and deduped.
@@ -144,6 +154,85 @@ mod entry_alias {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// A display name the user chose for an entry, shown instead of the name
+/// its sources' aliases give it. Keyed by entry rather than by source pair,
+/// so re-imports, which rewrite aliases, leave it alone.
+mod entry_display_name {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "entry_display_name")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        pub name: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// How the user wants an artist credited on one entry (a track, release or
+/// release group), in place of the artist's own display name there — a
+/// character credit like "成海萌奈（CV：夏川椎菜）" on one song only.
+mod credit_display_name {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "credit_display_name")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub artist_entry_id: i64,
+        pub name: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// An edition the user wants played when its edition group is queued as
+/// the group's default edition, with a relative weight: when several
+/// editions of one group are preferred, the player draws one per enqueue,
+/// in proportion to their weights. Keyed by entry, like
+/// `entry_display_name`; `set_preferred_edition` keeps at most one row per
+/// soft-identity component.
+mod preferred_edition {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "preferred_edition")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        pub weight: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A source the user wants an entry played from, with a relative weight
+/// (see `preferred_edition`). Keyed by pair, so it follows the source
+/// through entry merges and splits.
+mod preferred_source {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "preferred_source")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub weight: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 mod entry_child {
     use sea_orm::entity::prelude::*;
 
@@ -166,6 +255,183 @@ mod entry_child {
     }
 
     impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// One stated identity link: the fetch (`via = "fetch"`) or listing
+/// (`via = "listing"`) of the asserted pair said pairs `a` and `b` are one
+/// entity. `a` sorts before `b`. See docs/plan-identity-retraction.md.
+mod pair_link {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "pair_link")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source_a: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier_a: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source_b: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier_b: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub asserted_source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub asserted_identifier: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub via: String,
+        /// See `entry_source::Model::run_id`.
+        pub run_id: Option<i64>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A dedup barrier: pairs under different `anchor`s of one group never share
+/// an entry, and an anchor's pairs are merged into one. Made by an unmerge in
+/// the player, or imported from the old YAML files (`origin`).
+mod barrier_group {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "barrier_group")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        /// Human label, for logs and the player.
+        pub name: String,
+        /// `"ui"`, or `"yaml:<file name>"` for one imported from a file.
+        pub origin: String,
+        pub created_at: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+mod barrier_member {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "barrier_member")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub group_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub anchor: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Named DB-wide switches (`LINKS_COMPLETE`).
+mod setting {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "setting")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub key: String,
+        pub value: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A pair's picture, one URL per pair (docs/plan-images.md). `origin` is
+/// `fetch` (the pair's own response) or `listing` (a parent's listing, for a
+/// pair not fetched itself); a `fetch` image replaces a `listing` one, never
+/// the reverse.
+mod pair_image {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "pair_image")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub url: String,
+        pub width: Option<i32>,
+        pub height: Option<i32>,
+        pub origin: String,
+        /// See `entry_source::Model::run_id`.
+        pub run_id: Option<i64>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Who can see a pair on its provider (`Privacy`, stored by name): what the
+/// provider last said, filled on fetch, and the user's own call, which wins
+/// and which no fetch touches. A pair with neither is unknown.
+mod pair_privacy {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "pair_privacy")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub source: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub identifier: String,
+        pub provider: Option<String>,
+        pub manual: Option<String>,
+        /// When `provider` was last set (unix seconds).
+        pub checked_at: Option<i64>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A pair's `pair_privacy` row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PairPrivacy {
+    pub provider: Option<Privacy>,
+    pub manual: Option<Privacy>,
+}
+
+impl PairPrivacy {
+    /// The user's call, else the provider's.
+    pub fn effective(&self) -> Option<Privacy> {
+        self.manual.or(self.provider)
+    }
+}
+
+/// Where a `pair_image` row came from. See `pair_image`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageOrigin {
+    Fetch,
+    Listing,
+}
+
+impl ImageOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            ImageOrigin::Fetch => "fetch",
+            ImageOrigin::Listing => "listing",
+        }
+    }
+}
+
+/// One `pair_image` row.
+pub struct PairImageRow {
+    pub source: String,
+    pub identifier: String,
+    pub url: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub fetched: bool,
 }
 
 mod contribution {
@@ -220,6 +486,11 @@ mod dedup_block_key {
 // at insertion time so there is at most one row per (entry_a, entry_b, kind)
 // triple regardless of which side was passed first. Disabling a row (enabled=0)
 // tombstones the decision without losing history.
+mod playlists;
+mod songs;
+pub use playlists::{NewPlaylistItem, PlaylistItemRow, PlaylistRow};
+pub use songs::{RowImage, RowState, SongEdit};
+
 mod entry_relation {
     use sea_orm::entity::prelude::*;
 
@@ -270,41 +541,87 @@ mod dedup_feedback {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-// Dedup bookkeeping. `dedup_state` records the last-applied mtime of each barrier
-// config file (the cheap "did it change" gate). `entry_dedup` is a many-to-many
-// tag table recording which config files currently affect which entries, so when
-// a config is changed or removed we can recover the entries it used to touch
-// (needed to re-merge after a barrier is relaxed — its anchors are gone from the
-// new config, so only the persisted tag knows which entries to re-import).
-mod dedup_state {
+/// The player's listening history: one row per time a track started
+/// playing, with how much of it was actually heard (`listened_seconds`
+/// counts audible playback only — seeks and pauses add nothing). The
+/// player reports a play as it goes, so an in-progress play's row grows.
+/// `entry_id` is the edition that played, not its edition group's default.
+mod play_event {
     use sea_orm::entity::prelude::*;
 
     #[sea_orm::model]
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "dedup_state")]
+    #[sea_orm(table_name = "play_event")]
     pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub config_path: String,
-        pub mtime_ns: i64,
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        #[sea_orm(indexed)]
+        pub entry_id: i64,
+        /// Unix seconds.
+        #[sea_orm(indexed)]
+        pub started_at: i64,
+        pub listened_seconds: f64,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-mod entry_dedup {
+/// How much of each play has been handed to an external consumer of the
+/// play log (`target`, e.g. `"nrs"` for the server's NRS bridge), so an
+/// exporter that runs repeatedly only ever sends the growth since its last
+/// run. The play log itself knows nothing about its consumers.
+mod play_export {
     use sea_orm::entity::prelude::*;
 
     #[sea_orm::model]
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "entry_dedup")]
+    #[sea_orm(table_name = "play_export")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
-        pub entry_id: i64,
+        pub play_id: i64,
         #[sea_orm(primary_key, auto_increment = false)]
-        pub config_path: String,
+        pub target: String,
+        pub exported_seconds: f64,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Plays shorter than this are skips: kept in the log, but neither counted
+/// as a play nor exported.
+pub const MIN_COUNTED_PLAY_SECONDS: f64 = 10.0;
+
+/// One `play_event` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayRow {
+    pub id: i64,
+    pub entry_id: i64,
+    pub started_at: i64,
+    pub listened_seconds: f64,
+}
+
+/// A counted play with listening time not yet exported to some target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingExport {
+    pub play_id: i64,
+    pub entry_id: i64,
+    pub listened_seconds: f64,
+    pub exported_seconds: f64,
+}
+
+/// A main artist credited on one of an entry's sources.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MainCredit {
+    pub source: String,
+    pub identifier: String,
+    /// `listed_artist`, `uploader`, …
+    pub role: String,
+    /// The credited artist's own entry.
+    pub artist_entry_id: i64,
+    /// This source's name for the artist on this entry.
+    pub credited_name: Option<String>,
+    /// Literal text after the name, including any closing punctuation.
+    pub join_phrase: Option<String>,
 }
 
 #[derive(Clone)]
@@ -327,6 +644,12 @@ pub const SAME_IDENTITY: &str = "same_identity";
 /// (see `pipeline::flush`).
 pub const PROVIDER_ORIGIN: &str = "provider";
 pub const DIFFERENT_IDENTITY: &str = "different_identity";
+/// A person's judgment that two entries are versions of different songs:
+/// a cannot-link for edition groups, the way `different_identity` is for
+/// identity. `build_edition_projection` refuses any edition edge that would
+/// put both ends into one group, so a detached entry can't drift back in
+/// through some other path.
+pub const DIFFERENT_SONG: &str = "different_song";
 
 // Primitive relation predicates from the dedup-v2 ontology (see
 // docs/dedup-v2.md, docs/dedup-label-schema-v2.json). These are additive:
@@ -534,6 +857,20 @@ pub struct EditionProjection {
     /// "instrumental"). Absent for pairs related only transitively through a
     /// third member.
     edge_labels: HashMap<(i64, i64), (String, Option<String>)>,
+    /// Degenerate edition (see `DEGENERATE_MARKERS`) -> the edition it
+    /// derives from. See `rank_target`.
+    fold_to: HashMap<i64, i64>,
+    /// Group -> its original, for groups that have one (see
+    /// `original_of`).
+    original_by_group: HashMap<i64, i64>,
+    /// Edition -> the edition it was made from, for chains (see
+    /// `parent_of`).
+    parent: HashMap<i64, i64>,
+    /// Edition edges left out because a `different_song` row keeps their
+    /// two groups apart, as `(edition edge, different_song edge)`.
+    pub conflicts: Vec<((i64, i64), (i64, i64))>,
+    /// `different_song` pairs, identity-canonical.
+    different: Vec<(i64, i64)>,
 }
 
 impl EditionProjection {
@@ -569,85 +906,289 @@ impl EditionProjection {
             .get(&ordered_pair(a, b))
             .map(|(kind, transformation)| (kind.as_str(), transformation.as_deref()))
     }
+
+    /// Builds the projection over `identity` from `EDITION_KINDS` and
+    /// `DIFFERENT_SONG` rows; disabled rows are ignored. See
+    /// `build_edition_projection`.
+    pub fn build(
+        identity: &SoftIdentityProjection,
+        relations: impl IntoIterator<Item = RelationRow>,
+    ) -> Self {
+        build_edition_projection(identity, relations)
+    }
+
+    /// These songs as a union-find to grow (see `SongGroups`).
+    pub fn song_groups(&self) -> SongGroups {
+        let mut dsu = IdentityDsu::new(self.group_by_canonical.keys().copied());
+        for (&member, &group) in &self.group_by_canonical {
+            dsu.union(member, group);
+        }
+        SongGroups {
+            dsu: ConstrainedDsu::new(dsu, &self.different),
+        }
+    }
+
+    /// The original of `identity_canonical`'s song: the member every other
+    /// version derives from, directly or through a chain. `None` when the
+    /// library doesn't hold it (a group of covers only), or the relations
+    /// don't say which member it is.
+    pub fn original_of(&self, identity_canonical: i64) -> Option<i64> {
+        let group = self.group_of(identity_canonical);
+        self.original_by_group.get(&group).copied()
+    }
+
+    /// The version `identity_canonical` was made from inside its song, when
+    /// that isn't simply the original: a remix of a cover has the cover as
+    /// parent. `None` for the original itself and for versions that hang
+    /// straight off the original (or off the unknown original).
+    pub fn parent_of(&self, identity_canonical: i64) -> Option<i64> {
+        self.parent.get(&identity_canonical).copied()
+    }
+
+    /// The edition that is ranked as its own work when `identity_canonical`
+    /// plays. Degenerate editions (instrumental, TV size, ... — see
+    /// `DEGENERATE_MARKERS`) aren't works of their own, so they fold into the
+    /// edition they derive from, repeatedly. Every other edition (a cover, a
+    /// remix, an arrangement, a live or alternate version) is its own work
+    /// and is its own target; so is a degenerate edition whose original is
+    /// unknown (an edge without a recorded direction).
+    pub fn rank_target(&self, identity_canonical: i64) -> i64 {
+        let mut current = identity_canonical;
+        let mut seen = HashSet::new();
+        while let Some(&next) = self.fold_to.get(&current) {
+            if !seen.insert(current) {
+                break;
+            }
+            current = next;
+        }
+        current
+    }
+}
+
+/// The objects in a relation's `extra`: normally one, but [`combine_extra`]
+/// keeps both payloads as a list when a merge collapses two rows.
+pub fn extra_objects(
+    extra: &serde_json::Value,
+) -> Vec<&serde_json::Map<String, serde_json::Value>> {
+    match extra {
+        serde_json::Value::Array(items) => items.iter().filter_map(|v| v.as_object()).collect(),
+        serde_json::Value::Object(object) => vec![object],
+        _ => Vec::new(),
+    }
+}
+
+/// `(derived_entry, source_entry)` for each object in a relation's `extra`
+/// (see [`extra_objects`]) that names both — none when the objects disagree
+/// on the derived side (see [`extra_derived_entry`]).
+pub fn extra_derivations(extra: &serde_json::Value) -> Vec<(i64, i64)> {
+    if extra_derived_entry(extra).is_none() {
+        return Vec::new();
+    }
+    let mut derivations: Vec<(i64, i64)> = extra_objects(extra)
+        .into_iter()
+        .filter_map(|object| {
+            Some((
+                object.get("derived_entry")?.as_i64()?,
+                object.get("source_entry")?.as_i64()?,
+            ))
+        })
+        .collect();
+    derivations.dedup();
+    derivations
+}
+
+/// The `derived_entry` that every object in a relation's `extra` naming one
+/// agrees on. A list whose objects name different derived sides (two merged
+/// rows that recorded opposite directions) leaves the direction unknown.
+pub fn extra_derived_entry(extra: &serde_json::Value) -> Option<i64> {
+    let mut derived = extra_objects(extra)
+        .into_iter()
+        .filter_map(|object| object.get("derived_entry")?.as_i64());
+    let first = derived.next()?;
+    derived.all(|other| other == first).then_some(first)
+}
+
+/// An `extra` object's `transformation` as one label. `version_token_symdiff`
+/// in the match script emits an array -- a track can carry more than one
+/// marker at once (e.g. both "instrumental" and "named:long") -- space-joined
+/// to match that script's own `version_tokens()` convention.
+fn transformation_of(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    match object.get("transformation")? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(items) => {
+            let joined = items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    }
 }
 
 /// Builds an `EditionProjection` over `identity`'s canonical ids from raw
-/// `EDITION_KINDS` relation rows. Any such row's `extra.derived_entry` (see
-/// `pipeline::softmatch::resolve_derived_side` for the heuristic path, and
-/// `pipeline::flush`'s provider-asserted original->derived writes for
-/// cover/remix/arrangement) marks its canonical as the non-default side of
-/// its group; a group with no such marker (edges only via the manual
-/// version-kind taxonomy) falls back to its lowest id.
+/// `EDITION_KINDS` and `DIFFERENT_SONG` relation rows.
+///
+/// Rows apply strongest first (manual, then provider, then the matcher; by
+/// confidence within each), and a row that would join two groups a
+/// `different_song` row keeps apart is left out (`conflicts`). Each pair of
+/// identities takes its direction from its strongest row that names one
+/// (`extra.derived_entry`, see `pipeline::softmatch::resolve_derived_side`
+/// and `pipeline::flush`), so a person's `derive` outranks a provider's or
+/// the matcher's opinion of the same pair.
+///
+/// Inside a group the versions form a tree under the original:
+/// - a version's parent is its strongest directed row from a manual or
+///   provider source, or from the matcher when the change is degenerate
+///   (`DEGENERATE_MARKERS`: an instrumental's direction is reliable). The
+///   matcher's direction between two full versions (two covers) is
+///   arbitrary, so those never form a chain;
+/// - the original is a member that is the source of some directed row and
+///   derived in none, preferring one with a trusted row, then the lowest id.
+///   With no such member the original is unknown (`original_of` is `None`).
 fn build_edition_projection(
     identity: &SoftIdentityProjection,
     relations: impl IntoIterator<Item = RelationRow>,
 ) -> EditionProjection {
     let canonical_ids: HashSet<i64> = identity.component_by_entry.values().copied().collect();
-    let mut dsu = IdentityDsu::new(canonical_ids.iter().copied());
-    let mut is_derived_side: HashSet<i64> = HashSet::new();
-    let mut is_degenerate_side: HashSet<i64> = HashSet::new();
-    let mut edge_labels: HashMap<(i64, i64), (String, Option<String>)> = HashMap::new();
+    let canon = |id: i64| identity.component_of(id).unwrap_or(id);
 
-    for relation in relations
-        .into_iter()
-        .filter(|r| r.enabled && EDITION_KINDS.contains(&r.kind.as_str()))
-    {
-        let a = identity
-            .component_of(relation.entry_a)
-            .unwrap_or(relation.entry_a);
-        let b = identity
-            .component_of(relation.entry_b)
-            .unwrap_or(relation.entry_b);
+    let mut edition_rows = Vec::new();
+    let mut different = Vec::new();
+    for relation in relations.into_iter().filter(|r| r.enabled) {
+        if relation.kind == DIFFERENT_SONG {
+            let pair = ordered_pair(canon(relation.entry_a), canon(relation.entry_b));
+            if pair.0 != pair.1 {
+                different.push(pair);
+            }
+        } else if EDITION_KINDS.contains(&relation.kind.as_str()) {
+            edition_rows.push(relation);
+        }
+    }
+    different.sort_unstable();
+    different.dedup();
+    edition_rows.sort_by(|a, b| {
+        origin_priority(&a.origin)
+            .cmp(&origin_priority(&b.origin))
+            .then_with(|| b.confidence.total_cmp(&a.confidence))
+            .then_with(|| {
+                ordered_pair(a.entry_a, a.entry_b).cmp(&ordered_pair(b.entry_a, b.entry_b))
+            })
+            .then_with(|| a.kind.cmp(&b.kind))
+    });
+
+    let mut dsu = ConstrainedDsu::new(IdentityDsu::new(canonical_ids.iter().copied()), &different);
+    let mut conflicts = Vec::new();
+    let mut edge_labels: HashMap<(i64, i64), (String, Option<String>)> = HashMap::new();
+    /// A pair's direction, from its strongest row that names one.
+    struct Direction {
+        derived: i64,
+        source: i64,
+        priority: u8,
+        confidence: f64,
+        degenerate: bool,
+    }
+    let mut directions: HashMap<(i64, i64), Direction> = HashMap::new();
+    for relation in edition_rows {
+        let (a, b) = (canon(relation.entry_a), canon(relation.entry_b));
         if a == b {
             continue;
         }
-        dsu.union(a, b);
-
+        let pair = ordered_pair(a, b);
+        if let Err(blocker) = dsu.try_union(a, b) {
+            conflicts.push((ordered_pair(relation.entry_a, relation.entry_b), blocker));
+            continue;
+        }
         let extra: Option<serde_json::Value> = relation
             .extra
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok());
-        let transformation = extra
-            .as_ref()
-            .and_then(|v| v.get("transformation"))
-            .and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                // `version_token_symdiff` in the match script emits an array
-                // -- a track can carry more than one marker at once (e.g.
-                // both "instrumental" and "named:long") -- space-joined to
-                // match that script's own `version_tokens()` convention.
-                serde_json::Value::Array(items) => {
-                    let joined = items
-                        .iter()
-                        .filter_map(|item| item.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    (!joined.is_empty()).then_some(joined)
-                }
-                _ => None,
-            });
-        if let Some(derived_entry) = extra
-            .as_ref()
-            .and_then(|v| v.get("derived_entry"))
-            .and_then(|v| v.as_i64())
-        {
-            let derived_canonical = identity
-                .component_of(derived_entry)
-                .unwrap_or(derived_entry);
-            is_derived_side.insert(derived_canonical);
-            if transformation.as_deref().is_some_and(|t| {
+        let objects = extra.as_ref().map(extra_objects).unwrap_or_default();
+        let transformation = objects.iter().find_map(|object| transformation_of(object));
+        edge_labels
+            .entry(pair)
+            .or_insert((relation.kind.clone(), transformation.clone()));
+        if directions.contains_key(&pair) {
+            continue;
+        }
+        // `derived_entry` names one of the row's own endpoints; a stale id
+        // (say, one a merge didn't re-point) would otherwise mark some
+        // unrelated entry as derived.
+        let Some(derived) = extra.as_ref().and_then(extra_derived_entry).map(canon) else {
+            continue;
+        };
+        if derived != a && derived != b {
+            continue;
+        }
+        let degenerate = relation.kind == "instrumental"
+            || transformation.as_deref().is_some_and(|t| {
                 t.split_whitespace()
                     .any(|tok| DEGENERATE_MARKERS.contains(&tok))
-            }) {
-                is_degenerate_side.insert(derived_canonical);
-            }
-        }
-        edge_labels
-            .entry(ordered_pair(a, b))
-            .or_insert((relation.kind.clone(), transformation));
+            });
+        directions.insert(
+            pair,
+            Direction {
+                derived,
+                source: if derived == a { b } else { a },
+                priority: origin_priority(&relation.origin),
+                confidence: relation.confidence,
+                degenerate,
+            },
+        );
     }
 
-    let ids: Vec<i64> = dsu.parent.keys().copied().collect();
+    let mut is_derived_side: HashSet<i64> = HashSet::new();
+    let mut is_degenerate_side: HashSet<i64> = HashSet::new();
+    let mut is_source: HashMap<i64, u8> = HashMap::new();
+    let mut fold_to: HashMap<i64, i64> = HashMap::new();
+    // Each version's strongest trusted parent, as (priority, -confidence,
+    // parent) so `min` picks it.
+    let mut trusted_parent: HashMap<i64, (u8, i64, i64)> = HashMap::new();
+    let mut sorted_pairs: Vec<_> = directions.iter().collect();
+    sorted_pairs.sort_by_key(|(pair, _)| **pair);
+    for (_, d) in sorted_pairs {
+        is_derived_side.insert(d.derived);
+        let level = is_source.entry(d.source).or_insert(d.priority);
+        *level = (*level).min(d.priority);
+        if d.degenerate {
+            is_degenerate_side.insert(d.derived);
+            // Lowest original wins, so the fold doesn't depend on row order.
+            fold_to
+                .entry(d.derived)
+                .and_modify(|o| *o = (*o).min(d.source))
+                .or_insert(d.source);
+        }
+        if d.priority < 2 || d.degenerate {
+            let key = (d.priority, -(d.confidence * 1e6) as i64, d.source);
+            trusted_parent
+                .entry(d.derived)
+                .and_modify(|best| *best = (*best).min(key))
+                .or_insert(key);
+        }
+    }
+    let mut parent: HashMap<i64, i64> = trusted_parent
+        .into_iter()
+        .map(|(child, (_, _, source))| (child, source))
+        .collect();
+    // Two trusted rows can contradict each other (A from B, B from A).
+    // Follow each chain and cut it where it loops back.
+    let mut children: Vec<i64> = parent.keys().copied().collect();
+    children.sort_unstable();
+    for start in children {
+        let mut seen = vec![start];
+        let mut current = start;
+        while let Some(&next) = parent.get(&current) {
+            if seen.contains(&next) {
+                parent.remove(&current);
+                break;
+            }
+            seen.push(next);
+            current = next;
+        }
+    }
+
+    let ids: Vec<i64> = dsu.dsu.parent.keys().copied().collect();
     let mut raw_groups: HashMap<i64, Vec<i64>> = HashMap::new();
     for id in ids {
         let root = dsu.find(id);
@@ -656,26 +1197,41 @@ fn build_edition_projection(
     let mut group_by_canonical = HashMap::new();
     let mut members_by_group = BTreeMap::new();
     let mut default_by_group = HashMap::new();
+    let mut original_by_group = HashMap::new();
     for mut members in raw_groups.into_values() {
         members.sort_unstable();
         let canonical = members[0];
+        let original = members
+            .iter()
+            .filter(|m| !is_derived_side.contains(m) && !parent.contains_key(m))
+            .filter_map(|m| is_source.get(m).map(|&level| (level, *m)))
+            .min()
+            .map(|(_, m)| m);
         // Playback default until per-user preference exists (see
-        // `DEGENERATE_MARKERS`): original first, then a full alternate
+        // `DEGENERATE_MARKERS`): the original, else a full alternate
         // version, then a degenerate one; ties broken by lowest id via the
         // stable sort above.
-        let default = members
-            .iter()
-            .min_by_key(
-                |m| match (is_derived_side.contains(m), is_degenerate_side.contains(m)) {
-                    (false, _) => 0,
-                    (true, false) => 1,
-                    (true, true) => 2,
-                },
-            )
-            .copied()
-            .unwrap_or(members[0]);
+        let default = original.unwrap_or_else(|| {
+            members
+                .iter()
+                .min_by_key(|m| {
+                    match (is_derived_side.contains(m), is_degenerate_side.contains(m)) {
+                        (false, _) => 0,
+                        (true, false) => 1,
+                        (true, true) => 2,
+                    }
+                })
+                .copied()
+                .unwrap_or(members[0])
+        });
         for &member in &members {
             group_by_canonical.insert(member, canonical);
+        }
+        if let Some(original) = original {
+            original_by_group.insert(canonical, original);
+            // A chain that ends at the original needs no parent entry: a
+            // version without one hangs off the original.
+            parent.retain(|_, p| *p != original || !members.contains(p));
         }
         members_by_group.insert(canonical, members);
         default_by_group.insert(canonical, default);
@@ -686,6 +1242,11 @@ fn build_edition_projection(
         members_by_group,
         default_by_group,
         edge_labels,
+        fold_to,
+        original_by_group,
+        parent,
+        conflicts,
+        different,
     }
 }
 
@@ -773,6 +1334,7 @@ fn source_row_from_model(m: entry_source::Model) -> SourceRow {
         release_date: m.release_date,
         songs: songs_from_track_extra(m.track_extra.as_deref()),
         fetched_at: m.fetched_at,
+        gone_at: m.gone_at,
     }
 }
 
@@ -811,12 +1373,14 @@ pub fn merge_songs(groups: impl IntoIterator<Item = Vec<String>>) -> Vec<Vec<Str
 
 fn contrib_row_from_model(m: contribution::Model) -> ContribRow {
     ContribRow {
+        id: m.id,
         source: m.source,
         identifier: m.identifier,
         artist_source: m.artist_source,
         artist_identifier: m.artist_identifier,
         role: m.role,
         main_artist: m.main_artist,
+        extra: m.extra,
     }
 }
 
@@ -864,6 +1428,110 @@ impl IdentityDsu {
     }
 }
 
+/// A union-find that refuses any union that would put both ends of a
+/// cannot-link pair into one set. Cannot-link pairs are indexed by the root
+/// of each endpoint and merged small-into-large on every union, so a union
+/// only scans its smaller side's blockers instead of every pair
+/// (O(unions × pairs) was minutes on a real library).
+struct ConstrainedDsu {
+    dsu: IdentityDsu,
+    blockers: HashMap<i64, Vec<(i64, Edge)>>,
+}
+
+impl ConstrainedDsu {
+    /// `cannot` must be sorted: a refused union reports its first blocker
+    /// in that order.
+    fn new(mut dsu: IdentityDsu, cannot: &[Edge]) -> Self {
+        let mut blockers: HashMap<i64, Vec<(i64, Edge)>> = HashMap::new();
+        for &(a, b) in cannot {
+            blockers.entry(dsu.find(a)).or_default().push((b, (a, b)));
+            blockers.entry(dsu.find(b)).or_default().push((a, (a, b)));
+        }
+        Self { dsu, blockers }
+    }
+
+    fn find(&mut self, id: i64) -> i64 {
+        self.dsu.find(id)
+    }
+
+    /// Joins `a`'s and `b`'s sets, or returns the cannot-link pair that
+    /// keeps them apart.
+    fn try_union(&mut self, a: i64, b: i64) -> Result<(), Edge> {
+        if let Some(edge) = self.blocker(a, b) {
+            return Err(edge);
+        }
+        let left_root = self.dsu.find(a);
+        let right_root = self.dsu.find(b);
+        if left_root == right_root {
+            return Ok(());
+        }
+        self.dsu.union(left_root, right_root);
+        let root = self.dsu.find(left_root);
+        let child = if root == left_root {
+            right_root
+        } else {
+            left_root
+        };
+        if let Some(mut moved) = self.blockers.remove(&child) {
+            let kept = self.blockers.entry(root).or_default();
+            if kept.len() < moved.len() {
+                std::mem::swap(kept, &mut moved);
+            }
+            kept.extend(moved);
+        }
+        Ok(())
+    }
+
+    /// The cannot-link pair that keeps `a`'s and `b`'s sets apart, if any.
+    fn blocker(&mut self, a: i64, b: i64) -> Option<Edge> {
+        let left_root = self.dsu.find(a);
+        let right_root = self.dsu.find(b);
+        if left_root == right_root {
+            return None;
+        }
+        let Self { dsu, blockers } = self;
+        let side_len = |root| blockers.get(&root).map_or(0, Vec::len);
+        let (scan_root, target_root) = if side_len(left_root) <= side_len(right_root) {
+            (left_root, right_root)
+        } else {
+            (right_root, left_root)
+        };
+        // Every blocking pair appears on both sides, so `min` over either
+        // side is the first blocker in sorted order.
+        blockers
+            .get(&scan_root)
+            .into_iter()
+            .flatten()
+            .filter(|(other, _)| dsu.find(*other) == target_root)
+            .map(|&(_, edge)| edge)
+            .min()
+    }
+}
+
+/// An `EditionProjection`'s songs as a union-find that grows: softmatch
+/// joins songs here as it writes edition edges during one run, so it can
+/// tell when a new edge would only repeat a connection the song already
+/// has, or cross a `different_song` block. Ids are identity-canonical.
+pub struct SongGroups {
+    dsu: ConstrainedDsu,
+}
+
+impl SongGroups {
+    pub fn same(&mut self, a: i64, b: i64) -> bool {
+        self.dsu.find(a) == self.dsu.find(b)
+    }
+
+    /// The `different_song` pair that keeps `a`'s and `b`'s songs apart.
+    pub fn blocker(&mut self, a: i64, b: i64) -> Option<(i64, i64)> {
+        self.dsu.blocker(a, b)
+    }
+
+    /// Joins the two songs unless a `different_song` pair keeps them apart.
+    pub fn join(&mut self, a: i64, b: i64) -> Result<(), (i64, i64)> {
+        self.dsu.try_union(a, b)
+    }
+}
+
 fn origin_priority(origin: &str) -> u8 {
     match origin {
         "user" | "manual" => 0,
@@ -889,7 +1557,7 @@ fn build_soft_identity_projection(
     relations: impl IntoIterator<Item = RelationRow>,
     same_kinds: &[&str],
 ) -> SoftIdentityProjection {
-    let mut dsu = IdentityDsu::new(entry_ids);
+    let dsu = IdentityDsu::new(entry_ids);
     let mut same = Vec::new();
     let mut different = Vec::new();
     for relation in relations.into_iter().filter(|relation| relation.enabled) {
@@ -910,61 +1578,18 @@ fn build_soft_identity_projection(
             })
     });
 
-    // Cannot-link edges indexed by the DSU root of each endpoint, as
-    // `(other endpoint, edge)`, merged small-into-large on every union, so a
-    // same-edge only scans its smaller side's blockers instead of all of
-    // `different` (O(same × different) was minutes on a real library).
-    let mut blockers: HashMap<i64, Vec<(i64, Edge)>> = HashMap::new();
-    for &(a, b) in &different {
-        blockers.entry(dsu.find(a)).or_default().push((b, (a, b)));
-        blockers.entry(dsu.find(b)).or_default().push((a, (a, b)));
-    }
-
+    let mut dsu = ConstrainedDsu::new(dsu, &different);
     let mut conflicts = Vec::new();
     for relation in same {
         let edge = ordered_pair(relation.entry_a, relation.entry_b);
-        let left_root = dsu.find(edge.0);
-        let right_root = dsu.find(edge.1);
-        if left_root == right_root {
-            continue;
-        }
-        let side_len = |root| blockers.get(&root).map_or(0, Vec::len);
-        let (scan_root, target_root) = if side_len(left_root) <= side_len(right_root) {
-            (left_root, right_root)
-        } else {
-            (right_root, left_root)
-        };
-        // Every blocking edge appears on both sides, so `min` over either
-        // side is the first blocker in sorted `different` order.
-        let blocker = blockers
-            .get(&scan_root)
-            .into_iter()
-            .flatten()
-            .filter(|(other, _)| dsu.find(*other) == target_root)
-            .map(|&(_, different_edge)| different_edge)
-            .min();
-        if let Some(different_edge) = blocker {
+        if let Err(different_edge) = dsu.try_union(edge.0, edge.1) {
             conflicts.push(SoftIdentityConflict {
                 same_edge: edge,
                 different_edge,
             });
-        } else {
-            dsu.union(edge.0, edge.1);
-            let root = dsu.find(edge.0);
-            let child = if root == left_root {
-                right_root
-            } else {
-                left_root
-            };
-            if let Some(mut moved) = blockers.remove(&child) {
-                let kept = blockers.entry(root).or_default();
-                if kept.len() < moved.len() {
-                    std::mem::swap(kept, &mut moved);
-                }
-                kept.extend(moved);
-            }
         }
     }
+    let mut dsu = dsu.dsu;
 
     let ids: Vec<i64> = dsu.parent.keys().copied().collect();
     let mut raw_components: HashMap<i64, Vec<i64>> = HashMap::new();
@@ -1024,6 +1649,11 @@ fn combine_extra(a: &Option<String>, b: &Option<String>) -> Option<String> {
             }
             items.sort_by_key(|v| v.to_string());
             items.dedup_by_key(|v| v.to_string());
+            // Payloads that only differed in formatting (or in an id
+            // `remap_extra_ids` just re-pointed) are one payload, not a list.
+            if items.len() == 1 {
+                return Some(items[0].to_string());
+            }
             Some(serde_json::Value::Array(items).to_string())
         }
     }
@@ -1056,6 +1686,100 @@ fn combine_relations(
         enabled: primary.enabled,
         extra: combine_extra(&a.extra, &b.extra),
     }
+}
+
+/// `extra` with its `source_entry`/`derived_entry` ids re-pointed from
+/// `loser` to `winner`, so it keeps naming the relation's own endpoints
+/// once [`remap_relations`] re-points them. Anything else is left as is.
+fn remap_extra_ids(extra: &str, loser: i64, winner: i64) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(extra) else {
+        return extra.to_string();
+    };
+    let objects: Vec<&mut serde_json::Map<String, serde_json::Value>> = match &mut value {
+        serde_json::Value::Array(items) => {
+            items.iter_mut().filter_map(|v| v.as_object_mut()).collect()
+        }
+        serde_json::Value::Object(object) => vec![object],
+        _ => Vec::new(),
+    };
+    let mut changed = false;
+    for object in objects {
+        for key in ["source_entry", "derived_entry"] {
+            if object.get(key).and_then(|v| v.as_i64()) == Some(loser) {
+                object.insert(key.to_string(), serde_json::json!(winner));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        value.to_string()
+    } else {
+        extra.to_string()
+    }
+}
+
+/// The write half of `MusicDb::set_edition_derivation`, inside `txn`:
+/// tombstones every non-provider edition row between the two identities
+/// (`originals`/`deriveds` are their members) and upserts the manual
+/// `derived_from` row recording the direction.
+async fn write_derivation<C: ConnectionTrait>(
+    txn: &C,
+    (original, originals): (i64, &[i64]),
+    (derived, deriveds): (i64, &[i64]),
+    transformation: Option<&str>,
+) -> Result<(), Error> {
+    let mut extra = serde_json::json!({
+        "derived_entry": derived,
+        "source_entry": original,
+    });
+    if let Some(t) = transformation.filter(|t| !t.trim().is_empty()) {
+        extra["transformation"] = t.trim().into();
+    }
+    let (a, b) = ordered_pair(original, derived);
+    let between = Condition::any()
+        .add(
+            Condition::all()
+                .add(entry_relation::Column::EntryA.is_in(originals.iter().copied()))
+                .add(entry_relation::Column::EntryB.is_in(deriveds.iter().copied())),
+        )
+        .add(
+            Condition::all()
+                .add(entry_relation::Column::EntryA.is_in(deriveds.iter().copied()))
+                .add(entry_relation::Column::EntryB.is_in(originals.iter().copied())),
+        );
+    entry_relation::Entity::update_many()
+        .col_expr(entry_relation::Column::Enabled, false.into())
+        .filter(between)
+        .filter(entry_relation::Column::Kind.is_in(EDITION_KINDS.iter().copied()))
+        .filter(entry_relation::Column::Origin.ne(PROVIDER_ORIGIN))
+        .exec(txn)
+        .await?;
+    entry_relation::Entity::insert(entry_relation::ActiveModel {
+        entry_a: Set(a),
+        entry_b: Set(b),
+        kind: Set(DERIVED_FROM.to_string()),
+        confidence: Set(1.0),
+        origin: Set("manual".to_string()),
+        enabled: Set(true),
+        extra: Set(Some(extra.to_string())),
+    })
+    .on_conflict(
+        sea_query::OnConflict::columns([
+            entry_relation::Column::EntryA,
+            entry_relation::Column::EntryB,
+            entry_relation::Column::Kind,
+        ])
+        .update_columns([
+            entry_relation::Column::Confidence,
+            entry_relation::Column::Origin,
+            entry_relation::Column::Enabled,
+            entry_relation::Column::Extra,
+        ])
+        .to_owned(),
+    )
+    .exec(txn)
+    .await?;
+    Ok(())
 }
 
 /// Re-point every `entry_relation` row referencing `loser` onto `winner` and keep
@@ -1100,6 +1824,7 @@ async fn remap_relations<C: ConnectionTrait>(
         if r.entry_b == loser {
             r.entry_b = winner;
         }
+        r.extra = r.extra.map(|extra| remap_extra_ids(&extra, loser, winner));
         if r.entry_a == r.entry_b {
             // Lossy: a relationship that is now internal to a single entry is
             // dropped. Surface it so the loss is never silent.
@@ -1275,6 +2000,10 @@ impl MusicDb {
              CREATE INDEX IF NOT EXISTS idx_entry_alias_run_id ON entry_alias(run_id);
              CREATE INDEX IF NOT EXISTS idx_entry_child_run_id ON entry_child(run_id);
              CREATE INDEX IF NOT EXISTS idx_contribution_run_id ON contribution(run_id);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_a ON pair_link(source_a, identifier_a);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_b ON pair_link(source_b, identifier_b);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_asserted ON pair_link(asserted_source, asserted_identifier, via);
+             CREATE INDEX IF NOT EXISTS idx_pair_link_run_id ON pair_link(run_id);
              CREATE INDEX IF NOT EXISTS idx_import_run_status ON import_run(status);
              CREATE INDEX IF NOT EXISTS idx_entry_relation_entry_b ON entry_relation(entry_b);",
         )
@@ -1285,9 +2014,8 @@ impl MusicDb {
         // substrings anywhere in a name (like the old `LIKE '%q%'` scan) and
         // works uniformly on CJK aliases that have no word boundaries. It's
         // an external-content table over `entry_alias` (no data duplicated);
-        // the trigger keeps it in sync with the only mutation path aliases
-        // ever go through (`insert_aliases_for_pair` — entry_alias rows are
-        // never updated or deleted).
+        // the triggers keep it in sync as rows are inserted and deleted
+        // (entry_alias rows are never updated).
         sea_orm::ConnectionTrait::execute_unprepared(
             &db,
             "CREATE VIRTUAL TABLE IF NOT EXISTS entry_alias_fts USING fts5(
@@ -1295,6 +2023,10 @@ impl MusicDb {
              );
              CREATE TRIGGER IF NOT EXISTS entry_alias_ai AFTER INSERT ON entry_alias BEGIN
                  INSERT INTO entry_alias_fts(rowid, name) VALUES (new.id, new.name);
+             END;
+             CREATE TRIGGER IF NOT EXISTS entry_alias_ad AFTER DELETE ON entry_alias BEGIN
+                 INSERT INTO entry_alias_fts(entry_alias_fts, rowid, name)
+                 VALUES ('delete', old.id, old.name);
              END;",
         )
         .await?;
@@ -1348,6 +2080,57 @@ impl MusicDb {
                 "DROP TABLE IF EXISTS dedup_suggestion; PRAGMA user_version = 6;",
             )
             .await?;
+        }
+        if user_version < 7 {
+            // Aliases deleted before `entry_alias_ad` existed (rolled-back
+            // runs) left stale rows in the index.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "INSERT INTO entry_alias_fts(entry_alias_fts) VALUES('rebuild'); \
+                 PRAGMA user_version = 7;",
+            )
+            .await?;
+        }
+        if user_version < 8 {
+            // Provider relations left behind by re-fetches that replaced the
+            // edges they rested on, before commits removed them too.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                &format!(
+                    "DELETE FROM entry_relation WHERE origin = '{PROVIDER_ORIGIN}' \
+                     AND {UNSUPPORTED_PROVIDER_RELATIONS}; PRAGMA user_version = 8;"
+                ),
+            )
+            .await?;
+        }
+        if user_version < 9 {
+            // `pair_link` starts empty: complete for a DB with no pairs yet,
+            // not for one whose links were never recorded.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                &format!(
+                    "INSERT OR IGNORE INTO setting (key, value) VALUES ('{LINKS_COMPLETE}', \
+                     CASE WHEN EXISTS (SELECT 1 FROM entry_source) THEN '0' ELSE '1' END); \
+                     PRAGMA user_version = 9;"
+                ),
+            )
+            .await?;
+        }
+        if user_version < 10 {
+            // Barriers moved from YAML files into `barrier_group`; these
+            // tracked which entries each file touched and its mtime.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "DROP TABLE IF EXISTS entry_dedup; DROP TABLE IF EXISTS dedup_state; \
+                 PRAGMA user_version = 10;",
+            )
+            .await?;
+        }
+        if user_version < 11 {
+            let txn = db.begin().await?;
+            txn.execute_unprepared(NON_ARTIST_CONTRIBUTION_MIGRATION)
+                .await?;
+            txn.commit().await?;
         }
         Ok(Self {
             db,
@@ -1523,6 +2306,45 @@ impl MusicDb {
             .collect()
     }
 
+    /// The main-artist credits on each of `entry_id`'s sources, in credit
+    /// order. Every source credits the artists separately (MusicBrainz,
+    /// Spotify and a YouTube uploader for one track), so callers pick one
+    /// source's list rather than merging them. Ignore historical rows that
+    /// incorrectly target a track or release instead of an artist.
+    pub async fn main_artist_credits(&self, entry_id: i64) -> Result<Vec<MainCredit>, Error> {
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "SELECT c.source AS source, c.identifier AS identifier, c.role AS role, \
+                    artist.entry_id AS artist_entry_id, \
+                    json_extract(c.extra, '$.credited_name') AS credited_name, \
+                    json_extract(c.extra, '$.joinphrase') AS join_phrase \
+             FROM entry_source es \
+             JOIN contribution c ON c.source = es.source AND c.identifier = es.identifier \
+             JOIN entry_source artist \
+               ON artist.source = c.artist_source AND artist.identifier = c.artist_identifier \
+             JOIN entry artist_entry ON artist_entry.id = artist.entry_id \
+               AND artist_entry.entry_type = 'artist' \
+             WHERE es.entry_id = ? AND c.main_artist \
+             ORDER BY c.source, c.identifier, json_extract(c.extra, '$.index'), c.id",
+            [entry_id.into()],
+        );
+        self.db
+            .query_all_raw(stmt)
+            .await?
+            .iter()
+            .map(|row| {
+                Ok(MainCredit {
+                    source: row.try_get("", "source")?,
+                    identifier: row.try_get("", "identifier")?,
+                    role: row.try_get("", "role")?,
+                    artist_entry_id: row.try_get("", "artist_entry_id")?,
+                    credited_name: row.try_get("", "credited_name")?,
+                    join_phrase: row.try_get("", "join_phrase")?,
+                })
+            })
+            .collect()
+    }
+
     /// `draws` ids drawn uniformly from `[min(entry.id), max(entry.id)]`,
     /// keeping the ones that are tracks, in draw order. Gaps and non-track
     /// ids are simply rejected, so this returns fewer than `draws` (possibly
@@ -1587,8 +2409,8 @@ impl MusicDb {
     }
 
     /// Re-point every `entry_source` row from `loser` to `winner` and delete the
-    /// loser `entry` row. No other tables reference `entry_id`, so this is the
-    /// entirety of a DB-level entry merge.
+    /// loser `entry` row. Relations and chosen display names move over too
+    /// (the winner's own names, where it has them, stay).
     pub async fn merge_entries(&self, loser: i64, winner: i64) -> Result<(), Error> {
         if loser == winner {
             return Ok(());
@@ -1605,14 +2427,312 @@ impl MusicDb {
             .exec(&txn)
             .await?;
 
+        // History must follow newly imported catalog metadata too. Submission
+        // payloads already queued for Last.fm remain frozen independently.
+        play_event::Entity::update_many()
+            .col_expr(play_event::Column::EntryId, sea_query::Expr::value(winner))
+            .filter(play_event::Column::EntryId.eq(loser))
+            .exec(&txn)
+            .await?;
+
         // Keep entry_relation referentially consistent: the loser entry is about
         // to be deleted, so re-point every relation that referenced it onto the
         // winner, drop the resulting self-relations, and collapse duplicates.
         remap_relations(&txn, loser, winner).await?;
 
+        if let Some(name) = entry_display_name::Entity::find_by_id(loser)
+            .one(&txn)
+            .await?
+        {
+            entry_display_name::Entity::delete_by_id(loser)
+                .exec(&txn)
+                .await?;
+            if entry_display_name::Entity::find_by_id(winner)
+                .one(&txn)
+                .await?
+                .is_none()
+            {
+                entry_display_name::Entity::insert(entry_display_name::ActiveModel {
+                    entry_id: Set(winner),
+                    name: Set(name.name),
+                })
+                .exec(&txn)
+                .await?;
+            }
+        }
+        let credits = credit_display_name::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(credit_display_name::Column::EntryId.eq(loser))
+                    .add(credit_display_name::Column::ArtistEntryId.eq(loser)),
+            )
+            .all(&txn)
+            .await?;
+        for c in credits {
+            credit_display_name::Entity::delete_by_id((c.entry_id, c.artist_entry_id))
+                .exec(&txn)
+                .await?;
+            let remap = |id: i64| if id == loser { winner } else { id };
+            let key = (remap(c.entry_id), remap(c.artist_entry_id));
+            if credit_display_name::Entity::find_by_id(key)
+                .one(&txn)
+                .await?
+                .is_none()
+            {
+                credit_display_name::Entity::insert(credit_display_name::ActiveModel {
+                    entry_id: Set(key.0),
+                    artist_entry_id: Set(key.1),
+                    name: Set(c.name),
+                })
+                .exec(&txn)
+                .await?;
+            }
+        }
+        if let Some(pref) = preferred_edition::Entity::find_by_id(loser)
+            .one(&txn)
+            .await?
+        {
+            preferred_edition::Entity::delete_by_id(loser)
+                .exec(&txn)
+                .await?;
+            if preferred_edition::Entity::find_by_id(winner)
+                .one(&txn)
+                .await?
+                .is_none()
+            {
+                preferred_edition::Entity::insert(preferred_edition::ActiveModel {
+                    entry_id: Set(winner),
+                    weight: Set(pref.weight),
+                })
+                .exec(&txn)
+                .await?;
+            }
+        }
+
         entry::Entity::delete_by_id(loser).exec(&txn).await?;
 
         txn.commit().await?;
+        Ok(())
+    }
+
+    /// Store identity links, skipping ones already stored. `run_id` tags
+    /// new rows, like `upsert_pair`.
+    pub async fn insert_links(&self, links: &[LinkRow], run_id: Option<i64>) -> Result<(), Error> {
+        const LINK_INSERT_CHUNK: usize = 100;
+        for chunk in links.chunks(LINK_INSERT_CHUNK) {
+            let models = chunk.iter().map(|row| {
+                let ((a, b), by) = (&row.link, &row.asserted_by);
+                pair_link::ActiveModel {
+                    source_a: Set(a.0.clone()),
+                    identifier_a: Set(a.1.clone()),
+                    source_b: Set(b.0.clone()),
+                    identifier_b: Set(b.1.clone()),
+                    asserted_source: Set(by.0.clone()),
+                    asserted_identifier: Set(by.1.clone()),
+                    via: Set(row.via.to_string()),
+                    run_id: Set(run_id),
+                }
+            });
+            pair_link::Entity::insert_many(models)
+                .on_conflict_do_nothing()
+                .exec(&self.db)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The stored links of `replaced`'s asserters that it no longer states:
+    /// what `commit_import_run` will delete.
+    pub async fn stale_links(&self, replaced: &Replacements) -> Result<Vec<LinkRow>, Error> {
+        stale_links_on(&self.db, replaced).await
+    }
+
+    /// Delete these stored link rows.
+    pub async fn delete_links(&self, rows: &[LinkRow]) -> Result<(), Error> {
+        delete_links_on(&self.db, rows).await
+    }
+
+    /// Every stored link row with both ends among `pairs`.
+    pub async fn links_among(&self, pairs: &[(String, String)]) -> Result<Vec<LinkRow>, Error> {
+        let wanted: HashSet<&(String, String)> = pairs.iter().collect();
+        let rows = chunked_pair_query(pairs, |chunk| {
+            pair_link::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    pair_link::Column::SourceA,
+                    pair_link::Column::IdentifierA,
+                ))
+                .all(&self.db)
+        })
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let b = (r.source_b, r.identifier_b);
+                wanted.contains(&b).then(|| LinkRow {
+                    link: ((r.source_a, r.identifier_a), b),
+                    asserted_by: (r.asserted_source, r.asserted_identifier),
+                    via: via_str(&r.via),
+                })
+            })
+            .collect())
+    }
+
+    /// Every fetched pair not found deleted upstream, or only those last
+    /// fetched before `before` (unix seconds): what `import
+    /// --backfill-links` re-imports, and what it failed to.
+    pub async fn live_fetched_pairs(
+        &self,
+        before: Option<i64>,
+    ) -> Result<Vec<(String, String)>, Error> {
+        let mut query = entry_source::Entity::find()
+            .filter(entry_source::Column::FetchedAt.is_not_null())
+            .filter(entry_source::Column::GoneAt.is_null());
+        if let Some(before) = before {
+            query = query.filter(entry_source::Column::FetchedAt.lt(before));
+        }
+        Ok(query
+            .order_by_asc(entry_source::Column::Source)
+            .order_by_asc(entry_source::Column::Identifier)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|m| (m.source, m.identifier))
+            .collect())
+    }
+
+    /// Every stored barrier, oldest first.
+    pub async fn barrier_groups(&self) -> Result<Vec<BarrierGroupRow>, Error> {
+        let groups = barrier_group::Entity::find()
+            .order_by_asc(barrier_group::Column::Id)
+            .all(&self.db)
+            .await?;
+        let mut members: HashMap<i64, BTreeMap<String, Vec<(String, String)>>> = HashMap::new();
+        for m in barrier_member::Entity::find()
+            .order_by_asc(barrier_member::Column::Source)
+            .order_by_asc(barrier_member::Column::Identifier)
+            .all(&self.db)
+            .await?
+        {
+            members
+                .entry(m.group_id)
+                .or_default()
+                .entry(m.anchor)
+                .or_default()
+                .push((m.source, m.identifier));
+        }
+        Ok(groups
+            .into_iter()
+            .map(|g| BarrierGroupRow {
+                anchors: members.remove(&g.id).unwrap_or_default(),
+                id: g.id,
+                name: g.name,
+                origin: g.origin,
+                created_at: g.created_at,
+            })
+            .collect())
+    }
+
+    /// Store a barrier and return its id. A pair listed under two anchors
+    /// keeps the last.
+    pub async fn insert_barrier_group(
+        &self,
+        name: &str,
+        origin: &str,
+        anchors: &BTreeMap<String, Vec<(String, String)>>,
+    ) -> Result<i64, Error> {
+        let txn = self.db.begin().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let id = barrier_group::Entity::insert(barrier_group::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            name: Set(name.to_string()),
+            origin: Set(origin.to_string()),
+            created_at: Set(now),
+        })
+        .exec(&txn)
+        .await?
+        .last_insert_id;
+        let mut seen: HashMap<&(String, String), &str> = HashMap::new();
+        for (anchor, pairs) in anchors {
+            for pair in pairs {
+                seen.insert(pair, anchor);
+            }
+        }
+        let rows: Vec<barrier_member::ActiveModel> = seen
+            .into_iter()
+            .map(
+                |((source, identifier), anchor)| barrier_member::ActiveModel {
+                    group_id: Set(id),
+                    source: Set(source.clone()),
+                    identifier: Set(identifier.clone()),
+                    anchor: Set(anchor.to_string()),
+                },
+            )
+            .collect();
+        for chunk in rows.chunks(200) {
+            barrier_member::Entity::insert_many(chunk.to_vec())
+                .exec(&txn)
+                .await?;
+        }
+        txn.commit().await?;
+        Ok(id)
+    }
+
+    /// Delete a barrier, returning what it was.
+    pub async fn delete_barrier_group(&self, id: i64) -> Result<Option<BarrierGroupRow>, Error> {
+        let Some(row) = self
+            .barrier_groups()
+            .await?
+            .into_iter()
+            .find(|g| g.id == id)
+        else {
+            return Ok(None);
+        };
+        let txn = self.db.begin().await?;
+        barrier_member::Entity::delete_many()
+            .filter(barrier_member::Column::GroupId.eq(id))
+            .exec(&txn)
+            .await?;
+        barrier_group::Entity::delete_by_id(id).exec(&txn).await?;
+        txn.commit().await?;
+        Ok(Some(row))
+    }
+
+    /// A `setting` value, if set.
+    pub async fn setting(&self, key: &str) -> Result<Option<String>, Error> {
+        Ok(setting::Entity::find_by_id(key.to_string())
+            .one(&self.db)
+            .await?
+            .map(|m| m.value))
+    }
+
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<(), Error> {
+        setting::Entity::insert(setting::ActiveModel {
+            key: Set(key.to_string()),
+            value: Set(value.to_string()),
+        })
+        .on_conflict(
+            sea_query::OnConflict::column(setting::Column::Key)
+                .update_column(setting::Column::Value)
+                .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// Give `to` the entry type `from` has.
+    pub async fn copy_entry_type(&self, from: i64, to: i64) -> Result<(), Error> {
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "UPDATE entry SET entry_type = (SELECT entry_type FROM entry WHERE id = ?) \
+                 WHERE id = ?",
+                [from.into(), to.into()],
+            ))
+            .await?;
         Ok(())
     }
 
@@ -1647,7 +2767,23 @@ impl MusicDb {
             .from(entry_source::Entity)
             .to_owned();
         entry::Entity::delete_many()
-            .filter(entry::Column::Id.not_in_subquery(referenced))
+            .filter(entry::Column::Id.not_in_subquery(referenced.clone()))
+            .exec(&self.db)
+            .await?;
+        entry_display_name::Entity::delete_many()
+            .filter(entry_display_name::Column::EntryId.not_in_subquery(referenced.clone()))
+            .exec(&self.db)
+            .await?;
+        preferred_edition::Entity::delete_many()
+            .filter(preferred_edition::Column::EntryId.not_in_subquery(referenced.clone()))
+            .exec(&self.db)
+            .await?;
+        credit_display_name::Entity::delete_many()
+            .filter(
+                Condition::any()
+                    .add(credit_display_name::Column::EntryId.not_in_subquery(referenced.clone()))
+                    .add(credit_display_name::Column::ArtistEntryId.not_in_subquery(referenced)),
+            )
             .exec(&self.db)
             .await?;
         Ok(())
@@ -1679,20 +2815,28 @@ impl MusicDb {
     /// (`run_id` doubles as provenance of which run brought in which data)
     /// but the run is no longer eligible for `recover_pending_import_runs`.
     ///
-    /// `replaced` lists parents this run fetched completely, with the edges
-    /// each one has now. Any older `entry_child`/`contribution` row under such
-    /// a parent that isn't in its current set (a track dropped from an album,
-    /// a removed credit) is deleted in the same transaction as the status
-    /// update. Doing it here rather than at flush time keeps rollback
+    /// `replaced.parents` lists parents this run fetched completely, with the
+    /// edges each one has now. Any older `entry_child`/`contribution` row
+    /// under such a parent that isn't in its current set (a track dropped
+    /// from an album, a removed credit) is deleted in the same transaction as
+    /// the status update. `replaced.aliases` does the same for the aliases of
+    /// every fetched pair (a renamed or deleted alias), and provider
+    /// cover/remix/arrangement relations go once no child edge between
+    /// their two entries is left (see `UNSUPPORTED_PROVIDER_RELATIONS`).
+    /// Pairs in
+    /// `replaced.gone` get `gone_at` set unless the run also fetched them.
+    /// Identity links in `pair_link` are replaced per asserting pair (see
+    /// `Replacements::links`). Doing it here rather than at flush time keeps rollback
     /// correct: a run that fails or crashes never got to delete anything.
     pub async fn commit_import_run(
         &self,
         run_id: i64,
-        replaced: &HashMap<(String, String), ParentEdges>,
+        replaced: &Replacements,
     ) -> Result<(), Error> {
         let txn = self.db.begin().await?;
         let (mut stale_children, mut stale_contributions) = (0usize, 0usize);
-        for ((source, identifier), current) in replaced {
+        let mut lost_children: Vec<i64> = Vec::new();
+        for ((source, identifier), current) in &replaced.parents {
             let children = entry_child::Entity::find()
                 .filter(entry_child::Column::ParentSource.eq(source.as_str()))
                 .filter(entry_child::Column::ParentIdentifier.eq(identifier.as_str()))
@@ -1713,6 +2857,13 @@ impl MusicDb {
                     .exec(&txn)
                     .await?;
                 stale_children += 1;
+                if let Some(parent) =
+                    entry_source::Entity::find_by_id((source.clone(), identifier.clone()))
+                        .one(&txn)
+                        .await?
+                {
+                    lost_children.push(parent.entry_id);
+                }
             }
 
             let stale_ids: Vec<i64> = contribution::Entity::find()
@@ -1740,6 +2891,88 @@ impl MusicDb {
                     .await?;
             }
         }
+
+        // A provider cover/remix/arrangement relation rests on a child edge
+        // from a derived pair to its original (`pipeline::flush` step 10b).
+        // Drop the ones whose last such edge between the two entries just
+        // went with a re-fetch.
+        lost_children.sort_unstable();
+        lost_children.dedup();
+        let mut stale_relations = 0u64;
+        for chunk in lost_children.chunks(ID_QUERY_CHUNK) {
+            let ids = chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            stale_relations += txn
+                .execute_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    format!(
+                        "DELETE FROM entry_relation \
+                         WHERE origin = ? AND (entry_a IN ({ids}) OR entry_b IN ({ids})) \
+                           AND {UNSUPPORTED_PROVIDER_RELATIONS}"
+                    ),
+                    [PROVIDER_ORIGIN.into()],
+                ))
+                .await?
+                .rows_affected();
+        }
+
+        let stale_links = stale_links_on(&txn, replaced).await?;
+        delete_links_on(&txn, &stale_links).await?;
+
+        let mut stale_aliases = 0usize;
+        for ((source, identifier), current) in &replaced.aliases {
+            // A fetch that reported no aliases says nothing about them.
+            if current.is_empty() {
+                continue;
+            }
+            let stale_ids: Vec<i64> = entry_alias::Entity::find()
+                .filter(entry_alias::Column::Source.eq(source.as_str()))
+                .filter(entry_alias::Column::Identifier.eq(identifier.as_str()))
+                .all(&txn)
+                .await?
+                .into_iter()
+                .filter(|a| {
+                    !current.contains(&alias_key(
+                        &a.name,
+                        a.locale.as_deref(),
+                        a.extra.as_deref().unwrap_or("null"),
+                        a.primary,
+                    ))
+                })
+                .map(|a| a.id)
+                .collect();
+            if !stale_ids.is_empty() {
+                stale_aliases += stale_ids.len();
+                entry_alias::Entity::delete_many()
+                    .filter(entry_alias::Column::Id.is_in(stale_ids))
+                    .exec(&txn)
+                    .await?;
+            }
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let mut gone = 0u64;
+        for (source, identifier) in &replaced.gone {
+            if replaced
+                .aliases
+                .contains_key(&(source.clone(), identifier.clone()))
+            {
+                continue;
+            }
+            gone += entry_source::Entity::update_many()
+                .col_expr(entry_source::Column::GoneAt, sea_query::Expr::value(now))
+                .filter(entry_source::Column::Source.eq(source.as_str()))
+                .filter(entry_source::Column::Identifier.eq(identifier.as_str()))
+                .filter(entry_source::Column::GoneAt.is_null())
+                .exec(&txn)
+                .await?
+                .rows_affected;
+        }
         import_run::Entity::update_many()
             .col_expr(
                 import_run::Column::Status,
@@ -1749,12 +2982,27 @@ impl MusicDb {
             .exec(&txn)
             .await?;
         txn.commit().await?;
-        if stale_children + stale_contributions > 0 {
+        if stale_children + stale_contributions + stale_aliases > 0 {
             tracing::info!(
-                "run {run_id}: removed {stale_children} stale child edge(s) and \
-                 {stale_contributions} stale contribution(s) under {} re-fetched parent(s)",
-                replaced.len()
+                "run {run_id}: removed {stale_children} stale child edge(s), \
+                 {stale_contributions} stale contribution(s) and {stale_aliases} stale \
+                 alias(es) under {} re-fetched pair(s)",
+                replaced.parents.len().max(replaced.aliases.len())
             );
+        }
+        if !stale_links.is_empty() {
+            tracing::info!(
+                "run {run_id}: removed {} identity link(s) no longer stated",
+                stale_links.len()
+            );
+        }
+        if stale_relations > 0 {
+            tracing::info!(
+                "run {run_id}: removed {stale_relations} provider relation(s) no longer listed"
+            );
+        }
+        if gone > 0 {
+            tracing::info!("run {run_id}: marked {gone} pair(s) deleted upstream");
         }
         Ok(())
     }
@@ -1820,6 +3068,14 @@ impl MusicDb {
             .await?;
         contribution::Entity::delete_many()
             .filter(contribution::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        pair_image::Entity::delete_many()
+            .filter(pair_image::Column::RunId.eq(run_id))
+            .exec(&self.db)
+            .await?;
+        pair_link::Entity::delete_many()
+            .filter(pair_link::Column::RunId.eq(run_id))
             .exec(&self.db)
             .await?;
         self.delete_orphan_entries().await?;
@@ -1892,6 +3148,7 @@ impl MusicDb {
             entry_id: Set(entry_id),
             release_date: Set(release_date.map(|s| s.to_string())),
             fetched_at: Set(Some(now)),
+            gone_at: Set(None),
             duration_ms: Set(duration_ms),
             duration_ms_all: Set(duration_ms_all),
             track_extra: Set(track_extra),
@@ -1910,6 +3167,7 @@ impl MusicDb {
                 entry_source::Column::EntryId,
                 entry_source::Column::ReleaseDate,
                 entry_source::Column::FetchedAt,
+                entry_source::Column::GoneAt,
                 entry_source::Column::DurationMs,
                 entry_source::Column::DurationMsAll,
                 entry_source::Column::TrackExtra,
@@ -1966,6 +3224,161 @@ impl MusicDb {
         Ok(())
     }
 
+    /// Store `image` as the pair's picture, unless the pair already has one
+    /// from a higher `origin` (a `listing` image never replaces a `fetch`
+    /// one). `run_id` tags the row on INSERT only, like `upsert_pair`.
+    pub async fn set_pair_image(
+        &self,
+        source: &str,
+        identifier: &str,
+        image: &crate::providers::types::Image,
+        origin: ImageOrigin,
+        run_id: Option<i64>,
+    ) -> Result<(), Error> {
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            "INSERT INTO pair_image (source, identifier, url, width, height, origin, run_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (source, identifier) DO UPDATE \
+             SET url = excluded.url, width = excluded.width, height = excluded.height, \
+                 origin = excluded.origin \
+             WHERE excluded.origin = 'fetch' OR pair_image.origin = 'listing'",
+            [
+                source.into(),
+                identifier.into(),
+                image.url.as_str().into(),
+                image.width.map(|w| w as i32).into(),
+                image.height.map(|h| h as i32).into(),
+                origin.as_str().into(),
+                run_id.into(),
+            ],
+        );
+        self.db.execute_raw(stmt).await?;
+        Ok(())
+    }
+
+    /// Records what the provider says about who can see the pair, leaving
+    /// the user's own call (`set_manual_privacy`) as it is.
+    pub async fn set_provider_privacy(
+        &self,
+        source: &str,
+        identifier: &str,
+        privacy: Privacy,
+    ) -> Result<(), Error> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        pair_privacy::Entity::insert(pair_privacy::ActiveModel {
+            source: Set(source.to_owned()),
+            identifier: Set(identifier.to_owned()),
+            provider: Set(Some(privacy.as_str().to_owned())),
+            manual: Set(None),
+            checked_at: Set(Some(now)),
+        })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                pair_privacy::Column::Source,
+                pair_privacy::Column::Identifier,
+            ])
+            .update_columns([
+                pair_privacy::Column::Provider,
+                pair_privacy::Column::CheckedAt,
+            ])
+            .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// Sets the user's own call on who can see the pair, overriding the
+    /// provider's; `None` goes back to the provider's.
+    pub async fn set_manual_privacy(
+        &self,
+        source: &str,
+        identifier: &str,
+        privacy: Option<Privacy>,
+    ) -> Result<(), Error> {
+        pair_privacy::Entity::insert(pair_privacy::ActiveModel {
+            source: Set(source.to_owned()),
+            identifier: Set(identifier.to_owned()),
+            provider: Set(None),
+            manual: Set(privacy.map(|p| p.as_str().to_owned())),
+            checked_at: Set(None),
+        })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                pair_privacy::Column::Source,
+                pair_privacy::Column::Identifier,
+            ])
+            .update_column(pair_privacy::Column::Manual)
+            .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// The `pair_privacy` rows of `pairs`; pairs without one are absent.
+    pub async fn pair_privacies(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<HashMap<(String, String), PairPrivacy>, Error> {
+        if pairs.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = chunked_pair_query(pairs, |chunk| {
+            pair_privacy::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    pair_privacy::Column::Source,
+                    pair_privacy::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|m| {
+                let privacy = PairPrivacy {
+                    provider: m.provider.as_deref().and_then(Privacy::parse),
+                    manual: m.manual.as_deref().and_then(Privacy::parse),
+                };
+                ((m.source, m.identifier), privacy)
+            })
+            .collect())
+    }
+
+    /// The `pair_image` rows of `pairs`.
+    pub async fn pair_image_rows(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<Vec<PairImageRow>, Error> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(chunked_pair_query(pairs, |chunk| {
+            pair_image::Entity::find()
+                .filter(pair_condition(
+                    chunk,
+                    pair_image::Column::Source,
+                    pair_image::Column::Identifier,
+                ))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(|m| PairImageRow {
+            fetched: m.origin == ImageOrigin::Fetch.as_str(),
+            source: m.source,
+            identifier: m.identifier,
+            url: m.url,
+            width: m.width,
+            height: m.height,
+        })
+        .collect())
+    }
+
     /// Record the name a parent's listing gave a stub pair, as a non-primary
     /// alias (so a later fetch's own primary alias still wins the title).
     /// Only applies while the pair is still a stub: a fetched pair's names
@@ -2020,15 +3433,8 @@ impl MusicDb {
         // Skip aliases the pair already has (a re-import, or a stub's listing
         // name seen once per reference), and repeats within `aliases`. A
         // lookup rather than a UNIQUE index: see `CONTRIBUTION_DEDUP_MIGRATION`.
-        let key = |name: &str, locale: Option<&str>, extra: &str, primary: bool| {
-            (
-                name.to_string(),
-                locale.map(str::to_string),
-                extra.to_string(),
-                primary,
-            )
-        };
-        let mut seen: HashSet<(String, Option<String>, String, bool)> = entry_alias::Entity::find()
+        let key = alias_key;
+        let mut seen: HashSet<AliasKey> = entry_alias::Entity::find()
             .filter(entry_alias::Column::Source.eq(source))
             .filter(entry_alias::Column::Identifier.eq(identifier))
             .all(&self.db)
@@ -2160,88 +3566,6 @@ impl MusicDb {
         Ok(())
     }
 
-    /// Last-applied mtime (ns since epoch) of a barrier config file, if recorded.
-    pub async fn get_dedup_mtime(&self, config_path: &str) -> Result<Option<i64>, Error> {
-        Ok(dedup_state::Entity::find_by_id(config_path.to_string())
-            .one(&self.db)
-            .await?
-            .map(|m| m.mtime_ns))
-    }
-
-    /// Record (upsert) the last-applied mtime for a barrier config file.
-    pub async fn set_dedup_mtime(&self, config_path: &str, mtime_ns: i64) -> Result<(), Error> {
-        dedup_state::Entity::insert(dedup_state::ActiveModel {
-            config_path: Set(config_path.to_string()),
-            mtime_ns: Set(mtime_ns),
-        })
-        .on_conflict(
-            sea_query::OnConflict::column(dedup_state::Column::ConfigPath)
-                .update_column(dedup_state::Column::MtimeNs)
-                .to_owned(),
-        )
-        .exec(&self.db)
-        .await?;
-        Ok(())
-    }
-
-    /// Forget a barrier config file's recorded mtime (used when the file is gone).
-    pub async fn delete_dedup_mtime(&self, config_path: &str) -> Result<(), Error> {
-        dedup_state::Entity::delete_by_id(config_path.to_string())
-            .exec(&self.db)
-            .await?;
-        Ok(())
-    }
-
-    /// Entry ids currently tagged as affected by a given barrier config file.
-    pub async fn entries_for_config(&self, config_path: &str) -> Result<Vec<i64>, Error> {
-        Ok(entry_dedup::Entity::find()
-            .filter(entry_dedup::Column::ConfigPath.eq(config_path))
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(|m| m.entry_id)
-            .collect())
-    }
-
-    /// Every config path that currently tags at least one entry. Used to spot
-    /// config files that were removed since the last run.
-    pub async fn tagged_config_paths(&self) -> Result<Vec<String>, Error> {
-        let mut paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for m in entry_dedup::Entity::find().all(&self.db).await? {
-            paths.insert(m.config_path);
-        }
-        Ok(paths.into_iter().collect())
-    }
-
-    /// Replace the set of entries tagged for `config_path` with `entry_ids`.
-    /// Called after every flush so the tags reflect the latest grouping.
-    pub async fn set_config_entries(
-        &self,
-        config_path: &str,
-        entry_ids: &[i64],
-    ) -> Result<(), Error> {
-        entry_dedup::Entity::delete_many()
-            .filter(entry_dedup::Column::ConfigPath.eq(config_path))
-            .exec(&self.db)
-            .await?;
-        if entry_ids.is_empty() {
-            return Ok(());
-        }
-        let models: Vec<entry_dedup::ActiveModel> = entry_ids
-            .iter()
-            .map(|id| entry_dedup::ActiveModel {
-                entry_id: Set(*id),
-                config_path: Set(config_path.to_string()),
-            })
-            .collect();
-        entry_dedup::Entity::insert_many(models)
-            .exec(&self.db)
-            .await?;
-        Ok(())
-    }
-
-    // ── Bulk-fetch helpers (used by the soft-match pipeline) ──────────────────
-
     /// Every entry row (id, entry_type). Used to seed the match candidate set.
     pub async fn all_entry_rows(&self) -> Result<Vec<EntryRow>, Error> {
         Ok(entry::Entity::find()
@@ -2263,6 +3587,20 @@ impl MusicDb {
             .into_iter()
             .map(source_row_from_model)
             .collect())
+    }
+
+    /// Imported identifiers owned by a provider, excluding unfetched stubs.
+    /// Used by the server to watch local files without scanning other providers.
+    pub async fn fetched_identifiers_for_source(&self, source: &str) -> Result<Vec<String>, Error> {
+        Ok(entry_source::Entity::find()
+            .select_only()
+            .column(entry_source::Column::Identifier)
+            .filter(entry_source::Column::Source.eq(source))
+            .filter(entry_source::Column::FetchedAt.is_not_null())
+            .order_by_asc(entry_source::Column::Identifier)
+            .into_tuple::<String>()
+            .all(&self.db)
+            .await?)
     }
 
     /// Every alias row. Used to build the alias list per pair.
@@ -2335,6 +3673,21 @@ impl MusicDb {
     }
 
     /// Every `EDITION_KINDS` relation row, enabled or tombstoned.
+    /// Every `EDITION_KINDS` and `DIFFERENT_SONG` relation row, enabled or
+    /// tombstoned: what `EditionProjection::build` reads.
+    pub async fn song_relations(&self) -> Result<Vec<RelationRow>, Error> {
+        Ok(entry_relation::Entity::find()
+            .filter(
+                entry_relation::Column::Kind
+                    .is_in(EDITION_KINDS.iter().copied().chain([DIFFERENT_SONG])),
+            )
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect())
+    }
+
     pub async fn edition_relations(&self) -> Result<Vec<RelationRow>, Error> {
         Ok(entry_relation::Entity::find()
             .filter(entry_relation::Column::Kind.is_in(EDITION_KINDS.iter().copied()))
@@ -2402,7 +3755,7 @@ impl MusicDb {
     pub async fn edition_projection_for_display(&self) -> Result<EditionProjection, Error> {
         let identity = self.soft_identity_projection_for_display().await?;
         let mut kind_filter = Condition::any();
-        for kind in EDITION_KINDS {
+        for kind in EDITION_KINDS.iter().chain([&DIFFERENT_SONG]) {
             kind_filter = kind_filter.add(entry_relation::Column::Kind.eq(*kind));
         }
         let relations = entry_relation::Entity::find()
@@ -2437,7 +3790,7 @@ impl MusicDb {
         let kinds = SAME_KINDS
             .iter()
             .chain(EDITION_KINDS)
-            .chain([&DIFFERENT_IDENTITY])
+            .chain([&DIFFERENT_IDENTITY, &DIFFERENT_SONG])
             .map(|kind| format!("'{kind}'"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -2662,6 +4015,23 @@ impl MusicDb {
         .collect())
     }
 
+    /// `(entry_id, run_id)` of every pair held by `ids`, keyed by pair.
+    /// `run_id` is `None` for rows written before import runs were tracked.
+    pub async fn pair_run_ids_by_entry_ids(
+        &self,
+        ids: &[i64],
+    ) -> Result<HashMap<(String, String), (i64, Option<i64>)>, Error> {
+        Ok(chunked_id_query(ids, |chunk| {
+            entry_source::Entity::find()
+                .filter(entry_source::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+        })
+        .await?
+        .into_iter()
+        .map(|m| ((m.source, m.identifier), (m.entry_id, m.run_id)))
+        .collect())
+    }
+
     /// entry_source rows for exactly `pairs` (primary-key lookup).
     pub async fn source_rows_for_pairs(
         &self,
@@ -2775,12 +4145,212 @@ impl MusicDb {
                 source: s.source,
                 identifier: s.identifier,
                 duration_ms: s.duration_ms,
+                gone_at: s.gone_at,
             })
             .collect())
     }
 
     /// Each of `pairs`' own best alias: primary first, then the oldest.
     /// Pairs without any alias are absent.
+    /// The display names chosen for any of `entry_ids` (`entry_display_name`).
+    pub async fn display_names(&self, entry_ids: &[i64]) -> Result<HashMap<i64, String>, Error> {
+        let mut out = HashMap::new();
+        for chunk in entry_ids.chunks(500) {
+            for m in entry_display_name::Entity::find()
+                .filter(entry_display_name::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+                .await?
+            {
+                out.insert(m.entry_id, m.name);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Names `entry_id` `name` in place of its aliases, or with `None` goes
+    /// back to them. `members` are the other entries sharing its display
+    /// title (its soft-identity component); their names are cleared so the
+    /// new one is the only one.
+    pub async fn set_display_name(
+        &self,
+        entry_id: i64,
+        members: &[i64],
+        name: Option<&str>,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        entry_display_name::Entity::delete_many()
+            .filter(
+                entry_display_name::Column::EntryId
+                    .is_in(members.iter().copied().chain([entry_id])),
+            )
+            .exec(&txn)
+            .await?;
+        if let Some(name) = name {
+            entry_display_name::Entity::insert(entry_display_name::ActiveModel {
+                entry_id: Set(entry_id),
+                name: Set(name.to_owned()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// How artists are credited on any of `entry_ids`
+    /// (`credit_display_name`): `(entry_id, artist_entry_id, name)`.
+    pub async fn credit_display_names(
+        &self,
+        entry_ids: &[i64],
+    ) -> Result<Vec<(i64, i64, String)>, Error> {
+        let mut out = Vec::new();
+        for chunk in entry_ids.chunks(500) {
+            for m in credit_display_name::Entity::find()
+                .filter(credit_display_name::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+                .await?
+            {
+                out.push((m.entry_id, m.artist_entry_id, m.name));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Credits `artist_id` as `name` on `entry_id`, or with `None` goes back
+    /// to the artist's own name. `entry_members` and `artist_members` are
+    /// the soft-identity components of each; any other name for the same
+    /// pair of components is cleared.
+    pub async fn set_credit_display_name(
+        &self,
+        entry_id: i64,
+        entry_members: &[i64],
+        artist_id: i64,
+        artist_members: &[i64],
+        name: Option<&str>,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        credit_display_name::Entity::delete_many()
+            .filter(
+                credit_display_name::Column::EntryId
+                    .is_in(entry_members.iter().copied().chain([entry_id])),
+            )
+            .filter(
+                credit_display_name::Column::ArtistEntryId
+                    .is_in(artist_members.iter().copied().chain([artist_id])),
+            )
+            .exec(&txn)
+            .await?;
+        if let Some(name) = name {
+            credit_display_name::Entity::insert(credit_display_name::ActiveModel {
+                entry_id: Set(entry_id),
+                artist_entry_id: Set(artist_id),
+                name: Set(name.to_owned()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// The preference weights set on any of `entry_ids`
+    /// (`preferred_edition`). Entries without a preference are absent.
+    pub async fn preferred_edition_weights(
+        &self,
+        entry_ids: &[i64],
+    ) -> Result<HashMap<i64, u32>, Error> {
+        let mut out = HashMap::new();
+        for chunk in entry_ids.chunks(500) {
+            for m in preferred_edition::Entity::find()
+                .filter(preferred_edition::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+                .await?
+            {
+                out.insert(m.entry_id, m.weight.clamp(0, u32::MAX as i64) as u32);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Prefers edition `entry_id` with `weight`, or with 0 stops preferring
+    /// it. `members` are the other entries of its soft-identity component;
+    /// their rows are cleared so the new one is the only one.
+    pub async fn set_preferred_edition(
+        &self,
+        entry_id: i64,
+        members: &[i64],
+        weight: u32,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        preferred_edition::Entity::delete_many()
+            .filter(
+                preferred_edition::Column::EntryId.is_in(members.iter().copied().chain([entry_id])),
+            )
+            .exec(&txn)
+            .await?;
+        if weight > 0 {
+            preferred_edition::Entity::insert(preferred_edition::ActiveModel {
+                entry_id: Set(entry_id),
+                weight: Set(weight.into()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// The preference weights set on any of `pairs` (`preferred_source`).
+    /// Pairs without a preference are absent.
+    pub async fn preferred_source_weights(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<HashMap<(String, String), u32>, Error> {
+        let wanted: HashSet<&(String, String)> = pairs.iter().collect();
+        let mut out = HashMap::new();
+        for chunk in pairs.chunks(500) {
+            for m in preferred_source::Entity::find()
+                .filter(
+                    preferred_source::Column::Identifier
+                        .is_in(chunk.iter().map(|(_, identifier)| identifier.clone())),
+                )
+                .all(&self.db)
+                .await?
+            {
+                let pair = (m.source, m.identifier);
+                if wanted.contains(&pair) {
+                    out.insert(pair, m.weight.clamp(0, u32::MAX as i64) as u32);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Prefers playing from `(source, identifier)` with `weight`, or with 0
+    /// stops preferring it.
+    pub async fn set_preferred_source(
+        &self,
+        source: &str,
+        identifier: &str,
+        weight: u32,
+    ) -> Result<(), Error> {
+        let txn = self.db.begin().await?;
+        preferred_source::Entity::delete_by_id((source.to_owned(), identifier.to_owned()))
+            .exec(&txn)
+            .await?;
+        if weight > 0 {
+            preferred_source::Entity::insert(preferred_source::ActiveModel {
+                source: Set(source.to_owned()),
+                identifier: Set(identifier.to_owned()),
+                weight: Set(weight.into()),
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
     pub async fn pair_titles(
         &self,
         pairs: &[(String, String)],
@@ -2999,6 +4569,62 @@ impl MusicDb {
             .collect())
     }
 
+    /// The relations graph the player draws around `entry_id`: every row,
+    /// enabled or not, touching any member of its edition group (each
+    /// edition's whole soft-identity component, so `relations_around`'s
+    /// anchors and more), plus every row between two entries those rows
+    /// reach. The second pass is what shows how the neighbors relate to
+    /// each other, e.g. that two suggested editions are already an
+    /// instrumental and its original.
+    pub async fn relation_graph_around(&self, entry_id: i64) -> Result<Vec<RelationRow>, Error> {
+        let (identity, editions) = self.display_projections_around(&[entry_id]).await?;
+        let canonical = identity.component_of(entry_id).unwrap_or(entry_id);
+        let mut anchors: HashSet<i64> = editions
+            .members_of(canonical)
+            .into_iter()
+            .flat_map(|edition| {
+                identity
+                    .members_by_component
+                    .get(&edition)
+                    .cloned()
+                    .unwrap_or_else(|| vec![edition])
+            })
+            .collect();
+        anchors.insert(entry_id);
+
+        let mut rows: Vec<RelationRow> = entry_relation::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(entry_relation::Column::EntryA.is_in(anchors.iter().copied()))
+                    .add(entry_relation::Column::EntryB.is_in(anchors.iter().copied())),
+            )
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(RelationRow::from)
+            .collect();
+        let nodes: BTreeSet<i64> = anchors
+            .iter()
+            .copied()
+            .chain(rows.iter().flat_map(|r| [r.entry_a, r.entry_b]))
+            .collect();
+        let mut seen: HashSet<(i64, i64, String)> = rows
+            .iter()
+            .map(|r| (r.entry_a, r.entry_b, r.kind.clone()))
+            .collect();
+        let between = entry_relation::Entity::find()
+            .filter(entry_relation::Column::EntryA.is_in(nodes.iter().copied()))
+            .filter(entry_relation::Column::EntryB.is_in(nodes.iter().copied()))
+            .all(&self.db)
+            .await?;
+        for row in between.into_iter().map(RelationRow::from) {
+            if seen.insert((row.entry_a, row.entry_b, row.kind.clone())) {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
     /// All enabled relation rows, for reporting.
     pub async fn all_relations(&self) -> Result<Vec<RelationRow>, Error> {
         Ok(entry_relation::Entity::find()
@@ -3008,6 +4634,234 @@ impl MusicDb {
             .map(RelationRow::from)
             .collect())
     }
+
+    /// Records, as a manual judgment, that `derived` is an edition of
+    /// `original` made by `transformation` (a `version_tokens` marker such as
+    /// `"instrumental"` or `"live"`; `None` for an unspecified alternate
+    /// version). Upserts the pair's `derived_from` row with that direction,
+    /// replacing its `extra`. Every other non-provider edition-kind row
+    /// between the two entries' soft-identity components (any member of one
+    /// to any member of the other) is tombstoned, since this supersedes them;
+    /// provider rows (cover, remix, arrangement) stay, as they never mark a
+    /// degenerate edition.
+    pub async fn set_edition_derivation(
+        &self,
+        original: i64,
+        derived: i64,
+        transformation: Option<&str>,
+    ) -> Result<(), Error> {
+        if original == derived {
+            return Err(Error::InvalidInput(
+                "an entry can't be an edition of itself".into(),
+            ));
+        }
+        let (identity, _) = self
+            .display_projections_around(&[original, derived])
+            .await?;
+        let members = |id: i64| {
+            let canonical = identity.component_of(id).unwrap_or(id);
+            identity
+                .members_by_component
+                .get(&canonical)
+                .cloned()
+                .unwrap_or_else(|| vec![id])
+        };
+        let (originals, deriveds) = (members(original), members(derived));
+        if originals.iter().any(|m| deriveds.contains(m)) {
+            return Err(Error::InvalidInput(
+                "both entries are the same identity, not two editions".into(),
+            ));
+        }
+        let _guard = self.write_lock.lock().await;
+        let txn = self.db.begin().await?;
+        write_derivation(
+            &txn,
+            (original, &originals),
+            (derived, &deriveds),
+            transformation,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Starts a play of `entry_id` at `started_at` (unix seconds), with
+    /// nothing heard yet. Returns the play's id.
+    pub async fn start_play(&self, entry_id: i64, started_at: i64) -> Result<i64, Error> {
+        let _guard = self.write_lock.lock().await;
+        let result = play_event::Entity::insert(play_event::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            entry_id: Set(entry_id),
+            started_at: Set(started_at),
+            listened_seconds: Set(0.0),
+        })
+        .exec(&self.db)
+        .await?;
+        Ok(result.last_insert_id)
+    }
+
+    /// Raises a play's listened time to `listened_seconds`. Never lowers
+    /// it, so a late or reordered report can't undo a newer one. Returns
+    /// false for an unknown play.
+    pub async fn set_play_listened(
+        &self,
+        play_id: i64,
+        listened_seconds: f64,
+    ) -> Result<bool, Error> {
+        // A play reported for longer than a day is a client bug, not a song.
+        if !(0.0..=86_400.0).contains(&listened_seconds) {
+            return Err(Error::InvalidInput(format!(
+                "listened_seconds out of range: {listened_seconds}"
+            )));
+        }
+        let _guard = self.write_lock.lock().await;
+        let result = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "UPDATE play_event SET listened_seconds = MAX(listened_seconds, ?) WHERE id = ?",
+                [listened_seconds.into(), play_id.into()],
+            ))
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Each entry's latest counted play (`MIN_COUNTED_PLAY_SECONDS`) started
+    /// at or after `since`: `(entry_id, started_at)`, unix seconds.
+    pub async fn last_counted_plays(&self, since: i64) -> Result<Vec<(i64, i64)>, Error> {
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT entry_id, MAX(started_at) AS last FROM play_event
+                 WHERE started_at >= ? AND listened_seconds >= ?
+                 GROUP BY entry_id",
+                [since.into(), MIN_COUNTED_PLAY_SECONDS.into()],
+            ))
+            .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("", "entry_id")?, row.try_get("", "last")?)))
+            .collect()
+    }
+
+    /// Every entry's counted plays (`MIN_COUNTED_PLAY_SECONDS`), all time:
+    /// `(entry_id, plays)`. Keyed by the entry id each play was recorded on,
+    /// which may be any member of its soft-identity component.
+    pub async fn counted_plays_by_entry(&self) -> Result<Vec<(i64, i64)>, Error> {
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT entry_id, COUNT(*) AS plays FROM play_event
+                 WHERE listened_seconds >= ?
+                 GROUP BY entry_id",
+                [MIN_COUNTED_PLAY_SECONDS.into()],
+            ))
+            .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("", "entry_id")?, row.try_get("", "plays")?)))
+            .collect()
+    }
+
+    /// Counted plays whose listened time has grown past what was last
+    /// exported to `target` (see `play_export`), oldest first.
+    pub async fn plays_pending_export(&self, target: &str) -> Result<Vec<PendingExport>, Error> {
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT p.id, p.entry_id, p.listened_seconds,
+                        COALESCE(x.exported_seconds, 0.0) AS exported_seconds
+                 FROM play_event p
+                 LEFT JOIN play_export x ON x.play_id = p.id AND x.target = ?
+                 WHERE p.listened_seconds >= ?
+                   AND p.listened_seconds > COALESCE(x.exported_seconds, 0.0)
+                 ORDER BY p.id",
+                [target.into(), MIN_COUNTED_PLAY_SECONDS.into()],
+            ))
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(PendingExport {
+                    play_id: row.try_get("", "id")?,
+                    entry_id: row.try_get("", "entry_id")?,
+                    listened_seconds: row.try_get("", "listened_seconds")?,
+                    exported_seconds: row.try_get("", "exported_seconds")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Marks `(play_id, exported_seconds)` as exported to `target`. Like
+    /// `set_play_listened`, an export mark only ever grows.
+    pub async fn record_play_exports(
+        &self,
+        target: &str,
+        exports: &[(i64, f64)],
+    ) -> Result<(), Error> {
+        if exports.is_empty() {
+            return Ok(());
+        }
+        let _guard = self.write_lock.lock().await;
+        let txn = self.db.begin().await?;
+        for &(play_id, seconds) in exports {
+            txn.execute_raw(Statement::from_sql_and_values(
+                txn.get_database_backend(),
+                "INSERT INTO play_export (play_id, target, exported_seconds) VALUES (?, ?, ?)
+                 ON CONFLICT (play_id, target) DO UPDATE
+                 SET exported_seconds = MAX(exported_seconds, excluded.exported_seconds)",
+                [play_id.into(), target.into(), seconds.into()],
+            ))
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Counted plays of any of `entry_ids`, with their listened time and
+    /// how much of it was exported to `target`.
+    pub async fn play_totals(&self, entry_ids: &[i64], target: &str) -> Result<PlayTotals, Error> {
+        if entry_ids.is_empty() {
+            return Ok(PlayTotals::default());
+        }
+        let row = self
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                "SELECT COUNT(*) AS plays,
+                        COALESCE(SUM(p.listened_seconds), 0.0) AS listened,
+                        COALESCE(SUM(MIN(COALESCE(x.exported_seconds, 0.0), p.listened_seconds)), 0.0)
+                          AS exported
+                 FROM play_event p
+                 LEFT JOIN play_export x ON x.play_id = p.id AND x.target = ?
+                 WHERE p.entry_id IN (SELECT value FROM json_each(?))
+                   AND p.listened_seconds >= ?",
+                [
+                    target.into(),
+                    serde_json::to_string(entry_ids)
+                        .expect("ids serialize")
+                        .into(),
+                    MIN_COUNTED_PLAY_SECONDS.into(),
+                ],
+            ))
+            .await?;
+        let Some(row) = row else {
+            return Ok(PlayTotals::default());
+        };
+        Ok(PlayTotals {
+            plays: row.try_get("", "plays")?,
+            listened_seconds: row.try_get("", "listened")?,
+            exported_seconds: row.try_get("", "exported")?,
+        })
+    }
+}
+
+/// See `MusicDb::play_totals`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct PlayTotals {
+    pub plays: i64,
+    pub listened_seconds: f64,
+    pub exported_seconds: f64,
 }
 
 // ── Public data structs for bulk queries ──────────────────────────────────────
@@ -3031,6 +4885,9 @@ pub struct SourceRow {
     pub songs: Vec<Vec<String>>,
     /// NULL for a stub: a pair only ever seen in some listing, never fetched.
     pub fetched_at: Option<i64>,
+    /// Set when the provider last reported this pair deleted (see
+    /// `entry_source::Model::gone_at`).
+    pub gone_at: Option<i64>,
 }
 
 /// One pair of an entry, as `MusicDb::entry_pair_facts` returns it.
@@ -3039,6 +4896,8 @@ pub struct PairFacts {
     pub identifier: String,
     /// The pair's first known duration (`entry_source.duration_ms`).
     pub duration_ms: Option<i64>,
+    /// See `SourceRow::gone_at`.
+    pub gone_at: Option<i64>,
     /// Ascending `id`, i.e. insertion order.
     pub aliases: Vec<PairAlias>,
 }
@@ -3058,17 +4917,169 @@ pub struct AliasRow {
 }
 
 pub struct ContribRow {
+    pub id: i64,
     pub source: String,
     pub identifier: String,
     pub artist_source: String,
     pub artist_identifier: String,
     pub role: String,
     pub main_artist: bool,
+    /// Provider-specific credit facts, including order, credited name and
+    /// performance attributes. Older rows may have no extra metadata.
+    pub extra: Option<String>,
 }
 
 /// A contribution's identity under its parent pair: (artist pair, role,
 /// main_artist, extra as stored).
 pub type ContributionKey = ((String, String), String, bool, String);
+
+/// `setting` key: "1" once every stored identity link is recorded in
+/// `pair_link` (set for a DB created empty, and by `import
+/// --backfill-links`). Only then does a final flush group entries by their
+/// links and split one whose pairs a re-fetch disconnected
+/// (docs/plan-identity-retraction.md): with links missing, entries that are
+/// fine would look disconnected and split.
+pub const LINKS_COMPLETE: &str = "links_complete";
+
+/// `pair_link.via` of a link from the asserting pair's own fetch result.
+pub const LINK_VIA_FETCH: &str = "fetch";
+/// `pair_link.via` of a link between one child's sibling pairs in the
+/// asserting pair's listing.
+pub const LINK_VIA_LISTING: &str = "listing";
+
+/// The two pairs of a link, smaller first.
+pub type LinkKey = ((String, String), (String, String));
+
+pub fn link_key(a: &(String, String), b: &(String, String)) -> LinkKey {
+    if a <= b {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    }
+}
+
+/// A stored link and what stated it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LinkRow {
+    pub link: LinkKey,
+    pub asserted_by: (String, String),
+    pub via: &'static str,
+}
+
+/// A stored dedup barrier (see `barrier_group`), anchors by name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BarrierGroupRow {
+    pub id: i64,
+    pub name: String,
+    pub origin: String,
+    pub created_at: i64,
+    pub anchors: BTreeMap<String, Vec<(String, String)>>,
+}
+
+/// An alias's identity under its pair: (name, locale, extra as stored,
+/// primary).
+pub type AliasKey = (String, Option<String>, String, bool);
+
+pub fn alias_key(name: &str, locale: Option<&str>, extra: &str, primary: bool) -> AliasKey {
+    (
+        name.to_string(),
+        locale.map(str::to_string),
+        extra.to_string(),
+        primary,
+    )
+}
+
+/// What a committed run replaces under the pairs it fetched. See
+/// `MusicDb::commit_import_run`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Replacements {
+    /// Non-artist parents fetched completely, with their current edges.
+    pub parents: HashMap<(String, String), ParentEdges>,
+    /// Every fetched pair, with the aliases its fetch reported.
+    pub aliases: HashMap<(String, String), HashSet<AliasKey>>,
+    /// Pairs whose fetch found them deleted upstream.
+    pub gone: HashSet<(String, String)>,
+    /// The links each pair's fetch or listing stated in this run, by
+    /// (asserting pair, via). Every fetched pair's `fetch` links and every
+    /// parent's `listing` links replace its older ones, so an asserter
+    /// missing here stated none.
+    pub links: HashMap<((String, String), &'static str), HashSet<LinkKey>>,
+}
+
+/// An asserting pair and `pair_link.via`.
+type LinkAsserter<'a> = (&'a (String, String), &'static str);
+
+impl Replacements {
+    /// Every (asserting pair, via) whose stored links this run replaces,
+    /// with the links it states now.
+    fn link_asserters(
+        &self,
+    ) -> impl Iterator<Item = (LinkAsserter<'_>, Option<&HashSet<LinkKey>>)> {
+        let fetch = self.aliases.keys().map(|p| (p, LINK_VIA_FETCH));
+        let listing = self.parents.keys().map(|p| (p, LINK_VIA_LISTING));
+        fetch
+            .chain(listing)
+            .map(|(p, via)| ((p, via), self.links.get(&(p.clone(), via))))
+    }
+}
+
+async fn delete_links_on<C: ConnectionTrait>(db: &C, rows: &[LinkRow]) -> Result<(), Error> {
+    for row in rows {
+        let ((a, b), by) = (&row.link, &row.asserted_by);
+        pair_link::Entity::delete_many()
+            .filter(pair_link::Column::SourceA.eq(a.0.as_str()))
+            .filter(pair_link::Column::IdentifierA.eq(a.1.as_str()))
+            .filter(pair_link::Column::SourceB.eq(b.0.as_str()))
+            .filter(pair_link::Column::IdentifierB.eq(b.1.as_str()))
+            .filter(pair_link::Column::AssertedSource.eq(by.0.as_str()))
+            .filter(pair_link::Column::AssertedIdentifier.eq(by.1.as_str()))
+            .filter(pair_link::Column::Via.eq(row.via))
+            .exec(db)
+            .await?;
+    }
+    Ok(())
+}
+
+/// A stored `pair_link.via` as its constant; anything unknown reads as
+/// `listing`, the kind fewer re-fetches replace.
+fn via_str(via: &str) -> &'static str {
+    if via == LINK_VIA_FETCH {
+        LINK_VIA_FETCH
+    } else {
+        LINK_VIA_LISTING
+    }
+}
+
+/// The stored links of `replaced`'s asserters that this run no longer
+/// states.
+async fn stale_links_on<C: ConnectionTrait>(
+    db: &C,
+    replaced: &Replacements,
+) -> Result<Vec<LinkRow>, Error> {
+    let mut out = Vec::new();
+    for ((asserted, via), current) in replaced.link_asserters() {
+        let rows = pair_link::Entity::find()
+            .filter(pair_link::Column::AssertedSource.eq(asserted.0.as_str()))
+            .filter(pair_link::Column::AssertedIdentifier.eq(asserted.1.as_str()))
+            .filter(pair_link::Column::Via.eq(via))
+            .all(db)
+            .await?;
+        for row in rows {
+            let link = (
+                (row.source_a, row.identifier_a),
+                (row.source_b, row.identifier_b),
+            );
+            if current.is_none_or(|c| !c.contains(&link)) {
+                out.push(LinkRow {
+                    link,
+                    asserted_by: asserted.clone(),
+                    via,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// The edges a fully fetched non-artist parent has as of the current run.
 /// See `MusicDb::commit_import_run`.
@@ -3179,6 +5190,32 @@ const CONTRIBUTION_DEDUP_MIGRATION: &str = "
     );
     PRAGMA user_version = 2;";
 
+/// Release tracklists once copied their tracks' credits onto the
+/// release-to-track edge, making recordings appear to be artists. Remove
+/// contributions whose target is a known musical object, across all roles
+/// and providers. Keep unresolved pairs and unknown entry types: those can
+/// still turn out to be artists when fetched. Containment edges, artist
+/// credits, and manual display names are independent and remain intact.
+const NON_ARTIST_CONTRIBUTION_MIGRATION: &str = "
+    DELETE FROM contribution WHERE EXISTS (
+        SELECT 1 FROM entry_source artist
+        JOIN entry e ON e.id = artist.entry_id
+        WHERE artist.source = contribution.artist_source
+          AND artist.identifier = contribution.artist_identifier
+          AND e.entry_type IN ('track', 'release', 'release_group')
+    );
+    PRAGMA user_version = 11;";
+
+/// Matches an `entry_relation` row with no `entry_child` edge between its
+/// two entries, in either direction: for a provider cover/remix/arrangement
+/// relation, nothing lists it any more.
+const UNSUPPORTED_PROVIDER_RELATIONS: &str = "NOT EXISTS (
+    SELECT 1 FROM entry_child c
+    JOIN entry_source p ON p.source = c.parent_source AND p.identifier = c.parent_identifier
+    JOIN entry_source ch ON ch.source = c.child_source AND ch.identifier = c.child_identifier
+    WHERE (p.entry_id = entry_relation.entry_a AND ch.entry_id = entry_relation.entry_b)
+       OR (p.entry_id = entry_relation.entry_b AND ch.entry_id = entry_relation.entry_a))";
+
 /// Same problem as `CONTRIBUTION_DEDUP_MIGRATION`, for aliases (~6× on a real
 /// DB); `insert_aliases_for_pair` now skips existing rows. The FTS index is
 /// external-content, so deleting rows under it requires a rebuild.
@@ -3279,6 +5316,87 @@ mod tests {
 
     async fn mem_db() -> MusicDb {
         MusicDb::new("sqlite::memory:").await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_users_privacy_call_outlasts_a_refetch() {
+        let mdb = mem_db().await;
+        let pair = ("youtube".to_owned(), "https://youtu.be/x".to_owned());
+        let other = ("youtube".to_owned(), "https://youtu.be/y".to_owned());
+        let get = |mdb: &MusicDb| {
+            let pairs = vec![pair.clone(), other.clone()];
+            let mdb = mdb.clone();
+            async move { mdb.pair_privacies(&pairs).await.unwrap() }
+        };
+        mdb.set_provider_privacy(&pair.0, &pair.1, Privacy::Unlisted)
+            .await
+            .unwrap();
+        mdb.set_manual_privacy(&pair.0, &pair.1, Some(Privacy::Public))
+            .await
+            .unwrap();
+        // A refetch updates what the provider says, not the user's call.
+        mdb.set_provider_privacy(&pair.0, &pair.1, Privacy::Private)
+            .await
+            .unwrap();
+        let rows = get(&mdb).await;
+        assert_eq!(
+            rows[&pair],
+            PairPrivacy {
+                provider: Some(Privacy::Private),
+                manual: Some(Privacy::Public),
+            }
+        );
+        assert_eq!(rows[&pair].effective(), Some(Privacy::Public));
+        assert!(!rows.contains_key(&other));
+
+        mdb.set_manual_privacy(&pair.0, &pair.1, None)
+            .await
+            .unwrap();
+        assert_eq!(get(&mdb).await[&pair].effective(), Some(Privacy::Private));
+        // A call made before any fetch stands on its own.
+        mdb.set_manual_privacy(&other.0, &other.1, Some(Privacy::Private))
+            .await
+            .unwrap();
+        assert_eq!(get(&mdb).await[&other].effective(), Some(Privacy::Private));
+    }
+
+    #[tokio::test]
+    async fn listing_image_never_replaces_fetched_one() {
+        use crate::providers::types::Image;
+        let db = mem_db().await;
+        let pair = [("spotify".to_owned(), "a".to_owned())];
+        let url = |db: &MusicDb| {
+            let db = db.clone();
+            let pair = pair.clone();
+            async move {
+                let rows = db.pair_image_rows(&pair).await.unwrap();
+                rows.into_iter().map(|r| (r.url, r.fetched)).next()
+            }
+        };
+        let img = |u: &str| Image::new(u, Some(300), Some(300));
+
+        db.set_pair_image("spotify", "a", &img("listed"), ImageOrigin::Listing, None)
+            .await
+            .unwrap();
+        assert_eq!(url(&db).await, Some(("listed".into(), false)));
+        db.set_pair_image("spotify", "a", &img("fetched"), ImageOrigin::Fetch, None)
+            .await
+            .unwrap();
+        assert_eq!(url(&db).await, Some(("fetched".into(), true)));
+        db.set_pair_image(
+            "spotify",
+            "a",
+            &img("listed again"),
+            ImageOrigin::Listing,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(url(&db).await, Some(("fetched".into(), true)));
+        db.set_pair_image("spotify", "a", &img("refetched"), ImageOrigin::Fetch, None)
+            .await
+            .unwrap();
+        assert_eq!(url(&db).await, Some(("refetched".into(), true)));
     }
 
     /// `recover_pending_import_runs` purges a "pending" run whose recorded
@@ -3425,6 +5543,33 @@ mod tests {
         );
     }
 
+    /// Merging re-points the ids inside `extra` along with the endpoints, so
+    /// a cover row keeps naming its own original and derived side, and two
+    /// payloads that only differed in the merged-away id collapse into one.
+    #[tokio::test]
+    async fn merge_entries_remaps_extra_ids() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2, 3] {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(db, 1, 3, "cover", r#"{"derived_entry":3,"source_entry":1}"#).await;
+        insert_edition_rel(db, 2, 3, "cover", r#"{"derived_entry":3,"source_entry":2}"#).await;
+
+        mdb.merge_entries(1, 2).await.unwrap();
+
+        let row = entry_relation::Entity::find_by_id((2, 3, "cover".to_string()))
+            .one(db)
+            .await
+            .unwrap()
+            .expect("cover row re-pointed onto the winner");
+        let extra: serde_json::Value = serde_json::from_str(row.extra.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            extra,
+            serde_json::json!({"derived_entry": 3, "source_entry": 2})
+        );
+    }
+
     /// combine_relations is order-independent: the higher-confidence row's scalar
     /// fields win regardless of argument order.
     #[test]
@@ -3514,6 +5659,50 @@ mod tests {
         assert_eq!(transformation, Some("instrumental"));
     }
 
+    #[tokio::test]
+    async fn relation_graph_around_spans_edition_group_and_neighbor_edges() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1i64..=6 {
+            insert_entry(db, id).await;
+        }
+        for (a, b, enabled) in [
+            // 4 is an edition of the anchor 1; 4–5 is a rejected suggestion.
+            (1i64, 4i64, true),
+            (4, 5, false),
+            // Rejected suggestions from the anchor to 2 and 3, which are an
+            // edition pair of their own.
+            (1, 2, false),
+            (1, 3, false),
+            (2, 3, true),
+            // Two hops out from the anchor's group: not part of the graph.
+            (3, 6, true),
+        ] {
+            entry_relation::Entity::insert(entry_relation::ActiveModel {
+                entry_a: Set(a),
+                entry_b: Set(b),
+                kind: Set(DERIVED_FROM.to_string()),
+                confidence: Set(0.8),
+                origin: Set("heuristic".to_string()),
+                enabled: Set(enabled),
+                extra: Set(None),
+            })
+            .exec(db)
+            .await
+            .unwrap();
+        }
+
+        let mut pairs: Vec<(i64, i64)> = mdb
+            .relation_graph_around(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.entry_a, r.entry_b))
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(1, 2), (1, 3), (1, 4), (2, 3), (4, 5)]);
+    }
+
     /// Regression test for the pre-existing gate bug this feature exposed:
     /// `build_edition_projection` used to only honor `extra.derived_entry`
     /// when `relation.kind == DERIVED_FROM`, even though the enclosing loop
@@ -3554,6 +5743,82 @@ mod tests {
         );
     }
 
+    /// A merge that collapses two rows with different payloads stores
+    /// `extra` as a list (`combine_extra`); its `derived_entry` still marks
+    /// the derived side.
+    #[tokio::test]
+    async fn edition_projection_reads_list_extra() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2] {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(
+            db,
+            1,
+            2,
+            "cover",
+            r#"[{"derived_entry":1,"source_entry":2},{"reason":"provider"}]"#,
+        )
+        .await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(
+            projection.default_member_of(1),
+            2,
+            "the original, not the cover"
+        );
+    }
+
+    /// A `derived_entry` that isn't one of the row's endpoints is stale and
+    /// marks nothing — not the unrelated entry that happens to have that id.
+    #[tokio::test]
+    async fn edition_projection_ignores_derived_entry_off_the_row() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=4 {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(db, 1, 2, "cover", r#"{"derived_entry":3,"source_entry":1}"#).await;
+        insert_edition_rel(db, 3, 4, "cover", r#"{"derived_entry":4,"source_entry":3}"#).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(
+            projection.default_member_of(3),
+            3,
+            "3 is still 4's original"
+        );
+    }
+
+    /// A list `extra` whose objects name opposite derived sides leaves the
+    /// direction unknown instead of marking (and folding) both sides.
+    #[tokio::test]
+    async fn edition_projection_ignores_conflicting_list_directions() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2] {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(
+            db,
+            1,
+            2,
+            DERIVED_FROM,
+            r#"[{"derived_entry":2,"source_entry":1,"transformation":"instrumental"},
+                {"derived_entry":1,"source_entry":2,"transformation":"instrumental"}]"#,
+        )
+        .await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.rank_target(1), 1);
+        assert_eq!(projection.rank_target(2), 2);
+        let extra = serde_json::from_str(
+            r#"[{"derived_entry":2,"source_entry":1},{"derived_entry":1,"source_entry":2}]"#,
+        )
+        .unwrap();
+        assert!(extra_derivations(&extra).is_empty());
+    }
+
     /// `match.example.rhai`'s `version_token_symdiff` emits `transformation`
     /// as a JSON array (a track can carry more than one marker at once);
     /// `edge_label` must space-join it rather than silently dropping it.
@@ -3586,6 +5851,384 @@ mod tests {
         assert_eq!(transformation, Some("instrumental named:long"));
     }
 
+    async fn insert_rel_from(
+        db: &DatabaseConnection,
+        (a, b): (i64, i64),
+        kind: &str,
+        origin: &str,
+        extra: Option<&str>,
+    ) {
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(a.min(b)),
+            entry_b: Set(a.max(b)),
+            kind: Set(kind.to_string()),
+            confidence: Set(0.9),
+            origin: Set(origin.to_string()),
+            enabled: Set(true),
+            extra: Set(extra.map(str::to_string)),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    fn derived(derived: i64, source: i64) -> String {
+        format!(r#"{{"derived_entry":{derived},"source_entry":{source}}}"#)
+    }
+
+    /// A `different_song` row keeps two songs apart: the edition edge that
+    /// would join them is left out (and reported), even through a third
+    /// entry related to both.
+    #[tokio::test]
+    async fn different_song_keeps_songs_apart() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=4 {
+            insert_entry(db, id).await;
+        }
+        // 2 is a cover of 1; 3 was detached from 1's song; 4 covers 3 and
+        // the matcher also relates it to 2.
+        insert_rel_from(db, (1, 2), "cover", "provider", Some(&derived(2, 1))).await;
+        insert_rel_from(db, (1, 3), DIFFERENT_SONG, "manual", None).await;
+        insert_rel_from(db, (3, 4), DERIVED_FROM, "heuristic", Some(&derived(4, 3))).await;
+        insert_rel_from(db, (2, 4), DERIVED_FROM, "heuristic", Some(&derived(4, 2))).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(
+            projection.members_of(1),
+            vec![1, 2, 4],
+            "4 joins first through 2"
+        );
+        assert_eq!(
+            projection.members_of(3),
+            vec![3],
+            "and so can't bring 3 along"
+        );
+        assert_eq!(projection.conflicts, vec![((3, 4), (1, 3))]);
+    }
+
+    /// A pair takes its direction from its strongest row: a person's
+    /// `derive` outranks a provider row about the same pair.
+    #[tokio::test]
+    async fn manual_direction_outranks_provider() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in [1i64, 2] {
+            insert_entry(db, id).await;
+        }
+        insert_rel_from(db, (1, 2), "cover", "provider", Some(&derived(2, 1))).await;
+        insert_rel_from(db, (1, 2), DERIVED_FROM, "manual", Some(&derived(1, 2))).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.original_of(1), Some(2));
+        assert_eq!(projection.default_member_of(1), 2);
+    }
+
+    /// Versions form a tree under the original: provider and manual rows
+    /// chain (a remix of a cover), as does a matcher instrumental, while the
+    /// matcher's direction between two covers never does.
+    #[tokio::test]
+    async fn song_tree_chains_trusted_rows_only() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=6 {
+            insert_entry(db, id).await;
+        }
+        // 1 original; 2, 3 covers of it; 4 remix of cover 2 (manual);
+        // 5 instrumental of cover 3 (matcher); the matcher also says
+        // cover 3 was made from cover 2, and 6 from cover 3.
+        insert_rel_from(db, (1, 2), "cover", "provider", Some(&derived(2, 1))).await;
+        insert_rel_from(db, (1, 3), "cover", "provider", Some(&derived(3, 1))).await;
+        insert_rel_from(db, (2, 4), DERIVED_FROM, "manual", Some(&derived(4, 2))).await;
+        let instrumental =
+            r#"{"derived_entry":5,"source_entry":3,"transformation":"instrumental"}"#;
+        insert_rel_from(db, (3, 5), DERIVED_FROM, "heuristic", Some(instrumental)).await;
+        insert_rel_from(db, (2, 3), DERIVED_FROM, "heuristic", Some(&derived(3, 2))).await;
+        insert_rel_from(db, (3, 6), DERIVED_FROM, "heuristic", Some(&derived(6, 3))).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.original_of(4), Some(1));
+        assert_eq!(projection.parent_of(1), None, "the original is the root");
+        assert_eq!(projection.parent_of(2), None, "hangs off the original");
+        assert_eq!(
+            projection.parent_of(3),
+            None,
+            "no chain from a matcher cover"
+        );
+        assert_eq!(projection.parent_of(4), Some(2), "manual remix of a cover");
+        assert_eq!(projection.parent_of(5), Some(3), "matcher instrumental");
+        assert_eq!(projection.parent_of(6), None);
+        assert_eq!(
+            projection.rank_target(5),
+            3,
+            "the instrumental scores its cover"
+        );
+    }
+
+    /// A group of covers whose relations name no original leaves it unknown.
+    #[tokio::test]
+    async fn song_without_original_has_unknown_original() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=3 {
+            insert_entry(db, id).await;
+        }
+        let cover = r#"{"reason":"learned v19 (cover)","transformation":"cover"}"#;
+        insert_rel_from(db, (1, 2), DERIVED_FROM, "heuristic", Some(cover)).await;
+        insert_rel_from(db, (2, 3), DERIVED_FROM, "heuristic", Some(cover)).await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.members_of(1), vec![1, 2, 3]);
+        assert_eq!(projection.original_of(1), None);
+        assert_eq!(
+            projection.default_member_of(1),
+            1,
+            "playback still has a default"
+        );
+    }
+
+    async fn insert_edition_rel(db: &DatabaseConnection, a: i64, b: i64, kind: &str, extra: &str) {
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(a.min(b)),
+            entry_b: Set(a.max(b)),
+            kind: Set(kind.to_string()),
+            confidence: Set(0.9),
+            origin: Set("heuristic".to_string()),
+            enabled: Set(true),
+            extra: Set(Some(extra.to_string())),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+    }
+
+    /// Instrumentals (and other degenerate editions) fold into their
+    /// original, through a chain of them; a cover is its own target, and so
+    /// is anything derived from it only by a non-degenerate change.
+    #[tokio::test]
+    async fn rank_target_folds_degenerate_editions_only() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=6 {
+            insert_entry(db, id).await;
+        }
+        // 2 = instrumental of 1; 3 = TV size of 2 (folds through to 1).
+        insert_edition_rel(
+            db,
+            1,
+            2,
+            DERIVED_FROM,
+            r#"{"derived_entry":2,"source_entry":1,"transformation":"instrumental"}"#,
+        )
+        .await;
+        insert_edition_rel(
+            db,
+            2,
+            3,
+            DERIVED_FROM,
+            r#"{"derived_entry":3,"source_entry":2,"transformation":["tv_size","named:x"]}"#,
+        )
+        .await;
+        // 4 = cover of 1; 5 = live of 1: both their own works.
+        insert_edition_rel(db, 1, 4, "cover", r#"{"derived_entry":4,"source_entry":1}"#).await;
+        insert_edition_rel(
+            db,
+            1,
+            5,
+            DERIVED_FROM,
+            r#"{"derived_entry":5,"source_entry":1,"transformation":"live"}"#,
+        )
+        .await;
+        // 6 = instrumental of the cover: folds into the cover, not into 1.
+        insert_edition_rel(
+            db,
+            4,
+            6,
+            "instrumental",
+            r#"{"derived_entry":6,"source_entry":4}"#,
+        )
+        .await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.rank_target(1), 1);
+        assert_eq!(projection.rank_target(2), 1);
+        assert_eq!(projection.rank_target(3), 1);
+        assert_eq!(projection.rank_target(4), 4, "a cover is its own work");
+        assert_eq!(
+            projection.rank_target(5),
+            5,
+            "a live version is its own work"
+        );
+        assert_eq!(projection.rank_target(6), 4);
+    }
+
+    /// A degenerate-marked edge with no recorded direction can't fold, and
+    /// a direction cycle stops instead of looping.
+    #[tokio::test]
+    async fn rank_target_without_direction_or_with_cycle() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=4 {
+            insert_entry(db, id).await;
+        }
+        insert_rel(db, 1, 2, "instrumental", 1.0).await;
+        insert_edition_rel(
+            db,
+            3,
+            4,
+            DERIVED_FROM,
+            r#"{"derived_entry":4,"source_entry":3,"transformation":"instrumental"}"#,
+        )
+        .await;
+        insert_edition_rel(
+            db,
+            3,
+            4,
+            "instrumental",
+            r#"{"derived_entry":3,"source_entry":4}"#,
+        )
+        .await;
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.rank_target(2), 2);
+        let t = projection.rank_target(4);
+        assert!(t == 3 || t == 4);
+    }
+
+    /// The manual setter replaces a wrong heuristic transformation (here
+    /// unfolding a mislabelled instrumental), adds a direction to a manual
+    /// edge that had none, and tombstones the superseded manual row.
+    #[tokio::test]
+    async fn set_edition_derivation_overrides_heuristic_and_manual_rows() {
+        let mdb = mem_db().await;
+        let db = &mdb.db;
+        for id in 1..=5 {
+            insert_entry(db, id).await;
+        }
+        insert_edition_rel(
+            db,
+            1,
+            2,
+            DERIVED_FROM,
+            r#"{"derived_entry":2,"source_entry":1,"transformation":"instrumental"}"#,
+        )
+        .await;
+        // 5 is the same identity as 1, with its own instrumental edge to 2.
+        insert_rel(db, 1, 5, SAME_IDENTITY, 1.0).await;
+        insert_edition_rel(
+            db,
+            2,
+            5,
+            DERIVED_FROM,
+            r#"{"derived_entry":2,"source_entry":5,"transformation":"instrumental"}"#,
+        )
+        .await;
+        entry_relation::Entity::insert(entry_relation::ActiveModel {
+            entry_a: Set(3),
+            entry_b: Set(4),
+            kind: Set("instrumental".to_string()),
+            confidence: Set(1.0),
+            origin: Set("manual".to_string()),
+            enabled: Set(true),
+            extra: Set(None),
+        })
+        .exec(db)
+        .await
+        .unwrap();
+        assert_eq!(
+            mdb.edition_projection_for_display()
+                .await
+                .unwrap()
+                .rank_target(2),
+            1
+        );
+
+        mdb.set_edition_derivation(1, 2, Some("live"))
+            .await
+            .unwrap();
+        mdb.set_edition_derivation(4, 3, Some("instrumental"))
+            .await
+            .unwrap();
+
+        let projection = mdb.edition_projection_for_display().await.unwrap();
+        assert_eq!(projection.rank_target(2), 2, "no longer an instrumental");
+        assert_eq!(projection.rank_target(3), 4);
+        assert_eq!(
+            projection.edge_label(1, 2),
+            Some((DERIVED_FROM, Some("live")))
+        );
+        let manual = entry_relation::Entity::find_by_id((3, 4, "instrumental".to_string()))
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!manual.enabled, "superseded by the derivation");
+        assert!(mdb.set_edition_derivation(1, 1, None).await.is_err());
+        assert!(
+            mdb.set_edition_derivation(1, 5, None).await.is_err(),
+            "same identity"
+        );
+    }
+
+    /// Listened time only grows; skips (under `MIN_COUNTED_PLAY_SECONDS`)
+    /// are neither counted nor exported; an export only sends growth.
+    #[tokio::test]
+    async fn play_log_counts_and_exports_growth() {
+        let mdb = mem_db().await;
+        let skip = mdb.start_play(7, 100).await.unwrap();
+        let play = mdb.start_play(7, 200).await.unwrap();
+        let other = mdb.start_play(8, 300).await.unwrap();
+        assert!(mdb.set_play_listened(skip, 4.0).await.unwrap());
+        assert!(mdb.set_play_listened(play, 60.0).await.unwrap());
+        assert!(
+            mdb.set_play_listened(play, 30.0).await.unwrap(),
+            "stale report"
+        );
+        assert!(mdb.set_play_listened(other, 15.0).await.unwrap());
+        assert!(!mdb.set_play_listened(999, 15.0).await.unwrap());
+        assert!(mdb.set_play_listened(play, -1.0).await.is_err());
+
+        let mut last = mdb.last_counted_plays(0).await.unwrap();
+        last.sort_unstable();
+        assert_eq!(last, vec![(7, 200), (8, 300)]);
+        assert_eq!(mdb.last_counted_plays(250).await.unwrap(), vec![(8, 300)]);
+
+        let pending = mdb.plays_pending_export("nrs").await.unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| (p.play_id, p.listened_seconds))
+                .collect::<Vec<_>>(),
+            vec![(play, 60.0), (other, 15.0)]
+        );
+        mdb.record_play_exports("nrs", &[(play, 60.0)])
+            .await
+            .unwrap();
+        mdb.record_play_exports("nrs", &[(play, 20.0)])
+            .await
+            .unwrap();
+        mdb.set_play_listened(play, 90.0).await.unwrap();
+        let pending = mdb.plays_pending_export("nrs").await.unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| (p.play_id, p.exported_seconds))
+                .collect::<Vec<_>>(),
+            vec![(play, 60.0), (other, 0.0)]
+        );
+        assert_eq!(mdb.plays_pending_export("other").await.unwrap().len(), 2);
+
+        let totals = mdb.play_totals(&[7], "nrs").await.unwrap();
+        assert_eq!(
+            totals,
+            PlayTotals {
+                plays: 1,
+                listened_seconds: 90.0,
+                exported_seconds: 60.0,
+            }
+        );
+    }
+
     /// Endpoint order is normalized: a relation stored as (loser, x) with
     /// loser > x must come back as (x, winner) or (winner, x) with entry_a < entry_b.
     #[tokio::test]
@@ -3603,6 +6246,52 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].entry_a, rows[0].entry_b), (10, 20));
         assert!(rows[0].entry_a < rows[0].entry_b, "endpoints normalized");
+    }
+
+    #[tokio::test]
+    async fn a_chosen_display_name_is_one_per_component_and_survives_merges() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2, 3] {
+            insert_entry(&mdb.db, id).await;
+        }
+        mdb.set_display_name(1, &[1, 2], Some("Ado")).await.unwrap();
+        // Naming another member of the component replaces it.
+        mdb.set_display_name(2, &[1, 2], Some("ado")).await.unwrap();
+        let names = mdb.display_names(&[1, 2, 3]).await.unwrap();
+        assert_eq!(names, HashMap::from([(2, "ado".to_string())]));
+
+        mdb.merge_entries(2, 3).await.unwrap();
+        let names = mdb.display_names(&[1, 2, 3]).await.unwrap();
+        assert_eq!(names, HashMap::from([(3, "ado".to_string())]));
+
+        mdb.set_display_name(3, &[3], None).await.unwrap();
+        assert!(mdb.display_names(&[3]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_credit_name_is_per_entry_and_artist_and_survives_merges() {
+        let mdb = mem_db().await;
+        for id in [1i64, 2, 10, 11] {
+            insert_entry(&mdb.db, id).await;
+        }
+        // Track 1 credits artist 10 as a character; track 2 doesn't.
+        mdb.set_credit_display_name(1, &[1], 10, &[10], Some("Moena (CV)"))
+            .await
+            .unwrap();
+        assert_eq!(
+            mdb.credit_display_names(&[1, 2]).await.unwrap(),
+            [(1, 10, "Moena (CV)".to_string())]
+        );
+        // The artist merging into 11 carries the credit along.
+        mdb.merge_entries(10, 11).await.unwrap();
+        assert_eq!(
+            mdb.credit_display_names(&[1]).await.unwrap(),
+            [(1, 11, "Moena (CV)".to_string())]
+        );
+        mdb.set_credit_display_name(1, &[1], 11, &[11], None)
+            .await
+            .unwrap();
+        assert!(mdb.credit_display_names(&[1]).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4026,6 +6715,7 @@ mod tests {
                 entry_id: Set(1),
                 release_date: Set(None),
                 fetched_at: Set(Some(0)),
+                gone_at: Set(None),
                 duration_ms: Set(None),
                 duration_ms_all: Set(None),
                 track_extra: Set(None),
@@ -4059,6 +6749,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ids, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn main_artist_credits_exclude_non_artist_targets() {
+        let mdb = mem_db().await;
+        let release = mdb.insert_entry(Some(EntryType::Release)).await.unwrap();
+        mdb.upsert_stub_pair("musicbrainz", "release", release, None, None)
+            .await
+            .unwrap();
+
+        let mut artist_id = 0;
+        for (identifier, kind) in [
+            ("track", Some(EntryType::Track)),
+            ("artist", Some(EntryType::Artist)),
+            ("other-release", Some(EntryType::Release)),
+            ("release-group", Some(EntryType::ReleaseGroup)),
+            ("unknown", None),
+        ] {
+            let id = mdb.insert_entry(kind).await.unwrap();
+            mdb.upsert_stub_pair("musicbrainz", identifier, id, None, None)
+                .await
+                .unwrap();
+            if identifier == "artist" {
+                artist_id = id;
+            }
+            mdb.insert_contribution(
+                "musicbrainz",
+                "release",
+                "musicbrainz",
+                identifier,
+                &Contribution {
+                    role: "listed_artist".into(),
+                    main_artist: true,
+                    source: "musicbrainz".into(),
+                    extra: serde_json::json!({"credited_name": "Singer", "index": 0}),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Keep repeated, differently credited appearances of a real artist.
+        mdb.insert_contribution(
+            "musicbrainz",
+            "release",
+            "musicbrainz",
+            "artist",
+            &Contribution {
+                role: "listed_artist".into(),
+                main_artist: true,
+                source: "musicbrainz".into(),
+                extra: serde_json::json!({"credited_name": "Alias", "index": 1}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let credits = mdb.main_artist_credits(release).await.unwrap();
+        assert_eq!(credits.len(), 2);
+        assert!(credits.iter().all(|c| c.artist_entry_id == artist_id));
+        assert_eq!(credits[0].credited_name.as_deref(), Some("Singer"));
+        assert_eq!(credits[1].credited_name.as_deref(), Some("Alias"));
     }
 
     fn contribution_row(role: &str, extra: Option<&str>) -> contribution::ActiveModel {
@@ -4156,6 +6910,130 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(contribution_count(&mdb).await, 2);
+    }
+
+    #[tokio::test]
+    async fn contribution_migration_removes_non_artists_and_preserves_real_credits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("v10.db").display());
+        let (parent, expected, sources, children, names) = {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            let parent = mdb.insert_entry(Some(EntryType::Release)).await.unwrap();
+            mdb.upsert_stub_pair("musicbrainz", "parent", parent, None, None)
+                .await
+                .unwrap();
+            for (identifier, kind) in [
+                ("track", Some(EntryType::Track)),
+                ("release", Some(EntryType::Release)),
+                ("group", Some(EntryType::ReleaseGroup)),
+                ("artist", Some(EntryType::Artist)),
+                ("unknown", None),
+            ] {
+                let id = mdb.insert_entry(kind).await.unwrap();
+                mdb.upsert_stub_pair("musicbrainz", identifier, id, None, None)
+                    .await
+                    .unwrap();
+                if identifier == "artist" {
+                    mdb.set_credit_display_name(parent, &[parent], id, &[id], Some("Chosen name"))
+                        .await
+                        .unwrap();
+                }
+            }
+            mdb.insert_child_edge(
+                "musicbrainz",
+                "parent",
+                "musicbrainz",
+                "track",
+                None,
+                Some(1),
+                None,
+            )
+            .await
+            .unwrap();
+            for identifier in [
+                "track",
+                "release",
+                "group",
+                "artist",
+                "unknown",
+                "unresolved",
+            ] {
+                for source in ["musicbrainz", "discogs"] {
+                    for (role, main_artist) in [("listed_artist", true), ("composer", false)] {
+                        mdb.insert_contribution(
+                            source,
+                            "parent",
+                            "musicbrainz",
+                            identifier,
+                            &Contribution {
+                                source: source.into(),
+                                role: role.into(),
+                                main_artist,
+                                extra: serde_json::json!({"credited_name": "Singer", "index": 0}),
+                            },
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+            }
+            let expected: Vec<_> = contribution::Entity::find()
+                .order_by_asc(contribution::Column::Id)
+                .all(&mdb.db)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|c| {
+                    matches!(
+                        c.artist_identifier.as_str(),
+                        "artist" | "unknown" | "unresolved"
+                    )
+                })
+                .collect();
+            let sources = entry_source::Entity::find().all(&mdb.db).await.unwrap();
+            let children = entry_child::Entity::find().all(&mdb.db).await.unwrap();
+            let names = mdb.credit_display_names(&[parent]).await.unwrap();
+            mdb.db
+                .execute_unprepared("PRAGMA user_version = 10;")
+                .await
+                .unwrap();
+            (parent, expected, sources, children, names)
+        };
+
+        // Reopening runs the real upgrade; a second open must be a no-op.
+        for _ in 0..2 {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            assert_eq!(
+                contribution::Entity::find()
+                    .order_by_asc(contribution::Column::Id)
+                    .all(&mdb.db)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                entry_source::Entity::find().all(&mdb.db).await.unwrap(),
+                sources
+            );
+            assert_eq!(
+                entry_child::Entity::find().all(&mdb.db).await.unwrap(),
+                children
+            );
+            assert_eq!(mdb.credit_display_names(&[parent]).await.unwrap(), names);
+            let version: i64 = mdb
+                .db
+                .query_one_raw(Statement::from_string(
+                    mdb.db.get_database_backend(),
+                    "PRAGMA user_version",
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get("", "user_version")
+                .unwrap();
+            assert_eq!(version, 11);
+        }
     }
 
     async fn alias_count(mdb: &MusicDb) -> u64 {
@@ -4258,6 +7136,38 @@ mod tests {
     /// Opening a pre-v4 database rebuilds `entry_source` with a nullable
     /// `fetched_at` (keeping rows and indexes), and marks rows that were never
     /// fetched (no metadata, aliases or outgoing edges) as stubs.
+    /// A DB created empty records every link from the start, so its links
+    /// are complete; one that already had pairs when links started being
+    /// recorded is not, until a backfill says so.
+    #[tokio::test]
+    async fn links_complete_only_for_a_db_created_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("old.db").display());
+        {
+            let mdb = MusicDb::new(&db_url).await.unwrap();
+            assert_eq!(
+                mdb.setting(LINKS_COMPLETE).await.unwrap().as_deref(),
+                Some("1")
+            );
+            // Pretend it predates `pair_link`: pairs, no setting, version 8.
+            let id = mdb.insert_entry(Some(EntryType::Track)).await.unwrap();
+            mdb.upsert_stub_pair("isrc", "JPX000000001", id, None, None)
+                .await
+                .unwrap();
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &mdb.db,
+                "DELETE FROM setting; PRAGMA user_version = 8;",
+            )
+            .await
+            .unwrap();
+        }
+        let mdb = MusicDb::new(&db_url).await.unwrap();
+        assert_eq!(
+            mdb.setting(LINKS_COMPLETE).await.unwrap().as_deref(),
+            Some("0")
+        );
+    }
+
     #[tokio::test]
     async fn stub_migration_nulls_fetched_at_for_unfetched_rows() {
         let dir = tempfile::tempdir().unwrap();

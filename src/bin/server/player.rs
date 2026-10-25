@@ -15,24 +15,31 @@
 //! `/releases/:id/tracks`).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
 use bytes::Bytes;
+use futures::future::join_all;
 use hyper::{Method, StatusCode};
 use musiclib_rs::{
     app_dirs,
-    musicdb::{Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback},
+    musicdb::{
+        DERIVED_FROM, Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback, RowImage,
+        SongEdit,
+    },
     pipeline::ingest::ingest_entry,
     providers::backends::soundcloud,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    entries::{component_members, dedupe_by_edition, entry_summaries, entry_summaries_with},
-    fetch_options,
+    entries::{
+        component_members, dedupe_by_edition, entry_aliases, entry_credits, entry_summaries,
+        entry_summaries_with,
+    },
+    fetch_options, playback,
     respond::{self, HyperResponse, parse_query},
     state::AppState,
 };
@@ -51,6 +58,8 @@ pub fn handles(path: &str) -> bool {
         || path == "/player"
         || path == "/import"
         || path == "/settings"
+        || path == "/playlists"
+        || path.starts_with("/playlists/")
         || path.starts_with("/api/")
         || path.starts_with("/entry/")
         || path.starts_with("/graph/")
@@ -75,7 +84,9 @@ pub async fn route(
             || p.starts_with("/graph/")
             || p == "/player"
             || p == "/import"
-            || p == "/settings" =>
+            || p == "/settings"
+            || p == "/playlists"
+            || p.starts_with("/playlists/") =>
         {
             if *method != Method::GET {
                 return respond::method_not_allowed();
@@ -86,6 +97,16 @@ pub async fn route(
         "/api/library/shuffle" if *method == Method::GET => {
             shuffle_library(state, &parse_query(query)).await
         }
+        #[cfg(feature = "nrs")]
+        "/api/library/nrs-pool" if *method == Method::GET => {
+            nrs_pool_json(state, &parse_query(query)).await
+        }
+        "/api/playback" if *method == Method::GET => playback::snapshot(state),
+        "/api/playback/events" if *method == Method::GET => {
+            playback::events(state, &parse_query(query))
+        }
+        "/api/playback/command" if *method == Method::POST => playback::command(state, &body).await,
+        "/api/playback/report" if *method == Method::POST => playback::report(state, &body),
         "/api/fetch-options/files" if *method == Method::GET => fetch_options_files(),
         "/api/fetch-options/entry-points" if *method == Method::GET => {
             fetch_options_entry_points(&parse_query(query)).await
@@ -99,11 +120,29 @@ pub async fn route(
                 _ => respond::method_not_allowed(),
             }
         }
-        "/api/relations/link" if *method == Method::POST => link_relation(state, &body).await,
-        "/api/relations/unlink" if *method == Method::POST => unlink_relation(state, &body).await,
-        "/api/relations/relate" if *method == Method::POST => relate_entries(state, &body).await,
+        "/api/relations/link" if *method == Method::POST => {
+            recredit_after(state, link_relation(state, &body).await)
+        }
+        "/api/relations/unlink" if *method == Method::POST => {
+            recredit_after(state, unlink_relation(state, &body).await)
+        }
+        "/api/relations/relate" if *method == Method::POST => {
+            recredit_after(state, relate_entries(state, &body).await)
+        }
         "/api/relations/unrelate" if *method == Method::POST => {
-            unrelate_entries(state, &body).await
+            recredit_after(state, set_relation_enabled(state, &body, false).await)
+        }
+        "/api/relations/restore" if *method == Method::POST => {
+            recredit_after(state, set_relation_enabled(state, &body, true).await)
+        }
+        "/api/relations/derive" if *method == Method::POST => {
+            recredit_after(state, derive_edition(state, &body).await)
+        }
+        "/api/songs/edit" if *method == Method::POST => {
+            recredit_after(state, edit_song(state, &body).await)
+        }
+        "/api/relations/rows" if *method == Method::POST => {
+            recredit_after(state, restore_relation_rows(state, &body).await)
         }
         p if p.starts_with("/api/entries/") && p.ends_with("/playable-sources") => {
             if *method != Method::GET {
@@ -111,6 +150,106 @@ pub async fn route(
             }
             let id = &p["/api/entries/".len()..p.len() - "/playable-sources".len()];
             playable_sources(state, id).await
+        }
+        p if p.starts_with("/api/entries/") && p.contains("/credits") => {
+            let rest = &p["/api/entries/".len()..];
+            let parts: Vec<&str> = rest.split('/').collect();
+            match (method, parts.as_slice()) {
+                (&Method::GET, &[id, "credits"]) => credits(state, id).await,
+                (&Method::POST, &[id, "credits", artist, "display-name"]) => {
+                    set_credit_display_name(state, id, artist, &body).await
+                }
+                (_, &[_, "credits"] | &[_, "credits", _, "display-name"]) => {
+                    respond::method_not_allowed()
+                }
+                _ => respond::not_found(),
+            }
+        }
+        "/api/preferred-source" if *method == Method::POST => {
+            crate::preferences::set_source(state, &body).await
+        }
+        "/api/source-privacy" if *method == Method::POST => crate::privacy::set(state, &body).await,
+        p if p.starts_with("/api/entries/") && p.ends_with("/preferred-edition") => {
+            if *method != Method::POST {
+                return respond::method_not_allowed();
+            }
+            let id = &p["/api/entries/".len()..p.len() - "/preferred-edition".len()];
+            crate::preferences::set_edition(state, id, &body).await
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/display-name") => {
+            if *method != Method::POST {
+                return respond::method_not_allowed();
+            }
+            let id = &p["/api/entries/".len()..p.len() - "/display-name".len()];
+            set_display_name(state, id, &body).await
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/find-sources") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/find-sources".len()]) {
+                Ok(id) => {
+                    let q = parse_query(query).remove("q").unwrap_or_default();
+                    crate::find_source::search(state, id, &q).await
+                }
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/attach-source") => {
+            if *method != Method::POST {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/attach-source".len()]) {
+                Ok(id) => crate::find_source::attach(state, id, &body).await,
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/cover") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/cover".len()]) {
+                Ok(id) => crate::cover::cover(&state.db, id).await,
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/discography") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            let id = &p["/api/entries/".len()..p.len() - "/discography".len()];
+            discography(state, id).await
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/appearances") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            let id = &p["/api/entries/".len()..p.len() - "/appearances".len()];
+            appearances(state, id).await
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/identity") => {
+            if *method != Method::GET {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/identity".len()]) {
+                Ok(id) => crate::unmerge::identity(state, id).await,
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/entries/") && p.ends_with("/split") => {
+            if *method != Method::POST {
+                return respond::method_not_allowed();
+            }
+            match parse_entry_id(&p["/api/entries/".len()..p.len() - "/split".len()]) {
+                Ok(id) => recredit_after(state, crate::unmerge::split(state, id, &body).await),
+                Err(resp) => resp,
+            }
+        }
+        p if p.starts_with("/api/barriers/") => {
+            if *method != Method::DELETE {
+                return respond::method_not_allowed();
+            }
+            crate::unmerge::remove_barrier(state, &p["/api/barriers/".len()..]).await
         }
         p if p.starts_with("/api/entries/") && p.ends_with("/relations") => {
             if *method != Method::GET {
@@ -135,15 +274,34 @@ pub async fn route(
         "/"
         | "/api/library/search"
         | "/api/library/shuffle"
+        | "/api/library/nrs-pool"
+        | "/api/playback"
+        | "/api/playback/events"
+        | "/api/playback/command"
+        | "/api/playback/report"
         | "/api/fetch-options/files"
         | "/api/fetch-options/entry-points"
         | "/api/ingest"
         | "/api/relations/link"
         | "/api/relations/unlink"
         | "/api/relations/relate"
-        | "/api/relations/unrelate" => respond::method_not_allowed(),
+        | "/api/relations/unrelate"
+        | "/api/relations/restore"
+        | "/api/relations/derive"
+        | "/api/songs/edit"
+        | "/api/relations/rows"
+        | "/api/preferred-source" => respond::method_not_allowed(),
         _ => respond::not_found(),
     }
+}
+
+/// A relation edit can join or split artist identities, changing the name
+/// the playing track's artist line uses: once it succeeds, look it up again.
+fn recredit_after(state: &Arc<AppState>, response: HyperResponse) -> HyperResponse {
+    if response.status().is_success() {
+        state.playback.recredit();
+    }
+    response
 }
 
 /// Debug builds re-read `frontend/index.html` from the source tree on every
@@ -165,7 +323,7 @@ fn frontend() -> HyperResponse {
         .status(StatusCode::OK)
         .header("Content-Type", "text/html; charset=utf-8")
         .header("Cache-Control", "no-cache")
-        .body(http_body_util::Full::new(body))
+        .body(respond::full(body))
         .expect("response builder")
 }
 
@@ -187,7 +345,10 @@ fn frontend() -> HyperResponse {
 /// `frontend/index.html`) rather than the plain IFrame Player API YouTube
 /// uses, but the embed URL shape is still just a static transform of the
 /// canonical identifier, computed here the same as the other two.
-fn embed_for(source: &str, identifier: &str) -> Option<(String, &'static [&'static str])> {
+pub(crate) fn embed_for(
+    source: &str,
+    identifier: &str,
+) -> Option<(String, &'static [&'static str])> {
     match source {
         "youtube" => {
             let id = identifier.strip_prefix("https://youtu.be/")?;
@@ -227,6 +388,37 @@ fn embed_for(source: &str, identifier: &str) -> Option<(String, &'static [&'stat
     }
 }
 
+/// Where a track (or one of its editions) stands for playback, judged from
+/// its sources. `Playable` has a source `embed_for` can mount. `Unlinked`
+/// has none yet, but the recording may be on a platform musiclib hasn't
+/// imported a link from, so it's worth looking for. `Unavailable` exists
+/// only as a local file (a `local` source, e.g. a CTB Girls' Dormitory
+/// setlist rip), so there's nothing to look for and nothing to play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Playability {
+    Playable,
+    Unlinked,
+    Unavailable,
+}
+
+impl Playability {
+    pub(crate) fn of<'a>(sources: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let mut local = false;
+        for (source, identifier) in sources {
+            if embed_for(source, identifier).is_some() {
+                return Self::Playable;
+            }
+            local |= source == "local";
+        }
+        if local {
+            Self::Unavailable
+        } else {
+            Self::Unlinked
+        }
+    }
+}
+
 async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> HyperResponse {
     let q = query.get("q").cloned().unwrap_or_default();
     let limit = query
@@ -248,8 +440,8 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
     // Fold soft-linked matches, and edition-linked ones (a track and its
     // instrumental), together so the same song doesn't show up as
     // separate-looking rows.
-    let ids = match dedupe_by_edition(&state.db, &raw_ids).await {
-        Ok(ids) => ids,
+    let rows = match dedupe_by_edition(&state.db, &raw_ids).await {
+        Ok(rows) => rows,
         Err(e) => {
             return respond::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -258,6 +450,7 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
             );
         }
     };
+    let ids: Vec<i64> = rows.iter().map(|r| r.entry_id).collect();
     let summaries = match entry_summaries(&state.db, &ids).await {
         Ok(s) => s,
         Err(e) => {
@@ -268,7 +461,16 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
             );
         }
     };
-    let results: Vec<_> = ids.iter().filter_map(|id| summaries.get(id)).collect();
+    // `matched_edition`: the edition whose name matched, when it isn't the
+    // row's default edition — the player shows it under the row's title.
+    let results: Vec<_> = rows
+        .iter()
+        .filter_map(|r| {
+            let mut v = serde_json::to_value(summaries.get(&r.entry_id)?).ok()?;
+            v["matched_edition"] = json!(r.matched_edition);
+            Some(v)
+        })
+        .collect();
     respond::json(StatusCode::OK, json!({ "results": results }))
 }
 
@@ -285,6 +487,11 @@ async fn search(state: &Arc<AppState>, query: &HashMap<String, String>) -> Hyper
 /// often. Unplayable groups (same soft-identity + `embed_for` check
 /// `release_tracks` uses) are rejected too, and rounds repeat until `limit`
 /// rows are found or `MAX_ROUNDS` runs out on a mostly-unplayable library.
+///
+/// `exclude=track,album,artist` (any subset) skips rows the last-built NRS
+/// pool (`nrs_pool`) reaches that way, so the shuffle mix's "new" share
+/// doesn't redraw familiar tracks. No pool built yet means nothing excluded.
+/// `skip=1,2,3` skips those entry ids (rows already queued).
 async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>) -> HyperResponse {
     const MAX_ROUNDS: usize = 8;
     let limit = query
@@ -292,6 +499,17 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(1, 500);
+    #[cfg(feature = "nrs")]
+    let mut excluded = crate::nrs_pool::excluded_for(state, query.get("exclude"));
+    #[cfg(not(feature = "nrs"))]
+    let mut excluded: HashSet<i64> = HashSet::new();
+    excluded.extend(
+        query
+            .get("skip")
+            .into_iter()
+            .flat_map(|s| s.split(','))
+            .filter_map(|id| id.parse::<i64>().ok()),
+    );
 
     // Every round pays for the edition groups its draws land in (one huge
     // group gets hit almost every round), so size each round from the
@@ -312,7 +530,7 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
             (kept as f64 / drawn as f64).max(0.01)
         };
         let draws = (((limit - tracks.len()) as f64 / rate * 1.5) as usize).clamp(32, MAX_DRAWS);
-        match shuffle_round(state, draws, &mut seen_groups).await {
+        match shuffle_round(state, draws, &mut seen_groups, &excluded).await {
             Ok(round) => {
                 drawn += draws;
                 kept += round.len();
@@ -333,11 +551,13 @@ async fn shuffle_library(state: &Arc<AppState>, query: &HashMap<String, String>)
 
 /// One `shuffle_library` round over `draws` random ids: the accepted,
 /// playable rows, in draw order. `seen_groups` (edition-group roots) carries
-/// across rounds so a group is never returned twice.
+/// across rounds so a group is never returned twice; `excluded` default
+/// editions are never returned.
 async fn shuffle_round(
     state: &Arc<AppState>,
     draws: usize,
     seen_groups: &mut HashSet<i64>,
+    excluded: &HashSet<i64>,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let candidates = state.db.sample_track_entry_ids(draws).await?;
     let (identity, editions) = state.db.display_projections_around(&candidates).await?;
@@ -352,8 +572,9 @@ async fn shuffle_round(
         if fastrand::usize(..group_size) != 0 {
             continue;
         }
-        if seen_groups.insert(editions.group_of(canonical)) {
-            accepted.push(editions.default_member_of(canonical));
+        let default = editions.default_member_of(canonical);
+        if !excluded.contains(&default) && seen_groups.insert(editions.group_of(canonical)) {
+            accepted.push(default);
         }
     }
     let summaries = entry_summaries_with(&state.db, &accepted, &identity, &editions).await?;
@@ -368,6 +589,26 @@ async fn shuffle_round(
             playable.then(|| json!({ "entry_id": id, "title": summary.title }))
         })
         .collect())
+}
+
+/// `GET /api/library/nrs-pool[?refresh=1]` — the shuffle mix's familiar
+/// pool (see `nrs_pool`): `available: false` with the reason when the NRS
+/// app can't be read, so the player falls back to a plain shuffle. Absent
+/// (404) in a build without the `nrs` feature, which the player treats the
+/// same way.
+#[cfg(feature = "nrs")]
+async fn nrs_pool_json(state: &Arc<AppState>, query: &HashMap<String, String>) -> HyperResponse {
+    let refresh = query.get("refresh").is_some_and(|v| v == "1");
+    match crate::nrs_pool::get(state, refresh).await {
+        Ok(pool) => respond::json(
+            StatusCode::OK,
+            json!({ "available": true, "nrs_url": state.nrs_url, "pool": &*pool }),
+        ),
+        Err(e) => respond::json(
+            StatusCode::OK,
+            json!({ "available": false, "nrs_url": state.nrs_url, "error": format!("{e:#}") }),
+        ),
+    }
 }
 
 /// `GET /api/fetch-options/files` — the import form's file picker: every
@@ -484,8 +725,6 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
             &job_state.providers,
             &pool,
             options_id,
-            &job_state.dedup_configs,
-            &job_state.merged_dedup,
             job_state.soft_cfg.as_ref(),
             query,
             Some(sink),
@@ -539,10 +778,200 @@ async fn entry_details(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
-    match summaries.get(&entry_id) {
-        Some(s) => respond::json_typed(StatusCode::OK, s),
-        None => respond::not_found(),
+    let Some(summary) = summaries.get(&entry_id) else {
+        return respond::not_found();
+    };
+    let mut summary = summary.clone();
+    if summary.editions.len() > 1 {
+        let lines = join_all(
+            summary
+                .editions
+                .iter()
+                .map(|ed| crate::playback::artist_line(&state.db, ed.entry_id, None)),
+        )
+        .await;
+        for (ed, line) in summary.editions.iter_mut().zip(lines) {
+            // A missing artist line just leaves the edition unlabelled —
+            // never worth failing the whole entry page over.
+            if let Ok(artists) = line {
+                ed.artist_credit =
+                    (!artists.is_empty()).then(|| crate::playback::credit_line(&artists));
+                ed.artists = artists.into_iter().map(|a| a.name).collect();
+            }
+        }
+        let ids: Vec<i64> = summary.editions.iter().map(|ed| ed.entry_id).collect();
+        match crate::preferences::edition_weights(&state.db, &ids).await {
+            Ok(weights) => {
+                for ed in &mut summary.editions {
+                    ed.preferred_weight = weights.get(&ed.entry_id).copied().unwrap_or(0);
+                }
+            }
+            Err(e) => tracing::warn!("couldn't read preferred editions of {entry_id}: {e:#}"),
+        }
     }
+    let aliases = match entry_aliases(&state.db, entry_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            return respond::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            );
+        }
+    };
+    let pairs: Vec<(String, String)> = summary
+        .sources
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    let privacy = crate::privacy::for_entry(&state.db, &pairs).await;
+    let mut body = json!(summary);
+    body["aliases"] = json!(aliases);
+    body["privacy"] = privacy;
+    respond::json(StatusCode::OK, body)
+}
+
+/// `GET /api/entries/{id}/discography` — an artist's releases and tracks
+/// (`discography::discography`).
+async fn discography(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    let entry_id = match parse_entry_id(id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match crate::discography::discography(&state.db, entry_id).await {
+        Ok(d) => respond::json_typed(StatusCode::OK, &d),
+        Err(e) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &e.to_string(),
+        ),
+    }
+}
+
+/// `GET /api/entries/{id}/appearances` — the releases listing a track,
+/// with its position on each (`discography::appearances`).
+async fn appearances(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    let entry_id = match parse_entry_id(id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match crate::discography::appearances(&state.db, entry_id).await {
+        Ok(a) => respond::json_typed(StatusCode::OK, &a),
+        Err(e) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &e.to_string(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct DisplayNameRequest {
+    name: Option<String>,
+}
+
+/// `POST /api/entries/{id}/display-name` — `{"name": "…"}` shows the entry
+/// (its whole soft-identity component) by that name everywhere instead of
+/// the one its aliases give it; `{"name": null}` or a blank name goes back
+/// to the aliases.
+async fn set_display_name(state: &Arc<AppState>, id: &str, body: &[u8]) -> HyperResponse {
+    let entry_id = match parse_entry_id(id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let req: DisplayNameRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    let name = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let members = match component_members(&state.db, entry_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            return respond::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            );
+        }
+    };
+    if let Err(e) = state.db.set_display_name(entry_id, &members, name).await {
+        return db_error_response(e);
+    }
+    // Queued copies of a track carry its title; the playing track's artist
+    // line may use this name.
+    if let Ok(summaries) = entry_summaries(&state.db, &[entry_id]).await
+        && let Some(title) = summaries.get(&entry_id).and_then(|s| s.title.clone())
+    {
+        state.playback.retitle(&members, &title);
+    }
+    state.playback.recredit();
+    entry_details(state, id).await
+}
+
+/// `GET /api/entries/{id}/credits` — the artists the entry credits, each
+/// with the name it credits them as (`entries::entry_credits`).
+async fn credits(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    let entry_id = match parse_entry_id(id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match tokio::try_join!(
+        entry_credits(&state.db, entry_id),
+        crate::playback::artist_line(&state.db, entry_id, None),
+    ) {
+        Ok((credits, artist_credit)) => respond::json(
+            StatusCode::OK,
+            json!({ "credits": credits, "artist_credit": artist_credit }),
+        ),
+        Err(e) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &e.to_string(),
+        ),
+    }
+}
+
+/// `POST /api/entries/{id}/credits/{artist}/display-name` — `{"name": "…"}`
+/// credits the artist by that name on this entry only; `{"name": null}` or
+/// a blank name goes back to the artist's own name. Answers with the
+/// entry's credits.
+async fn set_credit_display_name(
+    state: &Arc<AppState>,
+    id: &str,
+    artist: &str,
+    body: &[u8],
+) -> HyperResponse {
+    let (entry_id, artist_id) = match (parse_entry_id(id), parse_entry_id(artist)) {
+        (Ok(e), Ok(a)) => (e, a),
+        (Err(resp), _) | (_, Err(resp)) => return resp,
+    };
+    let req: DisplayNameRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    let name = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let members = match (
+        component_members(&state.db, entry_id).await,
+        component_members(&state.db, artist_id).await,
+    ) {
+        (Ok(e), Ok(a)) => (e, a),
+        (Err(e), _) | (_, Err(e)) => {
+            return respond::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            );
+        }
+    };
+    if let Err(e) = state
+        .db
+        .set_credit_display_name(entry_id, &members.0, artist_id, &members.1, name)
+        .await
+    {
+        return db_error_response(e);
+    }
+    state.playback.recredit();
+    credits(state, id).await
 }
 
 fn parse_entry_id(id: &str) -> Result<i64, HyperResponse> {
@@ -644,21 +1073,24 @@ async fn structural_edges_around(
     Ok((edges, new_ids))
 }
 
-/// The soft-identity graph around `id`'s component: every relation row
-/// (enabled or not) touching it or a live member (`MusicDb::relations_around`),
+/// The relations graph around `id`'s edition group: every relation row
+/// (enabled or not) touching an edition or a soft-identity member, and the
+/// rows between the entries those reach (`MusicDb::relation_graph_around`),
 /// plus a display node — own sources only, not the component-wide union —
 /// for every entry any of those edges references. A disabled edge still
 /// needs its far endpoint rendered as a node even though that entry dropped
 /// out of the *live* component, or a plain "Unlink" would make the
 /// downgraded edge (and the undo it's supposed to offer) vanish outright.
-/// Also folds in `id`'s direct structural (`entry_child`) neighbors as
-/// read-only nodes/edges — see `structural_edges_around`.
+/// Each node carries its edition role (`edition_group`, `edition_size`,
+/// `default_edition`, `folds_into` — see `EditionProjection`). Also folds
+/// in `id`'s direct structural (`entry_child`) neighbors as read-only
+/// nodes/edges — see `structural_edges_around`.
 async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
     let entry_id = match parse_entry_id(id) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    let edges = match state.db.relations_around(entry_id).await {
+    let edges = match state.db.relation_graph_around(entry_id).await {
         Ok(e) => e,
         Err(e) => {
             return respond::error(
@@ -687,7 +1119,11 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
     node_ids.extend(structural_ids);
     node_ids.sort_unstable();
     node_ids.dedup();
-    let summaries = match entry_summaries(&state.db, &node_ids).await {
+    let (identity, editions) = match state.db.display_projections_around(&node_ids).await {
+        Ok(v) => v,
+        Err(e) => return db_error_response(e),
+    };
+    let summaries = match entry_summaries_with(&state.db, &node_ids, &identity, &editions).await {
         Ok(s) => s,
         Err(e) => {
             return respond::error(
@@ -697,11 +1133,63 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
+    // What tells versions with one title apart: who performs them, when,
+    // and how long they run. Artists are per identity, so asked once each.
+    let track_identities: Vec<i64> = node_ids
+        .iter()
+        .filter(|nid| summaries.get(nid).is_some_and(|s| s.entry_type == "track"))
+        .map(|&nid| identity.component_of(nid).unwrap_or(nid))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let artist_lines = join_all(
+        track_identities
+            .iter()
+            .map(|&id| crate::playback::artist_line(&state.db, id, None)),
+    )
+    .await;
+    let artists: HashMap<i64, Vec<String>> = track_identities
+        .into_iter()
+        .zip(artist_lines)
+        .map(|(id, line)| {
+            let names = line
+                .map(|artists| artists.into_iter().map(|a| a.name).collect())
+                .unwrap_or_default();
+            (id, names)
+        })
+        .collect();
+    let mut durations: HashMap<i64, i64> = HashMap::new();
+    match state.db.source_rows_by_entry_ids(&node_ids).await {
+        Ok(rows) => {
+            for row in rows {
+                if let Some(&ms) = row.duration_ms.first() {
+                    durations.entry(row.entry_id).or_insert(ms);
+                }
+            }
+        }
+        Err(e) => return db_error_response(e),
+    }
     let nodes: Vec<_> = node_ids
         .iter()
         .map(|&nid| {
             let summary = summaries.get(&nid);
             let own_member = summary.and_then(|s| s.members.iter().find(|m| m.entry_id == nid));
+            let canonical = identity.component_of(nid).unwrap_or(nid);
+            let rank_target = editions.rank_target(canonical);
+            // No relation names the original (a song with one recording,
+            // or versions nobody gave a direction): show its default
+            // recording as the original. `original_of` itself stays `None`
+            // there, for soft-matching and song edits.
+            let original = editions
+                .original_of(canonical)
+                .unwrap_or_else(|| editions.default_member_of(canonical));
+            let parent = editions.parent_of(canonical);
+            // What this version is, relative to what it was made from.
+            let song_kind = parent
+                .or(Some(original))
+                .filter(|&to| to != canonical)
+                .and_then(|to| editions.edge_label(canonical, to))
+                .map(|(kind, transformation)| json!({ "kind": kind, "transformation": transformation }));
             json!({
                 "entry_id": nid,
                 // This node's own title, not the soft-dedup-merged
@@ -711,6 +1199,21 @@ async fn entry_relations(state: &Arc<AppState>, id: &str) -> HyperResponse {
                 "title": own_member.and_then(|m| m.title.clone()),
                 "entry_type": summary.map(|s| s.entry_type.clone()),
                 "sources": own_member.map(|m| m.sources.clone()).unwrap_or_default(),
+                "edition_group": editions.group_of(canonical),
+                "edition_size": editions.members_of(canonical).len(),
+                "default_edition": editions.default_member_of(canonical) == canonical,
+                "folds_into": (rank_target != canonical).then_some(rank_target),
+                "identity": canonical,
+                "identity_size": identity
+                    .members_by_component
+                    .get(&canonical)
+                    .map_or(1, Vec::len),
+                "artists": artists.get(&canonical).cloned().unwrap_or_default(),
+                "release_date": summary.and_then(|s| s.release_date.clone()),
+                "duration_ms": durations.get(&nid),
+                "song_original": original,
+                "song_parent": parent,
+                "song_kind": song_kind,
             })
         })
         .collect();
@@ -855,6 +1358,7 @@ async fn unlink_relation(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
 /// `derived_from`), read-only in the player UI (`entry_relations` still
 /// returns them; see `PRIMITIVE_RELATION_KIND_SET` in the frontend). Add a
 /// kind here only once manual curation for it has actually been designed.
+/// `derived_from` can still be removed and restored (`TOGGLE_KINDS`).
 const RELATE_KINDS: &[&str] = &[
     "alt_version",
     "live",
@@ -867,6 +1371,14 @@ const RELATE_KINDS: &[&str] = &[
     "same_artist",
 ];
 
+/// Primitive-relation kinds a person may tombstone and re-enable, though
+/// not create. A tombstoned `derived_from` row stays down: softmatch skips
+/// pairs with a rejected edition row (`KnownRelations::already_related`),
+/// and the edition/identity projections read enabled rows only. New
+/// `derived_from` rows come from `/api/relations/derive`, which records
+/// their direction.
+const TOGGLE_KINDS: &[&str] = &[DERIVED_FROM];
+
 #[derive(Deserialize)]
 struct RelateRequest {
     a: i64,
@@ -874,7 +1386,7 @@ struct RelateRequest {
     kind: String,
 }
 
-fn parse_relate_body(body: &[u8]) -> Result<RelateRequest, HyperResponse> {
+fn parse_relate_body(body: &[u8], toggle: bool) -> Result<RelateRequest, HyperResponse> {
     let req: RelateRequest = serde_json::from_slice(body)
         .map_err(|e| respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()))?;
     if req.a == req.b {
@@ -884,7 +1396,9 @@ fn parse_relate_body(body: &[u8]) -> Result<RelateRequest, HyperResponse> {
             "relation endpoints must differ",
         ));
     }
-    if !RELATE_KINDS.contains(&req.kind.as_str()) {
+    let kind = req.kind.as_str();
+    let allowed = RELATE_KINDS.contains(&kind) || (toggle && TOGGLE_KINDS.contains(&kind));
+    if !allowed {
         return Err(respond::error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
@@ -905,7 +1419,7 @@ fn parse_relate_body(body: &[u8]) -> Result<RelateRequest, HyperResponse> {
 /// `soft_identity_projection` (only `same_identity` and, for display,
 /// `"variant"` do).
 async fn relate_entries(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
-    let req = match parse_relate_body(body) {
+    let req = match parse_relate_body(body, false) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -922,18 +1436,20 @@ async fn relate_entries(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
 /// `POST /api/relations/unrelate` — the inverse of `relate`: tombstones
 /// (disables, doesn't delete) the one exact `(a, b, kind)` row via
 /// `MusicDb::set_relation_enabled`, mirroring how `unlink` never deletes
-/// provenance either. Requesting an unknown `kind` or a pair with no such
-/// row is a no-op (`ok: true` either way) rather than an error — the UI
-/// only ever offers "remove" for a relation it just showed, so a mismatch
-/// here would mean the graph view and the DB had already drifted apart.
-async fn unrelate_entries(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
-    let req = match parse_relate_body(body) {
+/// provenance either. `POST /api/relations/restore` re-enables it, keeping
+/// its origin and metadata (a `derived_from` row's direction). Both also
+/// take `TOGGLE_KINDS`. A pair with no such row is a no-op (`ok: true`
+/// either way) rather than an error — the UI only ever offers these for a
+/// relation it just showed, so a mismatch here would mean the graph view
+/// and the DB had already drifted apart.
+async fn set_relation_enabled(state: &Arc<AppState>, body: &[u8], enabled: bool) -> HyperResponse {
+    let req = match parse_relate_body(body, true) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
     if let Err(e) = state
         .db
-        .set_relation_enabled(req.a, req.b, &req.kind, false)
+        .set_relation_enabled(req.a, req.b, &req.kind, enabled)
         .await
     {
         return db_error_response(e);
@@ -941,11 +1457,86 @@ async fn unrelate_entries(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     respond::json(StatusCode::OK, json!({ "ok": true }))
 }
 
+#[derive(Deserialize)]
+struct DeriveRequest {
+    original: i64,
+    derived: i64,
+    transformation: Option<String>,
+}
+
+/// `POST /api/relations/derive` `{"original", "derived", "transformation"}`
+/// — records that `derived` is an edition of `original` made by
+/// `transformation` (`"instrumental"`, `"live"`, ...; null for an
+/// unspecified alternate version), replacing whatever the pair's
+/// `derived_from` edge said (see `MusicDb::set_edition_derivation`). This is
+/// how the now-playing drawer fixes which editions fold into their original
+/// (`EditionProjection::rank_target`).
+async fn derive_edition(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let req: DeriveRequest = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    if let Err(e) = state
+        .db
+        .set_edition_derivation(req.original, req.derived, req.transformation.as_deref())
+        .await
+    {
+        return db_error_response(e);
+    }
+    respond::json(StatusCode::OK, json!({ "ok": true }))
+}
+
+/// `POST /api/songs/edit` `{"op": "detach" | "set_original" | "set_parent"
+/// | "move" | "derive" | "relate" | "disable" | "enable", ...}` — edits a version of a song as a whole (see
+/// `musicdb::SongEdit`) and returns `{"undo": [...]}`: the rows it changed
+/// as they were, for `/api/relations/rows`. A `different_song` block in
+/// the way is a 409 `blocked`, which `set_parent` with `"unblock": true`
+/// lifts.
+async fn edit_song(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let edit: SongEdit = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    if let SongEdit::Relate { kind, .. } = &edit
+        && !RELATE_KINDS.contains(&kind.as_str())
+    {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            &format!("unknown relation kind {kind:?}"),
+        );
+    }
+    match state.db.edit_song(edit).await {
+        Ok(undo) => respond::json(StatusCode::OK, json!({ "undo": undo })),
+        Err(e) => db_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RowsRequest {
+    rows: Vec<RowImage>,
+}
+
+/// `POST /api/relations/rows` `{"rows": [...]}` — writes relation rows back
+/// as an earlier edit's `undo` recorded them, and returns `{"redo": [...]}`,
+/// the rows it replaced, which this same endpoint takes to redo.
+async fn restore_relation_rows(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let req: RowsRequest = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return respond::error(StatusCode::BAD_REQUEST, "invalid_input", &e.to_string()),
+    };
+    match state.db.restore_relation_rows(req.rows).await {
+        Ok(redo) => respond::json(StatusCode::OK, json!({ "redo": redo })),
+        Err(e) => db_error_response(e),
+    }
+}
+
 fn db_error_response(e: DbError) -> HyperResponse {
     match e {
         DbError::InvalidInput(msg) => {
             respond::error(StatusCode::BAD_REQUEST, "invalid_input", &msg)
         }
+        DbError::Blocked(msg) => respond::error(StatusCode::CONFLICT, "blocked", &msg),
         DbError::Database(_) => respond::error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
@@ -985,15 +1576,30 @@ async fn playable_sources(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
+    let pairs: Vec<(String, String)> = source_rows
+        .iter()
+        .map(|s| (s.source.clone(), s.identifier.clone()))
+        .collect();
+    // The weights only label the switcher; playing doesn't need them here.
+    let weights = state
+        .db
+        .preferred_source_weights(&pairs)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("couldn't read preferred sources of {entry_id}: {e:#}");
+            HashMap::new()
+        });
     let sources: Vec<_> = source_rows
         .iter()
-        .filter_map(|s| {
+        .zip(&pairs)
+        .filter_map(|(s, pair)| {
             let (embed_url, capabilities) = embed_for(&s.source, &s.identifier)?;
             Some(json!({
                 "provider": s.source,
                 "identifier": s.identifier,
                 "embed_url": embed_url,
                 "capabilities": capabilities,
+                "preferred_weight": weights.get(pair).copied().unwrap_or(0),
             }))
         })
         .collect();
@@ -1001,6 +1607,88 @@ async fn playable_sources(state: &Arc<AppState>, id: &str) -> HyperResponse {
         StatusCode::OK,
         json!({ "entry_id": entry_id, "sources": sources }),
     )
+}
+
+/// `(disc_no, track_no, track entry)`.
+type TrackPos = (Option<i32>, Option<i32>, i64);
+
+/// A `TrackPos` for each track `entry_id` lists, in
+/// order. Only `track` children count: a release group's children are its
+/// releases (and, from some providers, its artist), so a release group with
+/// no tracks of its own shows the longest tracklist among its releases.
+async fn tracklist(db: &MusicDb, entry_id: i64) -> anyhow::Result<Vec<TrackPos>> {
+    let (mut tracks, releases) = direct_children(db, entry_id).await?;
+    if tracks.is_empty() {
+        for release in releases {
+            let (release_tracks, _) = direct_children(db, release).await?;
+            if release_tracks.len() > tracks.len() {
+                tracks = release_tracks;
+            }
+        }
+    }
+    // One provider can list two entries soft dedup has since linked: keep
+    // one per soft-identity component.
+    let ids: Vec<i64> = tracks.iter().map(|(_, _, id)| *id).collect();
+    let (identity, _) = db.display_projections_around(&ids).await?;
+    let mut seen = HashSet::new();
+    tracks.retain(|(_, _, id)| seen.insert(identity.component_of(*id).unwrap_or(*id)));
+    Ok(tracks)
+}
+
+/// `entry_id`'s track children (ordered as in `tracklist`) and its release
+/// children.
+async fn direct_children(db: &MusicDb, entry_id: i64) -> anyhow::Result<(Vec<TrackPos>, Vec<i64>)> {
+    let pairs = db.pairs_by_entry_ids(&[entry_id]).await?;
+    let children = db.child_rows_for_parent_pairs(&pairs).await?;
+    let child_pairs: Vec<(String, String)> = children
+        .iter()
+        .map(|c| (c.child_source.clone(), c.child_identifier.clone()))
+        .collect();
+    let pair_to_entry: HashMap<(String, String), i64> = db
+        .source_rows_for_pairs(&child_pairs)
+        .await?
+        .into_iter()
+        .map(|s| ((s.source, s.identifier), s.entry_id))
+        .collect();
+    let child_ids: Vec<i64> = pair_to_entry.values().copied().collect();
+    let type_of: HashMap<i64, String> = db
+        .entry_rows_by_ids(&child_ids)
+        .await?
+        .into_iter()
+        .map(|e| (e.id, e.entry_type))
+        .collect();
+    let is = |id: &i64, t: &str| type_of.get(id).is_some_and(|et| et == t);
+
+    // Each of the entry's pairs is one provider's tracklist, listing that
+    // provider's own track entries — which dedup may not have linked to the
+    // other providers'. Show one provider's list, not their union: the
+    // longest, preferring one that numbers its tracks.
+    let mut by_pair: HashMap<(&str, &str), Vec<TrackPos>> = HashMap::new();
+    for c in &children {
+        let key = (c.child_source.clone(), c.child_identifier.clone());
+        if let Some(&eid) = pair_to_entry.get(&key).filter(|id| is(id, "track")) {
+            by_pair
+                .entry((c.parent_source.as_str(), c.parent_identifier.as_str()))
+                .or_default()
+                .push((c.disc_no, c.track_no, eid));
+        }
+    }
+    let mut tracks = by_pair
+        .into_iter()
+        .max_by_key(|(pair, list)| {
+            let numbered = list.iter().all(|(_, track, _)| track.is_some());
+            (list.len(), numbered, std::cmp::Reverse(*pair))
+        })
+        .map(|(_, list)| list)
+        .unwrap_or_default();
+    tracks.sort_by_key(|(disc, track, _)| (disc.unwrap_or(0), track.unwrap_or(i32::MAX)));
+    let mut releases: Vec<i64> = child_ids
+        .into_iter()
+        .filter(|id| is(id, "release"))
+        .collect();
+    releases.sort_unstable();
+    releases.dedup();
+    Ok((tracks, releases))
 }
 
 async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
@@ -1011,8 +1699,8 @@ async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
             "id must be numeric",
         );
     };
-    let pairs = match state.db.pairs_by_entry_ids(&[entry_id]).await {
-        Ok(p) => p,
+    let ordered = match tracklist(&state.db, entry_id).await {
+        Ok(t) => t,
         Err(e) => {
             return respond::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1021,46 +1709,6 @@ async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
             );
         }
     };
-    let children = match state.db.child_rows_for_parent_pairs(&pairs).await {
-        Ok(c) => c,
-        Err(e) => {
-            return respond::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &e.to_string(),
-            );
-        }
-    };
-    let child_pairs: Vec<(String, String)> = children
-        .iter()
-        .map(|c| (c.child_source.clone(), c.child_identifier.clone()))
-        .collect();
-    let child_sources = match state.db.source_rows_for_pairs(&child_pairs).await {
-        Ok(s) => s,
-        Err(e) => {
-            return respond::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &e.to_string(),
-            );
-        }
-    };
-    let pair_to_entry: HashMap<(String, String), i64> = child_sources
-        .iter()
-        .map(|s| ((s.source.clone(), s.identifier.clone()), s.entry_id))
-        .collect();
-
-    let mut ordered: Vec<(Option<i32>, Option<i32>, i64)> = children
-        .iter()
-        .filter_map(|c| {
-            let key = (c.child_source.clone(), c.child_identifier.clone());
-            pair_to_entry
-                .get(&key)
-                .map(|&eid| (c.disc_no, c.track_no, eid))
-        })
-        .collect();
-    ordered.sort_by_key(|(disc, track, _)| (disc.unwrap_or(0), track.unwrap_or(0)));
-    ordered.dedup_by_key(|(_, _, id)| *id);
 
     let ids: Vec<i64> = ordered.iter().map(|(_, _, id)| *id).collect();
     let summaries = match entry_summaries(&state.db, &ids).await {
@@ -1113,7 +1761,23 @@ async fn release_tracks(state: &Arc<AppState>, id: &str) -> HyperResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::embed_for;
+    use super::{Playability, embed_for};
+
+    #[test]
+    fn playability_prefers_any_embeddable_source() {
+        let local = ("local", "local://ctbgd/track/x");
+        let video = ("youtube", "https://youtu.be/dQw4w9WgXcQ");
+        let mb = ("musicbrainz", "https://musicbrainz.org/recording/x");
+        assert_eq!(Playability::of([local, video]), Playability::Playable);
+        assert_eq!(Playability::of([mb, local]), Playability::Unavailable);
+        assert_eq!(Playability::of([mb]), Playability::Unlinked);
+        assert_eq!(Playability::of([]), Playability::Unlinked);
+        // A channel URL isn't a video: still nothing to mount.
+        assert_eq!(
+            Playability::of([("youtube", "https://www.youtube.com/@x")]),
+            Playability::Unlinked
+        );
+    }
 
     #[test]
     fn soundcloud_track_embeds() {

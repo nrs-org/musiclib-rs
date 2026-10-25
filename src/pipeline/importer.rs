@@ -4,13 +4,14 @@ use crate::providers::{
     FetchProvider, ResolveContext,
     std_values::StandardProviderKeys,
     types::{
-        EntityResult, EntryFetchOptionsPool, EntryType, ExternalSources, OptionsId, child_next,
+        EntityResult, EntryFetchOptionsPool, EntryType, Error, ExternalSources, OptionsId,
+        child_next,
     },
 };
 use futures::future::join_all;
 use tracing::{Instrument, debug, warn};
 
-use super::state::{ChildEdge, Pair, PairMetadata, State, StubInfo};
+use super::state::{ChildEdge, LinkVia, Pair, PairMetadata, State, StubInfo};
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'static>>;
 
@@ -57,7 +58,12 @@ pub fn import(
         // 2. Link the input pair to the canonical pair if they differ. Done
         //    before the claim so a losing claimer still records the link.
         if input != canonical {
-            state.push_is_rel(input.clone(), canonical.clone());
+            state.push_is_rel(
+                input.clone(),
+                canonical.clone(),
+                canonical.clone(),
+                LinkVia::Fetch,
+            );
         }
 
         // 3. Claim (canonical pair, options). If this pair was already
@@ -95,6 +101,9 @@ pub fn import(
             Err(e) => {
                 let msg = error_chain(&e);
                 warn!("fetch failed for {}:{}: {}", canonical.0, canonical.1, msg);
+                if matches!(e, Error::NotFound(_)) {
+                    state.note_gone(canonical.clone());
+                }
                 if let Some(p) = state.progress() {
                     p.fetch_failed(&canonical, &msg);
                 }
@@ -114,6 +123,8 @@ pub fn import(
             specific_data,
             children,
             aliases,
+            image,
+            privacy,
         } = result;
         let entry_type = specific_data.entry_type();
 
@@ -125,6 +136,8 @@ pub fn import(
             release_date,
             specific_data,
             aliases,
+            image,
+            privacy,
         };
 
         // 5b. Cross-link: ask every other provider to enrich `sources` with
@@ -198,7 +211,12 @@ pub fn import(
                 );
                 continue;
             }
-            state.push_is_rel(canonical.clone(), src.clone());
+            state.push_is_rel(
+                canonical.clone(),
+                src.clone(),
+                canonical.clone(),
+                LinkVia::Fetch,
+            );
             subs.push(import(
                 Arc::clone(&state),
                 Arc::clone(&providers),
@@ -231,7 +249,12 @@ pub fn import(
                             continue;
                         };
                         for sibling in child_pairs.iter().skip(1) {
-                            state.push_is_rel(primary.clone(), sibling.clone());
+                            state.push_is_rel(
+                                primary.clone(),
+                                sibling.clone(),
+                                canonical.clone(),
+                                LinkVia::Listing,
+                            );
                         }
                         // Used only if the child ends up never fetched.
                         state.insert_stub(
@@ -240,6 +263,7 @@ pub fn import(
                                 entry_type: child_ref.entry_type,
                                 name: child_ref.name.clone(),
                                 duration_ms: child_ref.duration_ms,
+                                image: child_ref.image.clone(),
                             },
                         );
                         let pos = child_ref.position.as_ref();
@@ -493,6 +517,8 @@ mod tests {
                 }
             };
             Ok(EntityResult {
+                privacy: None,
+                image: None,
                 release_date: None,
                 sources: Default::default(),
                 extra: Default::default(),
@@ -622,6 +648,8 @@ mod tests {
                 parent_type,
             )?;
             Ok(EntityResult {
+                privacy: None,
+                image: None,
                 release_date: None,
                 sources: Default::default(),
                 extra: Default::default(),

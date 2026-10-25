@@ -100,6 +100,8 @@ pub async fn get_playlist(client: Arc<YtdlpClient>, url: &str) -> Result<EntityR
     });
 
     Ok(EntityResult {
+        privacy: None,
+        image: crate::providers::backends::ytdlp::info_thumbnail(&meta.extra),
         release_date: None,
         sources,
         extra: meta.extra,

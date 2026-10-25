@@ -1,14 +1,16 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::musicdb::{MusicDb, PROVIDER_ORIGIN};
+use crate::musicdb::{
+    ImageOrigin, LINKS_COMPLETE, LinkKey, LinkRow, MusicDb, PROVIDER_ORIGIN, link_key,
+};
 use crate::providers::FetchProvider;
 use crate::providers::std_values::{StandardProviderKeys, normalize_isrc};
 use crate::providers::types::EntryType;
 use tracing::{debug, info, warn};
 
 use super::dedup::{AnchorId, DedupConfig};
-use super::state::{ChildEdge, Pair, PairMetadata, State, StubInfo};
+use super::state::{ChildEdge, IsRel, Pair, PairMetadata, State, StubInfo};
 
 /// Reduce all collected events to DB writes.
 ///
@@ -69,7 +71,7 @@ pub async fn flush(
         .sum::<usize>()
         + is_rel
             .iter()
-            .map(|(a, b)| super::state::pair_bytes(a) + super::state::pair_bytes(b) + 16)
+            .map(|r| super::state::is_rel_bytes(&r.a, &r.b, &r.asserted_by))
             .sum::<usize>()
         + has_rel.iter().map(super::state::edge_bytes).sum::<usize>()
         + stubs
@@ -90,9 +92,10 @@ pub async fn flush(
     for p in metadata.keys() {
         raw_pairs.insert(p.clone());
     }
-    for (a, b) in &is_rel {
-        raw_pairs.insert(a.clone());
-        raw_pairs.insert(b.clone());
+    for r in &is_rel {
+        raw_pairs.insert(r.a.clone());
+        raw_pairs.insert(r.b.clone());
+        raw_pairs.insert(r.asserted_by.clone());
     }
     for edge in &has_rel {
         raw_pairs.insert(edge.parent.clone());
@@ -111,10 +114,15 @@ pub async fn flush(
         .into_iter()
         .map(|(p, m)| (canon[&p].clone(), m))
         .collect();
-    let is_rel: Vec<(Pair, Pair)> = is_rel
+    let is_rel: Vec<IsRel> = is_rel
         .into_iter()
-        .map(|(a, b)| (canon[&a].clone(), canon[&b].clone()))
-        .filter(|(a, b)| a != b)
+        .map(|r| IsRel {
+            a: canon[&r.a].clone(),
+            b: canon[&r.b].clone(),
+            asserted_by: canon[&r.asserted_by].clone(),
+            via: r.via,
+        })
+        .filter(|r| r.a != r.b)
         .collect();
     let has_rel: Vec<ChildEdge> = has_rel
         .into_iter()
@@ -129,14 +137,21 @@ pub async fn flush(
     // every edge seen, by canonical pair: at commit these replace older edges
     // under re-fetched parents. Recorded before deferral so it doesn't matter
     // which flush ends up writing them. (A parent's metadata and its edges can
-    // land in different flushes, so the two are tracked separately.)
+    // land in different flushes, so the two are tracked separately.) Every
+    // fetched pair's aliases replace its older ones the same way; an artist
+    // fetch lists all of them, just not all of its children. So do the
+    // identity links each pair stated.
     for (pair, meta) in &metadata {
         if meta.entry_type != EntryType::Artist {
             state.note_fetched_parent(pair.clone());
         }
+        state.note_aliases(pair, &meta.aliases);
     }
     for edge in &has_rel {
         state.note_edge(edge);
+    }
+    for rel in &is_rel {
+        state.note_link(rel);
     }
 
     // Two raw forms of one child can collapse to the same canonical pair;
@@ -147,9 +162,11 @@ pub async fn flush(
             entry_type: info.entry_type,
             name: None,
             duration_ms: None,
+            image: None,
         });
         entry.name = entry.name.take().or(info.name);
         entry.duration_ms = entry.duration_ms.or(info.duration_ms);
+        entry.image = entry.image.take().or(info.image);
     }
     let stubs = canon_stubs;
 
@@ -165,9 +182,9 @@ pub async fn flush(
     for p in metadata.keys() {
         all_pairs.insert(p.clone());
     }
-    for (a, b) in &is_rel {
-        all_pairs.insert(a.clone());
-        all_pairs.insert(b.clone());
+    for r in &is_rel {
+        all_pairs.insert(r.a.clone());
+        all_pairs.insert(r.b.clone());
     }
     for edge in &has_rel {
         all_pairs.insert(edge.parent.clone());
@@ -184,6 +201,48 @@ pub async fn flush(
     // 2b. Compile declared dedup barriers (entities that must never merge) into
     //     a map of canonical pair -> anchor id. Empty config => no-op.
     let (barrier, group_names) = dedup.compile(providers).await;
+
+    // 2c. An entry this flush touches that holds a barrier pair joins the
+    //     flush whole. Otherwise a merge into or out of it (`merge_entries`
+    //     re-points every pair of the losing entry) can carry an anchor pair
+    //     the union-find never saw into another anchor's entry.
+    let mut barrier_entries: HashSet<i64> = HashSet::new();
+    for pair in barrier.keys() {
+        if let Some(id) = db.find_entry_id_by_pair(&pair.0, &pair.1).await? {
+            barrier_entries.insert(id);
+        }
+    }
+    let touched_barrier_entries: BTreeSet<i64> = existing
+        .values()
+        .flatten()
+        .copied()
+        .filter(|id| barrier_entries.contains(id))
+        .collect();
+    for &id in &touched_barrier_entries {
+        for pair in db.pairs_by_entry_ids(&[id]).await? {
+            existing.entry(pair.clone()).or_insert(Some(id));
+            all_pairs.insert(pair);
+        }
+    }
+
+    // 2d. With `LINKS_COMPLETE` on, step 3 groups some entries by
+    //     their recorded links instead of keeping all their pairs together:
+    //     one in which a link this run retracted is no longer stated by
+    //     anything (it splits), and every barrier entry from 2c (a pair two
+    //     anchors share then pulls only what links to it, not the whole
+    //     entry, to the anchor that reaches it first). All of their pairs
+    //     join this flush.
+    let regrouped = if final_flush {
+        regrouped_entries(&state, db, &is_rel, &touched_barrier_entries).await?
+    } else {
+        HashMap::new()
+    };
+    for (&id, regroup) in &regrouped {
+        for pair in &regroup.members {
+            existing.entry(pair.clone()).or_insert(Some(id));
+            all_pairs.insert(pair.clone());
+        }
+    }
 
     // 3. Union-find: union by fresh is_rel, then by shared existing entry_id
     //    (so the local model agrees with the DB's prior grouping). Seeded with
@@ -216,9 +275,9 @@ pub async fn flush(
     }
     // Process is_rel in a stable order so the (arbitrary) assignment of any
     // unclaimed shared node is deterministic across runs.
-    let mut is_rel_sorted = is_rel.clone();
+    let mut is_rel_sorted: Vec<(&Pair, &Pair)> = is_rel.iter().map(|r| (&r.a, &r.b)).collect();
     is_rel_sorted.sort();
-    for (a, b) in &is_rel_sorted {
+    for &(a, b) in &is_rel_sorted {
         if let Err((la, lb)) = uf.union(a, b) {
             debug!(
                 "dedup: kept anchors {:?}/{} and {:?}/{} apart (group '{}') — cut edge {}:{} <-> {}:{}",
@@ -240,7 +299,13 @@ pub async fn flush(
             existing_groups.entry(*id).or_default().push(pair.clone());
         }
     }
-    for group in existing_groups.values() {
+    for (id, group) in &existing_groups {
+        if let Some(regroup) = regrouped.get(id) {
+            for (a, b) in &regroup.links {
+                let _ = uf.union(a, b);
+            }
+            continue;
+        }
         for i in 1..group.len() {
             // A refusal here is expected: it means the barrier separates entities
             // that a prior import wrongly merged under one entry_id. The split
@@ -286,13 +351,11 @@ pub async fn flush(
         metadata
             .into_iter()
             .partition(|(p, _)| !deferred_pairs.contains(p));
-    // `is_rel` itself is never read again below (its only job was driving the
-    // union-find above); only the deferred half needs to survive, so it can
-    // be re-buffered for a later flush to redo that union-find with.
-    let deferred_is_rel: Vec<(Pair, Pair)> = is_rel
+    // The deferred half of `is_rel` is re-buffered for a later flush to redo
+    // the union-find with; the rest is only stored as links (step 9b).
+    let (deferred_is_rel, is_rel): (Vec<IsRel>, Vec<IsRel>) = is_rel
         .into_iter()
-        .filter(|(a, b)| deferred_pairs.contains(a) || deferred_pairs.contains(b))
-        .collect();
+        .partition(|r| deferred_pairs.contains(&r.a) || deferred_pairs.contains(&r.b));
     let defer_edge = |edge: &ChildEdge| -> bool {
         !final_flush
             && (deferred_pairs.contains(&edge.parent)
@@ -312,8 +375,8 @@ pub async fn flush(
     for (pair, meta) in deferred_metadata {
         state.insert_metadata(pair, meta);
     }
-    for (a, b) in deferred_is_rel {
-        state.push_is_rel(a, b);
+    for r in deferred_is_rel {
+        state.push_is_rel(r.a, r.b, r.asserted_by, r.via);
     }
     for edge in deferred_has_rel {
         state.push_has_rel(edge);
@@ -344,11 +407,23 @@ pub async fn flush(
     //    multiple existing entry_ids. Reconcile the class's entry_type from
     //    members' fresh metadata: new entries get the type at creation; existing
     //    entries are updated after merges.
-    // A class may keep an existing entry_id only if it's the *sole* class
-    // referencing it. When the barrier splits a contaminated entry, several
-    // classes share one existing id; none may keep it, so each gets a fresh
-    // entry and its pairs are re-pointed below (and the emptied entry is GC'd).
-    let owned_ids = owned_existing_ids(&classes, &existing);
+    // A class keeps an existing entry_id if it's the *sole* class referencing
+    // it. When the barrier splits a contaminated entry, several classes share
+    // one existing id; the class holding the entry's oldest pairs keeps it (so
+    // relations and feedback on it stay attached), and every other class gets
+    // a fresh entry with its pairs re-pointed below.
+    let contested = contested_existing_ids(&classes, &existing);
+    let run_ids = db
+        .pair_run_ids_by_entry_ids(&contested.iter().copied().collect::<Vec<_>>())
+        .await?;
+    let keepers = split_keepers(
+        &classes,
+        &existing,
+        &contested,
+        &run_ids,
+        &state.preferred_keepers(),
+    );
+    let owned_ids = owned_existing_ids(&classes, &existing, &keepers);
 
     let mut class_to_entry: HashMap<Pair, i64> = HashMap::new();
     let mut merges: Vec<(i64, i64)> = Vec::new();
@@ -363,10 +438,14 @@ pub async fn flush(
             // for new entries: an existing entry's type came from a fetch.
             let new_type = class_type.or_else(|| stub_type(members, &stubs));
             let new_id = db.insert_entry(new_type).await?;
-            // Referencing existing entries but owning none => the barrier split
-            // this class off a shared (contaminated) entry onto a fresh one.
+            // Referencing existing entries but owning none => the barrier
+            // or a retracted link split this class off a shared entry onto a
+            // fresh one, which keeps the old entry's type.
             let referenced: BTreeSet<i64> = members.iter().filter_map(|p| existing[p]).collect();
-            if !referenced.is_empty() {
+            if let Some(&old) = referenced.first() {
+                if new_type.is_none() {
+                    db.copy_entry_type(old, new_id).await?;
+                }
                 split_count += 1;
                 debug!("dedup: split off existing {referenced:?} into new entry {new_id}");
             }
@@ -385,7 +464,9 @@ pub async fn flush(
         class_to_entry.insert(repr.clone(), entry_id);
     }
     if split_count > 0 {
-        info!("dedup: split {split_count} class(es) off shared entries (barrier-enforced)");
+        info!(
+            "dedup: split {split_count} class(es) off shared entries (barrier or retracted link)"
+        );
     }
 
     // 6. Apply DB-level entry merges before any further writes — this way all
@@ -419,7 +500,18 @@ pub async fn flush(
                 run_id,
             )
             .await?;
+            if let Some(image) = &meta.image {
+                db.set_pair_image(&pair.0, &pair.1, image, ImageOrigin::Fetch, run_id)
+                    .await?;
+            }
+            if let Some(privacy) = meta.privacy {
+                db.set_provider_privacy(&pair.0, &pair.1, privacy).await?;
+            }
         } else {
+            if let Some(image) = stubs.get(pair).and_then(|s| s.image.as_ref()) {
+                db.set_pair_image(&pair.0, &pair.1, image, ImageOrigin::Listing, run_id)
+                    .await?;
+            }
             let duration_ms = stubs.get(pair).and_then(|s| s.duration_ms);
             if existing[pair].is_none() || duration_ms.is_some() {
                 // New stub row, or a duration for an existing stub that had
@@ -489,6 +581,22 @@ pub async fn flush(
         .await?;
     }
 
+    // 9b. Identity links, with what stated them.
+    let links: Vec<LinkRow> = is_rel
+        .iter()
+        .map(|r| LinkRow {
+            link: link_key(&r.a, &r.b),
+            asserted_by: r.asserted_by.clone(),
+            via: r.via.as_str(),
+        })
+        .collect();
+    db.insert_links(&links, run_id).await?;
+    let split_stale: Vec<LinkRow> = regrouped
+        .into_values()
+        .flat_map(|regroup| regroup.stale)
+        .collect();
+    db.delete_links(&split_stale).await?;
+
     // 10. Contributions: one per (parent_pair, child_pair, role) observation.
     for edge in &has_rel {
         write_edge_contributions(db, edge, run_id).await?;
@@ -557,6 +665,158 @@ fn confidence_for_original_relation(kind: &str) -> f64 {
     }
 }
 
+/// An entry step 3 groups by its remaining links: every pair it has, and
+/// the stored links among them still stated by something.
+struct Regroup {
+    members: Vec<Pair>,
+    links: Vec<LinkKey>,
+    /// Its stored links this run retracted, deleted with the split so the
+    /// two agree even if the run is rolled back afterwards.
+    stale: Vec<LinkRow>,
+}
+
+/// The entries step 3 groups by their links, when `LINKS_COMPLETE`
+/// is on: those in which a link this run retracted is no longer stated by
+/// anything (no other stored row, no fresh `is_rel`), and `barrier_ids`.
+/// In a barrier entry with no such link, a pair linked to nothing inside it
+/// (left there by an earlier barrier split) stays with the largest group
+/// rather than splitting off on its own. Called by the final flush, once
+/// every pair's links for the run are noted in `state`.
+async fn regrouped_entries(
+    state: &State,
+    db: &MusicDb,
+    is_rel: &[IsRel],
+    barrier_ids: &BTreeSet<i64>,
+) -> anyhow::Result<HashMap<i64, Regroup>> {
+    if db.setting(LINKS_COMPLETE).await?.as_deref() != Some("1") {
+        return Ok(HashMap::new());
+    }
+    let stale: HashSet<LinkRow> = db
+        .stale_links(&state.peek_replacements())
+        .await?
+        .into_iter()
+        .collect();
+    let fresh: HashSet<LinkKey> = is_rel.iter().map(|r| link_key(&r.a, &r.b)).collect();
+    let mut ids = BTreeSet::new();
+    for row in &stale {
+        let (a, b) = &row.link;
+        if fresh.contains(&row.link) {
+            continue;
+        }
+        for pair in [a, b] {
+            if let Some(id) = db.find_entry_id_by_pair(&pair.0, &pair.1).await? {
+                ids.insert(id);
+            }
+        }
+    }
+    let disconnected = ids.clone();
+    ids.extend(barrier_ids);
+    let mut out = HashMap::new();
+    for id in ids {
+        let members = db.pairs_by_entry_ids(&[id]).await?;
+        let rows = db.links_among(&members).await?;
+        let alive: HashSet<&LinkKey> = rows
+            .iter()
+            .filter(|r| !stale.contains(*r))
+            .map(|r| &r.link)
+            .collect();
+        let dead = rows
+            .iter()
+            .any(|r| stale.contains(r) && !alive.contains(&r.link) && !fresh.contains(&r.link));
+        if !dead && !barrier_ids.contains(&id) {
+            continue;
+        }
+        let mut links: Vec<LinkKey> = alive.into_iter().cloned().collect();
+        links.sort();
+        keep_unlinked_pairs(db, id, &members, &mut links, !dead).await?;
+        let stale_here: Vec<LinkRow> = if dead {
+            rows.into_iter().filter(|r| stale.contains(r)).collect()
+        } else {
+            Vec::new()
+        };
+        if disconnected.contains(&id) && dead {
+            info!(
+                "entry {id}: a re-fetch retracted a link inside it; regrouping its {} pair(s) by {} remaining link(s)",
+                members.len(),
+                links.len()
+            );
+        }
+        out.insert(
+            id,
+            Regroup {
+                members,
+                links,
+                stale: stale_here,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Link each of the entry's pairs found deleted upstream (`gone_at`) to its
+/// largest group: a pair that can't be fetched states no links, so missing
+/// ones say nothing about it (a merged-away MusicBrainz ID returns 404).
+/// With `unlinked`, so is every pair no link inside the entry touches.
+async fn keep_unlinked_pairs(
+    db: &MusicDb,
+    entry_id: i64,
+    members: &[Pair],
+    links: &mut Vec<LinkKey>,
+    unlinked: bool,
+) -> anyhow::Result<()> {
+    let linked: HashSet<&Pair> = links.iter().flat_map(|(a, b)| [a, b]).collect();
+    let rows = db.source_rows_by_entry_ids(&[entry_id]).await?;
+    let fetched: HashSet<Pair> = rows
+        .iter()
+        .filter(|r| r.fetched_at.is_some())
+        .map(|r| (r.source.clone(), r.identifier.clone()))
+        .collect();
+    let gone: Vec<Pair> = rows
+        .into_iter()
+        .map(|r| (r.source, r.identifier, r.gone_at))
+        .filter(|(s, i, gone_at)| {
+            gone_at.is_some() || (unlinked && !linked.contains(&(s.clone(), i.clone())))
+        })
+        .map(|(s, i, _)| (s, i))
+        .collect();
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let mut uf = UnionFind::new();
+    for pair in members {
+        uf.make_set(pair);
+    }
+    for (a, b) in links.iter() {
+        let _ = uf.union(a, b);
+    }
+    let mut groups: HashMap<Pair, Vec<&Pair>> = HashMap::new();
+    for pair in members.iter().filter(|p| !gone.contains(p)) {
+        groups.entry(uf.find(pair)).or_default().push(pair);
+    }
+    // The largest group, then attach to its smallest fetched pair: a stub in
+    // it (an ISRC two barrier anchors share) can end up with the other anchor.
+    let Some(target) = groups
+        .into_values()
+        .max_by(|a, b| {
+            a.len()
+                .cmp(&b.len())
+                .then_with(|| b.iter().min().cmp(&a.iter().min()))
+        })
+        .and_then(|group| {
+            group
+                .into_iter()
+                .min_by_key(|p| (!fetched.contains(*p), *p))
+        })
+        .cloned()
+    else {
+        return Ok(());
+    };
+    for pair in &gone {
+        links.push(link_key(pair, &target));
+    }
+    Ok(())
+}
+
 async fn write_edge_contributions(
     db: &MusicDb,
     edge: &ChildEdge,
@@ -576,14 +836,12 @@ async fn write_edge_contributions(
     Ok(())
 }
 
-/// For each class, the existing entry_ids it may keep: an id is owned only if a
-/// single class references it. Contested ids (shared by a barrier-driven split)
-/// are owned by no class, so those classes get a fresh entry. Returned sorted
-/// (min first) so the kept id is deterministic.
-fn owned_existing_ids(
+/// Existing entry_ids referenced by more than one class: entries a
+/// barrier-driven split is breaking apart.
+fn contested_existing_ids(
     classes: &HashMap<Pair, Vec<Pair>>,
     existing: &HashMap<Pair, Option<i64>>,
-) -> HashMap<Pair, BTreeSet<i64>> {
+) -> BTreeSet<i64> {
     let mut id_class_count: HashMap<i64, usize> = HashMap::new();
     for members in classes.values() {
         let ids: HashSet<i64> = members.iter().filter_map(|p| existing[p]).collect();
@@ -591,13 +849,81 @@ fn owned_existing_ids(
             *id_class_count.entry(id).or_insert(0) += 1;
         }
     }
+    id_class_count
+        .into_iter()
+        .filter(|&(_, count)| count > 1)
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// For each contested id, the class that keeps it: one holding a pair of
+/// `preferred` (`State::prefer_keeper`, the side an unmerge keeps), then the
+/// one holding the most of the entry's pairs from its earliest import run (a
+/// `None` run, written before runs were tracked, counts as earliest), then
+/// the most of its pairs overall, then the smallest representative.
+/// Contamination arrives with a later import, so the earliest pairs are the
+/// entry's original identity. `run_ids` maps every pair of the contested
+/// entries, including pairs outside this flush, to its `(entry_id, run_id)`.
+fn split_keepers(
+    classes: &HashMap<Pair, Vec<Pair>>,
+    existing: &HashMap<Pair, Option<i64>>,
+    contested: &BTreeSet<i64>,
+    run_ids: &HashMap<Pair, (i64, Option<i64>)>,
+    preferred: &HashSet<Pair>,
+) -> HashMap<i64, Pair> {
+    let mut earliest: HashMap<i64, Option<i64>> = HashMap::new();
+    for &(id, run) in run_ids.values() {
+        earliest
+            .entry(id)
+            .and_modify(|e| *e = (*e).min(run))
+            .or_insert(run);
+    }
+    // Per contested id: (holds a preferred pair, pairs from its earliest run,
+    // pairs, repr) of the best class.
+    let mut best: HashMap<i64, (bool, usize, usize, &Pair)> = HashMap::new();
+    for (repr, members) in classes {
+        let wanted = members.iter().any(|p| preferred.contains(p));
+        let mut held: HashMap<i64, (usize, usize)> = HashMap::new();
+        for pair in members {
+            let Some(id) = existing[pair].filter(|id| contested.contains(id)) else {
+                continue;
+            };
+            let run = run_ids.get(pair).and_then(|&(_, run)| run);
+            let counts = held.entry(id).or_default();
+            counts.0 += usize::from(earliest.get(&id).is_none_or(|&e| e == run));
+            counts.1 += 1;
+        }
+        for (id, (oldest, total)) in held {
+            let beats = |&(b_wanted, b_oldest, b_total, b_repr): &(bool, usize, usize, &Pair)| {
+                (wanted, oldest, total, std::cmp::Reverse(repr))
+                    > (b_wanted, b_oldest, b_total, std::cmp::Reverse(b_repr))
+            };
+            if best.get(&id).is_none_or(beats) {
+                best.insert(id, (wanted, oldest, total, repr));
+            }
+        }
+    }
+    best.into_iter()
+        .map(|(id, (_, _, _, repr))| (id, repr.clone()))
+        .collect()
+}
+
+/// For each class, the existing entry_ids it may keep: an id is owned if a
+/// single class references it, or if the class is that contested id's split
+/// keeper. Every other class referencing a contested id gets a fresh entry.
+/// Returned sorted (min first) so the kept id is deterministic.
+fn owned_existing_ids(
+    classes: &HashMap<Pair, Vec<Pair>>,
+    existing: &HashMap<Pair, Option<i64>>,
+    keepers: &HashMap<i64, Pair>,
+) -> HashMap<Pair, BTreeSet<i64>> {
     classes
         .iter()
         .map(|(repr, members)| {
             let owned = members
                 .iter()
                 .filter_map(|p| existing[p])
-                .filter(|id| id_class_count[id] == 1)
+                .filter(|id| keepers.get(id).is_none_or(|keeper| keeper == repr))
                 .collect();
             (repr.clone(), owned)
         })
@@ -729,6 +1055,7 @@ impl UnionFind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::state::LinkVia;
 
     fn p(s: &str) -> Pair {
         ("x".to_string(), s.to_string())
@@ -783,9 +1110,9 @@ mod tests {
         assert_ne!(uf.find(&claimed), uf.find(&b));
     }
 
-    /// A contested existing id (shared by two split classes) is kept by neither;
-    /// an uncontested id is kept; a class spanning two of its own ids keeps the
-    /// min and merges the rest.
+    /// A contested existing id (shared by two split classes) is kept only by
+    /// the class holding the entry's oldest pairs; an uncontested id is kept; a
+    /// class spanning two of its own ids keeps the min and merges the rest.
     #[test]
     fn split_assigns_owned_ids() {
         let mut classes: HashMap<Pair, Vec<Pair>> = HashMap::new();
@@ -805,14 +1132,76 @@ mod tests {
         .into_iter()
         .collect();
 
-        let owned = owned_existing_ids(&classes, &existing);
-        // 534 is contested → neither A nor B may keep it (both get new entries).
+        // B's pair predates A's; "z" is a pair of 534 outside this flush.
+        let run_ids: HashMap<Pair, (i64, Option<i64>)> = [
+            (p("a"), (534, Some(5))),
+            (p("b"), (534, Some(3))),
+            (p("z"), (534, Some(9))),
+        ]
+        .into_iter()
+        .collect();
+
+        let contested = contested_existing_ids(&classes, &existing);
+        assert_eq!(contested.iter().copied().collect::<Vec<_>>(), [534]);
+        let keepers = split_keepers(&classes, &existing, &contested, &run_ids, &HashSet::new());
+        let owned = owned_existing_ids(&classes, &existing, &keepers);
+        // 534 is contested → B, holding its oldest pair, keeps it; A gets a new entry.
         assert!(owned[&p("a")].is_empty());
-        assert!(owned[&p("b")].is_empty());
+        assert_eq!(owned[&p("b")].iter().copied().collect::<Vec<_>>(), [534]);
         // C owns both, sorted min first.
         assert_eq!(
             owned[&p("c")].iter().copied().collect::<Vec<_>>(),
             [700, 701]
+        );
+    }
+
+    /// The earliest run decides before size; an untracked (`None`) run is the
+    /// earliest; equal counts fall back to the larger class, then the smaller
+    /// representative.
+    #[test]
+    fn split_keeper_prefers_oldest_then_largest() {
+        let classes: HashMap<Pair, Vec<Pair>> = [
+            (p("a"), vec![p("a"), p("a2"), p("a3")]),
+            (p("b"), vec![p("b")]),
+        ]
+        .into_iter()
+        .collect();
+        let existing: HashMap<Pair, Option<i64>> = [
+            (p("a"), Some(1)),
+            (p("a2"), Some(1)),
+            (p("a3"), Some(1)),
+            (p("b"), Some(1)),
+        ]
+        .into_iter()
+        .collect();
+        let contested = contested_existing_ids(&classes, &existing);
+        let keeper = |runs: [Option<i64>; 4]| {
+            let run_ids = ["a", "a2", "a3", "b"]
+                .into_iter()
+                .zip(runs)
+                .map(|(s, run)| (p(s), (1, run)))
+                .collect();
+            split_keepers(&classes, &existing, &contested, &run_ids, &HashSet::new())[&1].clone()
+        };
+        // The lone untracked pair outranks three later ones.
+        assert_eq!(keeper([Some(2), Some(2), Some(2), None]), p("b"));
+        // Same run everywhere: the larger class keeps the id.
+        assert_eq!(keeper([Some(2), Some(2), Some(2), Some(2)]), p("a"));
+        // One oldest pair each, same size otherwise: the larger class still wins.
+        assert_eq!(keeper([Some(1), Some(2), Some(2), Some(1)]), p("a"));
+
+        let tied: HashMap<Pair, Vec<Pair>> = [(p("x"), vec![p("x")]), (p("w"), vec![p("w")])]
+            .into_iter()
+            .collect();
+        let existing: HashMap<Pair, Option<i64>> =
+            [(p("x"), Some(7)), (p("w"), Some(7))].into_iter().collect();
+        let run_ids = [(p("x"), (7, Some(1))), (p("w"), (7, Some(1)))]
+            .into_iter()
+            .collect();
+        let contested = contested_existing_ids(&tied, &existing);
+        assert_eq!(
+            split_keepers(&tied, &existing, &contested, &run_ids, &HashSet::new())[&7],
+            p("w")
         );
     }
 
@@ -881,6 +1270,8 @@ mod tests {
 
     fn track_metadata() -> PairMetadata {
         PairMetadata {
+            image: None,
+            privacy: None,
             entry_type: EntryType::Track,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Track {
@@ -999,11 +1390,7 @@ mod tests {
             {
                 metadata.insert(p(segment), song(work));
                 metadata.insert(p(original), song(work));
-                state
-                    .is_rel
-                    .lock()
-                    .unwrap()
-                    .push((p(segment), stream.clone()));
+                state.push_is_rel(p(segment), stream.clone(), p(segment), LinkVia::Fetch);
                 state.has_rel.lock().unwrap().push(ChildEdge {
                     parent: p(segment),
                     child: p(original),
@@ -1115,11 +1502,12 @@ mod tests {
             .lock()
             .unwrap()
             .insert(new_sibling.clone(), track_metadata());
-        state
-            .is_rel
-            .lock()
-            .unwrap()
-            .push((existing_pair.clone(), new_sibling.clone()));
+        state.push_is_rel(
+            existing_pair.clone(),
+            new_sibling.clone(),
+            existing_pair.clone(),
+            LinkVia::Fetch,
+        );
 
         // Periodic flush: the class {existing_pair, new_sibling} touches the
         // pre-existing entry, so it must be deferred whole.
@@ -1157,6 +1545,8 @@ mod tests {
 
     fn release_metadata() -> PairMetadata {
         PairMetadata {
+            image: None,
+            privacy: None,
             entry_type: EntryType::Release,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Release {
@@ -1180,6 +1570,7 @@ mod tests {
         state.insert_stub(
             child.clone(),
             StubInfo {
+                image: None,
                 entry_type: EntryType::Track,
                 name: Some(name.to_string()),
                 duration_ms: Some(180_000),
@@ -1261,6 +1652,73 @@ mod tests {
         Ok(())
     }
 
+    /// A fetched pair's own image is stored as `fetch`; a stub's image from
+    /// its parent's listing as `listing`, and a later fetch replaces it.
+    #[tokio::test]
+    async fn images_are_stored_with_their_origin() -> anyhow::Result<()> {
+        use crate::providers::types::Image;
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let album = p("album");
+        let track = p("track");
+        let images = |db: &MusicDb| {
+            let db = db.clone();
+            let pairs = vec![album.clone(), track.clone()];
+            async move {
+                let mut rows: Vec<(String, String, bool)> = db
+                    .pair_image_rows(&pairs)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| (r.identifier, r.url, r.fetched))
+                    .collect();
+                rows.sort();
+                rows
+            }
+        };
+
+        let state = State::new();
+        state.insert_metadata(
+            album.clone(),
+            PairMetadata {
+                image: Some(Image::new("cover.jpg", Some(300), Some(300))),
+                ..release_metadata()
+            },
+        );
+        listed_track(&state, &album, &track, "Song");
+        state.insert_stub(
+            track.clone(),
+            StubInfo {
+                image: Some(Image::new("thumb.jpg", None, None)),
+                entry_type: EntryType::Track,
+                name: None,
+                duration_ms: None,
+            },
+        );
+        flush_final(&db, state).await?;
+        assert_eq!(
+            images(&db).await,
+            vec![
+                (album.1.clone(), "cover.jpg".into(), true),
+                (track.1.clone(), "thumb.jpg".into(), false),
+            ]
+        );
+
+        let state = State::new();
+        state.insert_metadata(
+            track.clone(),
+            PairMetadata {
+                image: Some(Image::new("own.jpg", None, None)),
+                ..track_metadata()
+            },
+        );
+        flush_final(&db, state).await?;
+        assert_eq!(
+            images(&db).await[1],
+            (track.1.clone(), "own.jpg".into(), true)
+        );
+        Ok(())
+    }
+
     /// Stub info is recorded when a child is listed, but the edge only once
     /// the whole listing finished, so it can reach a periodic flush first. It
     /// must survive until the flush that writes the pair.
@@ -1274,6 +1732,7 @@ mod tests {
         state.insert_stub(
             track.clone(),
             StubInfo {
+                image: None,
                 entry_type: EntryType::Track,
                 name: Some("Song".to_string()),
                 duration_ms: Some(180_000),
@@ -1328,6 +1787,8 @@ mod tests {
 
     fn artist_metadata() -> PairMetadata {
         PairMetadata {
+            image: None,
+            privacy: None,
             entry_type: EntryType::Artist,
             release_date: None,
             specific_data: crate::providers::types::EntrySpecificData::Artist,
@@ -1362,12 +1823,26 @@ mod tests {
         edges: Vec<ChildEdge>,
         commit: bool,
     ) -> anyhow::Result<()> {
+        run_with_links(db, fetched, edges, vec![], commit).await
+    }
+
+    /// `run`, with `links` as (a, b, stated by, via) `is_rel` events.
+    async fn run_with_links(
+        db: &MusicDb,
+        fetched: Vec<(Pair, PairMetadata)>,
+        edges: Vec<ChildEdge>,
+        links: Vec<(&Pair, &Pair, &Pair, LinkVia)>,
+        commit: bool,
+    ) -> anyhow::Result<()> {
         let state = Arc::new(State::new());
         for (pair, meta) in fetched {
             state.insert_metadata(pair, meta);
         }
         for e in edges {
             state.push_has_rel(e);
+        }
+        for (a, b, by, via) in links {
+            state.push_is_rel(a.clone(), b.clone(), by.clone(), via);
         }
         let run_id = db.start_import_run().await?;
         flush(
@@ -1468,6 +1943,386 @@ mod tests {
         assert_eq!(children_of(&db, &album).await?, vec!["t1"]);
         assert_eq!(credited_on(&db, &t1).await?, vec!["performer"]);
         assert_eq!(children_of(&db, &artist).await?, vec!["album", "t2"]);
+        Ok(())
+    }
+
+    fn named(mut meta: PairMetadata, names: &[(&str, bool)]) -> PairMetadata {
+        meta.aliases = names
+            .iter()
+            .map(|&(name, primary)| crate::providers::types::Alias {
+                name: name.to_string(),
+                source: "x".into(),
+                locale: None,
+                extra: serde_json::Value::Null,
+                primary,
+            })
+            .collect();
+        meta
+    }
+
+    async fn names_of(db: &MusicDb, pair: &Pair) -> anyhow::Result<Vec<(String, bool)>> {
+        let mut out = aliases_of(db, pair).await?;
+        out.sort();
+        Ok(out)
+    }
+
+    /// A re-fetch replaces a pair's aliases at commit, artists included: a
+    /// renamed primary name and a dropped alias disappear, from the search
+    /// index too, and a listing name goes once the pair itself is fetched.
+    /// A rolled-back run, or a fetch reporting no aliases, deletes nothing.
+    #[tokio::test]
+    async fn refetch_replaces_stale_aliases_at_commit() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let (artist, album, t1) = (p("artist"), p("album"), p("t1"));
+        let state = State::new();
+        state.insert_metadata(
+            artist.clone(),
+            named(artist_metadata(), &[("Old Name", true), ("Kept", false)]),
+        );
+        state.push_has_rel(edge(&artist, &album, None));
+        state.insert_stub(
+            album.clone(),
+            StubInfo {
+                entry_type: EntryType::Release,
+                name: Some("Listing Title".into()),
+                duration_ms: None,
+                image: None,
+            },
+        );
+        flush_final(&db, state).await?;
+        assert_eq!(
+            names_of(&db, &album).await?,
+            vec![("Listing Title".to_string(), false)]
+        );
+
+        let refetch = || {
+            vec![
+                (
+                    artist.clone(),
+                    named(artist_metadata(), &[("New Name", true), ("Kept", false)]),
+                ),
+                (
+                    album.clone(),
+                    named(release_metadata(), &[("Album Title", true)]),
+                ),
+                (t1.clone(), track_metadata()),
+            ]
+        };
+        run(&db, refetch(), vec![], false).await?;
+        assert_eq!(names_of(&db, &artist).await?.len(), 2);
+
+        run(&db, refetch(), vec![], true).await?;
+        assert_eq!(
+            names_of(&db, &artist).await?,
+            vec![("Kept".to_string(), false), ("New Name".to_string(), true)]
+        );
+        assert_eq!(
+            names_of(&db, &album).await?,
+            vec![("Album Title".to_string(), true)]
+        );
+        assert!(
+            db.search_entry_ids_by_alias("Old Name", 10)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            db.search_entry_ids_by_alias("Listing", 10)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(db.search_entry_ids_by_alias("New Name", 10).await?.len(), 1);
+
+        run(&db, vec![(artist.clone(), artist_metadata())], vec![], true).await?;
+        assert_eq!(names_of(&db, &artist).await?.len(), 2);
+        Ok(())
+    }
+
+    /// A pair the provider reports deleted is marked at commit, keeping its
+    /// data, and unmarked by its next successful fetch. A rolled-back run
+    /// marks nothing.
+    #[tokio::test]
+    async fn not_found_marks_pair_gone_until_refetched() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let t1 = p("t1");
+        run(&db, vec![(t1.clone(), track_metadata())], vec![], true).await?;
+        async fn gone_at(db: &MusicDb) -> anyhow::Result<Option<i64>> {
+            let id = db.find_entry_id_by_pair("x", "t1").await?.unwrap();
+            Ok(db.source_rows_by_entry_ids(&[id]).await?[0].gone_at)
+        }
+
+        for commit in [false, true] {
+            let state = Arc::new(State::new());
+            state.note_gone(t1.clone());
+            let run_id = db.start_import_run().await?;
+            flush(
+                Arc::clone(&state),
+                &[],
+                &db,
+                &DedupConfig::default(),
+                Some(run_id),
+                true,
+            )
+            .await?;
+            if commit {
+                db.commit_import_run(run_id, &state.take_replacements())
+                    .await?;
+            } else {
+                db.rollback_import_run(run_id).await?;
+            }
+            assert_eq!(gone_at(&db).await?.is_some(), commit);
+        }
+        assert!(db.find_entry_id_by_pair(&t1.0, &t1.1).await?.is_some());
+
+        run(&db, vec![(t1.clone(), track_metadata())], vec![], true).await?;
+        assert_eq!(gone_at(&db).await?, None);
+        Ok(())
+    }
+
+    async fn provider_relations(db: &MusicDb) -> anyhow::Result<Vec<String>> {
+        let mut out: Vec<String> = db
+            .all_relations()
+            .await?
+            .into_iter()
+            .filter(|r| r.origin == PROVIDER_ORIGIN)
+            .map(|r| r.kind)
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    /// A cover relation goes at commit once a re-fetch of the cover no
+    /// longer links it to the original; a rolled-back run keeps it, and the
+    /// remix's relation to the same original is untouched.
+    #[tokio::test]
+    async fn refetch_drops_provider_relation_without_edge() -> anyhow::Result<()> {
+        let db = MusicDb::new("sqlite::memory:").await?;
+        let (original, cover, remix) = (p("original"), p("cover"), p("remix"));
+        let derived = |from: &Pair, kind: &str| {
+            let mut e = edge(from, &original, None);
+            e.original_relation_kind = Some(kind.to_string());
+            e
+        };
+        let tracks = |pairs: &[&Pair]| {
+            pairs
+                .iter()
+                .map(|&p| (p.clone(), track_metadata()))
+                .collect::<Vec<_>>()
+        };
+        run(
+            &db,
+            tracks(&[&original, &cover, &remix]),
+            vec![derived(&cover, "cover"), derived(&remix, "remix")],
+            true,
+        )
+        .await?;
+        assert_eq!(provider_relations(&db).await?, vec!["cover", "remix"]);
+
+        run(&db, tracks(&[&cover]), vec![], false).await?;
+        assert_eq!(provider_relations(&db).await?, vec!["cover", "remix"]);
+
+        run(&db, tracks(&[&cover]), vec![], true).await?;
+        assert_eq!(provider_relations(&db).await?, vec!["remix"]);
+        Ok(())
+    }
+
+    async fn entry_of(db: &MusicDb, pair: &Pair) -> anyhow::Result<i64> {
+        Ok(db.find_entry_id_by_pair(&pair.0, &pair.1).await?.unwrap())
+    }
+
+    async fn stored_links(db: &MusicDb, pairs: &[&Pair]) -> anyhow::Result<usize> {
+        let pairs: Vec<Pair> = pairs.iter().map(|&p| p.clone()).collect();
+        Ok(db.links_among(&pairs).await?.len())
+    }
+
+    /// Recording R wrongly links Spotify track S, merging them. Once R's
+    /// re-fetch stops stating the link it is deleted, but the entry only
+    /// splits with `LINKS_COMPLETE` set, and only when nothing else
+    /// (here, album A's listing) still states it. The split-off pair keeps
+    /// the entry's type.
+    #[tokio::test]
+    async fn retracted_link_splits_entry_only_when_enabled() -> anyhow::Result<()> {
+        use LinkVia::{Fetch, Listing};
+        let (r, s, album) = (p("r"), p("s"), p("album"));
+        async fn merged(db: &MusicDb) -> anyhow::Result<bool> {
+            Ok(entry_of(db, &p("r")).await? == entry_of(db, &p("s")).await?)
+        }
+        for enabled in [false, true] {
+            let db = MusicDb::new("sqlite::memory:").await?;
+            // A new DB starts complete; one with unrecorded links doesn't.
+            db.set_setting(
+                crate::musicdb::LINKS_COMPLETE,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+            run_with_links(
+                &db,
+                vec![(r.clone(), track_metadata())],
+                vec![],
+                vec![(&r, &s, &r, Fetch)],
+                true,
+            )
+            .await?;
+            assert!(merged(&db).await?);
+            assert_eq!(stored_links(&db, &[&r, &s]).await?, 1);
+
+            run(&db, vec![(r.clone(), track_metadata())], vec![], true).await?;
+            assert_eq!(stored_links(&db, &[&r, &s]).await?, 0);
+            assert_eq!(merged(&db).await?, !enabled);
+            if enabled {
+                let rows = db.entry_rows_by_ids(&[entry_of(&db, &s).await?]).await?;
+                assert_eq!(rows[0].entry_type, "track");
+            }
+        }
+
+        // Still stated by another asserter: no split.
+        let db = MusicDb::new("sqlite::memory:").await?;
+        db.set_setting(crate::musicdb::LINKS_COMPLETE, "1").await?;
+        run_with_links(
+            &db,
+            vec![
+                (r.clone(), track_metadata()),
+                (album.clone(), release_metadata()),
+            ],
+            vec![edge(&album, &r, None)],
+            vec![(&r, &s, &r, Fetch), (&r, &s, &album, Listing)],
+            true,
+        )
+        .await?;
+        run(&db, vec![(r.clone(), track_metadata())], vec![], true).await?;
+        assert!(merged(&db).await?);
+        assert_eq!(stored_links(&db, &[&r, &s]).await?, 1);
+        Ok(())
+    }
+
+    /// A pair found deleted upstream states no links, so a split leaves it
+    /// with the entry's largest group instead of on its own.
+    #[tokio::test]
+    async fn split_keeps_gone_pair_with_largest_group() -> anyhow::Result<()> {
+        use LinkVia::Fetch;
+        let (r, s, i, old) = (p("r"), p("s"), p("i"), p("old"));
+        let db = MusicDb::new("sqlite::memory:").await?;
+        db.set_setting(crate::musicdb::LINKS_COMPLETE, "1").await?;
+        // r states i, s and `old`, all one entry.
+        run_with_links(
+            &db,
+            vec![
+                (r.clone(), track_metadata()),
+                (old.clone(), track_metadata()),
+            ],
+            vec![],
+            vec![
+                (&r, &i, &r, Fetch),
+                (&r, &s, &r, Fetch),
+                (&r, &old, &r, Fetch),
+            ],
+            true,
+        )
+        .await?;
+        let state = Arc::new(State::new());
+        state.note_gone(old.clone());
+        let run_id = db.start_import_run().await?;
+        flush(
+            Arc::clone(&state),
+            &[],
+            &db,
+            &DedupConfig::default(),
+            Some(run_id),
+            true,
+        )
+        .await?;
+        db.commit_import_run(run_id, &state.take_replacements())
+            .await?;
+
+        // r drops s and `old` (merged away upstream); `old` is gone, so it
+        // stays while s splits off.
+        run_with_links(
+            &db,
+            vec![(r.clone(), track_metadata())],
+            vec![],
+            vec![(&r, &i, &r, Fetch)],
+            true,
+        )
+        .await?;
+        let entry = entry_of(&db, &r).await?;
+        assert_eq!(entry_of(&db, &i).await?, entry);
+        assert_ne!(entry_of(&db, &s).await?, entry);
+        assert_eq!(entry_of(&db, &old).await?, entry);
+        Ok(())
+    }
+
+    /// Recordings `orig` and `club` are barrier anchors in entries of their
+    /// own, each with a Spotify track. A later flush that only sees the two
+    /// Spotify tracks linked (a shared ISRC) must not merge the entries:
+    /// that would carry both anchors, never in the flush, into one.
+    #[tokio::test]
+    async fn barrier_holds_for_anchor_pairs_outside_the_flush() -> anyhow::Result<()> {
+        use LinkVia::Fetch;
+        let config: DedupConfig = serde_yaml_ng::from_str(
+            "groups:
+  - name: g
+    anchors:
+      orig: { members: ['x:orig'] }
+      club: { members: ['x:club'] }",
+        )?;
+        let (orig, club, s1, s2) = (p("orig"), p("club"), p("s1"), p("s2"));
+        let db = MusicDb::new("sqlite::memory:").await?;
+        for (anchor, track) in [(&orig, &s1), (&club, &s2)] {
+            let state = State::new();
+            state.insert_metadata(anchor.clone(), track_metadata());
+            state.push_is_rel(anchor.clone(), track.clone(), anchor.clone(), Fetch);
+            flush(Arc::new(state), &[], &db, &config, None, true).await?;
+        }
+        assert_ne!(entry_of(&db, &orig).await?, entry_of(&db, &club).await?);
+
+        let state = State::new();
+        state.insert_metadata(s1.clone(), track_metadata());
+        state.push_is_rel(s1.clone(), s2.clone(), s1.clone(), Fetch);
+        flush(Arc::new(state), &[], &db, &config, None, true).await?;
+        assert_ne!(entry_of(&db, &orig).await?, entry_of(&db, &club).await?);
+        Ok(())
+    }
+
+    /// An ISRC `bridge` both anchors list: with links recorded, the anchor
+    /// that reaches it takes only the bridge, and the club mix's own Spotify
+    /// track (linked to the club mix, not the bridge) stays put. A stub that
+    /// nothing inside the entry links to stays too.
+    #[tokio::test]
+    async fn barrier_entry_regroups_by_links() -> anyhow::Result<()> {
+        use LinkVia::Fetch;
+        let config: DedupConfig = serde_yaml_ng::from_str(
+            "groups:
+  - name: g
+    anchors:
+      orig: { members: ['x:orig'] }
+      club: { members: ['x:club'] }",
+        )?;
+        let (orig, club, bridge, track, leftover) =
+            (p("orig"), p("club"), p("bridge"), p("track"), p("leftover"));
+        let db = MusicDb::new("sqlite::memory:").await?;
+        db.set_setting(crate::musicdb::LINKS_COMPLETE, "1").await?;
+        let state = State::new();
+        state.insert_metadata(club.clone(), track_metadata());
+        state.insert_metadata(track.clone(), track_metadata());
+        for (a, b) in [(&club, &bridge), (&club, &track), (&bridge, &leftover)] {
+            state.push_is_rel(a.clone(), b.clone(), a.clone(), Fetch);
+        }
+        flush(Arc::new(state), &[], &db, &config, None, true).await?;
+        // `leftover` was linked only through the bridge, by a pair outside.
+        db.delete_links(&[LinkRow {
+            link: link_key(&bridge, &leftover),
+            asserted_by: bridge.clone(),
+            via: crate::musicdb::LINK_VIA_FETCH,
+        }])
+        .await?;
+
+        let state = State::new();
+        state.insert_metadata(orig.clone(), track_metadata());
+        state.push_is_rel(orig.clone(), bridge.clone(), orig.clone(), Fetch);
+        flush(Arc::new(state), &[], &db, &config, None, true).await?;
+        let club_entry = entry_of(&db, &club).await?;
+        assert_ne!(entry_of(&db, &orig).await?, club_entry);
+        assert_eq!(entry_of(&db, &track).await?, club_entry);
+        assert_eq!(entry_of(&db, &leftover).await?, club_entry);
         Ok(())
     }
 }

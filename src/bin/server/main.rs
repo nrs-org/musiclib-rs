@@ -6,24 +6,63 @@
 //!   entry type — this is what an `nrs-app` talks to.
 //! - `player`: musiclib-rs's own read-only library/playback API plus a
 //!   minimal static frontend — docs/plan-video-player.md Phase 1/2.
+//! - `nrs` (needs `player`): the player's optional NRS extension — scores
+//!   for the shuffle mix, the now-playing scoring drawer, and listening
+//!   time exported to NRS (docs/plan-listen-and-score.md). Without it, or
+//!   with no NRS app running, the player works the same minus those.
 //!
 //! Both share one `MusicDb` connection so exactly one process owns writes to
 //! `musiclib.db`; hand-rolled hyper (no framework), matching the existing
 //! `src/bin/ytdlp_server.rs`.
 
+// Handlers return a ready `HyperResponse` as their error type; boxing the
+// body (for SSE, see `respond::HyperResponse`) pushed it past clippy's size
+// threshold, and these are one-per-request values, not hot-path ones.
+#![allow(clippy::result_large_err)]
+
+mod cover;
+mod discography;
+#[cfg(all(feature = "discord_presence", unix))]
+mod discord_presence;
 mod entries;
 mod fetch_options;
+#[cfg(feature = "player")]
+mod find_source;
 mod ingest_progress;
 mod jobs;
 #[cfg(feature = "player")]
+mod lastfm;
+#[cfg(feature = "player")]
+mod lastfm_metadata;
+mod local_reload;
+#[cfg(feature = "media_controls")]
+mod media_controls;
+#[cfg(feature = "nrs")]
+mod nrs_bridge;
+#[cfg(feature = "nrs")]
+mod nrs_pool;
+#[cfg(feature = "player")]
+mod playback;
+#[cfg(feature = "player")]
 mod player;
+#[cfg(feature = "player")]
+mod playlists;
+#[cfg(feature = "player")]
+mod plays;
+#[cfg(feature = "player")]
+mod preferences;
+#[cfg(feature = "player")]
+mod privacy;
 mod respond;
+#[cfg(feature = "player")]
+mod spotify_auth;
 mod state;
 #[cfg(feature = "store_protocol")]
 mod store_protocol;
+#[cfg(feature = "player")]
+mod unmerge;
 
 use std::{
-    ffi::OsStr,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicU64},
@@ -38,11 +77,7 @@ use musiclib_rs::{
     app_dirs,
     http::HttpClientConfig,
     musicdb::MusicDb,
-    pipeline::{
-        dedup::{DedupConfig, merge_configs},
-        progress::HttpActivityClient,
-        softmatch::default_soft_match_config,
-    },
+    pipeline::{progress::HttpActivityClient, softmatch::default_soft_match_config},
     providers::{
         fetch_options_yaml::load_from_file,
         registry::{RegistryConfig, build_providers},
@@ -59,7 +94,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// Music library database. Defaults to <state_dir>/musiclib.db.
+    /// Music library database. Defaults to <data_dir>/musiclib.db.
     #[arg(long)]
     db: Option<String>,
     /// Provider credentials config. Defaults to <config_dir>/providers.yaml.
@@ -68,10 +103,6 @@ struct Args {
     /// HTTP client config. Defaults to <config_dir>/http.yaml.
     #[arg(long)]
     http_config: Option<String>,
-    /// Barrier config file(s). Repeatable; overrides auto-loading from
-    /// <config_dir>/dedup_barriers/*.yaml.
-    #[arg(long)]
-    dedup_config: Vec<String>,
     /// Fetch-options YAML used by the store-protocol `ingest` job. A bare
     /// filename resolves relative to <config_dir>/fetch_options/. Defaults to
     /// a single level deep, matching the `import` CLI's fallback.
@@ -80,6 +111,31 @@ struct Args {
     /// Listen address.
     #[arg(long, default_value = "127.0.0.1:4600")]
     listen: String,
+    /// NRS app the player's NRS extension talks to. Defaults to
+    /// `$NRS_APP_URL`, then http://127.0.0.1:3737. Nothing waits on it: the
+    /// player works without it running.
+    #[cfg(feature = "nrs")]
+    #[arg(long)]
+    nrs_url: Option<String>,
+    /// Where browsers reach the NRS app, for the player's "Open in NRS"
+    /// links — e.g. a tailnet HTTPS name when `--nrs-url` is loopback.
+    /// Defaults to `$NRS_APP_PUBLIC_URL`, then the NRS URL itself.
+    #[cfg(feature = "nrs")]
+    #[arg(long)]
+    nrs_public_url: Option<String>,
+    /// Don't publish the player session to the OS media controls (MPRIS),
+    /// e.g. for a second server on the same desktop.
+    #[cfg(feature = "media_controls")]
+    #[arg(long)]
+    no_media_controls: bool,
+    /// Discord application whose Rich Presence shows the session's track
+    /// (the application's name heads the card). Defaults to
+    /// `$DISCORD_CLIENT_ID`; with neither, no presence.
+    #[cfg(feature = "discord_presence")]
+    #[arg(long)]
+    discord_client_id: Option<String>,
+    #[command(flatten)]
+    dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 async fn load_config<T: Default + serde::de::DeserializeOwned>(
@@ -95,20 +151,6 @@ async fn load_config<T: Default + serde::de::DeserializeOwned>(
         .await
         .with_context(|| format!("reading {}", path.display()))?;
     Ok(serde_yaml_ng::from_str(&text)?)
-}
-
-fn yaml_paths_in_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == OsStr::new("yaml")))
-        .collect();
-    paths.sort();
-    Ok(paths)
 }
 
 fn resolve_fetch_options(s: &str) -> PathBuf {
@@ -129,6 +171,26 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
     #[cfg(feature = "store_protocol")]
     if store_protocol::handles(&path) {
         return Ok(store_protocol::route(&state, &method, &path, &query, body).await);
+    }
+    #[cfg(feature = "nrs")]
+    if nrs_bridge::handles(&path) {
+        return Ok(nrs_bridge::route(&state, &method, &path, &query, body).await);
+    }
+    #[cfg(feature = "player")]
+    if lastfm::handles(&path) {
+        return Ok(lastfm::route(&state, &method, &path, body).await);
+    }
+    #[cfg(feature = "player")]
+    if spotify_auth::handles(&path) {
+        return Ok(spotify_auth::route(&state, &method, &path, body).await);
+    }
+    #[cfg(feature = "player")]
+    if playlists::handles(&path) {
+        return Ok(playlists::route(&state, &method, &path, body).await);
+    }
+    #[cfg(feature = "player")]
+    if plays::handles(&path) {
+        return Ok(plays::route(&state, &method, &path, &query, body).await);
     }
     #[cfg(feature = "player")]
     if player::handles(&path) {
@@ -163,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    args.dirs.apply();
     let config_dir = app_dirs::config_dir();
 
     let registry_config: RegistryConfig = load_config(
@@ -170,21 +233,6 @@ async fn main() -> anyhow::Result<()> {
         &config_dir.join("providers.yaml"),
     )
     .await?;
-
-    let dedup_paths: Vec<PathBuf> = if args.dedup_config.is_empty() {
-        yaml_paths_in_dir(&config_dir.join("dedup_barriers"))?
-    } else {
-        args.dedup_config.iter().map(PathBuf::from).collect()
-    };
-    let mut dedup_configs: Vec<(String, DedupConfig)> = Vec::new();
-    for path in &dedup_paths {
-        let text = tokio::fs::read_to_string(path)
-            .await
-            .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: DedupConfig = serde_yaml_ng::from_str(&text)?;
-        dedup_configs.push((path.display().to_string(), cfg));
-    }
-    let merged_dedup = merge_configs(&dedup_configs);
 
     let mut http_config: HttpClientConfig =
         load_config(args.http_config.as_deref(), &config_dir.join("http.yaml")).await?;
@@ -232,17 +280,42 @@ async fn main() -> anyhow::Result<()> {
         info!("No <config_dir>/match.rhai; online soft-dedup disabled for ingest jobs");
     }
 
+    #[cfg(feature = "nrs")]
+    let nrs_url = args
+        .nrs_url
+        .or_else(|| std::env::var("NRS_APP_URL").ok())
+        .unwrap_or_else(|| "http://127.0.0.1:3737".to_owned());
+    #[cfg(feature = "nrs")]
+    let nrs_public_url = args
+        .nrs_public_url
+        .or_else(|| std::env::var("NRS_APP_PUBLIC_URL").ok())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| nrs_url.clone());
+
     let state = Arc::new(AppState {
         db,
         providers,
         pool,
         root_id,
-        dedup_configs,
-        merged_dedup,
         soft_cfg,
         jobs: JobManager::new(),
         activity,
         youtube_quota,
+        #[cfg(feature = "nrs")]
+        nrs_url,
+        #[cfg(feature = "nrs")]
+        nrs_public_url,
+        #[cfg(feature = "nrs")]
+        nrs_pool: Default::default(),
+        // Next to the DB, so a `--db` scratch library gets its own session.
+        #[cfg(feature = "player")]
+        playback: playback::PlaybackHub::load(db_path.with_file_name("playback.json")),
+        #[cfg(feature = "player")]
+        spotify: spotify_auth::SpotifyAuth::load(db_path.with_file_name("spotify.json")),
+        #[cfg(feature = "player")]
+        lastfm: lastfm::LastFm::load(db_path.with_file_name("lastfm.json")),
+        #[cfg(feature = "nrs")]
+        nrs_bridge: Default::default(),
     });
 
     let addr: SocketAddr = args.listen.parse()?;
@@ -252,8 +325,51 @@ async fn main() -> anyhow::Result<()> {
     info!("store protocol mounted at /nrs-store/v1");
     #[cfg(feature = "player")]
     info!("player API mounted at /api (frontend at /)");
+    #[cfg(feature = "nrs")]
+    info!(
+        "NRS extension mounted at /api/nrs (NRS app: {})",
+        state.nrs_url
+    );
 
     let local = tokio::task::LocalSet::new();
+    if let Some(config) = &registry_config.local {
+        let base_dir = config.base_dir.clone().unwrap_or(std::env::current_dir()?);
+        local.spawn_local(local_reload::run(state.db.clone(), base_dir));
+    }
+    #[cfg(feature = "player")]
+    local.spawn_local(lastfm::run(Arc::clone(&state)));
+    #[cfg(feature = "player")]
+    local.spawn_local(Arc::clone(&state.playback).persist_loop());
+    #[cfg(feature = "player")]
+    local.spawn_local(Arc::clone(&state.playback).artist_loop(state.db.clone()));
+    #[cfg(feature = "media_controls")]
+    if !args.no_media_controls {
+        local.spawn_local(media_controls::run(
+            Arc::clone(&state.playback),
+            state.db.clone(),
+        ));
+    }
+    #[cfg(feature = "discord_presence")]
+    if let Some(id) = args
+        .discord_client_id
+        .clone()
+        .or_else(|| std::env::var("DISCORD_CLIENT_ID").ok())
+        .filter(|id| !id.is_empty())
+    {
+        #[cfg(unix)]
+        local.spawn_local(discord_presence::run(
+            Arc::clone(&state.playback),
+            state.db.clone(),
+            id,
+        ));
+        #[cfg(not(unix))]
+        {
+            drop(id);
+            tracing::info!("Discord presence isn't available on this platform yet");
+        }
+    }
+    #[cfg(feature = "nrs")]
+    local.spawn_local(nrs_bridge::export_listening_loop(Arc::clone(&state)));
     local
         .run_until(async move {
             loop {

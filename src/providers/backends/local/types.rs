@@ -67,3 +67,19 @@ pub struct LocalContribution {
     #[serde(default)]
     pub main_artist: bool,
 }
+
+/// `<namespace>/namespace.yaml`: settings for every entry in a namespace.
+/// The file is optional; without it every field takes its default.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamespaceConfig {
+    /// Whether soft-dedup may link this namespace's entries to other
+    /// entries. Set `false` when the entry files already author each entry's
+    /// identity and originals.
+    #[serde(default = "default_true")]
+    pub soft_match: bool,
+}
+
+fn default_true() -> bool {
+    true
+}

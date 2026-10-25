@@ -7,7 +7,7 @@ use crate::providers::{
         SOURCE,
         canonicalize::{album_url, artist_url, match_artist_url},
         client::SpotifyClient,
-        types::{EXTERNAL_TYPE_ALBUM, Image, Paging},
+        types::{EXTERNAL_TYPE_ALBUM, Image, Paging, pick_image},
     },
     listing::{ListingKey, ListingOrder, listing_source},
     types::{
@@ -43,6 +43,8 @@ pub struct SimplifiedAlbum {
     /// `/artists/{id}/albums`: "album", "single", "compilation" or "appears_on".
     #[serde(default)]
     pub album_group: Option<String>,
+    #[serde(default)]
+    pub images: Vec<Image>,
 }
 
 // --- Constants ---
@@ -96,6 +98,7 @@ impl PageFetcher for ArtistAlbumsPageFetcher {
                 external_type: EXTERNAL_TYPE_ALBUM.into(),
                 sources: [(SOURCE.into(), HashSet::from([album_url(&album.id)]))].into(),
                 appears_on: album.album_group.as_deref() == Some("appears_on"),
+                image: pick_image(&album.images),
                 name: Some(album.name),
                 ..Default::default()
             })
@@ -183,6 +186,8 @@ pub async fn get_artist(client: &SpotifyClient, url: &str) -> Result<EntityResul
         .with_static_eval(album_eval);
 
         let result = Ok(EntityResult {
+            privacy: None,
+            image: pick_image(&a.images),
             release_date: None,
             sources: [(SOURCE.into(), HashSet::from([canonical]))].into(),
             extra: a.extra.clone(),
@@ -263,6 +268,10 @@ mod tests {
         assert!(matches!(artist.specific_data, EntrySpecificData::Artist));
         assert_eq!(artist.aliases.len(), 1);
         assert_eq!(artist.aliases[0].name, "角巻わため");
+        assert_eq!(
+            artist.image.as_ref().map(|i| i.url.as_str()),
+            Some("https://i.scdn.co/image/ab6761610000517418e9b4ec414a2d78bd25270a")
+        );
         assert!(artist.aliases[0].primary);
         assert_eq!(
             artist.sources.get(SOURCE).unwrap(),

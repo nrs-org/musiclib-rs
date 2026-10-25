@@ -19,8 +19,9 @@ use crate::pipeline::embedding::{
 
 use crate::http::{HeaderName, HeaderValue, HttpClient, Method, Request as HttpRequest};
 use crate::musicdb::{
-    AliasRow, ChildRow, ContribRow, EDITION_KINDS, IdentityJudgment, MusicDb, NewDedupFeedback,
-    PROVIDER_ORIGIN, RelationRow, SoftIdentityProjection, SourceRow, merge_songs,
+    AliasRow, ChildRow, ContribRow, DIFFERENT_SONG, EDITION_KINDS, EditionProjection,
+    IdentityJudgment, MusicDb, NewDedupFeedback, PROVIDER_ORIGIN, RelationRow,
+    SoftIdentityProjection, SourceRow, extra_derivations, merge_songs,
 };
 use crate::pipeline::dedup::DedupConfig;
 use crate::providers::FetchProvider;
@@ -1347,6 +1348,32 @@ impl ChannelMask {
 
 type CandidateChannels = HashMap<(i64, i64), ChannelMask>;
 
+/// Every provider's soft-dedup exclusions (see
+/// `FetchProvider::soft_match_exclusions`).
+fn soft_match_exclusions(providers: &[Arc<dyn FetchProvider>]) -> Vec<(String, String)> {
+    let exclusions: Vec<(String, String)> = providers
+        .iter()
+        .flat_map(|provider| provider.soft_match_exclusions())
+        .collect();
+    if !exclusions.is_empty() {
+        let names: Vec<String> = exclusions
+            .iter()
+            .map(|(source, prefix)| format!("{source}:{prefix}"))
+            .collect();
+        info!("Soft-dedup skips entries under {}", names.join(", "));
+    }
+    exclusions
+}
+
+/// Whether `entry` has a source under one of `exclusions`.
+fn is_excluded(entry: &EntryInfo, exclusions: &[(String, String)]) -> bool {
+    entry.pairs.iter().any(|(source, identifier)| {
+        exclusions
+            .iter()
+            .any(|(excluded, prefix)| source == excluded && identifier.starts_with(prefix.as_str()))
+    })
+}
+
 fn candidate_pair(a: i64, b: i64) -> (i64, i64) {
     (a.min(b), a.max(b))
 }
@@ -2493,6 +2520,10 @@ pub(crate) struct KnownRelations {
     originals: HashMap<i64, BTreeSet<i64>>,
     /// The inverse: original → its derivatives.
     derivatives: HashMap<i64, BTreeSet<i64>>,
+    /// Songs (edition groups) over `identity`, `different_song` blocks
+    /// included. `score_candidates` grows a copy (`song_groups`) as it
+    /// writes.
+    editions: EditionProjection,
 }
 
 impl KnownRelations {
@@ -2504,17 +2535,19 @@ impl KnownRelations {
                 "soft identity graph contains conflicting assertions; cannot-link edges won"
             );
         }
-        let rows = db.edition_relations().await?;
+        let rows = db.song_relations().await?;
         Ok(Self::build(identity, rows))
     }
 
     fn build(identity: SoftIdentityProjection, rows: Vec<RelationRow>) -> Self {
         let mut known = Self {
+            editions: EditionProjection::build(&identity, rows.iter().cloned()),
             identity,
             ..Self::default()
         };
         for row in rows {
-            if !row.enabled {
+            // A person said these are different songs: nothing to rescore.
+            if !row.enabled || row.kind == DIFFERENT_SONG {
                 known
                     .rejected
                     .insert(candidate_pair(row.entry_a, row.entry_b));
@@ -2532,26 +2565,31 @@ impl KnownRelations {
                 .extra
                 .as_deref()
                 .and_then(|raw| serde_json::from_str(raw).ok());
-            let id = |key: &str| extra.as_ref()?.get(key)?.as_i64();
-            let (Some(derived), Some(original)) = (id("derived_entry"), id("source_entry")) else {
-                continue;
-            };
-            let (derived, original) = (known.canon(derived), known.canon(original));
-            if derived == original {
-                continue;
+            let derivations = extra.as_ref().map(extra_derivations).unwrap_or_default();
+            for (derived, original) in derivations {
+                let (derived, original) = (known.canon(derived), known.canon(original));
+                if derived == original {
+                    continue;
+                }
+                known.originals.entry(derived).or_default().insert(original);
+                known
+                    .derivatives
+                    .entry(original)
+                    .or_default()
+                    .insert(derived);
             }
-            known.originals.entry(derived).or_default().insert(original);
-            known
-                .derivatives
-                .entry(original)
-                .or_default()
-                .insert(derived);
         }
         known
     }
 
     fn canon(&self, entry_id: i64) -> i64 {
         self.identity.component_of(entry_id).unwrap_or(entry_id)
+    }
+
+    /// `entry_id` is the original of its song.
+    fn is_original(&self, entry_id: i64) -> bool {
+        let canonical = self.canon(entry_id);
+        self.editions.original_of(canonical) == Some(canonical)
     }
 
     /// An edition relation already links the pair's identities, or the user
@@ -2608,6 +2646,7 @@ async fn score_candidates(
     ctx: &ScriptCtx<'_>,
     known: &KnownRelations,
     barrier: &HashMap<Pair, crate::pipeline::dedup::AnchorId>,
+    exclusions: &[(String, String)],
     config: &SoftMatchConfig,
     embed_cache: Option<&EmbeddingCache>,
     precomputed: Option<CandidateChannels>,
@@ -2696,12 +2735,19 @@ async fn score_candidates(
     };
     let mut to_score: Vec<(Arc<EntryInfo>, Arc<EntryInfo>, Option<ChannelMask>)> = Vec::new();
     let (mut soft_same, mut related, mut soft_different, mut barred) = (0usize, 0, 0, 0);
+    let mut excluded = 0usize;
     while let Some((id_a, id_b)) = work_queue.pop_front() {
         let (ea, eb) = match (share(id_a), share(id_b)) {
             (Some(a), Some(b)) => (a, b),
             _ => continue,
         };
 
+        // Excluded entries (e.g. a local namespace with `soft_match: false`)
+        // are authored: their files define identity and originals.
+        if is_excluded(&ea, exclusions) || is_excluded(&eb, exclusions) {
+            excluded += 1;
+            continue;
+        }
         if soft_identity.are_same(id_a, id_b) {
             soft_same += 1;
             continue;
@@ -2725,8 +2771,8 @@ async fn score_candidates(
     info!(
         "Skipped {} candidate pair(s) before scoring: {soft_same} already linked, \
          {related} already related, {soft_different} marked different, \
-         {barred} behind a dedup barrier",
-        soft_same + related + soft_different + barred
+         {barred} behind a dedup barrier, {excluded} excluded from soft-dedup",
+        soft_same + related + soft_different + barred + excluded
     );
 
     let total_scored = to_score.len();
@@ -2737,8 +2783,49 @@ async fn score_candidates(
     let mut verdicts = script_verdicts(ctx, &to_score);
     refine_verdicts(ctx, &to_score, &mut verdicts);
 
-    for ((ea, eb, channels), scored) in to_score.iter().zip(verdicts) {
-        let verdict = apply_candidate(db, ea, eb, channels.as_ref(), scored?, config).await?;
+    // Apply identity merges first, then edition verdicts that involve a
+    // song's original, strongest first: a new version then joins its song
+    // through the original, and a later verdict pairing it with another
+    // version of the same song only repeats that connection and is skipped
+    // (a song needs one edge per version, not one per pair of versions).
+    let mut decided: Vec<_> = to_score.iter().zip(verdicts).collect();
+    decided.sort_by_cached_key(|((ea, eb, _), scored)| {
+        let (rank, confidence) = match scored.as_ref().map(|s| &s.verdict) {
+            Ok(Verdict::Merge { confidence, .. }) => (0, *confidence),
+            Ok(Verdict::Relate {
+                kind, confidence, ..
+            }) if EDITION_KINDS.contains(&kind.as_str()) => {
+                let original = known.is_original(ea.entry_id) || known.is_original(eb.entry_id);
+                (if original { 1 } else { 2 }, *confidence)
+            }
+            _ => (3, 0.0),
+        };
+        (rank, std::cmp::Reverse((confidence * 1e6) as i64))
+    });
+    let mut songs = known.editions.song_groups();
+    let (mut repeated, mut blocked) = (0usize, 0usize);
+    for ((ea, eb, channels), scored) in decided {
+        let scored = scored?;
+        let (a, b) = (known.canon(ea.entry_id), known.canon(eb.entry_id));
+        let edition = matches!(&scored.verdict,
+            Verdict::Relate { kind, .. } if EDITION_KINDS.contains(&kind.as_str()));
+        if edition && songs.same(a, b) {
+            repeated += 1;
+            continue;
+        }
+        if edition && songs.blocker(a, b).is_some() {
+            blocked += 1;
+            continue;
+        }
+        let verdict = apply_candidate(db, ea, eb, channels.as_ref(), scored, config).await?;
+        if matches!(&verdict, Verdict::Merge { .. })
+            || matches!(&verdict,
+                Verdict::Relate { kind, .. } if EDITION_KINDS.contains(&kind.as_str()))
+        {
+            // A merge joins the two songs too; a blocked one is still a
+            // merge (identity wins), so the error is moot.
+            let _ = songs.join(a, b);
+        }
 
         let counters = stats.entry(ea.entry_type.clone()).or_insert([0; 4]);
         match &verdict {
@@ -2749,7 +2836,10 @@ async fn score_candidates(
         }
     }
 
-    info!("Scored {total_scored} candidate pair(s)");
+    info!(
+        "Scored {total_scored} candidate pair(s); skipped {repeated} edition edge(s) inside \
+         one song and {blocked} across a different-song block"
+    );
     Ok(stats)
 }
 
@@ -3014,6 +3104,7 @@ pub async fn match_db(
         &ctx,
         &known,
         &barrier,
+        &soft_match_exclusions(providers),
         config,
         embed_cache.as_deref(),
         None,
@@ -3030,6 +3121,14 @@ pub async fn match_db(
     println!("  script load  : {t_script:.2?}");
     println!("  scoring      : {t_score:.2?}");
     println!("  total        : {t_total:.2?}");
+    print_summary(&stats, config);
+
+    Ok(())
+}
+
+/// Prints the per-type `[merge, relate, distinct, defer]` counts a scan
+/// returned, and whether its decisions were written.
+pub fn print_summary(stats: &HashMap<String, [usize; 4]>, config: &SoftMatchConfig) {
     println!("=== Summary ===");
     for t in ["track", "release", "release_group", "artist"] {
         if let Some(c) = stats.get(t) {
@@ -3044,8 +3143,6 @@ pub async fn match_db(
     } else {
         info!("Dry-run complete. Pass --apply to write decisions to the DB.");
     }
-
-    Ok(())
 }
 
 /// Incremental scan: only compare pairs involving one of `new_entry_ids`.
@@ -3064,8 +3161,23 @@ pub async fn match_new_entries(
     providers: &[Arc<dyn FetchProvider>],
     config: &SoftMatchConfig,
 ) -> anyhow::Result<()> {
+    match_entries(db, new_entry_ids, dedup, providers, config).await?;
+    Ok(())
+}
+
+/// [`match_new_entries`], returning the per-type `[merge, relate, distinct,
+/// defer]` counts. The `softmatch --entries` batch path uses it to re-score a
+/// chosen set of existing entries (e.g. ones ingested while the matcher was
+/// unavailable) without a full-library scan.
+pub async fn match_entries(
+    db: &MusicDb,
+    new_entry_ids: &HashSet<i64>,
+    dedup: &DedupConfig,
+    providers: &[Arc<dyn FetchProvider>],
+    config: &SoftMatchConfig,
+) -> anyhow::Result<HashMap<String, [usize; 4]>> {
     if new_entry_ids.is_empty() {
-        return Ok(());
+        return Ok(HashMap::new());
     }
     let focus_ids: Vec<i64> = new_entry_ids.iter().copied().collect();
     let focus_entries = entry_infos_by_ids(db, &focus_ids).await?;
@@ -3101,12 +3213,12 @@ pub async fn match_new_entries(
         &ctx,
         &known,
         &barrier,
+        &soft_match_exclusions(providers),
         config,
         embed_cache.as_deref(),
         Some(candidate_channels),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Runs [`match_new_entries`] on a dedicated OS thread with its own
@@ -3655,6 +3767,102 @@ mod tests {
             "expected an error field, got {result:?}"
         );
         assert!(!result.contains_key("status"));
+    }
+
+    /// A new version the matcher relates to several versions of one song
+    /// gets one edge, to the song's original, instead of one per version;
+    /// and none at all across a `different_song` block.
+    #[tokio::test]
+    async fn new_version_joins_its_song_once_through_the_original() {
+        use crate::musicdb::DERIVED_FROM;
+
+        let db = MusicDb::new("sqlite::memory:").await.unwrap();
+        let original = insert_track(&db, "musicbrainz", "o", "Song", 200_000).await;
+        let cover = insert_track(&db, "youtube", "c", "Song", 210_000).await;
+        let new = insert_track(&db, "youtube", "n", "Song", 205_000).await;
+        let detached = insert_track(&db, "youtube", "d", "Song", 201_000).await;
+        let extra = format!(r#"{{"derived_entry":{cover},"source_entry":{original}}}"#);
+        db.upsert_relation(
+            original,
+            cover,
+            "cover",
+            0.85,
+            PROVIDER_ORIGIN,
+            Some(&extra),
+        )
+        .await
+        .unwrap();
+        db.upsert_relation(original, detached, DIFFERENT_SONG, 1.0, "manual", None)
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("song-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("match.rhai");
+        std::fs::write(
+            &path,
+            r#"
+            fn decide(ctx, a, b) {
+                relate("derived_from", 0.8, "test", #{"derived_side": "b", "transformation": "cover"})
+            }
+            "#,
+        )
+        .unwrap();
+        let ctx = load_script(path.to_str().unwrap(), None, None, None, None)
+            .await
+            .unwrap();
+        let known = KnownRelations::load(&db).await.unwrap();
+        let ids = [original, cover, new, detached];
+        let entries = entry_infos_by_ids(&db, &ids).await.unwrap();
+        let channels: CandidateChannels = [(cover, new), (original, new), (cover, detached)]
+            .into_iter()
+            .map(|pair| (pair, ChannelMask(1)))
+            .collect();
+        let config = SoftMatchConfig {
+            script_path: path.display().to_string(),
+            apply_relates: true,
+            embed_db_path: None,
+            embed_dim: 256,
+            embed_k: 20,
+            embed_sim_threshold: 0.45,
+            embed_max_pages: 1,
+            candidate_max_block: 50,
+            candidate_ngram_k: 30,
+            verbose_decisions: false,
+            http_client: None,
+        };
+        let focus: HashSet<i64> = [new, detached].into();
+        score_candidates(
+            &db,
+            entries,
+            Some(&focus),
+            &ctx,
+            &known,
+            &HashMap::new(),
+            &[],
+            &config,
+            None,
+            Some(channels),
+        )
+        .await
+        .unwrap();
+
+        let db = &db;
+        let edition_pairs = |id: i64| async move {
+            db.relations_around(id)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.enabled && r.kind == DERIVED_FROM)
+                .map(|r| (r.entry_a, r.entry_b))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(edition_pairs(new).await, vec![(original, new)]);
+        assert!(
+            edition_pairs(detached).await.is_empty(),
+            "blocked by different_song"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// `refine` sees every non-DISTINCT verdict with its entries, can replace

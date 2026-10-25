@@ -6,8 +6,8 @@ use crate::providers::{
         canonicalize::{match_track_url, track_url},
         client::DiscogsClient,
         release::{
-            ReleaseResponse, artist_child_refs, get_release_raw, parse_duration_ms,
-            parse_track_position,
+            ReleaseResponse, artist_child_refs, credit_applies_to_track, get_release_raw,
+            parse_duration_ms, parse_track_position, release_credit_refs,
         },
     },
     types::{Alias, CachedChildSource, EntityResult, EntrySpecificData, Error, TrackPosition},
@@ -55,8 +55,21 @@ pub async fn get_track(client: &DiscogsClient, url: &str) -> Result<EntityResult
                         artist_child_refs(&r.artists)
                     };
                     artist_refs.extend(artist_child_refs(&t.extraartists));
+                    artist_refs.extend(release_credit_refs(r, id).into_iter().filter_map(
+                        |mut child| {
+                            let credit = child.contributions.first_mut()?;
+                            let selector = credit.extra["tracks"].as_str().unwrap_or_default();
+                            if !credit_applies_to_track(selector, &t.position, &r.tracklist) {
+                                return None;
+                            }
+                            credit.extra["track_position"] = serde_json::json!(t.position);
+                            Some(child)
+                        },
+                    ));
 
                     Ok(EntityResult {
+                        privacy: None,
+                        image: None,
                         release_date: None,
                         sources: [(SOURCE.into(), HashSet::from([canonical]))].into(),
                         extra: serde_json::Value::Null,
@@ -113,6 +126,79 @@ mod tests {
 
     fn release_api_url(id: &str) -> String {
         DiscogsClient::build_url(&format!("releases/{id}"), &[])
+    }
+
+    #[tokio::test]
+    async fn release_staff_credits_keep_their_scope_when_projected_to_tracks() -> anyhow::Result<()>
+    {
+        use crate::http::ResponseStatus;
+        use serde_json::json;
+        let release = json!({
+            "id": 123, "title": "Album",
+            "extraartists": [
+                {"id": 1, "name": "Composer", "role": "Composed By", "tracks": "1 to 2"},
+                {"id": 2, "name": "Lyricist", "role": "Lyrics By", "tracks": "2, 3"},
+                {"id": 3, "name": "Album producer", "role": "Producer", "tracks": ""},
+                {"id": 0, "name": "Unlinked artwork", "role": "Artwork By", "tracks": ""},
+                {"id": 4, "name": "Unknown scope", "role": "Guitar", "tracks": "Missing to 3"}
+            ],
+            "tracklist": [
+                {"position": "1", "title": "First"},
+                {"position": "2", "title": "Second"},
+                {"position": "3", "title": "Third"}
+            ]
+        });
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route(
+            Method::GET,
+            &release_api_url("123"),
+            ResponseStatus::OK,
+            release.to_string().into(),
+        );
+        let client = DiscogsClient::new_with_client(Arc::new(http_client), None)?;
+        let album =
+            super::super::release::get_release(&client, "https://www.discogs.com/release/123")
+                .await?;
+        let mut album_artists = album.children[0].owned_cursor();
+        let mut album_credits = Vec::new();
+        while let Some((artist, _)) = child_next(&mut album_artists).await? {
+            album_credits.extend(artist.contributions);
+        }
+        assert_eq!(album_credits.len(), 4);
+        assert!(
+            album_credits
+                .iter()
+                .all(|c| !c.main_artist && c.extra["scope"] == "release")
+        );
+        assert!(
+            album_credits
+                .iter()
+                .any(|c| c.extra["tracks"] == "Missing to 3")
+        );
+        for (position, roles) in [
+            ("1", vec!["Composed By"]),
+            ("2", vec!["Composed By", "Lyrics By"]),
+            ("3", vec!["Lyrics By"]),
+        ] {
+            let track = get_track(
+                &client,
+                &format!("https://www.discogs.com/release/123?track={position}"),
+            )
+            .await?;
+            let mut cursor = track.children[0].owned_cursor();
+            let mut credits = Vec::new();
+            while let Some((artist, _)) = child_next(&mut cursor).await? {
+                credits.extend(artist.contributions);
+            }
+            assert_eq!(
+                credits.iter().map(|c| c.role.as_str()).collect::<Vec<_>>(),
+                roles
+            );
+            assert!(credits.iter().all(|c| c.extra["release"]["url"]
+                == "https://www.discogs.com/release/123"
+                && c.extra["track_position"] == position));
+        }
+        Ok(())
     }
 
     #[tokio::test]

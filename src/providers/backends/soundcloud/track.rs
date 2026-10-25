@@ -61,6 +61,8 @@ impl TrackResponse {
         };
 
         EntityResult {
+            privacy: None,
+            image: crate::providers::backends::ytdlp::info_thumbnail(&self.extra),
             release_date: self
                 .upload_date
                 .as_deref()

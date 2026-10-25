@@ -540,6 +540,8 @@ pub async fn get_artist(client: &MusicBrainzClient, url: &str) -> Result<EntityR
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
+            image: None,
             release_date: None,
             sources,
             extra: a.extra.clone(),

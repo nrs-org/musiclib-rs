@@ -58,6 +58,14 @@ standard environment variables listed below).
 | `mirror_db` | Credential? | `MUSICBRAINZ_MIRROR_DB` | Path to local `mb_mirror.db`; auto-detected from the data dir if omitted |
 | `dump_base_url` | Credential? | `MUSICBRAINZ_DUMP_BASE_URL` | Used by `mb_extract_urls` only; defaults to the public MetaBrainz server |
 
+Recording imports look up each performed work with `artist-rels+work-rels`
+to collect writing credits and group versions of the same song. These
+lookups also run when `resolve_original_recordings: false`; that setting
+only disables original-recording discovery. A missing work (404) is skipped,
+while other work lookup failures fail the recording fetch rather than
+silently discarding existing credits on re-import. See
+[artist credits](ARTIST_CREDITS.md) for metadata and scope details.
+
 If `mirror_db` is set (or found automatically), URL lookups skip the network for
 URLs not in the mirror. Build the mirror with `mb_extract_urls` and keep it fresh
 with `mb_sync_replication`.
@@ -101,9 +109,28 @@ absolute path, or by a path relative to another entry file), so its identity
 survives moving the files. Any other file is identified by its absolute path,
 `local:///abs/path.yaml`.
 
+While `server` is running, it discovers new YAML entries in the namespaces
+and checks them and imported absolute local paths every second. It imports
+new files and re-imports edits after their contents stay unchanged for a
+second. This also works through namespace symlinks and with editors that replace files on
+save. Local children and source references are followed recursively; remote
+providers are not fetched by the reload. Aliases, links, and child relations
+use the normal import replacement rules. Invalid or missing files leave the
+last imported metadata in place; fixing the file resumes reloading. Startup
+also refreshes existing entries, picking up edits made while the server was
+stopped. New files outside a namespace still need an explicit first import.
+`namespace.yaml` settings are already read fresh by each soft-dedup pass.
+
 In an entry file, a child's `relation` (`cover`, `remix`, `arrangement`, ...)
 marks it as the original the entry derives from; child URLs from other
 providers are canonicalized, so they meet that provider's own entries.
+
+A namespace may hold an optional `namespace.yaml` with settings for all its
+entries:
+
+| Field | Type | Notes |
+|---|---|---|
+| `soft_match` | bool | Default `true`. `false` keeps soft-dedup (`softmatch`, and the online pass after each ingest) from linking any of the namespace's entries: every candidate pair involving one is skipped. Use it when the entry files already author identity and originals. A file that fails to parse also excludes the namespace, with a warning. |
 
 ### `listings`
 
@@ -340,13 +367,18 @@ An entity reached under several option sets in one run (say, an album reached
 as a leaf from a track and with `main` from its artist) is processed under
 each of them, so the result doesn't depend on which path arrives first.
 
-Three ready-made files live in `config/fetch_options/`:
+Four ready-made files live in `config/fetch_options/`:
 
 | File | Purpose |
 |---|---|
 | `fetch_discography.yaml` | Fetch an artist's releases and their tracks; each track also fetches its album(s), credited artists and original as leaves (`track`) |
 | `vtuber_fetch_discography.yaml` | Like above but skip YouTube videos at channel level; whitelist/blacklist playlists by title |
+| `utaite_fetch_discography.yaml` | Like `fetch_discography.yaml`, with a channel's uploads as the discography: skip playlists, and uploads that are clips, crossfades or over 8 minutes |
 | `no_fetch_discography.yaml` | Fetch the entry itself, follow nothing (its structural children become stubs) |
+
+A YouTube channel's discography lists its playlists and its long-form uploads
+(the channel's Videos tab, playlist `UULF…`): Shorts and live-stream archives
+are not listed.
 
 ### File structure
 
@@ -460,20 +492,25 @@ Both `min` and `max` are optional in `ratio` and `count`.
 
 ---
 
-## Dedup barrier files (`dedup_barriers/`)
+## Dedup barriers
 
 Dedup barriers prevent distinct real-world entities from being merged into a
 single DB entry when they share ambiguous identifiers (e.g. a URL that redirects
 to multiple artists, or a Wikipedia page shared between a group and a solo act).
 
-### Where the files live
+### Where they live
 
-The `dedup` binary auto-loads every `*.yaml` file from
-`$CONFIG_DIR/musiclib-rs/dedup_barriers/` in sorted order. Pass one or more
-explicit `--dedup-config <path>` arguments to override this and use specific
-files instead.
+Barriers are stored in the music DB (`barrier_group`, `barrier_member`). Make
+one from the player: open an entry, **Unmerge…**, tick the sources that belong
+to something else and split them off. The panel lists the barriers touching the
+entry with an undo, and `dedup --list` prints them all.
 
-### File structure
+Barriers used to be YAML files in `$CONFIG_DIR/musiclib-rs/dedup_barriers/`.
+Nothing reads that directory any more; store such files with
+`dedup --import-yaml <file|dir>...` (importing a file twice adds nothing). The
+format below is that of those files.
+
+### YAML structure
 
 A barrier file is a list of **groups**. Each group contains two or more named
 **anchors** — the distinct entities that must never be merged. Each anchor
@@ -531,20 +568,17 @@ canonical pair.
 
 ### How the dedup barrier works
 
-When `dedup` runs it:
+Every import flushes under all stored barriers: pairs of different anchors in
+one group are kept in separate entries, and an anchor's pairs are merged. An
+entry a flush touches that holds a barrier pair joins the flush whole, so a
+merge can't carry an anchor pair the barrier never saw.
 
-1. Loads all barrier files and canonicalizes every declared pair.
-2. For each file, checks whether the barrier is already satisfied in the DB
-   (no single entry holds pairs from two different anchors in the same group).
-3. Re-imports (shallow — no child traversal) only the entries that violate a
-   barrier or whose config file has changed on disk.
-4. Flushes the merged barrier: during flush, the `is_rel` graph is partitioned so
-   pairs from different anchors land in separate DB entries.
-5. Persists each file's mtime so unchanged, already-satisfied barriers are
-   skipped on subsequent runs.
-
-Re-imports are served from the HTTP cache where possible, so a no-change run is
-cheap even for large libraries.
+A barrier made or undone in the player is applied at once by regrouping the
+entries it touches (`pipeline::dedup::regroup_entries`): with the DB's links
+complete it replays their stored identity links, fetching nothing; otherwise
+it re-imports their pairs shallowly from the HTTP cache. `dedup` (and
+`import`, before importing) regroups the entries of any barrier the DB
+violates.
 
 ### When to add a barrier
 

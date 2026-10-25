@@ -1,8 +1,10 @@
+#[cfg(feature = "nrs")]
+use std::sync::Mutex;
 use std::sync::{Arc, atomic::AtomicU64};
 
 use musiclib_rs::{
     musicdb::MusicDb,
-    pipeline::{dedup::DedupConfig, progress::HttpActivityClient, softmatch::SoftMatchConfig},
+    pipeline::{progress::HttpActivityClient, softmatch::SoftMatchConfig},
     providers::{
         FetchProvider,
         types::{EntryFetchOptionsPool, OptionsId},
@@ -10,6 +12,8 @@ use musiclib_rs::{
 };
 
 use crate::jobs::JobManager;
+#[cfg(feature = "player")]
+use crate::playback::PlaybackHub;
 
 /// Shared server state, handed to every request handler behind one `Arc`.
 /// Both route groups (`store_protocol`, `player`) read from the same
@@ -26,8 +30,6 @@ pub struct AppState {
     /// that module's doc comment.
     pub pool: Arc<EntryFetchOptionsPool>,
     pub root_id: OptionsId,
-    pub dedup_configs: Vec<(String, DedupConfig)>,
-    pub merged_dedup: DedupConfig,
     /// `None` disables online soft-dedup after an ingest (no
     /// `<config_dir>/match.rhai`), matching the `import` CLI's behavior.
     pub soft_cfg: Option<SoftMatchConfig>,
@@ -42,4 +44,26 @@ pub struct AppState {
     /// mirrors the `import` CLI's end-of-run "quota used" line, but kept
     /// running and surfaced live through `ingest_progress::JobProgressSink`.
     pub youtube_quota: Arc<AtomicU64>,
+    /// The NRS app the player's extension talks to (see `nrs_pool`,
+    /// `nrs_bridge`).
+    #[cfg(feature = "nrs")]
+    pub nrs_url: String,
+    /// Where browsers reach the NRS app: the base of the links the bridge
+    /// hands out (`nrs_url` unless configured otherwise).
+    #[cfg(feature = "nrs")]
+    pub nrs_public_url: String,
+    #[cfg(feature = "nrs")]
+    pub nrs_pool: Mutex<Option<Arc<crate::nrs_pool::NrsPool>>>,
+    /// The player's one playback session (queue, devices, position) — see
+    /// `playback`.
+    #[cfg(feature = "player")]
+    pub playback: Arc<PlaybackHub>,
+    #[cfg(feature = "nrs")]
+    pub nrs_bridge: crate::nrs_bridge::BridgeState,
+    /// The player's Spotify login, shared by every device — see
+    /// `spotify_auth`.
+    #[cfg(feature = "player")]
+    pub spotify: crate::spotify_auth::SpotifyAuth,
+    #[cfg(feature = "player")]
+    pub lastfm: crate::lastfm::LastFm,
 }

@@ -30,6 +30,8 @@ pub(crate) struct ReleaseResponse {
     #[serde(default)]
     pub artists: Vec<ReleaseArtist>,
     #[serde(default)]
+    pub extraartists: Vec<ReleaseArtist>,
+    #[serde(default)]
     pub tracklist: Vec<TracklistEntry>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
@@ -39,8 +41,15 @@ pub(crate) struct ReleaseResponse {
 pub struct ReleaseArtist {
     pub id: u64,
     pub name: String,
+    /// The artist name variation printed on this release.
+    #[serde(default)]
+    pub anv: String,
+    #[serde(default)]
+    pub join: String,
     #[serde(default)]
     pub role: String,
+    #[serde(default)]
+    pub tracks: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +159,9 @@ pub(crate) fn artist_child_refs(artists: &[ReleaseArtist]) -> Vec<ChildRef> {
     artists
         .iter()
         .enumerate()
+        // Discogs uses id 0 for credits without an artist identity. Those
+        // names must not all become one synthetic artist at /artist/0.
+        .filter(|(_, a)| a.id != 0)
         .map(|(i, a)| ChildRef {
             entry_type: EntryType::Artist,
             external_type: EXTERNAL_TYPE_ARTIST.into(),
@@ -167,11 +179,80 @@ pub(crate) fn artist_child_refs(artists: &[ReleaseArtist]) -> Vec<ChildRef> {
                 },
                 main_artist: a.role.is_empty(),
                 source: SOURCE.into(),
-                extra: serde_json::json!({ "index": i }),
+                extra: serde_json::json!({
+                    "index": i,
+                    "credited_name": if a.anv.is_empty() { &a.name } else { &a.anv },
+                    "joinphrase": a.join,
+                    "tracks": a.tracks,
+                }),
             }],
             ..Default::default()
         })
         .collect()
+}
+
+/// Staff credits printed in the release's main credit section, retaining
+/// their raw track selector even when it cannot be resolved to tracks.
+pub(crate) fn release_credit_refs(release: &ReleaseResponse, id: &str) -> Vec<ChildRef> {
+    let mut refs = artist_child_refs(&release.extraartists);
+    for (artist, child) in release
+        .extraartists
+        .iter()
+        .filter(|a| a.id != 0)
+        .zip(&mut refs)
+    {
+        for c in &mut child.contributions {
+            c.role = artist.role.clone();
+            c.main_artist = false;
+            c.extra["scope"] = serde_json::json!("release");
+            c.extra["release"] =
+                serde_json::json!({"url": release_url(id), "title": release.title});
+        }
+    }
+    refs
+}
+
+/// Match Discogs' comma-separated positions and inclusive `A1 to B2`
+/// ranges against the release's actual tracklist order. A blank selector
+/// can mean all tracks *or* unspecified scope; it never selects a track.
+/// Missing, repeated or reversed endpoints are left as release evidence.
+pub(crate) fn credit_applies_to_track(
+    selector: &str,
+    target: &str,
+    tracklist: &[TracklistEntry],
+) -> bool {
+    let positions: Vec<_> = tracklist
+        .iter()
+        .filter(|t| t.track_type != "heading")
+        .map(|t| t.position.trim())
+        .collect();
+    let unique_index = |position: &str| {
+        if position.is_empty() {
+            return None;
+        }
+        let mut found = positions
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p == position);
+        let first = found.next()?.0;
+        found.next().is_none().then_some(first)
+    };
+    let Some(target_index) = unique_index(target.trim()) else {
+        return false;
+    };
+    selector.split(',').any(|part| {
+        let part = part.trim();
+        if part == target.trim() {
+            return true;
+        }
+        let Some((start, end)) = part.split_once(" to ") else {
+            return false;
+        };
+        match (unique_index(start.trim()), unique_index(end.trim())) {
+            (Some(start), Some(end)) => start <= target_index && target_index <= end,
+            _ => false,
+        }
+    })
 }
 
 // --- Public API ---
@@ -199,7 +280,8 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
 
         let release_date = parse_release_date(r.released.as_deref(), r.year);
 
-        let artist_refs = artist_child_refs(&r.artists);
+        let mut artist_refs = artist_child_refs(&r.artists);
+        artist_refs.extend(release_credit_refs(r, id));
 
         // Derive disc count from track positions.
         let mut max_disc: i32 = 1;
@@ -215,18 +297,6 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
                 {
                     max_disc = max_disc.max(d);
                 }
-                // Main artists: per-track if present, otherwise release-level.
-                let main_artists = if !t.artists.is_empty() {
-                    artist_child_refs(&t.artists)
-                } else {
-                    artist_child_refs(&r.artists)
-                };
-                let extra_artists = artist_child_refs(&t.extraartists);
-                let contributions = main_artists
-                    .iter()
-                    .chain(extra_artists.iter())
-                    .flat_map(|c| c.contributions.clone())
-                    .collect();
                 // Fall back to an index-based synthetic position (disc_no=0 is the sentinel)
                 // when the Discogs position string can't be parsed (e.g. "Video", "").
                 let effective_pos = position.clone().unwrap_or(TrackPosition {
@@ -235,6 +305,7 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
                     synthetic: true,
                 });
                 ChildRef {
+                    image: None,
                     entry_type: EntryType::Track,
                     external_type: EXTERNAL_TYPE_TRACK.into(),
                     sources: [(
@@ -246,7 +317,9 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
                     duration_ms: t.duration.as_deref().and_then(parse_duration_ms),
                     appears_on: false,
                     position: Some(effective_pos),
-                    contributions,
+                    // This edge lists a track on the release; its credits
+                    // come from the track's own artist children when fetched.
+                    contributions: vec![],
                     original_relation_kind: None,
                 }
             })
@@ -280,6 +353,8 @@ pub async fn get_release(client: &DiscogsClient, url: &str) -> Result<EntityResu
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
+            image: super::types::primary_image(&r.extra),
             release_date,
             sources,
             extra: r.extra.clone(),
@@ -325,6 +400,75 @@ mod tests {
         DiscogsClient::build_url(&format!("releases/{id}"), &[])
     }
 
+    #[test]
+    fn artist_credit_keeps_discogs_name_variations_separate_from_artist_names() {
+        let response: ReleaseResponse =
+            serde_json::from_str(include_str!("./release_hop_step_sheep.json")).unwrap();
+        let artists = super::artist_child_refs(&response.artists);
+        assert_eq!(artists[0].name.as_deref(), Some("角巻わため"));
+        assert_eq!(
+            artists[0].contributions[0].extra["credited_name"],
+            "Tsunomaki Watame"
+        );
+        let contributors = super::artist_child_refs(&response.tracklist[0].extraartists);
+        assert_eq!(
+            contributors[0].contributions[0].extra["credited_name"],
+            "新藤晴一"
+        );
+        assert!(!contributors[0].contributions[0].main_artist);
+    }
+
+    #[test]
+    fn release_credit_track_ranges_use_real_positions_and_keep_unknown_scope() {
+        let tracks: Vec<super::TracklistEntry> = serde_json::from_value(serde_json::json!([
+            {"position": "A1", "title": "Heading", "type_": "heading"},
+            {"position": "A1", "title": "First"},
+            {"position": "A2", "title": "Second"},
+            {"position": "B1", "title": "Third"},
+            {"position": "B2", "title": "Fourth"}
+        ]))
+        .unwrap();
+        for (selector, target, expected) in [
+            ("A1, B2", "B2", true),
+            ("A1, B2", "B1", false),
+            ("A2 to B2", "B1", true),
+            ("A1, A2 to B1", "B1", true),
+            ("A2 to B2", "A1", false),
+            ("B2 to A1", "A2", false),
+            ("A1 to Missing", "A2", false),
+            ("", "A1", false),
+            ("all", "A1", false),
+            ("A1", "", false),
+            ("B2", "Missing", false),
+        ] {
+            assert_eq!(
+                super::credit_applies_to_track(selector, target, &tracks),
+                expected,
+                "selector={selector}, target={target}"
+            );
+        }
+        let multi_disc: Vec<super::TracklistEntry> = serde_json::from_value(serde_json::json!([
+            {"position": "1-1", "title": "One"}, {"position": "1-2", "title": "Two"},
+            {"position": "2-1", "title": "Three"}, {"position": "2-2", "title": "Four"}
+        ]))
+        .unwrap();
+        assert!(super::credit_applies_to_track(
+            "1-1 to 2-1",
+            "1-2",
+            &multi_disc
+        ));
+        assert!(!super::credit_applies_to_track(
+            "1-1 to 2-1",
+            "2-2",
+            &multi_disc
+        ));
+        let duplicate: Vec<super::TracklistEntry> = serde_json::from_value(serde_json::json!([
+            {"position": "1", "title": "One"}, {"position": "1", "title": "Two"}
+        ]))
+        .unwrap();
+        assert!(!super::credit_applies_to_track("1", "1", &duplicate));
+    }
+
     #[tokio::test]
     async fn test_get_release_hop_step_sheep() -> anyhow::Result<()> {
         let id = "34963553";
@@ -345,6 +489,13 @@ mod tests {
         assert_eq!(rel.aliases.len(), 1);
         assert_eq!(rel.aliases[0].name, "Hop Step Sheep");
         assert!(rel.aliases[0].primary);
+        let image = rel.image.as_ref().expect("primary image");
+        assert!(
+            image
+                .url
+                .starts_with("https://i.discogs.com/7lpbDEydCa_eaOeHtE_A1VbVCUP12nx0r4P2CT")
+        );
+        assert_eq!((image.width, image.height), (Some(600), Some(530)));
 
         // Sources
         assert_eq!(
@@ -382,6 +533,7 @@ mod tests {
         assert_eq!(track1.entry_type, EntryType::Track);
         assert_eq!(track1.external_type.as_ref(), EXTERNAL_TYPE_TRACK);
         assert_eq!(track1.name.as_deref(), Some("Beautiful Circle"));
+        assert!(track1.contributions.is_empty());
         let pos = track1.position.as_ref().expect("expected position");
         assert_eq!(pos.track_no, 1);
         assert_eq!(pos.disc_no, None);

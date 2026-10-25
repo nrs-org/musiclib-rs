@@ -79,6 +79,23 @@ pub(crate) const PARTS: &str = "recordings+artist-credits+url-rels";
 
 // --- Helpers ---
 
+/// The release's Cover Art Archive front image, when the lookup's
+/// `cover-art-archive` block (present whatever `inc=` asked for) says it has
+/// one. MusicBrainz itself has no images.
+fn cover_art_archive_front(
+    mbid: &str,
+    extra: &serde_json::Value,
+) -> Option<crate::providers::types::Image> {
+    let front = extra.get("cover-art-archive")?.get("front")?.as_bool()?;
+    front.then(|| {
+        crate::providers::types::Image::new(
+            format!("https://coverartarchive.org/release/{mbid}/front-250"),
+            Some(250),
+            Some(250),
+        )
+    })
+}
+
 fn parse_release_date(date_str: &str) -> Option<String> {
     // MB dates can be "YYYY", "YYYY-MM", or "YYYY-MM-DD".
     Some(match date_str.len() {
@@ -127,23 +144,13 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
                 medium.tracks.iter().map(move |track| {
                     let rec = track.recording.as_ref();
                     let recording_mbid = rec.map(|r| r.id.as_str());
-                    // Prefer track-level artist credit; fall back to recording's.
-                    let credits = if !track.artist_credit.is_empty() {
-                        &track.artist_credit
-                    } else {
-                        rec.map(|r| &r.artist_credit)
-                            .unwrap_or(&track.artist_credit)
-                    };
-                    let contributions = artist_credit_child_refs(credits)
-                        .into_iter()
-                        .flat_map(|c| c.contributions)
-                        .collect();
                     let sources = if let Some(id) = recording_mbid {
                         [(SOURCE.into(), HashSet::from([recording_url(id)]))].into()
                     } else {
                         Default::default()
                     };
                     ChildRef {
+                        image: None,
                         entry_type: EntryType::Track,
                         external_type: EXTERNAL_TYPE_RECORDING.into(),
                         sources,
@@ -162,7 +169,10 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
                             track_no: track.position,
                             synthetic: false,
                         }),
-                        contributions,
+                        // Contributions on this edge would credit the recording
+                        // itself as an artist of the release. The recording's
+                        // own artist children supply its credits when fetched.
+                        contributions: vec![],
                         original_relation_kind: None,
                     }
                 })
@@ -203,6 +213,8 @@ pub async fn get_release(client: &MusicBrainzClient, url: &str) -> Result<Entity
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
+            image: cover_art_archive_front(&r.id, &r.extra),
             release_date,
             sources,
             extra: r.extra.clone(),
@@ -305,6 +317,7 @@ mod tests {
             ])
         );
         assert_eq!(track.name.as_deref(), Some("Watame Lullaby"));
+        assert!(track.contributions.is_empty());
         let pos = track.position.as_ref().expect("expected position");
         assert_eq!(pos.track_no, 1);
         assert_eq!(pos.disc_no, None); // single-disc: disc_no is None
@@ -326,6 +339,14 @@ mod tests {
             Method::GET,
             &recording_api_url(recording_mbid),
             include_str!("./recording_beautiful_circle.json"),
+        );
+        http_client.add_route_json::<serde_json::Value>(
+            Method::GET,
+            &MusicBrainzClient::build_url(
+                "work/449529aa-9206-48da-85e5-07e663cfb494",
+                &[("inc", super::super::work::CREDIT_PARTS)],
+            ),
+            include_str!("./work_beautiful_circle.json"),
         );
 
         let client = MusicBrainzClient::new_with_client(Arc::new(http_client), None)?;
@@ -353,6 +374,12 @@ mod tests {
         // Alias
         assert_eq!(rel.aliases.len(), 1);
         assert_eq!(rel.aliases[0].name, "Hop Step Sheep");
+        assert_eq!(
+            rel.image.as_ref().map(|i| i.url.as_str()),
+            Some(
+                "https://coverartarchive.org/release/c9496f63-4978-4008-b069-953e8fb1f8a6/front-250"
+            )
+        );
 
         // children[0] = artist credits, children[1] = tracks
         assert_eq!(rel.children.len(), 2);
@@ -398,7 +425,7 @@ mod tests {
             &HashSet::from(["JPV752307972".to_string()])
         );
 
-        // 1 child source containing: 1 artist-credit (Watame) + 15 artist-rels
+        // Recording and work-level artist credits share one child source.
         assert_eq!(rec.children.len(), 1);
         let mut rec_artists = rec.children[0].cursor();
         let (main_artist, _) = child_next(&mut rec_artists)
@@ -414,6 +441,43 @@ mod tests {
         assert_eq!(arranger.name.as_deref(), Some("佐藤純一"));
         assert_eq!(arranger.contributions[0].role, "arranger");
         assert!(!arranger.contributions[0].main_artist);
+        assert_eq!(arranger.contributions[0].extra["credited_name"], "佐藤純一");
+        assert_eq!(arranger.contributions[0].extra["direction"], "backward");
+
+        let (saxophonist, _) = child_next(&mut rec_artists)
+            .await?
+            .expect("expected saxophonist");
+        assert_eq!(saxophonist.contributions[0].role, "instrument");
+        assert_eq!(
+            saxophonist.contributions[0].extra["attributes"],
+            serde_json::json!(["alto saxophone"])
+        );
+        assert_eq!(
+            saxophonist.contributions[0].extra["attribute-ids"]["alto saxophone"],
+            "9c977091-b27a-4a0e-b54e-b5ab89420e22"
+        );
+
+        let mut writing = Vec::new();
+        while let Some((artist, _)) = child_next(&mut rec_artists).await? {
+            for credit in artist.contributions {
+                if credit.extra["scope"] == "work" {
+                    writing.push((artist.name.clone().unwrap_or_default(), credit));
+                }
+            }
+        }
+        assert!(
+            writing
+                .iter()
+                .any(|(name, c)| name == "佐藤純一" && c.role == "composer")
+        );
+        assert!(
+            writing
+                .iter()
+                .any(|(name, c)| name == "林英樹" && c.role == "lyricist")
+        );
+        assert!(writing.iter().all(|(_, c)| {
+            !c.main_artist && c.extra["work"]["id"] == "449529aa-9206-48da-85e5-07e663cfb494"
+        }));
 
         Ok(())
     }

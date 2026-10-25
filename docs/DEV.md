@@ -114,6 +114,13 @@ Config, cache, and data directories follow the
 | Cache | `~/.cache/musiclib-rs/` | `~/Library/Caches/nrs-org/musiclib-rs/` |
 | Data | `~/.local/share/musiclib-rs/` | `~/Library/Application Support/nrs-org/musiclib-rs/` |
 
+To relocate a directory, pass `--config-dir`, `--cache-dir`, or `--data-dir`
+to any binary that reads it, or set `MUSICLIB_CONFIG_DIR`,
+`MUSICLIB_CACHE_DIR`, or `MUSICLIB_DATA_DIR`. A flag takes precedence over its
+variable, and an empty variable counts as unset. Relative paths resolve against
+the working directory. Scripts in the config directory, such as `match.rhai`
+and the `jev/` files it reads, load relative to that directory.
+
 When no explicit `--http-config` / `--registry-config` / `--db` flag is passed,
 binaries look in these directories and fall back to built-in defaults if the
 file is absent.
@@ -139,21 +146,21 @@ cargo run --bin import -- <url> \
 | `--db` | `<data_dir>/musiclib.db` | SQLite music library |
 | `--http-config` | `<config_dir>/http.yaml` | HTTP client config |
 | `--registry-config` | `<config_dir>/providers.yaml` | Provider credentials |
-| `--dedup-config` | auto from `<config_dir>/dedup_barriers/` | Barrier file(s); repeatable |
-| `--skip-dedup` | false | Skip the pre-import dedup pass |
+| `--skip-dedup` | false | Skip re-applying barriers the DB violates before importing |
 
 `scripts/import.sh` is a convenience wrapper that sets `RUST_LOG` and pins a
 fixed example URL + vtuber fetch-options.
 
-### `dedup` — re-apply barrier configs without ingesting new URLs
+### `dedup` — re-apply barriers without ingesting new URLs
 
 ```bash
 RUST_LOG=musiclib_rs=info,dedup=info cargo run --bin dedup
 ```
 
-Barrier files are auto-loaded from `<config_dir>/dedup_barriers/*.yaml`. Pass
-`--dedup-config <path>` (repeatable) to override. See
-[CONFIG_REFERENCE.md](CONFIG_REFERENCE.md) for the barrier file format.
+Barriers are stored in the DB and made from the player's **Unmerge…** panel;
+this regroups the entries of any the DB violates. `--list` prints them, and
+`--import-yaml <file|dir>...` stores barrier files in the old YAML format
+(see [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)).
 
 `scripts/dedup.sh` is a convenience wrapper that sets `RUST_LOG`.
 
@@ -227,7 +234,6 @@ MUSICLIB_MATCH_CSV=out.csv cargo run --features ffi --release --bin softmatch  #
 | `--candidate-max-block` | `50` | Largest lexical/structural posting list expanded into pairs |
 | `--candidate-ngram-k` | `30` | Character-ngram neighbors retained per entry |
 | `--verbose-decisions` | false | Print every suggested merge/relation and full sources |
-| `--dedup-config` | auto from `<config_dir>/dedup_barriers/` | Barrier file(s); repeatable |
 | `--registry-config` | `<config_dir>/providers.yaml` | Provider credentials |
 | `--http-config` | `<config_dir>/http.yaml` | HTTP client config |
 

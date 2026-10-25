@@ -121,6 +121,51 @@ pub struct Alias {
     pub primary: bool,
 }
 
+/// A picture of an entity — album cover, artist photo, video thumbnail — as
+/// its provider gives it. Stored per pair (`pair_image`, see
+/// docs/plan-images.md).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    pub url: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// The long side `Image::pick` aims for: the UI shows ~170 px tiles, ~340 px
+/// at 2x.
+const IMAGE_TARGET_PX: u32 = 300;
+
+impl Image {
+    pub fn new(url: impl Into<String>, width: Option<u32>, height: Option<u32>) -> Self {
+        Self {
+            url: url.into(),
+            width,
+            height,
+        }
+    }
+
+    /// The one variant worth storing out of a provider's size variants: the
+    /// smallest whose long side is at least `IMAGE_TARGET_PX`, else the
+    /// largest. Variants without a known size rank below sized ones; when
+    /// none has a size, the first wins.
+    pub fn pick(variants: impl IntoIterator<Item = Image>) -> Option<Image> {
+        let variants: Vec<Image> = variants.into_iter().filter(|v| !v.url.is_empty()).collect();
+        let side = |v: &Image| v.width.max(v.height);
+        variants
+            .iter()
+            .filter(|v| side(v).is_some_and(|s| s >= IMAGE_TARGET_PX))
+            .min_by_key(|v| side(v))
+            .or_else(|| {
+                variants
+                    .iter()
+                    .filter(|v| side(v).is_some())
+                    .max_by_key(|v| side(v))
+            })
+            .or_else(|| variants.first())
+            .cloned()
+    }
+}
+
 // reference to a child entry (e.g. track within a release), with optional name and position.
 // Serializable so a listing can be stored as a snapshot (`providers::listing`);
 // `#[serde(default)]` lets snapshots written before a field existed still load.
@@ -155,6 +200,10 @@ pub struct ChildRef {
     /// `entry_relation` row once both sides have resolved entry_ids. `None`
     /// for the overwhelming majority of children.
     pub original_relation_kind: Option<Cow<'static, str>>,
+    /// The child's picture as the parent's listing gives it (a Spotify
+    /// artist's album list, a YouTube playlist's items). Stored only for a
+    /// child that isn't fetched itself.
+    pub image: Option<Image>,
 }
 
 // contribution of an artist to an entry, with role (e.g. "main", "featured", "producer", etc.) and
@@ -178,6 +227,42 @@ pub struct EntityResult<T: Clone + Send + Sync + 'static = ChildFetchOptions> {
     pub specific_data: EntrySpecificData,
     pub children: Vec<Arc<CachedChildSource<T>>>,
     pub aliases: Vec<Alias>,
+    /// The entity's own picture, if its provider gives one.
+    pub image: Option<Image>,
+    /// Who can see the entity on its provider, for a provider with
+    /// unlisted or private entities (YouTube); `None` for the rest.
+    pub privacy: Option<Privacy>,
+}
+
+/// Who can see a YouTube video or playlist: anyone, anyone with its link, or
+/// only its owner. Stored per pair (`pair_privacy`) so nothing that isn't
+/// public gets shared from the library (e.g. the player's Discord status).
+/// Other providers' entities all count as public.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Privacy {
+    Public,
+    Unlisted,
+    Private,
+}
+
+impl Privacy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Privacy::Public => "public",
+            Privacy::Unlisted => "unlisted",
+            Privacy::Private => "private",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "public" => Some(Privacy::Public),
+            "unlisted" => Some(Privacy::Unlisted),
+            "private" => Some(Privacy::Private),
+            _ => None,
+        }
+    }
 }
 
 // result of canonicalizing an identifier, with canonical source key, canonical identifier, entry
@@ -904,7 +989,9 @@ fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: u
                         Tribool::False
                     }
                 }
-                None => Tribool::False,
+                // Listings without names (a Niconico user's uploads) need the
+                // fetched entity's name.
+                None => Tribool::Indeterminate,
             },
             CompiledEntryDataMatcher::HasSource(source) => {
                 if child.sources.get(source).is_some() {
@@ -1084,6 +1171,46 @@ impl<T: Clone + Send + Sync + 'static> Unpin for OwnedCachedChildCursor<T> {}
 impl<T: Clone + Send + Sync + 'static> ChildSource<T> for OwnedCachedChildCursor<T> {
     fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
         cached_evaluate_expr(&self.cache, self.index, expr)
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::Image;
+
+    fn img(url: &str, side: Option<u32>) -> Image {
+        Image::new(url, side, side)
+    }
+
+    #[test]
+    fn picks_smallest_variant_at_least_300() {
+        let picked = Image::pick([
+            img("640", Some(640)),
+            img("300", Some(300)),
+            img("64", Some(64)),
+        ]);
+        assert_eq!(picked.unwrap().url, "300");
+    }
+
+    #[test]
+    fn falls_back_to_largest_when_all_are_small() {
+        let picked = Image::pick([img("120", Some(120)), img("180", Some(180))]);
+        assert_eq!(picked.unwrap().url, "180");
+    }
+
+    #[test]
+    fn unsized_variants_rank_last_and_first_wins() {
+        assert_eq!(
+            Image::pick([img("a", None), img("b", Some(90))])
+                .unwrap()
+                .url,
+            "b"
+        );
+        assert_eq!(
+            Image::pick([img("a", None), img("b", None)]).unwrap().url,
+            "a"
+        );
+        assert!(Image::pick([]).is_none());
     }
 }
 

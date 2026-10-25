@@ -53,6 +53,8 @@ struct Cli {
     /// env var.
     #[arg(long)]
     base_url: Option<String>,
+    #[command(flatten)]
+    dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 const REPLICATION_SEQUENCE_PATH: &str = "REPLICATION_SEQUENCE";
@@ -97,6 +99,7 @@ fn load_registry_config(path: Option<&Path>) -> Result<RegistryConfig> {
 fn main() -> Result<()> {
     dotenv::dotenv().ok();
     let cli = Cli::parse();
+    cli.dirs.apply();
 
     let registry_config = load_registry_config(cli.registry_config.as_deref())?;
 

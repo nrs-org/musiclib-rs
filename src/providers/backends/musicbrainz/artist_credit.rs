@@ -31,6 +31,17 @@ pub fn artist_credit_child_refs(credits: &[ArtistCredit]) -> Vec<ChildRef> {
         .enumerate()
         .map(|(i, credit)| {
             let mut extra = serde_json::Map::new();
+            // A credit belongs to this entry, not to the artist globally:
+            // another recording can credit the same artist by another name.
+            extra.insert(
+                "credited_name".into(),
+                serde_json::Value::String(
+                    credit
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| credit.artist.name.clone()),
+                ),
+            );
             if !credit.join_phrase.is_empty() {
                 extra.insert(
                     "joinphrase".into(),
@@ -62,4 +73,33 @@ pub fn artist_credit_child_refs(credits: &[ArtistCredit]) -> Vec<ChildRef> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn artist_credit_preserves_names_per_credit() {
+        let credits: Vec<ArtistCredit> = serde_json::from_value(json!([
+            {"name": "Character", "joinphrase": " feat. ",
+             "artist": {"id": "singer", "name": "Singer"}},
+            {"artist": {"id": "guest", "name": "Guest"}}
+        ]))
+        .unwrap();
+        let children = artist_credit_child_refs(&credits);
+        assert_eq!(
+            children[0].contributions[0].extra,
+            json!({
+                "credited_name": "Character", "index": 0, "joinphrase": " feat. "
+            })
+        );
+        assert_eq!(
+            children[1].contributions[0].extra,
+            json!({
+                "credited_name": "Guest", "index": 1
+            })
+        );
+    }
 }

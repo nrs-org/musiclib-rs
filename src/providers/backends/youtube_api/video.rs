@@ -17,7 +17,7 @@ use crate::providers::{
     std_values::StandardRoleNames,
     types::{
         Alias, CachedChildSource, ChildRef, Contribution, EntityResult, EntrySpecificData,
-        EntryType, Error,
+        EntryType, Error, Privacy,
     },
 };
 
@@ -33,6 +33,16 @@ struct Video {
     snippet: VideoSnippet,
     #[serde(rename = "contentDetails")]
     content_details: VideoContentDetails,
+    #[serde(default)]
+    status: Option<VideoStatus>,
+    #[serde(flatten)]
+    extra: ExtraJSON,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VideoStatus {
+    #[serde(rename = "privacyStatus")]
+    privacy_status: Option<String>,
     #[serde(flatten)]
     extra: ExtraJSON,
 }
@@ -79,7 +89,7 @@ fn parse_iso_duration_ms(duration: &str) -> Option<i64> {
     Some(total_ms)
 }
 
-const PARTS: &str = "snippet,contentDetails";
+const PARTS: &str = "snippet,contentDetails,status";
 
 pub async fn get_video_raw<T, F, R, E, FR>(
     client: &YoutubeClient,
@@ -127,6 +137,12 @@ pub async fn get_video(client: &YoutubeClient, url: &str) -> Result<EntityResult
                 .as_deref()
                 .and_then(parse_iso_duration_ms);
             Ok(EntityResult {
+                privacy: v
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.privacy_status.as_deref())
+                    .and_then(Privacy::parse),
+                image: super::snippet_thumbnail(&v.snippet.extra),
                 release_date,
                 sources: [(SOURCE.into(), HashSet::from([url]))].into(),
                 extra: serde_json::to_value(&v).unwrap_or_default(),
@@ -245,6 +261,10 @@ mod tests {
         assert!(child_next(&mut children_cursor).await?.is_none());
 
         assert_eq!(video.aliases.len(), 1);
+        assert_eq!(
+            video.image.as_ref().map(|i| i.url.as_str()),
+            Some("https://i.ytimg.com/vi/ahFZQ_lDoQ4/mqdefault.jpg")
+        );
         let alias = &video.aliases[0];
         assert_eq!(
             alias.name,

@@ -2,8 +2,13 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::musicdb::ParentEdges;
-use crate::providers::types::{Alias, Contribution, EntrySpecificData, EntryType, OptionsId};
+use crate::musicdb::{
+    AliasKey, LINK_VIA_FETCH, LINK_VIA_LISTING, LinkKey, ParentEdges, Replacements, alias_key,
+    link_key,
+};
+use crate::providers::types::{
+    Alias, Contribution, EntrySpecificData, EntryType, Image, OptionsId, Privacy,
+};
 
 /// A `(source_key, identifier)` pair. The only unit of identity during import.
 pub type Pair = (String, String);
@@ -16,6 +21,8 @@ pub struct PairMetadata {
     pub release_date: Option<String>,
     pub specific_data: EntrySpecificData,
     pub aliases: Vec<Alias>,
+    pub image: Option<Image>,
+    pub privacy: Option<Privacy>,
 }
 
 /// What a parent's listing said about a child (from its `ChildRef`). Kept so a
@@ -27,12 +34,52 @@ pub struct StubInfo {
     pub entry_type: EntryType,
     pub name: Option<String>,
     pub duration_ms: Option<i64>,
+    pub image: Option<Image>,
 }
 
 #[derive(Default)]
 struct RunEdges {
     fetched: HashSet<Pair>,
     edges: HashMap<Pair, ParentEdges>,
+    aliases: HashMap<Pair, HashSet<AliasKey>>,
+    gone: HashSet<Pair>,
+    links: HashMap<(Pair, &'static str), HashSet<LinkKey>>,
+}
+
+/// How an `IsRel` was stated (`pair_link.via`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LinkVia {
+    /// In the asserting pair's own fetch result.
+    Fetch,
+    /// Between one child's sibling pairs in the asserting pair's listing.
+    Listing,
+}
+
+impl LinkVia {
+    /// The `pair_link.via` value back; anything unknown reads as `Listing`.
+    pub fn from_stored(via: &str) -> Self {
+        if via == LINK_VIA_FETCH {
+            LinkVia::Fetch
+        } else {
+            LinkVia::Listing
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LinkVia::Fetch => LINK_VIA_FETCH,
+            LinkVia::Listing => LINK_VIA_LISTING,
+        }
+    }
+}
+
+/// An "a and b are one entity" link, with the fetched pair that stated it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsRel {
+    pub a: Pair,
+    pub b: Pair,
+    pub asserted_by: Pair,
+    pub via: LinkVia,
 }
 
 /// A "parent has child" edge between two pairs, with the structural position
@@ -68,7 +115,7 @@ pub struct State {
     /// Claimed pairs → the option sets each has been processed under.
     claimed: Mutex<HashMap<Pair, HashSet<OptionsId>>>,
     pub metadata: Mutex<HashMap<Pair, PairMetadata>>,
-    pub is_rel: Mutex<Vec<(Pair, Pair)>>,
+    pub is_rel: Mutex<Vec<IsRel>>,
     pub has_rel: Mutex<Vec<ChildEdge>>,
     pub stubs: Mutex<HashMap<Pair, StubInfo>>,
     /// Every non-artist pair fetched completely in this run, and every edge
@@ -78,6 +125,9 @@ pub struct State {
     /// flush can drain). At commit, it's what replaces older edges under
     /// re-fetched parents (see `MusicDb::commit_import_run`).
     run_edges: Mutex<RunEdges>,
+    /// Pairs whose class keeps their entry's id when a flush splits it
+    /// (`prefer_keeper`).
+    preferred_keepers: Mutex<HashSet<Pair>>,
     /// Safety cap on fetches per run (see `charge_fetch`); `usize::MAX` = none.
     fetch_budget: AtomicUsize,
     fetches: AtomicUsize,
@@ -117,6 +167,7 @@ impl State {
             has_rel: Mutex::new(Vec::new()),
             stubs: Mutex::new(HashMap::new()),
             run_edges: Mutex::new(RunEdges::default()),
+            preferred_keepers: Mutex::new(HashSet::new()),
             fetch_budget: AtomicUsize::new(usize::MAX),
             fetches: AtomicUsize::new(0),
             approx_bytes: AtomicUsize::new(0),
@@ -165,9 +216,14 @@ impl State {
 
     /// Record an is_rel edge. Prefer this over locking `is_rel` directly so
     /// the size counter stays accurate.
-    pub fn push_is_rel(&self, a: Pair, b: Pair) {
-        let size = pair_bytes(&a) + pair_bytes(&b) + 16;
-        self.is_rel.lock().unwrap().push((a, b));
+    pub fn push_is_rel(&self, a: Pair, b: Pair, asserted_by: Pair, via: LinkVia) {
+        let size = is_rel_bytes(&a, &b, &asserted_by);
+        self.is_rel.lock().unwrap().push(IsRel {
+            a,
+            b,
+            asserted_by,
+            via,
+        });
         self.approx_bytes.fetch_add(size, Ordering::Relaxed);
     }
 
@@ -221,14 +277,63 @@ impl State {
                 if existing.duration_ms.is_none() {
                     existing.duration_ms = info.duration_ms;
                 }
+                if existing.image.is_none()
+                    && let Some(image) = info.image
+                {
+                    self.approx_bytes
+                        .fetch_add(image.url.len(), Ordering::Relaxed);
+                    existing.image = Some(image);
+                }
             }
         }
+    }
+
+    /// When a flush of this state splits the entry `pair` is in, the part
+    /// holding `pair` keeps the entry's id (and with it plays, display names
+    /// and soft relations), whatever its size or age.
+    pub fn prefer_keeper(&self, pair: Pair) {
+        self.preferred_keepers.lock().unwrap().insert(pair);
+    }
+
+    pub(super) fn preferred_keepers(&self) -> HashSet<Pair> {
+        self.preferred_keepers.lock().unwrap().clone()
     }
 
     /// Record that `pair` (canonical) was fetched completely as a non-artist
     /// entity in this run, so its edges as of this run replace older ones.
     pub(super) fn note_fetched_parent(&self, pair: Pair) {
         self.run_edges.lock().unwrap().fetched.insert(pair);
+    }
+
+    /// Record the aliases a fetch of `pair` (canonical, any entry type)
+    /// reported, so they replace older ones at commit.
+    pub(super) fn note_aliases(&self, pair: &Pair, aliases: &[Alias]) {
+        let mut run_edges = self.run_edges.lock().unwrap();
+        let current = run_edges.aliases.entry(pair.clone()).or_default();
+        for a in aliases {
+            current.insert(alias_key(
+                &a.name,
+                a.locale.as_deref(),
+                &a.extra.to_string(),
+                a.primary,
+            ));
+        }
+    }
+
+    /// Record a link (canonical pairs) as stated by its asserter this run.
+    pub(super) fn note_link(&self, rel: &IsRel) {
+        self.run_edges
+            .lock()
+            .unwrap()
+            .links
+            .entry((rel.asserted_by.clone(), rel.via.as_str()))
+            .or_default()
+            .insert(link_key(&rel.a, &rel.b));
+    }
+
+    /// Record that the provider reported `pair` (canonical) deleted.
+    pub(super) fn note_gone(&self, pair: Pair) {
+        self.run_edges.lock().unwrap().gone.insert(pair);
     }
 
     /// Record an edge (canonical pairs) as current for its parent.
@@ -247,16 +352,50 @@ impl State {
     }
 
     /// The current edges of every non-artist parent fetched in this run (an
-    /// empty set for one that listed nothing), for `MusicDb::commit_import_run`.
-    pub fn take_replacements(&self) -> HashMap<Pair, ParentEdges> {
-        let RunEdges { fetched, mut edges } = std::mem::take(&mut *self.run_edges.lock().unwrap());
-        fetched
+    /// empty set for one that listed nothing) and the current aliases of
+    /// every fetched pair, and the pairs found deleted upstream, for
+    /// `MusicDb::commit_import_run`.
+    pub fn take_replacements(&self) -> Replacements {
+        let RunEdges {
+            fetched,
+            mut edges,
+            aliases,
+            gone,
+            links,
+        } = std::mem::take(&mut *self.run_edges.lock().unwrap());
+        let parents = fetched
             .into_iter()
             .map(|pair| {
                 let current = edges.remove(&pair).unwrap_or_default();
                 (pair, current)
             })
-            .collect()
+            .collect();
+        Replacements {
+            parents,
+            aliases,
+            gone,
+            links,
+        }
+    }
+
+    /// What `take_replacements` would return now, leaving it in place: the
+    /// final flush reads it to find the links this run retracts.
+    pub fn peek_replacements(&self) -> Replacements {
+        let run_edges = self.run_edges.lock().unwrap();
+        let parents = run_edges
+            .fetched
+            .iter()
+            .map(|pair| {
+                let current = run_edges.edges.get(pair).cloned().unwrap_or_default();
+                (pair.clone(), current)
+            })
+            .collect();
+        Replacements {
+            parents,
+            aliases: run_edges.aliases.clone(),
+            gone: run_edges.gone.clone(),
+            links: run_edges.links.clone(),
+        }
     }
 
     /// Current estimated size of buffered state, in bytes.
@@ -278,6 +417,10 @@ impl State {
     pub(super) fn progress(&self) -> Option<&Arc<dyn ImportProgress>> {
         self.progress.as_ref()
     }
+}
+
+pub(super) fn is_rel_bytes(a: &Pair, b: &Pair, asserted_by: &Pair) -> usize {
+    pair_bytes(a) + pair_bytes(b) + pair_bytes(asserted_by) + 16
 }
 
 pub(super) fn pair_bytes(p: &Pair) -> usize {
@@ -313,7 +456,7 @@ fn specific_data_bytes(d: &EntrySpecificData) -> usize {
 }
 
 pub(super) fn stub_bytes(s: &StubInfo) -> usize {
-    32 + s.name.as_ref().map_or(0, |n| n.len())
+    32 + s.name.as_ref().map_or(0, |n| n.len()) + s.image.as_ref().map_or(0, |i| i.url.len())
 }
 
 pub(super) fn alias_bytes(a: &Alias) -> usize {

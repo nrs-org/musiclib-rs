@@ -165,6 +165,8 @@ impl FetchProvider for Provider {
         };
 
         Ok(EntityResult {
+            privacy: None,
+            image: result.image.clone(),
             children: result
                 .children
                 .iter()

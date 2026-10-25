@@ -143,6 +143,8 @@ pub async fn get_artist(client: Arc<YtdlpClient>, url: &str) -> Result<EntityRes
         Arc::clone(&client).lazy_children(artist_sets_url(url), sets_value_to_child_refs);
 
     Ok(EntityResult {
+        privacy: None,
+        image: crate::providers::backends::ytdlp::info_thumbnail(&artist.extra),
         release_date: None,
         sources,
         extra: artist.extra,

@@ -462,12 +462,20 @@ async fn evaluate_entry_data(
 ) -> Result<bool, Error> {
     match data {
         CompiledEntryDataMatcher::EntryType(t) => Ok(ctx.child.entry_type == *t),
-        CompiledEntryDataMatcher::NameRegex(regex) => Ok(ctx
-            .child
-            .name
-            .as_deref()
-            .map(|n| regex.is_match(n))
-            .unwrap_or(false)),
+        CompiledEntryDataMatcher::NameRegex(regex) => {
+            // The listing's own name, when it has one, saves fetching the
+            // child just to read it.
+            if let Some(name) = ctx.child.name.as_deref() {
+                return Ok(regex.is_match(name));
+            }
+            let entity = ctx.get_entity(provider).await?;
+            let name = entity
+                .aliases
+                .iter()
+                .find(|a| a.primary)
+                .or_else(|| entity.aliases.first());
+            Ok(name.is_some_and(|a| regex.is_match(&a.name)))
+        }
         CompiledEntryDataMatcher::HasSource(source) => Ok(ctx.child.sources.get(source).is_some()),
         CompiledEntryDataMatcher::AppearsOn(want) => Ok(ctx.child.appears_on == *want),
         CompiledEntryDataMatcher::DurationRange { min, max } => {
@@ -1082,6 +1090,8 @@ mod tests {
             call_count,
         };
         EntityResult {
+            privacy: None,
+            image: None,
             release_date: None,
             sources: Default::default(),
             extra: Default::default(),
@@ -1121,6 +1131,52 @@ mod tests {
                 },
             }),
             options_id: Some(pool.insert(options)),
+        }
+    }
+
+    /// A listing without names (a Niconico user's uploads): the name comes
+    /// from fetching the child.
+    #[tokio::test]
+    async fn test_name_regex_fetches_unnamed_child() {
+        const VIDEO_URL: &str = "https://www.nicovideo.jp/watch/sm1";
+        for (name, kept) in [
+            ("1st アルバム【クロスフェード】", false),
+            ("歌ってみた", true),
+        ] {
+            let entity = EntityResult {
+                aliases: vec![crate::providers::types::Alias {
+                    name: name.into(),
+                    primary: true,
+                    ..Default::default()
+                }],
+                ..make_playlist_entity(vec![], Arc::new(AtomicUsize::new(0)))
+            };
+            let provider = Arc::new(SingleResultProvider::new(VIDEO_URL, entity));
+            let child = ChildRef {
+                entry_type: EntryType::Track,
+                sources: [(
+                    Cow::Borrowed("nicovideo"),
+                    HashSet::from([VIDEO_URL.into()]),
+                )]
+                .into(),
+                ..Default::default()
+            };
+            let source = Arc::new(CachedChildSource::from_children(vec![child]));
+            let mut pool = EntryFetchOptionsPool::default();
+            let skip = ChildRule {
+                matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(
+                    EntryDataMatcher::NameRegex("クロスフェード".into()),
+                )),
+                options_id: None,
+            };
+            let rest = always_rule(&mut pool, EntryFetchOptions::default());
+            let root_id = pool.insert(EntryFetchOptions {
+                child_rules: vec![skip, rest],
+            });
+            let filtered =
+                filter_children(source, Arc::new(pool), root_id, provider, EntryType::Artist)
+                    .unwrap();
+            assert_eq!(drain(filtered).await.len(), usize::from(kept), "{name}");
         }
     }
 
@@ -1206,6 +1262,8 @@ mod tests {
             call_count,
         });
         EntityResult {
+            privacy: None,
+            image: None,
             release_date: None,
             sources: Default::default(),
             extra: Default::default(),
@@ -1334,6 +1392,8 @@ mod tests {
                 return Err(Error::InvalidUrl("video unavailable".into()));
             }
             Ok(EntityResult {
+                privacy: None,
+                image: None,
                 release_date: None,
                 sources: Default::default(),
                 extra: Default::default(),

@@ -18,10 +18,12 @@ use crate::providers::{
 
 use crate::providers::registry::canonicalize;
 use crate::providers::std_values::StandardProviderKeys;
-use types::{LocalChild, LocalEntry};
+use types::{LocalChild, LocalEntry, NamespaceConfig};
 
 pub const SOURCE: &str = "local";
 pub const EXTERNAL_TYPE_ENTRY: &str = "local:entry";
+/// Optional per-namespace settings file (see `NamespaceConfig`).
+pub const NAMESPACE_FILE: &str = "namespace.yaml";
 
 pub struct Provider {
     base_dir: std::path::PathBuf,
@@ -36,6 +38,48 @@ impl Provider {
         Resolver {
             base_dir: &self.base_dir,
         }
+    }
+
+    /// Resolve an imported local identifier for file-change detection. Follows
+    /// the same namespace rules as fetching; the file may be temporarily absent
+    /// while an editor replaces it.
+    pub fn entry_file(&self, identifier: &str) -> Option<PathBuf> {
+        identifier.strip_prefix("local://")?;
+        self.resolver().file_of(identifier, &self.base_dir)
+    }
+
+    /// YAML entries in the configured namespaces, including entries not yet
+    /// imported. Namespace directories may be symlinks. Settings and temporary
+    /// files are excluded by scanning only the entry-kind directories.
+    pub fn namespace_identifiers(&self) -> Vec<String> {
+        let Ok(namespaces) = std::fs::read_dir(&self.base_dir) else {
+            return Vec::new();
+        };
+        let mut identifiers = Vec::new();
+        for namespace in namespaces.flatten() {
+            let name = namespace.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !namespace.path().is_dir() {
+                continue;
+            }
+            for (kind, dir) in KIND_DIRS {
+                let Ok(files) = std::fs::read_dir(namespace.path().join(dir)) else {
+                    continue;
+                };
+                for file in files.flatten() {
+                    let filename = file.file_name();
+                    let filename = filename.to_string_lossy();
+                    if let Some(id) = filename.strip_suffix(".yaml")
+                        && !id.is_empty()
+                        && !id.starts_with('.')
+                        && file.path().is_file()
+                    {
+                        identifiers.push(format!("local://{name}/{kind}/{id}"));
+                    }
+                }
+            }
+        }
+        identifiers.sort();
+        identifiers
     }
 }
 
@@ -155,6 +199,13 @@ fn read_entry(path: &std::path::Path) -> Result<LocalEntry, Error> {
         .map_err(|e| Error::InvalidUrl(format!("cannot parse {}: {e}", path.display())))
 }
 
+fn read_namespace_config(path: &std::path::Path) -> Result<NamespaceConfig, Error> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| Error::InvalidUrl(format!("cannot read {}: {e}", path.display())))?;
+    serde_yaml_ng::from_str(&content)
+        .map_err(|e| Error::InvalidUrl(format!("cannot parse {}: {e}", path.display())))
+}
+
 fn build_sources(raw: &std::collections::HashMap<String, Vec<String>>) -> ExternalSources {
     let mut sources = ExternalSources::default();
     for (k, vs) in raw {
@@ -211,6 +262,7 @@ fn build_child_ref(child: &LocalChild, base: &Path, resolver: &Resolver<'_>) -> 
     });
 
     ChildRef {
+        image: None,
         entry_type: child.entry_type,
         external_type: EXTERNAL_TYPE_ENTRY.into(),
         sources,
@@ -266,6 +318,8 @@ fn entry_to_entity_result(
         .collect::<Vec<_>>();
 
     EntityResult {
+        privacy: None,
+        image: None,
         release_date: entry.release_date,
         sources,
         extra: serde_json::Value::Null,
@@ -331,6 +385,8 @@ impl FetchProvider for Provider {
             .collect::<Result<Vec<_>, Error>>()?;
 
         Ok(EntityResult {
+            privacy: None,
+            image: result.image,
             children,
             release_date: result.release_date,
             sources: result.sources,
@@ -338,6 +394,34 @@ impl FetchProvider for Provider {
             specific_data: result.specific_data,
             aliases: result.aliases,
         })
+    }
+
+    /// Namespaces whose `namespace.yaml` sets `soft_match: false`. An
+    /// unreadable file also excludes its namespace, so a typo can't let
+    /// soft-dedup link entries the namespace meant to keep authored.
+    fn soft_match_exclusions(&self) -> Vec<(String, String)> {
+        let Ok(dirs) = std::fs::read_dir(&self.base_dir) else {
+            return Vec::new();
+        };
+        let mut exclusions = Vec::new();
+        for ns in dirs.flatten() {
+            let name = ns.file_name().to_string_lossy().into_owned();
+            let file = ns.path().join(NAMESPACE_FILE);
+            if name.starts_with('.') || !file.is_file() {
+                continue;
+            }
+            let soft_match = read_namespace_config(&file)
+                .map(|config| config.soft_match)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("{e}; excluding namespace {name} from soft-dedup");
+                    false
+                });
+            if !soft_match {
+                exclusions.push((SOURCE.to_string(), format!("local://{name}/")));
+            }
+        }
+        exclusions.sort();
+        exclusions
     }
 }
 
@@ -347,9 +431,11 @@ mod tests {
 
     use crate::providers::types::{ChildSource, EntrySpecificData, EntryType, child_next};
 
-    use crate::providers::CanonicalizeProvider;
+    use crate::providers::{CanonicalizeProvider, FetchProvider};
 
-    use super::{entry_to_entity_result, read_entry, to_local_url};
+    use super::{
+        NAMESPACE_FILE, Provider, SOURCE, entry_to_entity_result, read_entry, to_local_url,
+    };
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -463,6 +549,33 @@ mod tests {
         assert!(ids.contains(&canonical.canonical_identifier));
         assert!(original.sources.get("url").is_none());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_namespace_config_excludes_soft_match() -> anyhow::Result<()> {
+        let base = tempfile::tempdir()?;
+        for (ns, config) in [
+            ("authored", Some("soft_match: false\n")),
+            ("default", None),
+            ("matched", Some("soft_match: true\n")),
+            ("typo", Some("soft_matc: false\n")),
+        ] {
+            let dir = base.path().join(ns).join("tracks");
+            std::fs::create_dir_all(&dir)?;
+            if let Some(config) = config {
+                std::fs::write(base.path().join(ns).join(NAMESPACE_FILE), config)?;
+            }
+        }
+        let provider = Provider::new(base.path().to_path_buf());
+        // An unparseable file excludes its namespace rather than matching it.
+        assert_eq!(
+            provider.soft_match_exclusions(),
+            [
+                (SOURCE.to_string(), "local://authored/".to_string()),
+                (SOURCE.to_string(), "local://typo/".to_string()),
+            ]
+        );
         Ok(())
     }
 

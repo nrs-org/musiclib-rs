@@ -7,7 +7,9 @@ use crate::providers::{
         SOURCE,
         canonicalize::{album_url, artist_url, match_album_url, track_url},
         client::SpotifyClient,
-        types::{EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_TRACK, Paging, SimpleArtist},
+        types::{
+            EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_TRACK, Image, Paging, SimpleArtist, pick_image,
+        },
     },
     std_values::StandardRoleNames,
     types::{
@@ -32,6 +34,8 @@ pub(crate) struct AlbumResponse {
     pub tracks: Paging<SimplifiedTrack>,
     #[serde(default)]
     pub external_ids: AlbumExternalIds,
+    #[serde(default)]
+    pub images: Vec<Image>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
 }
@@ -66,6 +70,7 @@ pub(crate) fn parse_release_date(date_str: &str, precision: Option<&str>) -> Opt
 
 fn simplified_track_to_child_ref(track: &SimplifiedTrack) -> ChildRef {
     ChildRef {
+        image: None,
         entry_type: EntryType::Track,
         external_type: EXTERNAL_TYPE_TRACK.into(),
         sources: [(SOURCE.into(), HashSet::from([track_url(&track.id)]))].into(),
@@ -229,6 +234,8 @@ pub async fn get_album(client: &SpotifyClient, url: &str) -> Result<EntityResult
         }
 
         let result = Ok(EntityResult {
+            privacy: None,
+            image: pick_image(&a.images),
             release_date,
             sources,
             extra: a.extra.clone(),
@@ -294,6 +301,10 @@ mod tests {
         // Title and release metadata
         assert_eq!(album.aliases.len(), 1);
         assert_eq!(album.aliases[0].name, "Hop Step Sheep");
+        assert_eq!(
+            album.image.as_ref().map(|i| i.url.as_str()),
+            Some("https://i.scdn.co/image/ab67616d00001e028e57b5670089512e1e4c2da5")
+        );
         assert!(album.aliases[0].primary);
         assert!(matches!(
             album.specific_data,

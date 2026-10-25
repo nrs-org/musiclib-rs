@@ -1,0 +1,82 @@
+# Fetch the full discography of an utaite (cover singer).
+#
+# Fetching an entity always records all of its structural children (an
+# album's tracklist, a track's credits and album); rules only decide which of
+# them are also fetched. Children that aren't fetched are stored as stubs. A
+# channel's (artist's) children are its discography, and are recorded only
+# when fetched.
+#
+# Unlike a VTuber, an utaite uploads almost nothing but songs, so the upload
+# history is the discography and playlists aren't needed to find them. Start
+# from the MusicBrainz artist: importing it also imports the YouTube channels,
+# Spotify artists, etc. it links to, with these same options. For an utaite
+# who also uploads streams, clips or other videos, use
+# vtuber_fetch_discography.yaml instead.
+#
+# - A YouTube channel's uploads are its long-form uploads (its Videos tab):
+#   Shorts and live-stream archives are already left out. Of these, and of a
+#   Niconico account's uploads, videos are fetched unless their title marks
+#   them as something other than a song (a clip, gameplay, crossfade, teaser,
+#   digest, announcement, ad), or they run under 30 seconds or over 8 minutes
+#   (variety and gameplay videos, live sets). Short and live versions of
+#   songs are kept.
+#
+#   Tested on 16 utaite (2026-10-20). A channel with a lot of variety content
+#   still leaks some of it under 8 minutes (まふまふ: short game videos,
+#   vlogs); use the VTuber options for those.
+# - YouTube playlists are not fetched: the uploads already hold their songs.
+#   This also drops YouTube Music releases (listed as playlists); Spotify and
+#   MusicBrainz releases are fetched with `main`.
+# - Every discography track fetches its album(s), credited artists and, for a
+#   cover, its original, each as a leaf (`track`). An album reached this way
+#   records its other tracks as stubs.
+# - Releases the artist only appears on (various-artists compilations) are
+#   leaves: fetched with their tracklist as stubs.
+# - Artist children are stored as leaves (no recursive discography fetch).
+
+main:
+  child_rules:
+    - match: { entry_type: artist }
+      fetch: ./no_fetch_discography.yaml::main  # artists fetched as leaves
+    - match: { appears_on: true }
+      fetch: ./no_fetch_discography.yaml::main  # releases they only appear on: tracklist as stubs
+
+    - match: { external_type: "youtube:playlist" }
+      fetch: null
+
+    # Uploads that aren't songs: stream clips and archives, gameplay, album
+    # crossfades and previews, teasers, digests, announcements, product
+    # explainers, interviews
+    - match:
+        all:
+          - any:
+              - { external_type: "youtube:video" }
+              - { external_type: "nicovideo:video" }
+          - any:
+              - { name_regex: "(?i)(切り抜き|雑談|歌枠|実況|XFD|クロスフェード|crossfade|試聴|予告|trailer|トレイラー|トレーラー|teaser|ティザー|ダイジェスト|digest|告知|お知らせ|開催決定|解説|インタビュー|interview|対談|メイキング|making of|behind the scenes)" }
+              # Ad spots ("[30sec.SPOT]", "【CM】"); case-sensitive, and
+              # "CMソング" (a cover of a jingle) has no word boundary
+              - { name_regex: "\\b(SPOT|CM)\\b" }
+      fetch: null
+    - match:
+        all:
+          - any:
+              - { external_type: "youtube:video" }
+              - { external_type: "nicovideo:video" }
+          - { not: { duration_range: { min: 30000, max: 480000 } } }
+      fetch: null                               # skip uploads <30s or >8m
+
+    - match:
+        all:
+          - { entry_type: track }
+          - { not: { duration_range: { min: 30000, max: 1200000 } } }
+      fetch: null                               # skip other tracks <30s or >20m
+    - match: { entry_type: track }
+      fetch: track
+    - match: always
+      fetch: main                               # Spotify / MusicBrainz releases: their tracklists
+
+track:
+  child_rules:
+    - match: always
+      fetch: ./no_fetch_discography.yaml::main  # album(s), credits, original: one hop

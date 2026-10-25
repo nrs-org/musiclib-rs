@@ -7,7 +7,9 @@ use crate::providers::{
         SOURCE,
         canonicalize::{match_playlist_url, playlist_url, track_url},
         client::SpotifyClient,
-        types::{EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_TRACK, Paging, SimpleArtist},
+        types::{
+            EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_TRACK, Image, Paging, SimpleArtist, pick_image,
+        },
     },
     listing::{ListingKey, ListingOrder, listing_source},
     std_values::StandardRoleNames,
@@ -28,6 +30,8 @@ pub(crate) struct PlaylistResponse {
     pub description: Option<String>,
     pub owner: PlaylistOwner,
     pub tracks: Paging<PlaylistItem>,
+    #[serde(default)]
+    pub images: Vec<Image>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
 }
@@ -120,6 +124,7 @@ fn playlist_items_to_child_refs(items: &[PlaylistItem]) -> Vec<ChildRef> {
                 })
                 .collect();
             ChildRef {
+                image: None,
                 entry_type: EntryType::Track,
                 external_type: EXTERNAL_TYPE_TRACK.into(),
                 sources: [(SOURCE.into(), HashSet::from([track_url(&track.id)]))].into(),
@@ -224,6 +229,8 @@ pub async fn get_playlist(client: &SpotifyClient, url: &str) -> Result<EntityRes
             };
 
         let result = Ok(EntityResult {
+            privacy: None,
+            image: pick_image(&p.images),
             release_date: None,
             sources: [(SOURCE.into(), HashSet::from([canonical]))].into(),
             extra: p.extra.clone(),
