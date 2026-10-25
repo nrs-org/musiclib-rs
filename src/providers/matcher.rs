@@ -33,6 +33,29 @@ pub struct CompiledChildRule {
 
 // --- Compilation ---
 
+/// The compiled `child_rules` of `pool`'s entry `id`, compiled once per pool.
+fn compiled_rules(
+    pool: &EntryFetchOptionsPool,
+    id: OptionsId,
+) -> Result<Arc<[CompiledChildRule]>, Error> {
+    if let Some(rules) = pool.compiled.0.get(&id) {
+        return Ok(Arc::clone(&rules));
+    }
+    let rules: Arc<[CompiledChildRule]> = pool
+        .get(id)
+        .child_rules
+        .iter()
+        .map(|r| {
+            Ok(CompiledChildRule {
+                matcher: compile_expr(&r.matcher)?,
+                options_id: r.options_id,
+            })
+        })
+        .collect::<Result<_, Error>>()?;
+    pool.compiled.0.insert(id, Arc::clone(&rules));
+    Ok(rules)
+}
+
 fn compiled_expr_cost(expr: &CompiledMatcherExpr) -> u32 {
     match expr {
         CompiledMatcherExpr::Matcher(m) => match m {
@@ -159,7 +182,7 @@ struct FilteringChildSource {
 
 fn filtering_stream(
     cursor: OwnedCachedChildCursor,
-    rules: Vec<CompiledChildRule>,
+    rules: Arc<[CompiledChildRule]>,
     pool: Arc<EntryFetchOptionsPool>,
     provider: Arc<dyn FetchProvider>,
     exhaustive: bool,
@@ -171,7 +194,6 @@ fn filtering_stream(
     // fetches reach the coalescer in parallel.
     const CONCURRENCY: usize = 50;
 
-    let rules = Arc::new(rules);
     let rules_pull = Arc::clone(&rules);
 
     // Sequential cursor walk (fast — no matcher eval here). Tags each child
@@ -296,17 +318,7 @@ pub fn filter_children(
     provider: Arc<dyn FetchProvider>,
     parent_type: EntryType,
 ) -> Result<CachedChildSource<ChildFetchOptions>, Error> {
-    let options = pool.get(root_id);
-    let rules = options
-        .child_rules
-        .iter()
-        .map(|r| {
-            Ok(CompiledChildRule {
-                matcher: compile_expr(&r.matcher)?,
-                options_id: r.options_id,
-            })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let rules = compiled_rules(&pool, root_id)?;
 
     // An artist's listing whose every item the rules would drop is never read,
     // so a lazy listing never makes its request (a channel's uploads pages, a
@@ -645,6 +657,28 @@ mod tests {
             sources: [(Cow::Borrowed(source), HashSet::from([name.to_string()]))].into(),
             ..Default::default()
         }
+    }
+
+    /// Rules are compiled once per pool entry, and recompiled after a patch.
+    #[test]
+    fn compiled_rules_are_cached_per_entry() {
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = always_rule(&mut pool, EntryFetchOptions::default());
+        let id = pool.insert(EntryFetchOptions {
+            child_rules: vec![rule.clone()],
+        });
+        let first = compiled_rules(&pool, id).unwrap();
+        assert!(Arc::ptr_eq(&first, &compiled_rules(&pool, id).unwrap()));
+
+        pool.patch(
+            id,
+            EntryFetchOptions {
+                child_rules: vec![rule.clone(), rule],
+            },
+        );
+        let patched = compiled_rules(&pool, id).unwrap();
+        assert_eq!(patched.len(), 2);
+        assert!(!Arc::ptr_eq(&first, &patched));
     }
 
     fn always_rule(pool: &mut EntryFetchOptionsPool, options: EntryFetchOptions) -> ChildRule {

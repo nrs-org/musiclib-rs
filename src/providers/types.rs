@@ -525,12 +525,29 @@ pub struct EntryFetchOptions {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EntryFetchOptionsPool {
     entries: Vec<EntryFetchOptions>,
+    /// Each entry's rules, compiled on first use by `matcher::filter_children`
+    /// rather than once per fetched entity (regex compilation is costly).
+    #[serde(skip)]
+    pub(crate) compiled: CompiledRulesCache,
+}
+
+/// See `EntryFetchOptionsPool::compiled`. A clone starts empty.
+#[derive(Default)]
+pub(crate) struct CompiledRulesCache(
+    pub(crate) dashmap::DashMap<OptionsId, Arc<[crate::providers::matcher::CompiledChildRule]>>,
+);
+
+impl Clone for CompiledRulesCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 impl Default for EntryFetchOptionsPool {
     fn default() -> Self {
         Self {
             entries: vec![EntryFetchOptions::default()],
+            compiled: CompiledRulesCache::default(),
         }
     }
 }
@@ -552,6 +569,7 @@ impl EntryFetchOptionsPool {
     /// pre-allocate a slot (to get the id for self-referential named options), then patch
     /// it with the real content once all ids are known.
     pub fn patch(&mut self, id: OptionsId, opts: EntryFetchOptions) {
+        self.compiled.0.remove(&id);
         self.entries[id as usize] = opts;
     }
 
