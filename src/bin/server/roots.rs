@@ -11,6 +11,13 @@
 //!   edits (`"label": null` clears it); `DELETE` removes. Removing a root
 //!   only stops updating it: what it imported stays in the library.
 //!
+//! - `POST /api/roots/preview` `{"url", "fetch_options"}`: what those fetch
+//!   options decide for each of the URL's direct children (fetched, skipped,
+//!   undecided), without importing anything: `{"root", "existing_root_id",
+//!   "rules", "listings", "errors"}`. `rules` are the entry point's
+//!   `child_rules` as written; each child's `rule` is a 1-based index into
+//!   them (`pipeline::update::preview_root`).
+//!
 //! Fetch options are checked when saved, by loading them; a file broken
 //! later shows up when an update runs the root.
 
@@ -23,7 +30,8 @@ use bytes::Bytes;
 use hyper::{Method, StatusCode};
 use musiclib_rs::{
     musicdb::{Error as DbError, NewUpdateRoot, UpdateRootEdit, UpdateRootRow},
-    providers::registry::canonicalize,
+    pipeline::update::preview_root,
+    providers::{fetch_options_yaml::YamlFetchDocument, registry::canonicalize},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -54,6 +62,8 @@ pub async fn route(
         (&Method::GET, []) => list(state).await,
         (&Method::POST, []) => create(state, &body).await,
         (_, []) => respond::method_not_allowed(),
+        (&Method::POST, ["preview"]) => preview(state, &body).await,
+        (_, ["preview"]) => respond::method_not_allowed(),
         (_, [id]) => {
             let Ok(id) = id.parse::<i64>() else {
                 return bad_request("root id must be numeric");
@@ -265,4 +275,87 @@ async fn delete(state: &Arc<AppState>, id: i64) -> HyperResponse {
         Ok(false) => respond::not_found(),
         Err(e) => db_error(e),
     }
+}
+
+#[derive(Deserialize)]
+struct PreviewBody {
+    url: String,
+    fetch_options: FetchOptionsBody,
+}
+
+/// The entry point's rules as written in its file (the built-in preset's
+/// as generated from its pool), each with an explicit `"fetch"`: an omitted
+/// one parses as `fetch: null`, a skip.
+async fn rules_json(file: &str, entry_point: &str) -> Value {
+    let mut rules = written_rules(file, entry_point).await;
+    if let Value::Array(rules) = &mut rules {
+        for rule in rules {
+            if let Value::Object(rule) = rule {
+                rule.entry("fetch").or_insert(Value::Null);
+            }
+        }
+    }
+    rules
+}
+
+async fn written_rules(file: &str, entry_point: &str) -> Value {
+    if file == fetch_options::SHALLOW_ID {
+        let (pool, root_id) = fetch_options::shallow();
+        let doc = YamlFetchDocument::from_pool(&pool, root_id);
+        return serde_json::to_value(&doc.0["main"].child_rules).unwrap_or_default();
+    }
+    let path = fetch_options_dir().join(format!("{file}.yaml"));
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        return Value::Null;
+    };
+    serde_yaml_ng::from_str::<YamlFetchDocument>(&text)
+        .ok()
+        .and_then(|doc| {
+            doc.0
+                .get(entry_point)
+                .and_then(|o| serde_json::to_value(&o.child_rules).ok())
+        })
+        .unwrap_or(Value::Null)
+}
+
+async fn preview(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
+    let req: PreviewBody = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    let url = req.url.trim().to_string();
+    let (file, entry_point) = (req.fetch_options.file, req.fetch_options.entry_point);
+    let Some((pool, root_id)) =
+        fetch_options::resolve(&fetch_options_dir(), &file, &entry_point).await
+    else {
+        return bad_request(&format!(
+            "unknown fetch_options file/entry_point {file:?}/{entry_point:?}"
+        ));
+    };
+    let report = match preview_root(&state.providers, &url, pool, root_id).await {
+        Ok(report) => report,
+        Err(e) => return bad_request(&format!("{e:#}")),
+    };
+    let existing_root_id = match state.db.update_roots().await {
+        Ok(roots) => roots
+            .iter()
+            .find(|r| r.source == report.source && r.identifier == report.identifier)
+            .map(|r| r.id),
+        Err(e) => return db_error(e),
+    };
+    respond::json(
+        StatusCode::OK,
+        json!({
+            "root": {
+                "source": report.source,
+                "identifier": report.identifier,
+                "entry_type": report.entry_type,
+                "name": report.name,
+            },
+            "existing_root_id": existing_root_id,
+            "rules": rules_json(&file, &entry_point).await,
+            "listings": report.listings,
+            "errors": report.errors,
+        }),
+    )
 }

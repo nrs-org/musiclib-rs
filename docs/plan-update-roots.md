@@ -109,7 +109,11 @@ the job meanwhile.
    `mb_sync`, walk, pass, per-root results), run by `POST /api/update`
    (`src/bin/server/update.rs`) and `import --update`; `update.sh` is
    removed.
-4. **Preview**: the filtering report above.
+4. **Preview** (done): `matcher::preview` records what `filter_children`
+   decides inside a scope (rules evaluated with a provider that refuses
+   fetches, so a rule needing a child's own data reports it undecided);
+   `pipeline::update::preview_root` fetches the root and drains its
+   listings; `POST /api/roots/preview`.
 5. **UI**: a Roots panel next to the ingest form: list with last-run status,
    add (with preview), edit options, enable/disable, remove, "update now",
    job progress reusing the ingest job view.

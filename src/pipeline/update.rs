@@ -245,3 +245,72 @@ async fn sync_mirror(
     .await?
     .context("MusicBrainz mirror")
 }
+
+/// What `preview_root` found.
+#[derive(Debug, Clone, Serialize)]
+pub struct RootPreview {
+    pub source: String,
+    pub identifier: String,
+    pub entry_type: crate::providers::types::EntryType,
+    pub name: Option<String>,
+    pub listings: Vec<crate::providers::matcher::PreviewListing>,
+    /// Listings that failed partway; their children so far are still listed.
+    pub errors: Vec<String>,
+}
+
+/// Fetch `url` with the fetch options `pool`/`root_id` and report what they
+/// decide for each of its direct children (`matcher::preview`): fetched,
+/// skipped, or undecided because the deciding rule needs the child's own
+/// data. Nothing is written to the library, and no child is fetched; reading
+/// the root's listings costs what it costs (a few YouTube units for a
+/// channel), and the responses land in the HTTP cache for the real import.
+pub async fn preview_root(
+    providers: &[Arc<dyn crate::providers::FetchProvider>],
+    url: &str,
+    pool: Arc<crate::providers::types::EntryFetchOptionsPool>,
+    root_id: crate::providers::types::OptionsId,
+) -> anyhow::Result<RootPreview> {
+    use crate::providers::{matcher::preview, std_values::StandardProviderKeys, types::child_next};
+    let mut found = None;
+    for p in providers {
+        if let Some(c) = p.canonicalize(StandardProviderKeys::UNKNOWN_URL, url).await {
+            found = Some((Arc::clone(p), c));
+            break;
+        }
+    }
+    let Some((provider, canonical)) = found else {
+        anyhow::bail!("no provider recognises {url:?}");
+    };
+    let source = canonical.canonical_source_key.into_owned();
+    let identifier = canonical.canonical_identifier;
+    let (result, listings) = preview(async {
+        let entity = Arc::clone(&provider)
+            .fetch_entry(&source, &identifier, pool, root_id)
+            .await?;
+        let mut errors = Vec::new();
+        for listing in &entity.children {
+            let mut cursor = listing.cursor();
+            loop {
+                match child_next(&mut cursor).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(e) => {
+                        errors.push(e.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        Ok::<_, crate::providers::types::Error>((entity, errors))
+    })
+    .await;
+    let (entity, errors) = result?;
+    Ok(RootPreview {
+        source,
+        identifier,
+        entry_type: entity.specific_data.entry_type(),
+        name: entity.aliases.first().map(|a| a.name.clone()),
+        listings,
+        errors,
+    })
+}
