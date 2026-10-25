@@ -286,7 +286,7 @@ async fn sync_mirror(
                             at: Some(at),
                             target,
                         })
-                    }) as Box<dyn Fn(i64, Option<i64>) + Send>
+                    }) as mb_sync::PacketHook
                 }),
                 ..SyncOptions::default()
             },

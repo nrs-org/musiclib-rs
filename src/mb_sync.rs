@@ -22,6 +22,9 @@ use crate::{
     replication::{self, PacketInfo},
 };
 
+/// See `SyncOptions::on_packet`.
+pub type PacketHook = Box<dyn Fn(i64, Option<i64>) + Send>;
+
 pub struct SyncOptions {
     /// The mirror file; defaults to the backend's (`mirror_db`, else
     /// <data_dir>/mb_mirror.db when it exists).
@@ -37,7 +40,7 @@ pub struct SyncOptions {
     pub max_server_lag: Option<i64>,
     /// Called after each packet is applied, with the mirror's sequence and
     /// the one it's syncing up to (`None` for the newest published).
-    pub on_packet: Option<Box<dyn Fn(i64, Option<i64>) + Send>>,
+    pub on_packet: Option<PacketHook>,
 }
 
 impl Default for SyncOptions {
