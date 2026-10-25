@@ -31,6 +31,8 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ChannelListResponse {
+    // Absent when a `forHandle`/`forUsername` lookup matches no channel.
+    #[serde(default)]
     items: Vec<Channel>,
     #[serde(flatten)]
     extra: ExtraJSON,
@@ -819,6 +821,34 @@ mod tests {
                 ("maxResults", UPLOADS_MAX_RESULTS),
             ],
         )
+    }
+
+    /// A handle that matches no channel gets a response without `items`.
+    #[tokio::test]
+    async fn unknown_handle_is_not_found() -> anyhow::Result<()> {
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route(
+            Method::GET,
+            &YoutubeClient::build_url(
+                "channels",
+                &[("part", CHANNEL_PARTS), ("forHandle", "nosuchhandle")],
+            ),
+            ResponseStatus::OK,
+            Bytes::from_static(
+                br#"{"kind": "youtube#channelListResponse", "etag": "x",
+                    "pageInfo": {"totalResults": 0, "resultsPerPage": 5}}"#,
+            ),
+        );
+        let client = YoutubeClient::new_with_client(Arc::new(http_client), "key".to_string())?;
+
+        let err = get_channel(&client, "https://www.youtube.com/@nosuchhandle")
+            .await
+            .err();
+        assert!(
+            matches!(err, Some(crate::providers::Error::NotFound(_))),
+            "{err:?}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
