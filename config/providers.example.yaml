@@ -17,6 +17,12 @@ nicovideo:
 
 musicbrainz:
   base_url: "http://localhost:5000/ws/2"
+  # Keeps the URL mirror from getting ahead of this self-hosted server
+  # (docs/CONFIG_REFERENCE.md).
+  server_replication:
+    command: >-
+      docker exec musicbrainz-docker-db-1 psql -U musicbrainz -d musicbrainz_db
+      -tAc "select current_replication_sequence from replication_control"
 
 # local:
 #   base_dir: .  # resolve relative local:// paths from here

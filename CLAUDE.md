@@ -34,7 +34,7 @@ RUST_LOG=musiclib_rs=info,dedup=info cargo run --bin dedup
 
 # MusicBrainz local mirror (URL table only)
 cargo run --release --bin mb_extract_urls -- <mbdump.tar.bz2|-> -d mb_mirror.db
-cargo run --bin mb_sync_replication -- -d mb_mirror.db   # incremental catch-up
+cargo run --bin mb_sync_replication -- -d mb_mirror.db   # incremental catch-up, never past a self-hosted server (musicbrainz.server_replication)
 cargo run --bin mb_apply_replication -- replication-<N>-v2.tar.bz2   # apply one packet
 cargo run --bin mb_apply_replication -- --undo replication-<N>-v2.tar.bz2  # undo last packet
 ```

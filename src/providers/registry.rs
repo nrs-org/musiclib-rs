@@ -98,7 +98,7 @@ impl Default for SpotifyConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MusicBrainzConfig {
     #[serde(default = "MusicBrainzConfig::default_token")]
     pub token: Option<Credential>,
@@ -113,6 +113,11 @@ pub struct MusicBrainzConfig {
     /// `MUSICBRAINZ_MIRROR_DB` env var.
     #[serde(default = "MusicBrainzConfig::default_mirror_db")]
     pub mirror_db: Option<Credential>,
+    /// How to read a self-hosted server's replication sequence, so the mirror
+    /// never gets ahead of it (`crate::mb_freshness`). Not needed for the
+    /// public server.
+    #[serde(default)]
+    pub server_replication: Option<crate::mb_freshness::ServerReplication>,
     /// Base URL for the MusicBrainz full-export download server, used by
     /// `mb_extract_urls`. Defaults to `MUSICBRAINZ_DUMP_BASE_URL` env var;
     /// falls back to the public MetaBrainz server when unset.
@@ -157,6 +162,22 @@ impl MusicBrainzConfig {
     fn default_resolve_original_recordings() -> bool {
         true
     }
+
+    /// The API base URL in use, `None` for the public server's default.
+    pub fn resolved_base_url(&self) -> Option<String> {
+        self.base_url.as_ref().and_then(Credential::resolve)
+    }
+
+    /// The URL mirror in use: `mirror_db`, else `<data_dir>/mb_mirror.db` if
+    /// it exists.
+    pub fn mirror_db_path(&self) -> Option<std::path::PathBuf> {
+        let default = crate::app_dirs::data_dir().join("mb_mirror.db");
+        self.mirror_db
+            .as_ref()
+            .and_then(Credential::resolve)
+            .map(std::path::PathBuf::from)
+            .or_else(|| default.exists().then_some(default))
+    }
 }
 
 impl Default for MusicBrainzConfig {
@@ -165,6 +186,7 @@ impl Default for MusicBrainzConfig {
             token: Self::default_token(),
             base_url: Self::default_base_url(),
             mirror_db: Self::default_mirror_db(),
+            server_replication: None,
             dump_base_url: Self::default_dump_base_url(),
             fetch_release_durations: Self::default_fetch_release_durations(),
             resolve_original_recordings: Self::default_resolve_original_recordings(),
@@ -275,6 +297,23 @@ impl Default for RegistryConfig {
     }
 }
 
+impl RegistryConfig {
+    /// `explicit` (must exist), else `<config_dir>/providers.yaml` if it
+    /// exists, else the defaults.
+    pub fn load(explicit: Option<&std::path::Path>) -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+        let default = crate::app_dirs::config_dir().join("providers.yaml");
+        let path = match explicit {
+            Some(p) => p.to_owned(),
+            None if default.exists() => default,
+            None => return Ok(Self::default()),
+        };
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+}
+
 // ── Builder ───────────────────────────────────────────────────────────────────
 
 fn skip_missing(name: &str, msg: &str) {
@@ -343,18 +382,7 @@ pub fn build_providers_with_listings(
             token,
             base_url,
         )?;
-        let default_mirror_db = crate::app_dirs::data_dir().join("mb_mirror.db");
-        let mirror_db_path = cfg
-            .mirror_db
-            .as_ref()
-            .and_then(|c| c.resolve())
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                default_mirror_db
-                    .exists()
-                    .then(|| default_mirror_db.clone())
-            });
-        if let Some(path) = mirror_db_path {
+        if let Some(path) = cfg.mirror_db_path() {
             match rusqlite::Connection::open(&path) {
                 Ok(conn) => {
                     provider = provider.with_mirror_db(Arc::new(std::sync::Mutex::new(conn)));
@@ -367,7 +395,7 @@ pub fn build_providers_with_listings(
             warn!(
                 "[registry] musicbrainz: no mirror_db configured and {} not found; \
                  URL lookups will hit the network",
-                default_mirror_db.display()
+                crate::app_dirs::data_dir().join("mb_mirror.db").display()
             );
         }
         provider = provider.with_fetch_release_durations(cfg.fetch_release_durations);

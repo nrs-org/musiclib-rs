@@ -57,6 +57,7 @@ standard environment variables listed below).
 | `base_url` | Credential? | `MUSICBRAINZ_BASE_URL` | Defaults to `https://musicbrainz.org/ws/2` |
 | `mirror_db` | Credential? | `MUSICBRAINZ_MIRROR_DB` | Path to local `mb_mirror.db`; auto-detected from the data dir if omitted |
 | `dump_base_url` | Credential? | `MUSICBRAINZ_DUMP_BASE_URL` | Used by `mb_extract_urls` only; defaults to the public MetaBrainz server |
+| `server_replication` | `{command: …}` or `{url: …}`? | — | How to read a self-hosted server's replication sequence; see below |
 
 Recording imports look up each performed work with `artist-rels+work-rels`
 to collect writing credits and group versions of the same song. These
@@ -69,6 +70,30 @@ silently discarding existing credits on re-import. See
 If `mirror_db` is set (or found automatically), URL lookups skip the network for
 URLs not in the mirror. Build the mirror with `mb_extract_urls` and keep it fresh
 with `mb_sync_replication`.
+
+**Mirror and self-hosted server.** The mirror must never be ahead of the
+server it sends lookups to: it would vouch for URLs the server doesn't have
+yet, and their 404s get cached. With a self-hosted `base_url`, set
+`server_replication` so the tools can read the server's replication sequence:
+
+```yaml
+musicbrainz:
+  base_url: http://localhost:5000/ws/2
+  server_replication:
+    # musicbrainz-docker: ask its database
+    command: >-
+      docker exec musicbrainz-docker-db-1 psql -U musicbrainz -d musicbrainz_db
+      -tAc "select current_replication_sequence from replication_control"
+    # lightweight-mb instead: JSON with `replication_sequence`
+    # url: http://localhost:8080/healthz
+```
+
+The command prints the sequence; the URL serves JSON with a
+`replication_sequence` field. With it, `mb_sync_replication` stops at the
+server's sequence (`--until N` overrides), `mb_apply_replication` refuses a
+packet past it, and `import` refuses to run while the mirror is ahead.
+Without it, both sync tools refuse to run and `import` warns. The public
+server needs none of this.
 
 #### `discogs`
 
@@ -334,6 +359,12 @@ refreshes of the uploads snapshots whose last full fetch is oldest, which
 catches videos that appeared below the page an incremental refresh stopped
 at. `--no-full-refresh-pass` skips that step. Manual runs normally pass no
 budget.
+
+**MusicBrainz first.** `scripts/update.sh` starts with `mb_sync_replication
+--max-server-lag 36`: it stops the update if a self-hosted server is more than
+36 packets (about 36 hours) behind the newest published one, its replication
+having likely stopped, and otherwise catches the mirror up to the server.
+`MB_MAX_LAG` changes the limit; `MB_ALLOW_STALE=1` skips the check.
 
 **Daily cron.** `scripts/update.sh` runs every roots file in
 `<config_dir>/update_roots/`: `NAME.txt` lists root URLs and is imported with

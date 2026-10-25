@@ -284,6 +284,13 @@ async fn run() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // A MusicBrainz URL mirror ahead of its self-hosted server would send
+    // lookups for links the server doesn't have yet, and cache the 404s.
+    if let Some(mb) = registry_config.musicbrainz.clone() {
+        tokio::task::spawn_blocking(move || musiclib_rs::mb_freshness::check_before_import(&mb))
+            .await??;
+    }
+
     let providers =
         build_providers_with_listings(&registry_config, http, Some(Arc::clone(&listings)))?;
     if providers.is_empty() {

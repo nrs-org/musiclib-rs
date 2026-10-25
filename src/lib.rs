@@ -2,6 +2,7 @@ pub mod app_dirs;
 pub mod duration;
 pub mod http;
 pub mod httpcache;
+pub mod mb_freshness;
 pub mod musicdb;
 pub mod pipeline;
 pub mod providers;
