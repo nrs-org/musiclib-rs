@@ -86,3 +86,8 @@ schedulers:
   # yt-dlp server (YTDLP_SERVER_URL): each request is a yt-dlp extraction.
   localhost:3000:
     max_concurrent: 4
+
+  # ytmusicapi server (youtube_api.ytmusicapi_server_url): single-threaded
+  # with a listen backlog of 5, so more at once get connections refused.
+  localhost:9001:
+    max_concurrent: 2
