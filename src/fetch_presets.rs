@@ -1,6 +1,7 @@
-//! Fetch-options file/entry-point picker for the player UI's import form
-//! (`player.rs`'s `/api/fetch-options/*` routes and `/api/ingest`'s
-//! `fetch_options` field).
+//! Fetch-options presets: the files in `<config_dir>/fetch_options/` and
+//! their entry points, as the player UI's import form and update roots name
+//! them (a file id plus an entry point), for the server and the library
+//! update (`pipeline::update`).
 //!
 //! There is no bundled or hardcoded config here — `<config_dir>/fetch_options/`
 //! is a plain directory the user manages themselves (copying in whatever
@@ -22,13 +23,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use musiclib_rs::providers::{
+use crate::providers::{
     fetch_options_yaml::{YamlFetchDocument, load_from_file_with_root},
     types::{
         ChildMatcher, ChildMatcherExpr, ChildRule, EntryFetchOptions, EntryFetchOptionsPool,
         OptionsId,
     },
 };
+
+/// `<config_dir>/fetch_options/`, where presets live.
+pub fn dir() -> PathBuf {
+    crate::app_dirs::config_dir().join("fetch_options")
+}
 
 /// Reserved id for the built-in fallback (see `shallow`) — not a real file,
 /// so it can't collide with a genuine `<file-stem>.yaml`.
@@ -59,7 +65,7 @@ pub fn shallow() -> (Arc<EntryFetchOptionsPool>, OptionsId) {
 pub struct FileEntry {
     /// The bare filename stem (e.g. `fetch_discography` for
     /// `fetch_discography.yaml`) — what the client sends back as `file` in
-    /// `/api/ingest`'s `fetch_options` field.
+    /// `/api/ingest`'s `fetch_options` field and an update root.
     pub id: String,
 }
 

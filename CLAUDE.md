@@ -19,6 +19,11 @@ cargo run --bin update_fixtures -- fixtures.yaml <filter>   # filter by path/url
 RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url>... [--url-file urls.txt] \
   --fetch-options config/fetch_options/fetch_discography.yaml
 
+# Update: refresh growing listings (uploads, discographies) instead of
+# serving their snapshots; --refresh=full refetches everything
+cargo run --bin import -- --refresh <url> --fetch-options <name>
+cargo run --release --bin import -- --update   # daily cron: the player's update roots (docs/plan-update-roots.md)
+
 # Record every identity link on an existing DB, then let re-imports split
 # entries a removed link disconnects (docs/plan-identity-retraction.md)
 cargo run --release --bin import -- --backfill-links --skip-softmatch
@@ -29,7 +34,7 @@ RUST_LOG=musiclib_rs=info,dedup=info cargo run --bin dedup
 
 # MusicBrainz local mirror (URL table only)
 cargo run --release --bin mb_extract_urls -- <mbdump.tar.bz2|-> -d mb_mirror.db
-cargo run --bin mb_sync_replication -- -d mb_mirror.db   # incremental catch-up
+cargo run --bin mb_sync_replication -- -d mb_mirror.db   # incremental catch-up, never past a self-hosted server (musicbrainz.server_replication)
 cargo run --bin mb_apply_replication -- replication-<N>-v2.tar.bz2   # apply one packet
 cargo run --bin mb_apply_replication -- --undo replication-<N>-v2.tar.bz2  # undo last packet
 ```
@@ -82,6 +87,10 @@ Children are exposed as `ChildSource<T>: Stream<Item = Result<(ChildRef, T), Err
 
 `ChildSource` also exposes `evaluate_expr(&CompiledMatcherExpr) -> Tribool` for **static analysis** of matcher expressions against pending items without consuming them — used by the matcher system for early-exit in quantifier checks.
 
+#### Listing snapshots (`providers/listing.rs`)
+
+Growing listings (YouTube uploads/playlists, artist discographies, playlist items) are built with `listing_source(store, ListingKey, ListingOrder, fetcher)`. With a `ListingStore` (only the `import` binary passes one, via `build_providers_with_listings`) the listing is cached as one snapshot of `ChildRef`s in the HTTP cache DB; without one it's a plain `PaginatedChildSource`. `import --refresh` refreshes snapshots once per run: `NewestFirst` (YouTube uploads) incrementally, stopping at the first page of known items; `Unordered` in full. Refresh pages skip every cache layer via the task-local `http::bypass_cache`. Updates are add-only, and the importer always gets a complete listing. YouTube refreshes are capped by `--quota-budget` against a per-day ledger (`http::quota::QuotaLedger`); leftover budget fully refreshes the oldest uploads snapshots (`full_refresh_pass`). Design: `docs/plan-update.md`.
+
 #### Fetch-options DAG
 
 `EntryFetchOptions` is a list of `ChildRule { matcher, options_id }`. Options live in a flat arena `EntryFetchOptionsPool` and reference each other by `OptionsId`, so rules can recurse (e.g. `main → main`) without `Arc` cycles. Entry 0 is the no-rules sentinel.
@@ -114,9 +123,9 @@ DefaultHttpClient → DomainScheduler → Coalescer (opt) → DB cache (opt) →
 
 Cache hits at an outer layer bypass scheduling and batching.
 
-`Coalescer` (`http/coalescer.rs`) merges single-entity requests matched by per-backend `CoalesceRule`s (YouTube `videos`/`channels`/`playlists.list`, Spotify tracks/albums/artists) into batched calls. Full batches fire immediately; partial batches fire only when `http::Activity` (`http/activity.rs`) reports the process idle, i.e. every piece of running work is parked in a coalescer queue. Traversal roots must be wrapped in `Activity::global().track(..)` (the pipeline does this) so CPU work between awaits isn't mistaken for idleness. `DomainScheduler` (`http/scheduler.rs`) enforces per-domain concurrency and a two-phase retry on 429 (and per-domain extra statuses like MusicBrainz's 503): phase 1 honours `Retry-After` for N attempts, phase 2 is exponential backoff. The special host key `"*"` is the default applied to unlisted domains.
+`Coalescer` (`http/coalescer.rs`) merges single-entity requests matched by per-backend `CoalesceRule`s (YouTube `videos`/`channels`/`playlists.list`, Spotify tracks/albums/artists) into batched calls. Full batches fire immediately; partial batches fire only when `http::Activity` (`http/activity.rs`) reports the process idle, i.e. every piece of running work is parked in a coalescer queue. Traversal roots must be wrapped in `Activity::global().track(..)` (the pipeline does this) so CPU work between awaits isn't mistaken for idleness; tasks started with `Activity::spawn` are tracked too, including while queued for their first poll. `DomainScheduler` (`http/scheduler.rs`) enforces per-domain concurrency and a two-phase retry on 429 (and per-domain extra statuses like MusicBrainz's 503): phase 1 honours `Retry-After` for N attempts, phase 2 is exponential backoff. The special host key `"*"` is the default applied to unlisted domains. Host keys include the port (`localhost:5000`), so self-hosted services get their own cap; the import walk is parallel, so an uncapped one can be overloaded.
 
-`HttpCache` (`src/httpcache/`) has two impls: `MemoryHttpCache` (in-process) and `DbHttpCache` (SQLite/SeaORM). Cache keys default to `"{METHOD}:{url}"` but can be overridden per-request via `Request::cache_key`.
+`HttpCache` (`src/httpcache/`) has two impls: `MemoryHttpCache` (in-process) and `DbHttpCache` (SQLite/SeaORM). `DbHttpCache` reads through a read-only pool and writes through one writer task that commits queued rows in batches (rows are served from a pending map until committed); binaries that write the cache call `httpcache::db::flush_all()` before exiting. A failed cache write is logged, never a failed request. Cache keys default to `"{METHOD}:{url}"` but can be overridden per-request via `Request::cache_key`.
 
 ### Import pipeline (`src/pipeline/`)
 
@@ -158,7 +167,7 @@ The importer is a structured-concurrency traversal that turns a starting URL int
 5. Store `PairMetadata` (entry_type, release_date, extra, specific_data, aliases) on the canonical pair.
 6. Fixed-point cross-link loop: ask every other provider to `resolve_external_source` until no new IDs are added. Providers that already own a namespace in `sources` are skipped. HTTP-layer caching makes repeated calls cheap.
 7. Recurse into every other source in the result (linked via `is_rel`) and every child (linked via `has_rel`, primary child pair chosen from `flatten_pairs`, siblings linked via `is_rel`).
-8. `join_all` on all spawned subtasks — no detached work.
+8. Await every subtask. Each runs as its own tokio task (`Activity::spawn`, abort-on-drop), so the walk uses every core while staying structured: no detached work, and cancelling the root cancels the tree.
 
 `flush.rs` persists the collected `State` (metadata, `is_rel`, `has_rel`) into the SeaORM schema defined in `src/musicdb/mod.rs`. That schema is **pair-centric**: all metadata, aliases, child edges, and contributions are keyed by `(source, identifier)`; the `entry` table is just a grouping primitive whose `id` is referenced from `entry_source.entry_id`. A DB-level entry merge therefore only needs to re-point `entry_source` rows.
 
@@ -170,6 +179,9 @@ Each backend ships checked-in JSON fixtures next to its source (e.g. `youtube_ap
 
 - `scripts/import.sh` is a convenience wrapper — it re-runs the importer against a fixed example URL with vtuber fetch options, relying on the default config directory for `http.yaml` and `providers.yaml`.
 - `scripts/dedup.sh` and `scripts/clear_yt_cache.sh` are similar convenience wrappers.
+- Server jobs (`src/bin/server/jobs.rs`) carry a label/trigger/params, are recorded in `job_run` and streamed on `GET /api/jobs/events`; the player's Jobs mode shows running jobs and history (`docs/plan-jobs-ui.md`).
+- The library update walks the update roots the player keeps (`update_root`, `/api/roots`), as `POST /api/update` or `import --update` (`pipeline::update`; `docs/CONFIG_REFERENCE.md`, "Library updates").
+- The DB HTTP cache records TTLs but never expires entries on read; updates come from listing refreshes, not TTLs.
 - Edition: 2024.
 - `docs/BATCHING_PROVIDERS.md` is the original design doc for the coalescer; its firing rule section is superseded (see the status note at its top).
 - `docs/CONFIG_REFERENCE.md` has full annotated examples for `providers.yaml`, `http.yaml`, fetch-options files, and the YAML barrier format.

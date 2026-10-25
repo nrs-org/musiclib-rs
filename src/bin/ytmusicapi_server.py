@@ -35,6 +35,12 @@ import ytmusicapi
 
 yt = ytmusicapi.YTMusic()
 
+# A channel without a YouTube Music artist page gets a plain channel page
+# (musicVisualHeaderRenderer: Videos and Playlists shelves only), and
+# get_artist raises KeyError on the artist header it expects. Any other
+# KeyError is a real parse failure and stays a 500.
+NON_ARTIST_PAGE_KEY = "musicImmersiveHeaderRenderer"
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002
@@ -58,6 +64,11 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     data = yt.get_artist(channel_id)
                     self._send_json(200, json.dumps(data).encode())
+                except KeyError as exc:
+                    if exc.args != (NON_ARTIST_PAGE_KEY,):
+                        self._send_error(500, str(exc))
+                    else:
+                        self._send_error(404, f"no YouTube Music artist page: {channel_id}")
                 except Exception as exc:
                     self._send_error(500, str(exc))
 
@@ -65,7 +76,14 @@ class Handler(BaseHTTPRequestHandler):
             # Returns a flat list of all albums+singles, resolving pagination internally.
             elif parts[1] == "discography":
                 try:
-                    artist = yt.get_artist(channel_id)
+                    try:
+                        artist = yt.get_artist(channel_id)
+                    except KeyError as exc:
+                        # No artist page: no albums or singles either.
+                        if exc.args != (NON_ARTIST_PAGE_KEY,):
+                            raise
+                        self._send_json(200, b"[]")
+                        return
                     results = []
                     for section_key in ("albums", "singles"):
                         section = artist.get(section_key) or {}

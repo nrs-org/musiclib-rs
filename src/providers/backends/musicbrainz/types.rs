@@ -103,6 +103,13 @@ impl Provider {
         self.resolve_original_recordings = enabled;
         self
     }
+
+    /// Serve artist browses (release groups, releases, recordings) as
+    /// snapshots.
+    pub fn with_listings(mut self, store: Arc<crate::providers::listing::ListingStore>) -> Self {
+        self.client.listings = Some(store);
+        self
+    }
 }
 
 impl TryDefault for Provider {

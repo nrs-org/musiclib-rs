@@ -9,7 +9,7 @@ use crate::{
         self, HeaderName, HeaderValue, HttpClient, Method, Request, default_http_client,
         json_body_extractor,
     },
-    providers::{backends::build_url, types::Error},
+    providers::{backends::build_url, listing::ListingStore, types::Error},
 };
 
 pub struct SpotifyClient {
@@ -17,6 +17,8 @@ pub struct SpotifyClient {
     credentials: Credentials,
     /// Cached access token; fetched lazily on first request.
     cached_token: Mutex<Option<HeaderValue>>,
+    /// Serves growing listings (artist albums, playlists) as snapshots when set.
+    pub(crate) listings: Option<Arc<ListingStore>>,
 }
 
 enum Credentials {
@@ -35,6 +37,7 @@ impl Clone for SpotifyClient {
                 client: self.client.clone(),
                 credentials: Credentials::Static(v.clone()),
                 cached_token: Mutex::new(Some(v.clone())),
+                listings: self.listings.clone(),
             };
         }
         let credentials = match &self.credentials {
@@ -48,6 +51,7 @@ impl Clone for SpotifyClient {
             client: self.client.clone(),
             credentials,
             cached_token: Mutex::new(None),
+            listings: self.listings.clone(),
         }
     }
 }
@@ -93,6 +97,7 @@ impl SpotifyClient {
             client,
             credentials: Credentials::ClientCredentials { encoded },
             cached_token: Mutex::new(None),
+            listings: None,
         }
     }
 
@@ -105,6 +110,7 @@ impl SpotifyClient {
             client,
             credentials: Credentials::Static(access_token.clone()),
             cached_token: Mutex::new(Some(access_token)),
+            listings: None,
         }
     }
 

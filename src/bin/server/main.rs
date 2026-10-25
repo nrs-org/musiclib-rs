@@ -25,11 +25,13 @@ mod discography;
 #[cfg(all(feature = "discord_presence", unix))]
 mod discord_presence;
 mod entries;
-mod fetch_options;
+pub(crate) use musiclib_rs::fetch_presets as fetch_options;
 #[cfg(feature = "player")]
 mod find_source;
 mod ingest_progress;
 mod jobs;
+#[cfg(feature = "player")]
+mod jobs_api;
 #[cfg(feature = "player")]
 mod lastfm;
 #[cfg(feature = "player")]
@@ -55,12 +57,16 @@ mod preferences;
 mod privacy;
 mod respond;
 #[cfg(feature = "player")]
+mod roots;
+#[cfg(feature = "player")]
 mod spotify_auth;
 mod state;
 #[cfg(feature = "store_protocol")]
 mod store_protocol;
 #[cfg(feature = "player")]
 mod unmerge;
+#[cfg(feature = "player")]
+mod update;
 
 use std::{
     net::SocketAddr,
@@ -75,15 +81,17 @@ use hyper::{Request, body::Incoming, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use musiclib_rs::{
     app_dirs,
-    http::HttpClientConfig,
+    http::{HttpClientConfig, quota::QuotaLedger},
+    httpcache,
     musicdb::MusicDb,
     pipeline::{progress::HttpActivityClient, softmatch::default_soft_match_config},
     providers::{
         fetch_options_yaml::load_from_file,
-        registry::{RegistryConfig, build_providers},
+        listing::{ListingMode, ListingStore},
+        registry::{RegistryConfig, build_providers_with_listings},
     },
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use jobs::JobManager;
 use respond::HyperResponse;
@@ -189,6 +197,18 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
         return Ok(playlists::route(&state, &method, &path, body).await);
     }
     #[cfg(feature = "player")]
+    if roots::handles(&path) {
+        return Ok(roots::route(&state, &method, &path, body).await);
+    }
+    #[cfg(feature = "player")]
+    if update::handles(&path) {
+        return Ok(update::route(&state, &method, &body).await);
+    }
+    #[cfg(feature = "player")]
+    if jobs_api::handles(&path) {
+        return Ok(jobs_api::route(&state, &method, &path, &respond::parse_query(&query)).await);
+    }
+    #[cfg(feature = "player")]
     if plays::handles(&path) {
         return Ok(plays::route(&state, &method, &path, &query, body).await);
     }
@@ -239,10 +259,41 @@ async fn main() -> anyhow::Result<()> {
     http_config.coalescer_rules = musiclib_rs::providers::registry::coalesce_rules();
     let youtube_quota = Arc::new(AtomicU64::new(0));
     http_config.youtube_quota_counter = Some(Arc::clone(&youtube_quota));
+    // Listing snapshots and the quota ledger live in the HTTP cache DB (in
+    // memory when there's none), as for the `import` CLI.
+    let listing_db = httpcache::db::connect(
+        http_config
+            .db_cache
+            .as_ref()
+            .map_or_else(|| "sqlite::memory:".to_owned(), |c| c.path.clone()),
+    )
+    .await?;
+    let ledger = Arc::new(QuotaLedger::new(listing_db.clone(), Arc::clone(&youtube_quota)).await?);
+    {
+        // Units count toward the day as they're spent, not only when a job
+        // ends, so a killed server's spending still counts.
+        let ledger = Arc::clone(&ledger);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if let Err(e) = ledger.flush().await {
+                    warn!("recording YouTube quota use failed: {e}");
+                }
+            }
+        });
+    }
+    let listings = Arc::new(
+        ListingStore::new(listing_db.clone(), ListingMode::Cached)
+            .await?
+            .with_kind_modes(registry_config.listings.clone()),
+    );
+
     let http = http_config.build().await?;
     let activity = HttpActivityClient::new(http);
 
-    let providers = build_providers(&registry_config, activity.clone())?;
+    let providers =
+        build_providers_with_listings(&registry_config, activity.clone(), Some(listings))?;
     // No providers still serves the library read-only (`resolve`, `lookup`,
     // the player API); only ingesting needs one.
     if providers.is_empty() {
@@ -292,13 +343,22 @@ async fn main() -> anyhow::Result<()> {
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| nrs_url.clone());
 
+    // Jobs are recorded in the library DB; ones a previous run left
+    // unfinished are closed as interrupted.
+    let jobs = JobManager::new(Some(db.clone()));
+    jobs.close_stale().await;
+
     let state = Arc::new(AppState {
         db,
         providers,
+        registry: Arc::new(registry_config),
+        listing_db,
+        ledger,
+        updating: Default::default(),
         pool,
         root_id,
         soft_cfg,
-        jobs: JobManager::new(),
+        jobs,
         activity,
         youtube_quota,
         #[cfg(feature = "nrs")]
@@ -332,7 +392,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let local = tokio::task::LocalSet::new();
-    if let Some(config) = &registry_config.local {
+    if let Some(config) = &state.registry.local {
         let base_dir = config.base_dir.clone().unwrap_or(std::env::current_dir()?);
         local.spawn_local(local_reload::run(state.db.clone(), base_dir));
     }

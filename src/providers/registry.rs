@@ -9,6 +9,7 @@ use crate::{
     providers::{
         CanonicalizeProvider, FetchProvider,
         backends::{discogs, local, musicbrainz, nicovideo, soundcloud, spotify, youtube_api},
+        listing::{ListingMode, ListingStore},
         std_values::StandardProviderKeys,
         types::{CanonicalizeResult, Error},
     },
@@ -97,7 +98,7 @@ impl Default for SpotifyConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MusicBrainzConfig {
     #[serde(default = "MusicBrainzConfig::default_token")]
     pub token: Option<Credential>,
@@ -112,6 +113,11 @@ pub struct MusicBrainzConfig {
     /// `MUSICBRAINZ_MIRROR_DB` env var.
     #[serde(default = "MusicBrainzConfig::default_mirror_db")]
     pub mirror_db: Option<Credential>,
+    /// How to read a self-hosted server's replication sequence, so the mirror
+    /// never gets ahead of it (`crate::mb_freshness`). Not needed for the
+    /// public server.
+    #[serde(default)]
+    pub server_replication: Option<crate::mb_freshness::ServerReplication>,
     /// Base URL for the MusicBrainz full-export download server, used by
     /// `mb_extract_urls`. Defaults to `MUSICBRAINZ_DUMP_BASE_URL` env var;
     /// falls back to the public MetaBrainz server when unset.
@@ -156,6 +162,22 @@ impl MusicBrainzConfig {
     fn default_resolve_original_recordings() -> bool {
         true
     }
+
+    /// The API base URL in use, `None` for the public server's default.
+    pub fn resolved_base_url(&self) -> Option<String> {
+        self.base_url.as_ref().and_then(Credential::resolve)
+    }
+
+    /// The URL mirror in use: `mirror_db`, else `<data_dir>/mb_mirror.db` if
+    /// it exists.
+    pub fn mirror_db_path(&self) -> Option<std::path::PathBuf> {
+        let default = crate::app_dirs::data_dir().join("mb_mirror.db");
+        self.mirror_db
+            .as_ref()
+            .and_then(Credential::resolve)
+            .map(std::path::PathBuf::from)
+            .or_else(|| default.exists().then_some(default))
+    }
 }
 
 impl Default for MusicBrainzConfig {
@@ -164,6 +186,7 @@ impl Default for MusicBrainzConfig {
             token: Self::default_token(),
             base_url: Self::default_base_url(),
             mirror_db: Self::default_mirror_db(),
+            server_replication: None,
             dump_base_url: Self::default_dump_base_url(),
             fetch_release_durations: Self::default_fetch_release_durations(),
             resolve_original_recordings: Self::default_resolve_original_recordings(),
@@ -240,6 +263,10 @@ pub struct LocalConfig {
 ///
 /// discogs: ~      # disabled
 /// local: false
+///
+/// # Per-kind override of `import --refresh` (see `providers::listing`).
+/// listings:
+///   youtube:playlist_items: cached   # never refresh playlists' items
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -251,6 +278,8 @@ pub struct RegistryConfig {
     pub soundcloud: Option<YtdlpConfig>,
     pub nicovideo: Option<YtdlpConfig>,
     pub local: Option<LocalConfig>,
+    /// Listing mode per listing kind, overriding the run's mode.
+    pub listings: std::collections::HashMap<String, ListingMode>,
 }
 
 impl Default for RegistryConfig {
@@ -263,7 +292,25 @@ impl Default for RegistryConfig {
             soundcloud: Some(YtdlpConfig::default()),
             nicovideo: Some(YtdlpConfig::default()),
             local: Some(LocalConfig::default()),
+            listings: Default::default(),
         }
+    }
+}
+
+impl RegistryConfig {
+    /// `explicit` (must exist), else `<config_dir>/providers.yaml` if it
+    /// exists, else the defaults.
+    pub fn load(explicit: Option<&std::path::Path>) -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+        let default = crate::app_dirs::config_dir().join("providers.yaml");
+        let path = match explicit {
+            Some(p) => p.to_owned(),
+            None if default.exists() => default,
+            None => return Ok(Self::default()),
+        };
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 }
 
@@ -278,6 +325,17 @@ fn skip_missing(name: &str, msg: &str) {
 pub fn build_providers(
     config: &RegistryConfig,
     http: Arc<dyn HttpClient>,
+) -> Result<Vec<Arc<dyn FetchProvider>>, Error> {
+    build_providers_with_listings(config, http, None)
+}
+
+/// `build_providers`, with growing listings served as snapshots from
+/// `listings` (see `providers::listing`). Without a store, listings are walked
+/// page by page through the HTTP cache.
+pub fn build_providers_with_listings(
+    config: &RegistryConfig,
+    http: Arc<dyn HttpClient>,
+    listings: Option<Arc<ListingStore>>,
 ) -> Result<Vec<Arc<dyn FetchProvider>>, Error> {
     let mut providers: Vec<Arc<dyn FetchProvider>> = Vec::new();
 
@@ -294,6 +352,9 @@ pub fn build_providers(
                 {
                     provider = provider.with_ytmusicapi_url(url);
                 }
+                if let Some(store) = &listings {
+                    provider = provider.with_listings(Arc::clone(store));
+                }
                 providers.push(Arc::new(provider));
             }
         }
@@ -302,11 +363,12 @@ pub fn build_providers(
     if let Some(cfg) = &config.spotify {
         match (cfg.client_id.resolve(), cfg.client_secret.resolve()) {
             (Some(id), Some(secret)) => {
-                providers.push(Arc::new(spotify::Provider::new_with_http_client(
-                    Arc::clone(&http),
-                    &id,
-                    &secret,
-                )));
+                let mut provider =
+                    spotify::Provider::new_with_http_client(Arc::clone(&http), &id, &secret);
+                if let Some(store) = &listings {
+                    provider = provider.with_listings(Arc::clone(store));
+                }
+                providers.push(Arc::new(provider));
             }
             _ => skip_missing("spotify", "client_id or client_secret not set"),
         }
@@ -320,18 +382,7 @@ pub fn build_providers(
             token,
             base_url,
         )?;
-        let default_mirror_db = crate::app_dirs::data_dir().join("mb_mirror.db");
-        let mirror_db_path = cfg
-            .mirror_db
-            .as_ref()
-            .and_then(|c| c.resolve())
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                default_mirror_db
-                    .exists()
-                    .then(|| default_mirror_db.clone())
-            });
-        if let Some(path) = mirror_db_path {
+        if let Some(path) = cfg.mirror_db_path() {
             match rusqlite::Connection::open(&path) {
                 Ok(conn) => {
                     provider = provider.with_mirror_db(Arc::new(std::sync::Mutex::new(conn)));
@@ -344,20 +395,24 @@ pub fn build_providers(
             warn!(
                 "[registry] musicbrainz: no mirror_db configured and {} not found; \
                  URL lookups will hit the network",
-                default_mirror_db.display()
+                crate::app_dirs::data_dir().join("mb_mirror.db").display()
             );
         }
         provider = provider.with_fetch_release_durations(cfg.fetch_release_durations);
         provider = provider.with_resolve_original_recordings(cfg.resolve_original_recordings);
+        if let Some(store) = &listings {
+            provider = provider.with_listings(Arc::clone(store));
+        }
         providers.push(Arc::new(provider));
     }
 
     if let Some(cfg) = &config.discogs {
         let token = cfg.user_token.as_ref().and_then(|c| c.resolve());
-        providers.push(Arc::new(discogs::Provider::new_with_client(
-            Arc::clone(&http),
-            token,
-        )?));
+        let mut provider = discogs::Provider::new_with_client(Arc::clone(&http), token)?;
+        if let Some(store) = &listings {
+            provider = provider.with_listings(Arc::clone(store));
+        }
+        providers.push(Arc::new(provider));
     }
 
     if let Some(cfg) = &config.soundcloud {

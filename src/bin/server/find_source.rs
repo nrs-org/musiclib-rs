@@ -296,71 +296,80 @@ pub async fn attach(state: &Arc<AppState>, entry_id: i64, body: &[u8]) -> HyperR
     };
 
     let job_state = Arc::clone(state);
-    let job_id = state.jobs.spawn("attach_source", move |handle| async move {
-        let state = job_state;
-        let existing = match state.db.find_entry_id_by_pair(provider, &url).await {
-            Ok(id) => id,
-            Err(e) => return handle.fail("internal", e.to_string()),
-        };
-        let found = match existing {
-            Some(id) => id,
-            None => {
-                handle.progress("fetching", "importing the picked source");
-                let sink = crate::ingest_progress::JobProgressSink::new(
-                    handle.clone(),
-                    Arc::clone(&state.activity),
-                    Arc::clone(&state.youtube_quota),
-                );
-                match ingest_entry(
-                    &state.db,
-                    &state.providers,
-                    &state.pool,
-                    state.root_id,
-                    state.soft_cfg.as_ref(),
-                    url.clone(),
-                    Some(sink),
-                )
-                .await
-                {
-                    Ok(outcome) => match outcome.entry_id {
-                        Some(id) => id,
-                        None => return handle.fail("not_found", "no provider recognised the URL"),
-                    },
-                    Err(e) => return handle.fail("provider_error", e.to_string()),
-                }
-            }
-        };
-        let members = match component_members(&state.db, entry_id).await {
-            Ok(m) => m,
-            Err(e) => return handle.fail("internal", e.to_string()),
-        };
-        if !members.contains(&found) {
-            handle.progress("linking", "linking it to the track");
-            let feedback = NewDedupFeedback {
-                entry_a: entry_id,
-                entry_b: found,
-                judgment: IdentityJudgment::Same,
-                origin: "manual".to_string(),
-                model_version: None,
-                probability: None,
-                candidate_channels: None,
-                features: None,
-                evidence: None,
-                note: Some("attached from the player's source finder".to_string()),
-                supersedes_id: None,
+    let meta = crate::jobs::JobMeta {
+        label: format!("Attach {url} to entry {entry_id}"),
+        trigger: crate::jobs::Trigger::Manual,
+        params: json!({ "entry_id": entry_id, "url": url }),
+    };
+    let job_id = state
+        .jobs
+        .spawn("attach_source", meta, move |handle| async move {
+            let state = job_state;
+            let existing = match state.db.find_entry_id_by_pair(provider, &url).await {
+                Ok(id) => id,
+                Err(e) => return handle.fail("internal", e.to_string()),
             };
-            if let Err(e) = state.db.record_identity_feedback(feedback).await {
-                return handle.fail("internal", e.to_string());
+            let found = match existing {
+                Some(id) => id,
+                None => {
+                    handle.progress("fetching", "importing the picked source");
+                    let sink = crate::ingest_progress::JobProgressSink::new(
+                        handle.clone(),
+                        Arc::clone(&state.activity),
+                        Arc::clone(&state.youtube_quota),
+                    );
+                    match ingest_entry(
+                        &state.db,
+                        &state.providers,
+                        &state.pool,
+                        state.root_id,
+                        state.soft_cfg.as_ref(),
+                        url.clone(),
+                        Some(sink),
+                    )
+                    .await
+                    {
+                        Ok(outcome) => match outcome.entry_id {
+                            Some(id) => id,
+                            None => {
+                                return handle.fail("not_found", "no provider recognised the URL");
+                            }
+                        },
+                        Err(e) => return handle.fail("provider_error", e.to_string()),
+                    }
+                }
+            };
+            let members = match component_members(&state.db, entry_id).await {
+                Ok(m) => m,
+                Err(e) => return handle.fail("internal", e.to_string()),
+            };
+            if !members.contains(&found) {
+                handle.progress("linking", "linking it to the track");
+                let feedback = NewDedupFeedback {
+                    entry_a: entry_id,
+                    entry_b: found,
+                    judgment: IdentityJudgment::Same,
+                    origin: "manual".to_string(),
+                    model_version: None,
+                    probability: None,
+                    candidate_channels: None,
+                    features: None,
+                    evidence: None,
+                    note: Some("attached from the player's source finder".to_string()),
+                    supersedes_id: None,
+                };
+                if let Err(e) = state.db.record_identity_feedback(feedback).await {
+                    return handle.fail("internal", e.to_string());
+                }
+                state.playback.recredit();
             }
-            state.playback.recredit();
-        }
-        handle.succeed(json!({
-            "entry_id": entry_id,
-            "attached_entry_id": found,
-            "provider": provider,
-            "identifier": url,
-        }));
-    });
+            handle.succeed(json!({
+                "entry_id": entry_id,
+                "attached_entry_id": found,
+                "provider": provider,
+                "identifier": url,
+            }));
+        });
     respond::json(
         StatusCode::ACCEPTED,
         json!({ "job_id": job_id, "op": "attach_source", "status": "pending" }),

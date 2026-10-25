@@ -23,7 +23,6 @@ use bytes::Bytes;
 use futures::future::join_all;
 use hyper::{Method, StatusCode};
 use musiclib_rs::{
-    app_dirs,
     musicdb::{
         DERIVED_FROM, Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback, RowImage,
         SongEdit,
@@ -46,8 +45,8 @@ use crate::{
 
 /// `<config_dir>/fetch_options/` — where the import form's depth presets are
 /// read from, fresh on every request (see `fetch_options`'s module doc).
-fn fetch_options_dir() -> std::path::PathBuf {
-    app_dirs::config_dir().join("fetch_options")
+pub(crate) fn fetch_options_dir() -> std::path::PathBuf {
+    fetch_options::dir()
 }
 
 const FRONTEND_INDEX: &str = include_str!("frontend/index.html");
@@ -57,6 +56,7 @@ pub fn handles(path: &str) -> bool {
         || path == "/graph"
         || path == "/player"
         || path == "/import"
+        || path == "/jobs"
         || path == "/settings"
         || path == "/playlists"
         || path.starts_with("/playlists/")
@@ -84,6 +84,7 @@ pub async fn route(
             || p.starts_with("/graph/")
             || p == "/player"
             || p == "/import"
+            || p == "/jobs"
             || p == "/settings"
             || p == "/playlists"
             || p.starts_with("/playlists/") =>
@@ -115,8 +116,8 @@ pub async fn route(
         p if p.starts_with("/api/jobs/") => {
             let id = &p["/api/jobs/".len()..];
             match *method {
-                Method::GET => job_status(state, id),
-                Method::DELETE => job_cancel(state, id),
+                Method::GET => job_status(state, id).await,
+                Method::DELETE => job_cancel(state, id).await,
                 _ => respond::method_not_allowed(),
             }
         }
@@ -670,6 +671,12 @@ struct IngestRequest {
     /// before this field existed.
     #[serde(default)]
     fetch_options: Option<IngestFetchOptions>,
+    /// Refresh the growing listings the ingest reaches (uploads, playlists,
+    /// discographies) instead of serving their snapshots, like `import
+    /// --refresh <url>`: see new items now rather than after the next
+    /// update. Not counted against the update's budget.
+    #[serde(default)]
+    refresh: bool,
 }
 
 /// `POST /api/ingest` — the webapp's "add a song" affordance: runs
@@ -712,8 +719,35 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
         None => (Arc::clone(&state.pool), state.root_id),
     };
 
+    let providers = if req.refresh {
+        match crate::update::refreshing_providers(state).await {
+            Ok(providers) => providers,
+            Err(e) => {
+                return respond::error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    &format!("{e:#}"),
+                );
+            }
+        }
+    } else {
+        Arc::clone(&state.providers)
+    };
+
     let job_state = Arc::clone(state);
-    let job_id = state.jobs.spawn("ingest", move |handle| async move {
+    let meta = crate::jobs::JobMeta {
+        label: format!("Import {query}"),
+        trigger: crate::jobs::Trigger::Manual,
+        params: json!({
+            "query": query,
+            "fetch_options": req.fetch_options.as_ref().map(|fo| json!({
+                "file": fo.file,
+                "entry_point": fo.entry_point,
+            })),
+            "refresh": req.refresh,
+        }),
+    };
+    let job_id = state.jobs.spawn("ingest", meta, move |handle| async move {
         handle.progress("fetching", "running import pipeline");
         let sink = crate::ingest_progress::JobProgressSink::new(
             handle.clone(),
@@ -722,7 +756,7 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
         );
         let result = ingest_entry(
             &job_state.db,
-            &job_state.providers,
+            &providers,
             &pool,
             options_id,
             job_state.soft_cfg.as_ref(),
@@ -745,16 +779,16 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
     )
 }
 
-fn job_status(state: &Arc<AppState>, id: &str) -> HyperResponse {
-    match state.jobs.view(id) {
+async fn job_status(state: &Arc<AppState>, id: &str) -> HyperResponse {
+    match state.jobs.find(id).await {
         Some(view) => respond::json_typed(StatusCode::OK, &view),
         None => respond::not_found(),
     }
 }
 
-fn job_cancel(state: &Arc<AppState>, id: &str) -> HyperResponse {
+async fn job_cancel(state: &Arc<AppState>, id: &str) -> HyperResponse {
     if state.jobs.cancel(id) {
-        job_status(state, id)
+        job_status(state, id).await
     } else {
         respond::not_found()
     }

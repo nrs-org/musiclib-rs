@@ -4,13 +4,15 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
     http::{self, HeaderName, HeaderValue, HttpClient, Request, default_http_client},
-    providers::{backends::build_url, types::Error},
+    providers::{backends::build_url, listing::ListingStore, types::Error},
 };
 
 pub struct DiscogsClient {
     client: Arc<dyn HttpClient>,
     user_agent: HeaderValue,
     token: Option<HeaderValue>,
+    /// Serves artist release listings as snapshots when set.
+    pub(crate) listings: Option<Arc<ListingStore>>,
 }
 
 impl Clone for DiscogsClient {
@@ -19,6 +21,7 @@ impl Clone for DiscogsClient {
             client: self.client.clone(),
             user_agent: self.user_agent.clone(),
             token: self.token.clone(),
+            listings: self.listings.clone(),
         }
     }
 }
@@ -47,6 +50,7 @@ impl DiscogsClient {
             client,
             user_agent,
             token,
+            listings: None,
         })
     }
 

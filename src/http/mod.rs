@@ -13,6 +13,7 @@ pub mod scheduler;
 mod types;
 
 pub use activity::Activity;
+pub use cache::{allow as allow_cache, bypass as bypass_cache};
 pub use coalescer::{CoalesceKey, CoalesceRule, Coalescer, SplitResponse};
 pub use quota::QuotaCounter;
 use tokio::sync::RwLock;

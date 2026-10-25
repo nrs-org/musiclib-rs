@@ -10,14 +10,14 @@ use tokio::sync::OnceCell;
 
 use crate::providers::std_values::StandardProviderKeys;
 use crate::providers::{
-    FetchProvider,
+    CanonicalizeProvider, FetchProvider,
     backends::{
         musicbrainz::matcher::evaluate as evaluate_musicbrainz,
         youtube_api::matcher::evaluate as evaluate_youtube,
     },
     types::{
-        CachedChildSource, ChildFetchOptions, ChildMatcher, ChildMatcherExpr, ChildRef,
-        ChildSource, CompiledChildMatcher, CompiledEntryDataMatcher, CompiledMatcherExpr,
+        CachedChildSource, CanonicalizeResult, ChildFetchOptions, ChildMatcher, ChildMatcherExpr,
+        ChildRef, ChildSource, CompiledChildMatcher, CompiledEntryDataMatcher, CompiledMatcherExpr,
         CompiledMusicBrainzDataMatcher, CompiledYouTubeDataMatcher, EntityResult, EntryDataMatcher,
         EntryFetchOptionsPool, EntrySpecificData, EntryType, Error, MusicBrainzDataMatcher,
         OptionsId, OwnedCachedChildCursor, QuantifierMode, RelationMatcher, Tribool,
@@ -33,6 +33,29 @@ pub struct CompiledChildRule {
 
 // --- Compilation ---
 
+/// The compiled `child_rules` of `pool`'s entry `id`, compiled once per pool.
+fn compiled_rules(
+    pool: &EntryFetchOptionsPool,
+    id: OptionsId,
+) -> Result<Arc<[CompiledChildRule]>, Error> {
+    if let Some(rules) = pool.compiled.0.get(&id) {
+        return Ok(Arc::clone(&rules));
+    }
+    let rules: Arc<[CompiledChildRule]> = pool
+        .get(id)
+        .child_rules
+        .iter()
+        .map(|r| {
+            Ok(CompiledChildRule {
+                matcher: compile_expr(&r.matcher)?,
+                options_id: r.options_id,
+            })
+        })
+        .collect::<Result<_, Error>>()?;
+    pool.compiled.0.insert(id, Arc::clone(&rules));
+    Ok(rules)
+}
+
 fn compiled_expr_cost(expr: &CompiledMatcherExpr) -> u32 {
     match expr {
         CompiledMatcherExpr::Matcher(m) => match m {
@@ -44,6 +67,7 @@ fn compiled_expr_cost(expr: &CompiledMatcherExpr) -> u32 {
                 CompiledEntryDataMatcher::HasSource(_) => 2,
                 CompiledEntryDataMatcher::AppearsOn(_) => 1,
                 CompiledEntryDataMatcher::NameRegex(_) => 5,
+                CompiledEntryDataMatcher::UrlRegex(_) => 5,
                 CompiledEntryDataMatcher::DurationRange { .. } => 20,
                 CompiledEntryDataMatcher::YouTube(_) => 20,
                 CompiledEntryDataMatcher::MusicBrainz(_) => 20,
@@ -98,6 +122,9 @@ fn compile_entry_data(d: &EntryDataMatcher) -> Result<CompiledEntryDataMatcher, 
         EntryDataMatcher::EntryType(t) => CompiledEntryDataMatcher::EntryType(*t),
         EntryDataMatcher::ExternalType(s) => CompiledEntryDataMatcher::ExternalType(s.clone()),
         EntryDataMatcher::NameRegex(p) => CompiledEntryDataMatcher::NameRegex(Arc::new(
+            Regex::new(p).map_err(|e| Error::InvalidPattern(e.to_string()))?,
+        )),
+        EntryDataMatcher::UrlRegex(p) => CompiledEntryDataMatcher::UrlRegex(Arc::new(
             Regex::new(p).map_err(|e| Error::InvalidPattern(e.to_string()))?,
         )),
         EntryDataMatcher::DurationRange { min, max } => CompiledEntryDataMatcher::DurationRange {
@@ -159,11 +186,18 @@ struct FilteringChildSource {
 
 fn filtering_stream(
     cursor: OwnedCachedChildCursor,
-    rules: Vec<CompiledChildRule>,
+    rules: Arc<[CompiledChildRule]>,
     pool: Arc<EntryFetchOptionsPool>,
     provider: Arc<dyn FetchProvider>,
     exhaustive: bool,
+    preview: Option<(Arc<PreviewLog>, usize)>,
 ) -> BoxStream<'static, Result<(ChildRef, ChildFetchOptions), Error>> {
+    // A preview decides from what the listing says, never fetching a child,
+    // unless it was asked to fetch them.
+    let provider: Arc<dyn FetchProvider> = match &preview {
+        Some((log, _)) if !log.fetch_children => Arc::new(NoFetch),
+        _ => provider,
+    };
     // Matcher eval may fetch the child's entity (duration_range, youtube/MB
     // data matchers). Serial eval = one fetch RTT per child, which collapses
     // request-batching downstream (the coalescer only ever sees a single
@@ -171,7 +205,6 @@ fn filtering_stream(
     // fetches reach the coalescer in parallel.
     const CONCURRENCY: usize = 50;
 
-    let rules = Arc::new(rules);
     let rules_pull = Arc::clone(&rules);
 
     // Sequential cursor walk (fast — no matcher eval here). Tags each child
@@ -210,6 +243,7 @@ fn filtering_stream(
             let rules = Arc::clone(&rules);
             let pool = Arc::clone(&pool);
             let provider = Arc::clone(&provider);
+            let preview = preview.clone();
             async move {
                 // A listing error (the parent's pagination failed) propagates:
                 // the importer must know the child list is incomplete.
@@ -222,13 +256,24 @@ fn filtering_stream(
                         entity_cell: &entity_cell,
                     };
                     let mut found = None;
-                    for rule in rules.iter() {
+                    let mut outcome = (None, PreviewDecision::NoRule);
+                    for (i, rule) in rules.iter().enumerate() {
                         match evaluate_expr(&rule.matcher, &ctx, provider.clone()).await {
                             Ok(true) => {
                                 found = Some(rule.options_id);
+                                outcome = match rule.options_id {
+                                    Some(_) => (Some(i + 1), PreviewDecision::Fetch),
+                                    None => (Some(i + 1), PreviewDecision::Skip),
+                                };
                                 break;
                             }
                             Ok(false) => {}
+                            // In a preview, the rule needs the child's own
+                            // data, which a preview doesn't fetch.
+                            Err(_) if preview.is_some() => {
+                                outcome = (Some(i + 1), PreviewDecision::Undecided);
+                                break;
+                            }
                             // A matcher error (e.g. `duration_range` fetching a
                             // deleted video) only concerns this child, so it
                             // must not end the listing. Treat the child as
@@ -244,6 +289,9 @@ fn filtering_stream(
                                 break;
                             }
                         }
+                    }
+                    if let Some((log, listing)) = &preview {
+                        log.record(*listing, &child, child_index, outcome);
                     }
                     found
                 };
@@ -296,17 +344,12 @@ pub fn filter_children(
     provider: Arc<dyn FetchProvider>,
     parent_type: EntryType,
 ) -> Result<CachedChildSource<ChildFetchOptions>, Error> {
-    let options = pool.get(root_id);
-    let rules = options
-        .child_rules
-        .iter()
-        .map(|r| {
-            Ok(CompiledChildRule {
-                matcher: compile_expr(&r.matcher)?,
-                options_id: r.options_id,
-            })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let rules = compiled_rules(&pool, root_id)?;
+    let preview = PREVIEW
+        .try_with(Arc::clone)
+        .ok()
+        .filter(|log| !log.muted)
+        .map(|log| (Arc::clone(&log), log.open_listing(parent_type)));
 
     // An artist's listing whose every item the rules would drop is never read,
     // so a lazy listing never makes its request (a channel's uploads pages, a
@@ -321,6 +364,9 @@ pub fn filter_children(
         if !rules.is_empty() {
             tracing::info!("listing skipped without reading it: {reason}");
         }
+        if let Some((log, listing)) = &preview {
+            log.skip(*listing, reason);
+        }
         return Ok(CachedChildSource::from_vec(Vec::new()));
     }
 
@@ -331,8 +377,143 @@ pub fn filter_children(
             pool,
             provider,
             parent_type != EntryType::Artist,
+            preview,
         ),
     })))
+}
+
+// --- Preview ---
+
+tokio::task_local! {
+    static PREVIEW: Arc<PreviewLog>;
+}
+
+/// Run `fut`, recording what `filter_children` decides for every child of
+/// every listing filtered inside it. Without `fetch_children`, no child is
+/// fetched: a rule that needs a child's own data (`duration_range`, a YouTube
+/// description) leaves it `Undecided`. With it, those children are fetched
+/// as the import would (batched, and cached for it). Listings are in the
+/// order they were filtered.
+pub async fn preview<F: Future>(fut: F, fetch_children: bool) -> (F::Output, Vec<PreviewListing>) {
+    let log = Arc::new(PreviewLog {
+        fetch_children,
+        ..Default::default()
+    });
+    let out = PREVIEW.scope(Arc::clone(&log), fut).await;
+    let mut listings = std::mem::take(&mut *log.listings.lock().unwrap());
+    for listing in &mut listings {
+        listing.children.sort_by_key(|c| c.index);
+    }
+    (out, listings)
+}
+
+#[derive(Default)]
+pub struct PreviewLog {
+    fetch_children: bool,
+    /// Records nothing: the scope of a fetch a preview made to decide a child.
+    muted: bool,
+    listings: std::sync::Mutex<Vec<PreviewListing>>,
+}
+
+impl PreviewLog {
+    fn muted() -> Self {
+        Self {
+            muted: true,
+            ..Default::default()
+        }
+    }
+
+    fn open_listing(&self, parent_type: EntryType) -> usize {
+        let mut listings = self.listings.lock().unwrap();
+        listings.push(PreviewListing {
+            discography: parent_type == EntryType::Artist,
+            skipped: None,
+            children: Vec::new(),
+        });
+        listings.len() - 1
+    }
+
+    fn skip(&self, listing: usize, reason: String) {
+        self.listings.lock().unwrap()[listing].skipped = Some(reason);
+    }
+
+    fn record(
+        &self,
+        listing: usize,
+        child: &ChildRef,
+        index: usize,
+        (rule, decision): (Option<usize>, PreviewDecision),
+    ) {
+        self.listings.lock().unwrap()[listing]
+            .children
+            .push(PreviewChild {
+                index,
+                name: child.name.clone(),
+                url: child.sources.first_identifier().map(str::to_owned),
+                entry_type: child.entry_type,
+                external_type: child.external_type.to_string(),
+                rule,
+                decision,
+            });
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PreviewListing {
+    /// An artist's listing (its discography): children not fetched are
+    /// dropped. Otherwise they're kept as stubs.
+    pub discography: bool,
+    /// Why the listing wasn't read at all.
+    pub skipped: Option<String>,
+    pub children: Vec<PreviewChild>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PreviewChild {
+    pub index: usize,
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub entry_type: EntryType,
+    pub external_type: String,
+    /// The deciding rule, 1-based in the entry point's `child_rules`.
+    pub rule: Option<usize>,
+    pub decision: PreviewDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewDecision {
+    /// A rule matched and fetches it.
+    Fetch,
+    /// A rule matched with `fetch: null`.
+    Skip,
+    /// No rule matched.
+    NoRule,
+    /// The deciding rule needs the child's own data.
+    Undecided,
+}
+
+/// The provider a preview evaluates rules with: every entity fetch fails.
+struct NoFetch;
+
+#[async_trait::async_trait]
+impl CanonicalizeProvider for NoFetch {
+    async fn canonicalize(&self, _: &str, _: &str) -> Option<CanonicalizeResult> {
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl FetchProvider for NoFetch {
+    async fn fetch_entry(
+        self: Arc<Self>,
+        _: &str,
+        _: &str,
+        _: Arc<EntryFetchOptionsPool>,
+        _: OptionsId,
+    ) -> Result<EntityResult, Error> {
+        Err(Error::NotFound("a preview doesn't fetch children".into()))
+    }
 }
 
 /// Decide, from what `source` declares about all of its items (its static
@@ -384,9 +565,18 @@ impl MatchContext<'_> {
                 // UNKNOWN_URL lets them re-canonicalize the identifier for dispatch.
                 let pool = Arc::new(EntryFetchOptionsPool::default());
                 let root_id = EntryFetchOptionsPool::DEFAULT_ID;
-                provider
-                    .fetch_entry(StandardProviderKeys::UNKNOWN_URL, identifier, pool, root_id)
-                    .await
+                let fetch = provider.fetch_entry(
+                    StandardProviderKeys::UNKNOWN_URL,
+                    identifier,
+                    pool,
+                    root_id,
+                );
+                // A preview that fetches children records only the root's own
+                // listings, not the listings of the children it fetched.
+                match PREVIEW.try_with(|_| ()) {
+                    Ok(()) => PREVIEW.scope(Arc::new(PreviewLog::muted()), fetch).await,
+                    Err(_) => fetch.await,
+                }
             })
             .await
     }
@@ -476,6 +666,13 @@ async fn evaluate_entry_data(
                 .or_else(|| entity.aliases.first());
             Ok(name.is_some_and(|a| regex.is_match(&a.name)))
         }
+        CompiledEntryDataMatcher::UrlRegex(regex) => Ok(ctx
+            .child
+            .sources
+            .0
+            .values()
+            .flatten()
+            .any(|id| regex.is_match(id))),
         CompiledEntryDataMatcher::HasSource(source) => Ok(ctx.child.sources.get(source).is_some()),
         CompiledEntryDataMatcher::AppearsOn(want) => Ok(ctx.child.appears_on == *want),
         CompiledEntryDataMatcher::DurationRange { min, max } => {
@@ -647,6 +844,28 @@ mod tests {
         }
     }
 
+    /// Rules are compiled once per pool entry, and recompiled after a patch.
+    #[test]
+    fn compiled_rules_are_cached_per_entry() {
+        let mut pool = EntryFetchOptionsPool::default();
+        let rule = always_rule(&mut pool, EntryFetchOptions::default());
+        let id = pool.insert(EntryFetchOptions {
+            child_rules: vec![rule.clone()],
+        });
+        let first = compiled_rules(&pool, id).unwrap();
+        assert!(Arc::ptr_eq(&first, &compiled_rules(&pool, id).unwrap()));
+
+        pool.patch(
+            id,
+            EntryFetchOptions {
+                child_rules: vec![rule.clone(), rule],
+            },
+        );
+        let patched = compiled_rules(&pool, id).unwrap();
+        assert_eq!(patched.len(), 2);
+        assert!(!Arc::ptr_eq(&first, &patched));
+    }
+
     fn always_rule(pool: &mut EntryFetchOptionsPool, options: EntryFetchOptions) -> ChildRule {
         ChildRule {
             matcher: ChildMatcherExpr::Matcher(ChildMatcher::Always),
@@ -692,6 +911,114 @@ mod tests {
             )),
             options_id: Some(pool.insert(options)),
         }
+    }
+
+    /// `url_regex` matches a child by any of its source URLs: a YouTube Music
+    /// album (`OLAK5uy_…` playlist) and a channel playlist look alike
+    /// otherwise.
+    #[tokio::test]
+    async fn url_regex_matches_source_urls() {
+        let yaml = r#"
+main:
+  child_rules:
+    - match: { url_regex: "[?&]list=OLAK5uy_" }
+      fetch: main
+    - match: always
+      fetch: null
+"#;
+        let doc: crate::providers::fetch_options_yaml::YamlFetchDocument =
+            serde_yaml_ng::from_str(yaml).unwrap();
+        let (pool, root) = doc.into_pool().unwrap();
+        let playlist = |id: &str| {
+            let url = format!("https://www.youtube.com/playlist?list={id}");
+            ChildRef {
+                entry_type: EntryType::Release,
+                name: Some(id.into()),
+                sources: [(Cow::Borrowed("youtube"), HashSet::from([url]))].into(),
+                ..Default::default()
+            }
+        };
+        let source = Arc::new(CachedChildSource::from_vec(vec![
+            (playlist("OLAK5uy_album"), ()),
+            (playlist("PLchannel"), ()),
+        ]));
+        let filtered = filter_children(
+            source,
+            pool,
+            root,
+            Arc::new(PanicProvider),
+            EntryType::Artist,
+        )
+        .unwrap();
+        let mut cursor = filtered.cursor();
+        let mut fetched = Vec::new();
+        while let Some((c, _)) = child_next(&mut cursor).await.unwrap() {
+            fetched.push(c.name.unwrap());
+        }
+        assert_eq!(fetched, ["OLAK5uy_album"]);
+    }
+
+    /// A preview records each child's deciding rule, and leaves a child
+    /// undecided when the deciding rule needs its own data, never fetching.
+    #[tokio::test]
+    async fn preview_records_decisions_without_fetching() {
+        let mut pool = EntryFetchOptionsPool::default();
+        let skip_karaoke = ChildRule {
+            options_id: None,
+            ..name_regex_rule(&mut pool, "歌枠", EntryFetchOptions::default())
+        };
+        let tracks = entry_type_rule(&mut pool, EntryType::Track, EntryFetchOptions::default());
+        let described = ChildRule {
+            matcher: ChildMatcherExpr::Matcher(ChildMatcher::EntryData(EntryDataMatcher::YouTube(
+                YouTubeDataMatcher::DescriptionRegex("MV".into()),
+            ))),
+            options_id: Some(pool.insert(EntryFetchOptions::default())),
+        };
+        let root = pool.insert(EntryFetchOptions {
+            child_rules: vec![skip_karaoke, tracks, described],
+        });
+        let source = Arc::new(CachedChildSource::from_vec(vec![
+            (make_child(EntryType::Release, "歌枠まとめ", "youtube"), ()),
+            (make_child(EntryType::Track, "Song", "youtube"), ()),
+            (make_child(EntryType::Release, "Album", "youtube"), ()),
+        ]));
+        let pool = Arc::new(pool);
+        let (fetched, listings) = preview(
+            async {
+                let filtered = filter_children(
+                    source,
+                    pool,
+                    root,
+                    Arc::new(PanicProvider),
+                    EntryType::Artist,
+                )
+                .unwrap();
+                let mut cursor = filtered.cursor();
+                let mut fetched = Vec::new();
+                while let Some((c, _)) = child_next(&mut cursor).await.unwrap() {
+                    fetched.push(c.name.unwrap());
+                }
+                fetched
+            },
+            false,
+        )
+        .await;
+        assert_eq!(fetched, ["Song"]);
+        assert_eq!(listings.len(), 1);
+        assert!(listings[0].discography);
+        let got: Vec<_> = listings[0]
+            .children
+            .iter()
+            .map(|c| (c.name.as_deref().unwrap(), c.rule, c.decision))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("歌枠まとめ", Some(1), PreviewDecision::Skip),
+                ("Song", Some(2), PreviewDecision::Fetch),
+                ("Album", Some(3), PreviewDecision::Undecided),
+            ]
+        );
     }
 
     // Dummy provider that panics if called — for tests that only use ChildRef-level matchers

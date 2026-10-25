@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 // dict of external identifier (mostly URLs), grouped by source (e.g. "wikidata", "spotify", etc.)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExternalSources(pub HashMap<Cow<'static, str>, HashSet<String>>);
 
 impl ExternalSources {
@@ -52,7 +52,7 @@ where
 }
 
 // track position within a release, with optional disc number (for multi-disc releases)
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrackPosition {
     pub disc_no: Option<i32>,
     pub track_no: i32,
@@ -124,7 +124,7 @@ pub struct Alias {
 /// A picture of an entity — album cover, artist photo, video thumbnail — as
 /// its provider gives it. Stored per pair (`pair_image`, see
 /// docs/plan-images.md).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub url: String,
     pub width: Option<u32>,
@@ -166,8 +166,11 @@ impl Image {
     }
 }
 
-// reference to a child entry (e.g. track within a release), with optional name and position
-#[derive(Default, Clone)]
+// reference to a child entry (e.g. track within a release), with optional name and position.
+// Serializable so a listing can be stored as a snapshot (`providers::listing`);
+// `#[serde(default)]` lets snapshots written before a field existed still load.
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChildRef {
     pub entry_type: EntryType,
     /// Backend-specific type string (e.g. `"youtube:video"`, `"youtube:playlist"`).
@@ -205,7 +208,8 @@ pub struct ChildRef {
 
 // contribution of an artist to an entry, with role (e.g. "main", "featured", "producer", etc.) and
 // optional flag for main artist
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Contribution {
     pub role: String,
     pub main_artist: bool,
@@ -298,6 +302,8 @@ pub enum Error {
     InvalidPattern(String),
     #[error("Not found: {0}")]
     NotFound(String),
+    #[error("Listing snapshot error: {0}")]
+    Listing(String),
 }
 
 // Matchers based on entry metadata (requires fetching the entry)
@@ -307,7 +313,12 @@ pub enum EntryDataMatcher {
     EntryType(EntryType),
     ExternalType(String),
     NameRegex(String),
-    DurationRange { min: Option<u64>, max: Option<u64> },
+    /// Matches when any of the child's source identifiers (URLs) does.
+    UrlRegex(String),
+    DurationRange {
+        min: Option<u64>,
+        max: Option<u64>,
+    },
     HasSource(String),
     AppearsOn(bool),
 
@@ -429,6 +440,7 @@ pub enum CompiledEntryDataMatcher {
     EntryType(EntryType),
     ExternalType(String),
     NameRegex(Arc<Regex>),
+    UrlRegex(Arc<Regex>),
     DurationRange { min: Option<u64>, max: Option<u64> },
     HasSource(String),
     AppearsOn(bool),
@@ -525,12 +537,29 @@ pub struct EntryFetchOptions {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EntryFetchOptionsPool {
     entries: Vec<EntryFetchOptions>,
+    /// Each entry's rules, compiled on first use by `matcher::filter_children`
+    /// rather than once per fetched entity (regex compilation is costly).
+    #[serde(skip)]
+    pub(crate) compiled: CompiledRulesCache,
+}
+
+/// See `EntryFetchOptionsPool::compiled`. A clone starts empty.
+#[derive(Default)]
+pub(crate) struct CompiledRulesCache(
+    pub(crate) dashmap::DashMap<OptionsId, Arc<[crate::providers::matcher::CompiledChildRule]>>,
+);
+
+impl Clone for CompiledRulesCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 impl Default for EntryFetchOptionsPool {
     fn default() -> Self {
         Self {
             entries: vec![EntryFetchOptions::default()],
+            compiled: CompiledRulesCache::default(),
         }
     }
 }
@@ -552,6 +581,7 @@ impl EntryFetchOptionsPool {
     /// pre-allocate a slot (to get the id for self-referential named options), then patch
     /// it with the real content once all ids are known.
     pub fn patch(&mut self, id: OptionsId, opts: EntryFetchOptions) {
+        self.compiled.0.remove(&id);
         self.entries[id as usize] = opts;
     }
 
@@ -683,6 +713,44 @@ pub trait PageFetcher: Send {
     async fn fetch_page(&mut self, page_token: Option<&str>) -> Result<ChildPage, Error>;
 }
 
+/// Ends a walk whose next page token was already requested in it. YouTube
+/// returns, for some playlists with hidden items, an empty last page whose
+/// `nextPageToken` is its own token; followed blindly, that costs a unit per
+/// request forever. A walk starts at a `None` token.
+pub struct CycleGuard {
+    inner: Box<dyn PageFetcher>,
+    seen: std::collections::HashSet<String>,
+}
+
+impl CycleGuard {
+    pub fn wrap(inner: Box<dyn PageFetcher>) -> Box<dyn PageFetcher> {
+        Box::new(Self {
+            inner,
+            seen: Default::default(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl PageFetcher for CycleGuard {
+    async fn fetch_page(&mut self, page_token: Option<&str>) -> Result<ChildPage, Error> {
+        match page_token {
+            None => self.seen.clear(),
+            Some(t) => {
+                self.seen.insert(t.to_owned());
+            }
+        }
+        let mut page = self.inner.fetch_page(page_token).await?;
+        if let Some(next) = &page.next_page_token
+            && self.seen.contains(next)
+        {
+            tracing::warn!("page token {next:?} repeats; treating the listing as ended there");
+            page.next_page_token = None;
+        }
+        Ok(page)
+    }
+}
+
 /// `ChildSource` that lazily paginates through children using a `PageFetcher`.
 ///
 /// The inner stream is built with `stream::unfold` so the `PageFetcher` moves
@@ -755,7 +823,7 @@ fn paginated_stream(
     // State: (fetcher, buffered items, next page token, exhausted flag)
     futures::stream::unfold(
         (
-            fetcher,
+            CycleGuard::wrap(fetcher),
             std::collections::VecDeque::<ChildRef>::new(),
             None::<String>,
             false,
@@ -790,8 +858,15 @@ fn paginated_stream(
 
 impl PaginatedChildSource {
     pub fn new(fetcher: Box<dyn PageFetcher>) -> Self {
+        Self::from_stream(paginated_stream(fetcher))
+    }
+
+    /// A listing whose items come from `stream` rather than straight from a
+    /// `PageFetcher`, e.g. a snapshot (`providers::listing`). Static
+    /// evaluation and the declaration check work as with `new`.
+    pub fn from_stream(stream: BoxStream<'static, Result<(ChildRef, ()), Error>>) -> Self {
         Self {
-            stream: paginated_stream(fetcher),
+            stream,
             static_eval: indeterminate_eval,
             trusted: true,
         }
@@ -980,6 +1055,13 @@ fn eval_expr_on_child_ref(expr: &CompiledMatcherExpr, child: &ChildRef, index: u
                 // fetched entity's name.
                 None => Tribool::Indeterminate,
             },
+            CompiledEntryDataMatcher::UrlRegex(regex) => child
+                .sources
+                .0
+                .values()
+                .flatten()
+                .any(|id| regex.is_match(id))
+                .into(),
             CompiledEntryDataMatcher::HasSource(source) => {
                 if child.sources.get(source).is_some() {
                     Tribool::True

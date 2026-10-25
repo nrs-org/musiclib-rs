@@ -42,7 +42,7 @@ commit.
 ## Model
 
 **A growing listing is cached as one snapshot**, not as pages: the ordered
-list of its raw items, under a listing key such as
+list of its `ChildRef`s, under a listing key such as
 `youtube:uploads:UUxxxxxxxx`. Fixed listings (album tracklists, Discogs master
 versions) stay on the per-page HTTP cache.
 
@@ -58,7 +58,7 @@ A run has a **listing mode**, set by `import --refresh[=full]`:
 | Mode | Snapshot present | Snapshot missing |
 |---|---|---|
 | `cached` (default, no flag) | serve it, no requests | fetch pages through the normal HTTP cache, write snapshot with unknown age |
-| `auto` (`--refresh`: daily cron, manual) | `NewestFirst`: incremental; `Unordered`: full | fetch all pages fresh, write snapshot |
+| `auto` (`--refresh`: daily cron, manual) | `NewestFirst`: incremental; `Unordered`: full | `NewestFirst`: build as in `cached`, then incremental; `Unordered`: fetch all pages fresh |
 | `full` (`--refresh=full`, manual only) | fetch all pages fresh, replace | fetch all pages fresh, write snapshot |
 
 The `cached`-mode miss path reads pages through the existing HTTP cache. The
@@ -66,7 +66,9 @@ first run after this ships builds every snapshot from the pages already cached
 by earlier imports, costing no quota. All pages of a listing were cached by the
 same walk, so they're consistent with each other. Their real age is unknown,
 so they're written with `created_at = 0`, which puts them first in line for a
-full refresh (below).
+full refresh (below). An `auto` run builds a missing `NewestFirst` snapshot the
+same way before refreshing it, so even a first `--refresh` run costs a page or
+two per channel rather than a full fetch.
 
 ### Incremental refresh
 
@@ -196,7 +198,7 @@ the cache, not facts, so `musiclib.db` doesn't grow a dependency on them.
 ```
 listing_snapshot(
   key          TEXT PRIMARY KEY,   -- "youtube:uploads:UU…"
-  items        BLOB,               -- zlib JSON array of raw items
+  items        BLOB,               -- zlib JSON array of ChildRefs
   kind         TEXT,               -- "youtube:uploads", for the factory
   created_at   INTEGER,            -- last full fetch; 0 = unknown age
   refreshed_at INTEGER,            -- last incremental or full refresh
@@ -214,31 +216,29 @@ New module `src/providers/listing.rs`:
 ```rust
 pub enum ListingOrder { NewestFirst, Unordered }
 pub enum ListingMode { Cached, Auto, Full }
+pub struct ListingKey { pub kind: &'static str, pub id: String }
 
-#[async_trait]
-pub trait SnapshotPageFetcher: Send {
-    type Item: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
-    /// `fresh`: bypass the HTTP cache (`no_cache`). Otherwise read through it.
-    async fn fetch_page(&mut self, token: Option<&str>, fresh: bool)
-        -> Result<(Vec<Self::Item>, Option<String>), Error>;
-    fn item_key(item: &Self::Item) -> String;
-    fn to_child_ref(item: Self::Item) -> Option<ChildRef>;
-}
-
-pub struct ListingStore { /* DB handle, mode, per-kind policy, once-per-run map */ }
+pub struct ListingStore { /* DB handle, mode, per-kind modes, budget, factories, per-run state */ }
 ```
 
+- Snapshots hold the backend's existing `ChildRef`s (now
+  `Serialize`/`Deserialize`), so backends keep their `PageFetcher`s as they
+  are: no per-backend item type. An item's identity is its smallest
+  `(source, identifier)` pair.
 - `ListingStore::listing(key, order, fetcher) -> PaginatedChildSource`
   returns the same type backends build today, so `with_static_eval` and the
-  declaration check keep working. That needs a
-  `PaginatedChildSource::from_stream` constructor next to `new`
-  (`src/providers/types.rs:706`).
-- The source emits fetched items as pages arrive, then the snapshot
-  remainder. It writes the snapshot when the walk reaches the end.
-- Once per run: `Mutex<HashMap<key, Shared<BoxFuture<Result<Arc<Vec<Item>>>>>>>`
-  keyed by listing key.
-- Refresh pages use `no_cache`, not `force_refetch`: the snapshot is now
-  the only copy, and writing pages too would only bloat the cache DB.
+  declaration check keep working, via a new
+  `PaginatedChildSource::from_stream` (`src/providers/types.rs`). The source
+  is lazy, resolves the whole listing on first poll, then yields it.
+- Refresh pages bypass every cache layer through `http::bypass_cache(fut)`,
+  a task-local scope checked by `CacheHttpClient`, so no request builder
+  needs a `no_cache` parameter. Not writing pages either: the snapshot is the
+  only copy.
+- Once per run: a per-key async lock plus a set of refreshed keys. Later
+  readers of a refreshed key read its snapshot.
+- On a failed or skipped refresh the store falls back to `cached` behaviour
+  (old snapshot, else the HTTP cache), and only a walk with no copy at all
+  yields its partial items plus the error, as a plain listing does.
 
 Tests, with a mock fetcher that counts calls:
 
@@ -268,8 +268,6 @@ Tests, with a mock fetcher that counts calls:
   ```
 
   Default: every growing kind follows the run's mode.
-- `YoutubeClient::get` (`src/providers/backends/youtube_api/client.rs:56`)
-  and the other clients get a way to set `no_cache` on a request.
 - The import summary logs, per kind: snapshots served, refreshed
   incrementally, refreshed fully, skipped for budget, new items found; plus
   YouTube units used by this run and today in total.
@@ -277,8 +275,7 @@ Tests, with a mock fetcher that counts calls:
 ## Phase 3: YouTube
 
 - `ChannelUploadsPageFetcher` (`youtube_api/channel.rs:208`) → `NewestFirst`,
-  key `youtube:uploads:<uploads playlist id>`. Item: the
-  `playlistItems` item (video id, title).
+  key `youtube:uploads:<uploads playlist id>`.
 - `ChannelPlaylistsPageFetcher` → `Unordered`, key
   `youtube:channel_playlists:<channel id>`.
 - `PlaylistItemsPageFetcher` (`youtube_api/playlist.rs:128`) → `Unordered`,
@@ -290,12 +287,12 @@ Tests, with a mock fetcher that counts calls:
 ## Phase 4: full-refresh pass
 
 - A listing-kind registry: each backend registers
-  `kind → fn(id, &clients) -> Box<dyn DynSnapshotFetcher>`, where
-  `DynSnapshotFetcher` is the object-safe form of `SnapshotPageFetcher` over
-  `serde_json::Value` items. Phase 3's `youtube:uploads` is the first entry.
-- `ListingStore::full_refresh_pass(budget)`, called by `import` after the
-  walk and before the final flush, only when `--refresh` was given with
-  `--quota-budget`. It follows the loop in the Model section.
+  `kind → fn(id) -> Box<dyn PageFetcher>` with
+  `ListingStore::register_factory`. Phase 3's `youtube:uploads` is the
+  first entry.
+- `ListingStore::full_refresh_pass()`, called by `import` after the ingest,
+  does nothing unless `--quota-budget` was given. It follows the loop in the
+  Model section.
 - `last_used_at` is set on every snapshot read, including in `cached` mode.
 - Tests: oldest `created_at` goes first; the pass stops at the budget;
   snapshots refreshed by the walk this run are skipped; snapshots unused for
@@ -314,12 +311,16 @@ only rate-limit.
 
 ## Phase 6: cron
 
-- `scripts/update.sh`: `import --refresh --quota-budget 8000`
-  over each roots file, run daily. There's no separate weekly job: the
-  full-refresh pass spends each day's leftover budget. With several roots
-  files run one after another, only the last one's pass has budget left,
-  which is fine because the pass works on the whole snapshot table.
-- Manual refresh needs nothing extra: `import --refresh <url>`.
+- `scripts/update.sh`: `import --refresh --quota-budget 8000` over each
+  roots file `<config_dir>/update_roots/NAME.txt` (fetch options
+  `NAME.yaml`), run daily. There's no separate weekly job: the full-refresh
+  pass spends each day's leftover budget. With several roots files run one
+  after another, all but the last pass `--no-full-refresh-pass`: an early
+  run's pass would otherwise spend the budget later runs need for their
+  incremental refreshes. The last one's pass works on the whole snapshot
+  table, so nothing is lost.
+- Manual refresh needs nothing extra: `import --refresh <url>`. Because of
+  that form, `--refresh=full` requires the `=`.
 - Document `--refresh`, `listings:` and the cron setup in
   `docs/CONFIG_REFERENCE.md` and `CLAUDE.md`.
 

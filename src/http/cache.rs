@@ -31,6 +31,34 @@ impl CacheClientConfig {
     }
 }
 
+tokio::task_local! {
+    static BYPASS: bool;
+}
+
+/// Run `fut` with every cache layer bypassed: requests it makes are neither
+/// read from nor written to any `CacheHttpClient`, as if each had `no_cache`
+/// set. Used to refresh a listing without the request builders below it
+/// having to know (see `providers::listing`).
+///
+/// Scoped with a task-local, so it only reaches requests made from the task
+/// polling `fut`. That covers the whole stack down to the caches: the
+/// activity, memory-cache and DB-cache layers run in the caller's task, and
+/// only layers below the caches (coalescer, scheduler) spawn.
+pub async fn bypass<F: Future>(fut: F) -> F::Output {
+    BYPASS.scope(true, fut).await
+}
+
+/// Undo `bypass` for `fut`: for lookups made while refreshing a listing whose
+/// answers don't change (e.g. resolving an album's playlist ID), so they stay
+/// cached.
+pub async fn allow<F: Future>(fut: F) -> F::Output {
+    BYPASS.scope(false, fut).await
+}
+
+fn bypassed() -> bool {
+    BYPASS.try_with(|b| *b).unwrap_or(false)
+}
+
 pub struct CacheHttpClient {
     pub client: Arc<dyn HttpClient>,
     pub cache: Arc<dyn HttpCache>,
@@ -65,7 +93,8 @@ impl HttpClient for CacheHttpClient {
         req: Request,
         body_extractor: super::BodyExtractorCow<'static>,
     ) -> Result<Arc<Response>, super::Error> {
-        if !req.no_cache
+        let no_cache = req.no_cache || bypassed();
+        if !no_cache
             && !req.force_refetch
             && let Some(cached) = self
                 .cache
@@ -82,15 +111,13 @@ impl HttpClient for CacheHttpClient {
             .client
             .make_request(req.clone(), body_extractor)
             .await?;
-        if !req.no_cache {
+        // A failed write only costs a later refetch; failing the request would
+        // throw away a response already paid for (quota, rate limit).
+        if !no_cache {
             let policy = self.config.resolve_policy(&req.url);
-            self.cache
-                .set_req(&req, policy, res.clone())
-                .await
-                .map_err(|source| super::Error::Cache {
-                    url: req.url.clone(),
-                    source,
-                })?;
+            if let Err(e) = self.cache.set_req(&req, policy, res.clone()).await {
+                tracing::warn!("caching {} failed: {e}", req.url);
+            }
         }
         Ok(res)
     }
@@ -148,6 +175,38 @@ mod tests {
         Ok(())
     }
 
+    /// Inside `bypass`, a request skips the cache both ways: it goes to the
+    /// server despite a cached entry and doesn't replace that entry.
+    #[tokio::test]
+    async fn bypass_skips_cache_read_and_write() -> anyhow::Result<()> {
+        init_test_logger();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        let server = MockServer::new(move |_| {
+            let n = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(HyperResponse::new(Full::new(Bytes::from(format!("{n}"))))) }
+        })
+        .await?;
+
+        let client = default_http_client().into_cached::<MemoryHttpCache>();
+        let req = Request {
+            url: server.route("/"),
+            ..Default::default()
+        };
+
+        assert_eq!(&*client.get_text(req.clone()).await?.text().await?, "0");
+        let bypassed = super::bypass(client.get_text(req.clone())).await?;
+        assert_eq!(&*bypassed.text().await?, "1");
+        assert_eq!(&*client.get_text(req.clone()).await?.text().await?, "0");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // `allow` inside `bypass` uses the cache again.
+        let allowed = super::bypass(super::allow(client.get_text(req))).await?;
+        assert_eq!(&*allowed.text().await?, "0");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_sqlite_cache() -> anyhow::Result<()> {
         init_test_logger();
@@ -177,6 +236,53 @@ mod tests {
 
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
 
+        Ok(())
+    }
+
+    /// A cache that misses on every read and fails every write.
+    struct FailingWrites;
+
+    #[async_trait::async_trait]
+    impl crate::httpcache::HttpCache for FailingWrites {
+        async fn set(
+            &self,
+            _key: String,
+            _method: &crate::http::Method,
+            _policy: Option<&crate::httpcache::CachePolicy>,
+            _value: Arc<crate::http::Response>,
+        ) -> Result<(), crate::httpcache::Error> {
+            Err(
+                crate::httpcache::db::Error::Database(sea_orm::DbErr::Custom(
+                    "pool timed out".into(),
+                ))
+                .into(),
+            )
+        }
+
+        async fn get(
+            &self,
+            _key: &str,
+            _extractor: crate::http::BodyExtractorCow<'static>,
+        ) -> Result<Option<Arc<crate::http::Response>>, crate::httpcache::Error> {
+            Ok(None)
+        }
+    }
+
+    /// A failed cache write still returns the fetched response.
+    #[tokio::test]
+    async fn failed_cache_write_returns_response() -> anyhow::Result<()> {
+        init_test_logger();
+        let server = MockServer::new(|_| async {
+            Ok(HyperResponse::new(Full::new(Bytes::from("Hello, World!"))))
+        })
+        .await?;
+        let client = default_http_client().into_cached_with_cache(Arc::new(FailingWrites));
+        let req = Request {
+            url: server.route("/"),
+            ..Default::default()
+        };
+        let res = client.get_text(req).await?;
+        assert_eq!(&*res.text().await?, "Hello, World!");
         Ok(())
     }
 }

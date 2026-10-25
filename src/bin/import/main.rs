@@ -9,16 +9,21 @@ use std::{
 use anyhow::Context as _;
 use clap::Parser;
 use musiclib_rs::{
-    app_dirs,
-    http::HttpClientConfig,
+    app_dirs, fetch_presets,
+    http::{HttpClientConfig, quota::QuotaLedger},
+    httpcache,
     musicdb::{LINKS_COMPLETE, MusicDb},
     pipeline::{
-        dedup::enforce_barriers, ingest::ingest_entries, progress,
+        dedup::enforce_barriers,
+        ingest::ingest_entries,
+        progress,
         softmatch::default_soft_match_config,
+        update::{UpdateContext, UpdateOptions, run_update},
     },
     providers::{
         fetch_options_yaml::load_from_file,
-        registry::{RegistryConfig, build_providers},
+        listing::{ListingMode, ListingStore, QuotaBudget},
+        registry::{RegistryConfig, build_providers_with_listings},
         types::{
             ChildMatcher, ChildMatcherExpr, ChildRule, EntryFetchOptions, EntryFetchOptionsPool,
         },
@@ -31,7 +36,7 @@ use tracing::{info, warn};
 struct Args {
     /// URL(s) to import. All are traversed together in one run, so their
     /// fetches share API batches.
-    #[arg(required_unless_present_any = ["url_file", "backfill_links"])]
+    #[arg(required_unless_present_any = ["url_file", "backfill_links", "update"])]
     urls: Vec<String>,
     /// File with more URLs to import, one per line (blank lines and lines
     /// starting with `#` are ignored).
@@ -56,6 +61,20 @@ struct Args {
     /// re-imports can split entries (docs/plan-identity-retraction.md).
     #[arg(long, conflicts_with_all = ["urls", "url_file", "fetch_options"])]
     backfill_links: bool,
+    /// Instead of importing URLs, run the library update over the update
+    /// roots the player keeps (every enabled one): sync the MusicBrainz
+    /// mirror, walk the roots refreshing their listings within
+    /// `--quota-budget` (default 8000), then full-refresh the oldest
+    /// snapshots with what's left (docs/plan-update-roots.md). For cron.
+    #[arg(
+        long,
+        conflicts_with_all = ["urls", "url_file", "fetch_options", "backfill_links", "refresh"]
+    )]
+    update: bool,
+    /// With `--update`: packets a self-hosted MusicBrainz server may be
+    /// behind the newest published one before the update refuses to run.
+    #[arg(long, default_value_t = 36, requires = "update")]
+    mb_max_server_lag: i64,
     /// Skip the pre-import pass that re-applies violated barriers.
     #[arg(long)]
     skip_dedup: bool,
@@ -68,8 +87,38 @@ struct Args {
     /// is cheap: responses are in the HTTP cache).
     #[arg(long)]
     max_fetches: Option<usize>,
+    /// Refresh growing listings (uploads, discographies, playlists) instead
+    /// of serving their snapshots. `auto` (the bare flag) refreshes YouTube
+    /// uploads incrementally and the rest in full; `full` refetches all.
+    /// (`--refresh=full` needs the `=`, so `--refresh <url>` reads the URL.)
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "auto"
+    )]
+    refresh: Option<RefreshArg>,
+    /// YouTube units refreshes may use today, counting every run's usage
+    /// (Pacific-time day). Once spent, listings are served from their
+    /// snapshots. With `--refresh`, the rest of the budget goes to full
+    /// refreshes of the oldest uploads snapshots after the import. Meant for
+    /// the cron job; leave it off for manual refreshes.
+    #[arg(long)]
+    quota_budget: Option<u64>,
+    /// Skip the full-refresh pass after the import. For all but the last of
+    /// several runs sharing one day's budget, so an early run's pass doesn't
+    /// spend what later runs need for finding new items.
+    #[arg(long)]
+    no_full_refresh_pass: bool,
     #[command(flatten)]
     dirs: musiclib_rs::app_dirs::DirArgs,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum RefreshArg {
+    Auto,
+    Full,
 }
 
 /// Load YAML config from an explicit path (errors if missing) or a default
@@ -161,6 +210,13 @@ async fn backfill_links(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let res = run().await;
+    // Responses still queued for the HTTP cache would be lost on exit.
+    musiclib_rs::httpcache::db::flush_all().await;
+    res
+}
+
+async fn run() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     let args = Args::parse();
@@ -180,14 +236,42 @@ async fn main() -> anyhow::Result<()> {
     let youtube_quota = Arc::new(AtomicU64::new(0));
     http_config.youtube_quota_counter = Some(Arc::clone(&youtube_quota));
 
+    // Listing snapshots and the quota ledger live in the HTTP cache DB
+    // (in memory when there's none: every listing is then a snapshot miss).
+    let cache_db_url = http_config
+        .db_cache
+        .as_ref()
+        .map_or_else(|| "sqlite::memory:".to_owned(), |c| c.path.clone());
+    let cache_db = httpcache::db::connect(cache_db_url).await?;
+    let ledger = Arc::new(QuotaLedger::new(cache_db.clone(), Arc::clone(&youtube_quota)).await?);
+    let listing_db = cache_db.clone();
+    let mode = match args.refresh {
+        None => ListingMode::Cached,
+        Some(RefreshArg::Auto) => ListingMode::Auto,
+        Some(RefreshArg::Full) => ListingMode::Full,
+    };
+    let mut listings = ListingStore::new(cache_db, mode)
+        .await?
+        .with_kind_modes(registry_config.listings.clone());
+    if let Some(units) = args.quota_budget {
+        listings = listings.with_budget(QuotaBudget {
+            units,
+            ledger: Arc::clone(&ledger),
+        });
+    }
+    let listings = Arc::new(listings);
+
     // The quota total is otherwise only logged once, at clean exit — a killed
     // process (SIGTERM during a batch, common when driving many imports and
     // culling stuck/unwanted ones) leaves no record at all of what it really
     // consumed, even though the counter itself was tracking correctly the
     // whole time. Log it periodically too so a killed run's log still has a
     // recent, accurate figure instead of nothing.
+    // The ledger is flushed on the same tick, so a killed run's units still
+    // count toward the day.
     {
         let youtube_quota = Arc::clone(&youtube_quota);
+        let ledger = Arc::clone(&ledger);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             interval.tick().await; // skip the immediate first tick
@@ -197,6 +281,9 @@ async fn main() -> anyhow::Result<()> {
                     "YouTube Data API quota used so far: {} unit(s)",
                     youtube_quota.load(Ordering::Relaxed),
                 );
+                if let Err(e) = ledger.flush().await {
+                    warn!("recording YouTube quota use failed: {e}");
+                }
             }
         });
     }
@@ -215,7 +302,21 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let providers = build_providers(&registry_config, http)?;
+    // A MusicBrainz URL mirror ahead of its self-hosted server would send
+    // lookups for links the server doesn't have yet, and cache the 404s.
+    // (`--update` syncs the mirror itself, which checks the same.)
+    if !args.update
+        && let Some(mb) = registry_config.musicbrainz.clone()
+    {
+        tokio::task::spawn_blocking(move || musiclib_rs::mb_freshness::check_before_import(&mb))
+            .await??;
+    }
+
+    let providers = build_providers_with_listings(
+        &registry_config,
+        Arc::clone(&http) as Arc<dyn musiclib_rs::http::HttpClient>,
+        Some(Arc::clone(&listings)),
+    )?;
     if providers.is_empty() {
         anyhow::bail!("No providers available -- check your credential env vars");
     }
@@ -242,6 +343,63 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let mut soft_cfg = (!args.skip_softmatch)
+        .then(default_soft_match_config)
+        .flatten();
+    if let Some(cfg) = soft_cfg.as_mut() {
+        cfg.http_client = Some(Arc::clone(&http_for_script));
+    }
+
+    if args.update {
+        let roots: Vec<_> = db
+            .update_roots()
+            .await?
+            .into_iter()
+            .filter(|r| r.enabled)
+            .collect();
+        if roots.is_empty() {
+            anyhow::bail!("no enabled update roots; add some in the player");
+        }
+        info!("Updating {} root(s)", roots.len());
+        let report = run_update(
+            UpdateContext {
+                db: &db,
+                registry: &registry_config,
+                http,
+                listing_db,
+                ledger: Arc::clone(&ledger),
+                youtube_quota: Arc::clone(&youtube_quota),
+                soft_cfg: soft_cfg.as_ref(),
+                progress: None,
+                on_step: None,
+                fetch_options_dir: fetch_presets::dir(),
+            },
+            &roots,
+            &UpdateOptions {
+                quota_budget: Some(args.quota_budget.unwrap_or(8000)),
+                mb_max_server_lag: Some(args.mb_max_server_lag),
+            },
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs() as i64,
+        )
+        .await?;
+        let failed: Vec<_> = report.roots.iter().filter(|r| r.error.is_some()).collect();
+        for root in &failed {
+            warn!(
+                "root {} ({}) failed: {}",
+                root.id,
+                root.url,
+                root.error.as_deref().unwrap_or_default()
+            );
+        }
+        if !failed.is_empty() {
+            anyhow::bail!("{} of {} root(s) failed", failed.len(), report.roots.len());
+        }
+        info!("Done.");
+        return Ok(());
+    }
+
     let (pool, root_id) = match args.fetch_options.as_deref() {
         Some(s) => {
             let path = resolve_fetch_options(s);
@@ -262,12 +420,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let mut soft_cfg = (!args.skip_softmatch)
-        .then(default_soft_match_config)
-        .flatten();
-    if let Some(cfg) = soft_cfg.as_mut() {
-        cfg.http_client = Some(Arc::clone(&http_for_script));
-    }
     let mut urls = args.urls;
     if let Some(path) = &args.url_file {
         let text = tokio::fs::read_to_string(path)
@@ -306,10 +458,44 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Full refreshes of the oldest uploads snapshots, with whatever budget
+    // the import left. Items they find are imported by the next run.
+    if args.refresh.is_some() && !args.no_full_refresh_pass {
+        listings.full_refresh_pass().await?;
+    }
+    listings.log_summary().await;
+
     info!(
         "YouTube Data API quota used: {} unit(s)",
         youtube_quota.load(Ordering::Relaxed),
     );
+    match ledger.used_today().await {
+        Ok(units) => info!("YouTube Data API quota used today, all runs: {units} unit(s)"),
+        Err(e) => warn!("recording YouTube quota use failed: {e}"),
+    }
     info!("Done.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Args, RefreshArg};
+
+    /// A bare `--refresh` is `auto` and leaves a following URL alone; only
+    /// `--refresh=full` takes a value.
+    #[test]
+    fn refresh_flag_parsing() {
+        let args = Args::try_parse_from(["import", "--refresh", "https://youtu.be/x"]).unwrap();
+        assert!(matches!(args.refresh, Some(RefreshArg::Auto)));
+        assert_eq!(args.urls, ["https://youtu.be/x"]);
+
+        let args = Args::try_parse_from(["import", "--refresh=full", "u"]).unwrap();
+        assert!(matches!(args.refresh, Some(RefreshArg::Full)));
+
+        let args = Args::try_parse_from(["import", "u"]).unwrap();
+        assert!(args.refresh.is_none());
+        assert!(Args::try_parse_from(["import", "--refresh=bogus", "u"]).is_err());
+    }
 }

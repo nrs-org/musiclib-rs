@@ -57,6 +57,7 @@ standard environment variables listed below).
 | `base_url` | Credential? | `MUSICBRAINZ_BASE_URL` | Defaults to `https://musicbrainz.org/ws/2` |
 | `mirror_db` | Credential? | `MUSICBRAINZ_MIRROR_DB` | Path to local `mb_mirror.db`; auto-detected from the data dir if omitted |
 | `dump_base_url` | Credential? | `MUSICBRAINZ_DUMP_BASE_URL` | Used by `mb_extract_urls` only; defaults to the public MetaBrainz server |
+| `server_replication` | `{command: …}` or `{url: …}`? | — | How to read a self-hosted server's replication sequence; see below |
 
 Recording imports look up each performed work with `artist-rels+work-rels`
 to collect writing credits and group versions of the same song. These
@@ -69,6 +70,30 @@ silently discarding existing credits on re-import. See
 If `mirror_db` is set (or found automatically), URL lookups skip the network for
 URLs not in the mirror. Build the mirror with `mb_extract_urls` and keep it fresh
 with `mb_sync_replication`.
+
+**Mirror and self-hosted server.** The mirror must never be ahead of the
+server it sends lookups to: it would vouch for URLs the server doesn't have
+yet, and their 404s get cached. With a self-hosted `base_url`, set
+`server_replication` so the tools can read the server's replication sequence:
+
+```yaml
+musicbrainz:
+  base_url: http://localhost:5000/ws/2
+  server_replication:
+    # musicbrainz-docker: ask its database
+    command: >-
+      docker exec musicbrainz-docker-db-1 psql -U musicbrainz -d musicbrainz_db
+      -tAc "select current_replication_sequence from replication_control"
+    # lightweight-mb instead: JSON with `replication_sequence`
+    # url: http://localhost:8080/healthz
+```
+
+The command prints the sequence; the URL serves JSON with a
+`replication_sequence` field. With it, `mb_sync_replication` stops at the
+server's sequence (`--until N` overrides), `mb_apply_replication` refuses a
+packet past it, and `import` refuses to run while the mirror is ahead.
+Without it, both sync tools refuse to run and `import` warns. The public
+server needs none of this.
 
 #### `discogs`
 
@@ -131,6 +156,17 @@ entries:
 | Field | Type | Notes |
 |---|---|---|
 | `soft_match` | bool | Default `true`. `false` keeps soft-dedup (`softmatch`, and the online pass after each ingest) from linking any of the namespace's entries: every candidate pair involving one is skipped. Use it when the entry files already author identity and originals. A file that fails to parse also excludes the namespace, with a warning. |
+
+### `listings`
+
+Overrides `import --refresh` per listing kind (see
+[Library updates](#library-updates-import---refresh)). The only useful value
+is `cached`, which never refreshes that kind:
+
+```yaml
+listings:
+  youtube:playlist_items: cached   # playlists' items stay as first fetched
+```
 
 ### Full example
 
@@ -228,6 +264,11 @@ ttl:
 
 The effective TTL is `initial × multiplier^(consecutive_error_count)`, capped at `max`.
 
+> **Note:** expiry is recorded but not yet enforced. Reads ignore `ttl` and
+> `swr`, so a stored response is served until it is replaced. New uploads and
+> releases are picked up by refreshing listings instead: see
+> [Library updates](#library-updates-import---refresh).
+
 #### Duration formats
 
 Durations are strings: `"500ms"`, `"30s"`, `"5m"`, `"1h"`, `"7d"`.
@@ -289,6 +330,62 @@ ISRC (the ISRC → Spotify bridge). Give `api.spotify.com` its own scheduler
 entry with a small `max_concurrent` (the example uses 4) so a large
 MusicBrainz import doesn't hit Spotify's rolling rate limit; 429s are retried
 with `Retry-After` either way.
+
+---
+
+## Library updates (`import --refresh`)
+
+Growing listings (a channel's uploads and playlists, playlist items, artist
+discographies on Spotify, MusicBrainz, Discogs and YouTube Music) are cached as
+one snapshot each, in the `db_cache` database. Updates only add: removed items
+stay. Tracklists don't grow, so they stay on the per-page HTTP cache and are
+never refreshed; that includes YouTube Music albums and singles, which YouTube
+lists as `OLAK5uy_…` playlists. Design: `docs/plan-update.md`.
+
+| Invocation | Listings |
+|---|---|
+| `import <url>` | served from snapshots; a missing one is built from the HTTP cache |
+| `import --refresh <url>` | YouTube uploads refreshed incrementally (fetch until a page of known videos, usually 1–2 units per channel); everything else refetched in full |
+| `import --refresh=full <url>` | everything refetched in full |
+
+`--refresh=full` needs the `=`; a bare `--refresh` leaves the next argument
+for the URL list.
+
+**Quota budget.** `--quota-budget <units>` caps the YouTube units refreshes
+may use today, counting every run's usage in a per-day ledger (Pacific time,
+when YouTube resets the quota). Once spent, listings are served from their
+snapshots. With `--refresh`, the rest of the budget then goes to full
+refreshes of the uploads snapshots whose last full fetch is oldest, which
+catches videos that appeared below the page an incremental refresh stopped
+at. `--no-full-refresh-pass` skips that step. Manual runs normally pass no
+budget.
+
+**The update.** The library update walks the **update roots** the player
+keeps (`/api/roots`: a URL plus a fetch-options preset each; design:
+`docs/plan-update-roots.md`). It runs as a player job (`POST /api/update`) or
+from cron with `import --update`:
+
+1. It catches the MusicBrainz URL mirror up to the MusicBrainz server, never
+   past it (`mb_sync_replication`'s code; needs `METABRAINZ_ACCESS_TOKEN`,
+   without which the mirror is only checked not to be ahead). It refuses to
+   go on if a self-hosted server is more than 36 packets (about 36 hours)
+   behind the newest published one, its replication having likely stopped
+   (`--mb-max-server-lag`).
+2. It imports the roots, one run per preset, refreshing listings within the
+   day's budget (`--quota-budget`, default 8000). A listing several roots
+   reach is refreshed once.
+3. It spends the rest of the budget on the full-refresh pass.
+4. Each root's row records the outcome. A root that fails doesn't stop the
+   others; `import --update` then exits non-zero.
+
+```cron
+0 6 * * *  cd ~/dev/nrs-org/musiclib-rs && nix develop -c cargo run --release --bin import -- --update >> ~/.cache/musiclib-rs/update.log 2>&1
+```
+
+To pick up a release right away, refresh just that root:
+`import --refresh 'https://www.youtube.com/channel/…' --fetch-options vtuber_fetch_discography.yaml`,
+or ingest it in the player with `"refresh": true`. A player ingest otherwise
+serves listings from their snapshots.
 
 ---
 
@@ -376,6 +473,7 @@ in order; the first match wins.
 | `{ entry_type: <type> }` | `track`, `release`, `release_group`, or `artist` |
 | `{ external_type: "youtube:video" }` | Exact `source:entity` type string (e.g. `"spotify:track"`, `"musicbrainz:recording"`) |
 | `{ name_regex: "pattern" }` | Entry name matches the regex (requires fetching the entry) |
+| `{ url_regex: "pattern" }` | One of the child's URLs (source identifiers) matches the regex, e.g. `"[?&]list=OLAK5uy_"` for YouTube Music albums and singles. Never needs a fetch |
 | `{ has_source: spotify }` | Entry has at least one identifier in the `spotify` source namespace |
 | `{ appears_on: true }` | In an artist's discography: a release the artist only appears on (Spotify `appears_on`, Discogs `Appearance`/`TrackAppearance`), e.g. a various-artists compilation |
 | `{ duration_range: { min: 60000, max: 1200000 } }` | Duration in milliseconds; both `min` and `max` are optional |

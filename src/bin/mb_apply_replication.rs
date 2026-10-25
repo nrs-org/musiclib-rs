@@ -10,6 +10,8 @@
 //! Safety checks (apply):
 //! - The packet's `REPLICATION_SEQUENCE` must be exactly `db_sequence + 1`.
 //! - The packet's `SCHEMA_SEQUENCE` must match the database's `schema_sequence`.
+//! - With a self-hosted MusicBrainz server, the packet must not be past the
+//!   server's own replication sequence (`musiclib_rs::mb_freshness`).
 //!
 //! Safety checks (undo):
 //! - The packet's `REPLICATION_SEQUENCE` must equal `db_sequence` (it must be
@@ -30,7 +32,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bzip2::read::MultiBzDecoder;
 use clap::Parser;
-use musiclib_rs::replication;
+use musiclib_rs::{mb_freshness, providers::registry::RegistryConfig, replication};
 use rusqlite::Connection;
 use tracing::info;
 
@@ -49,13 +51,24 @@ struct Cli {
     /// one applied (replication_sequence must equal the db's current value).
     #[arg(long)]
     undo: bool,
+
+    /// providers.yaml with the MusicBrainz server settings. Defaults to
+    /// <config_dir>/providers.yaml.
+    #[arg(long)]
+    registry_config: Option<PathBuf>,
     #[command(flatten)]
     dirs: musiclib_rs::app_dirs::DirArgs,
 }
 
 fn main() -> Result<()> {
+    dotenv::dotenv().ok();
     let cli = Cli::parse();
     cli.dirs.apply();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
 
     let db = cli
         .db
@@ -123,6 +136,17 @@ fn main() -> Result<()> {
                 "schema mismatch: db has schema_sequence={db_schema}, \
                  packet has {} — re-bootstrap from a fresh full dump",
                 pkt.schema_sequence
+            );
+        }
+        let registry = RegistryConfig::load(cli.registry_config.as_deref())?;
+        if let Some(mb) = &registry.musicbrainz
+            && let Some(server) = mb_freshness::mirror_cap(mb)?
+            && pkt.replication_sequence > server
+        {
+            bail!(
+                "packet {} is past the MusicBrainz server's sequence {server}; \
+                 the mirror must not get ahead of the server",
+                pkt.replication_sequence
             );
         }
         let (n_i, n_u, n_d) = replication::count_ops(&pkt.ops);

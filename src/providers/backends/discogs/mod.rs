@@ -51,6 +51,12 @@ impl Provider {
             client: DiscogsClient::new_with_client(http_client, token)?,
         })
     }
+
+    /// Serve artist release listings as snapshots.
+    pub fn with_listings(mut self, store: Arc<crate::providers::listing::ListingStore>) -> Self {
+        self.client.listings = Some(store);
+        self
+    }
 }
 
 impl TryDefault for Provider {

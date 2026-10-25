@@ -1,16 +1,11 @@
-use std::{
-    collections::HashSet,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{collections::HashSet, sync::Arc};
 
-use futures::{Stream, StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::future::Future;
+use tracing::warn;
 
 use crate::{
-    http::{HttpClient, Request},
+    http::{HttpClient, Request, allow_cache},
     providers::{
         backends::{
             ExtraJSON,
@@ -23,11 +18,11 @@ use crate::{
                 types::{EXTERNAL_TYPE_PLAYLIST, EXTERNAL_TYPE_VIDEO},
             },
         },
+        listing::{ListingKey, ListingOrder, listing_source},
         types::{
-            Alias, CachedChildSource, ChildPage, ChildRef, ChildSource, CompiledChildMatcher,
+            Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
             CompiledEntryDataMatcher, CompiledMatcherExpr, EntityResult, EntrySpecificData,
-            EntryType, Error, PageFetcher, PaginatedChildSource, Tribool, default_eval_leaf,
-            static_eval_expr,
+            EntryType, Error, PageFetcher, Tribool, default_eval_leaf, static_eval_expr,
         },
     },
 };
@@ -36,6 +31,8 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ChannelListResponse {
+    // Absent when a `forHandle`/`forUsername` lookup matches no channel.
+    #[serde(default)]
     items: Vec<Channel>,
     #[serde(flatten)]
     extra: ExtraJSON,
@@ -156,6 +153,26 @@ pub(crate) const PLAYLISTS_MAX_RESULTS: &str = "50";
 pub(crate) const UPLOADS_PARTS: &str = "snippet";
 pub(crate) const UPLOADS_MAX_RESULTS: &str = "50";
 
+/// Listing kinds (`providers::listing`). Uploads are newest first, so they
+/// refresh incrementally; a channel's playlists have no usable order.
+pub(crate) const UPLOADS_KIND: &str = "youtube:uploads";
+pub(crate) const CHANNEL_PLAYLISTS_KIND: &str = "youtube:channel_playlists";
+/// Served by the ytmusicapi server, not the Data API, so it costs no quota;
+/// the `ytmusic:` prefix keeps it out of the YouTube budget.
+pub(crate) const YTMUSIC_DISCOGRAPHY_KIND: &str = "ytmusic:discography";
+
+/// The page fetcher for an uploads playlist, also used by the full-refresh
+/// pass to rebuild one from its listing ID.
+pub(crate) fn uploads_fetcher(
+    client: &YoutubeClient,
+    uploads_playlist_id: &str,
+) -> Box<dyn PageFetcher> {
+    Box::new(ChannelUploadsPageFetcher {
+        client: client.clone(),
+        uploads_playlist_id: uploads_playlist_id.to_owned(),
+    })
+}
+
 /// The channel's long-form uploads playlist (its Videos tab) for its uploads
 /// playlist ID: `UU<id>` → `UULF<id>`. Unlike `UU…` it leaves out Shorts
 /// and live-stream archives, which are clips and streams rather than
@@ -273,16 +290,6 @@ impl PageFetcher for ChannelUploadsPageFetcher {
     }
 }
 
-/// Fetches the full YTMusic discography list upfront, then yields one entry at a time.
-/// For entries missing `audioPlaylistId`, resolves it lazily via `GET /albums/{browseId}`.
-struct YtmusicDiscographySource {
-    stream: BoxStream<'static, Result<(ChildRef, ()), Error>>,
-    /// Known total count once fetched; used for size_hint.
-    total: Option<usize>,
-    /// Items consumed so far; used to compute remaining hint.
-    consumed: usize,
-}
-
 async fn fetch_discography(
     http: Arc<dyn HttpClient>,
     server_url: &str,
@@ -346,100 +353,54 @@ async fn resolve_playlist_id(
         .ok_or_else(|| Error::InvalidUrl(format!("no audioPlaylistId for album {browse_id}")))
 }
 
-fn discography_stream(
+/// The YTMusic discography of a channel, as one page. Releases without an
+/// `audioPlaylistId` are resolved via `GET /albums/{browseId}`; a release
+/// that can't be resolved is skipped with a warning.
+struct YtmusicDiscographyPageFetcher {
     http: Arc<dyn HttpClient>,
     server_url: String,
     channel_id: String,
-) -> BoxStream<'static, Result<(ChildRef, ()), Error>> {
-    // State: (http, server_url, channel_id, Option<pending releases>)
-    // The releases are fetched lazily on the first iteration step.
-    futures::stream::unfold(
-        (
-            http,
-            server_url,
-            channel_id,
-            None::<std::collections::VecDeque<YtmusicRelease>>,
-        ),
-        |(http, server_url, channel_id, mut releases)| async move {
-            if releases.is_none() {
-                match fetch_discography(Arc::clone(&http), &server_url, &channel_id).await {
-                    Ok(r) => releases = Some(r.into()),
-                    Err(e) => return Some((Err(e), (http, server_url, channel_id, None))),
-                }
-            }
-            let queue = releases.as_mut().unwrap();
-            loop {
-                let release = queue.pop_front()?;
-                let playlist_id = match release.audio_playlist_id {
-                    Some(id) => id,
-                    None => match release.browse_id {
-                        Some(bid) => {
-                            match resolve_playlist_id(Arc::clone(&http), &server_url, &bid).await {
-                                Ok(id) => id,
-                                Err(e) => {
-                                    return Some((
-                                        Err(e),
-                                        (http, server_url, channel_id, releases),
-                                    ));
-                                }
-                            }
+}
+
+#[async_trait::async_trait]
+impl PageFetcher for YtmusicDiscographyPageFetcher {
+    async fn fetch_page(&mut self, _page_token: Option<&str>) -> Result<ChildPage, Error> {
+        let releases =
+            fetch_discography(Arc::clone(&self.http), &self.server_url, &self.channel_id).await?;
+        let mut children = Vec::with_capacity(releases.len());
+        for release in releases {
+            let playlist_id = match (release.audio_playlist_id, release.browse_id) {
+                (Some(id), _) => id,
+                // A browse ID's playlist never changes, so the lookup stays
+                // cached even while the discography is being refreshed.
+                (None, Some(bid)) => {
+                    let lookup =
+                        resolve_playlist_id(Arc::clone(&self.http), &self.server_url, &bid);
+                    match allow_cache(lookup).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            warn!(
+                                "ytmusic discography of {}: skipping {bid}: {e}",
+                                self.channel_id
+                            );
+                            continue;
                         }
-                        None => continue,
-                    },
-                };
-                let child = ChildRef {
-                    entry_type: EntryType::Release,
-                    sources: [(SOURCE.into(), HashSet::from([playlist_url(&playlist_id)]))].into(),
-                    name: release.title,
-                    external_type: EXTERNAL_TYPE_PLAYLIST.into(),
-                    ..Default::default()
-                };
-                let remaining = releases.clone().map(|q| q.len());
-                let _ = remaining; // used for size_hint via YtmusicDiscographySource.total
-                return Some((Ok((child, ())), (http, server_url, channel_id, releases)));
-            }
-        },
-    )
-    .boxed()
-}
-
-impl YtmusicDiscographySource {
-    fn new(http: Arc<dyn HttpClient>, server_url: String, channel_id: String) -> Self {
-        Self {
-            stream: discography_stream(http, server_url, channel_id),
-            total: None,
-            consumed: 0,
+                    }
+                }
+                (None, None) => continue,
+            };
+            children.push(ChildRef {
+                entry_type: EntryType::Release,
+                sources: [(SOURCE.into(), HashSet::from([playlist_url(&playlist_id)]))].into(),
+                name: release.title,
+                external_type: EXTERNAL_TYPE_PLAYLIST.into(),
+                ..Default::default()
+            });
         }
-    }
-}
-
-impl Stream for YtmusicDiscographySource {
-    type Item = Result<(ChildRef, ()), Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let result = self.stream.as_mut().poll_next(cx);
-        if matches!(result, Poll::Ready(Some(Ok(_)))) {
-            self.consumed += 1;
-        }
-        result
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self.total {
-            Some(n) => {
-                let remaining = n.saturating_sub(self.consumed);
-                (remaining, Some(remaining))
-            }
-            None => (0, None),
-        }
-    }
-}
-
-impl Unpin for YtmusicDiscographySource {}
-
-impl ChildSource for YtmusicDiscographySource {
-    fn evaluate_expr(&self, expr: &CompiledMatcherExpr) -> Tribool {
-        release_eval(expr)
+        Ok(ChildPage {
+            children,
+            next_page_token: None,
+        })
     }
 }
 
@@ -453,6 +414,10 @@ fn release_eval(expr: &CompiledMatcherExpr) -> Tribool {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
             (t == EXTERNAL_TYPE_PLAYLIST).into()
         }
+        // A channel's own listing: nothing on it is an "appears on".
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::AppearsOn(want)) => {
+            (!*want).into()
+        }
         _ => default_eval_leaf(matcher),
     })
 }
@@ -464,6 +429,10 @@ fn track_eval(expr: &CompiledMatcherExpr) -> Tribool {
         }
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
             (t == EXTERNAL_TYPE_VIDEO).into()
+        }
+        // A channel's own listing: nothing on it is an "appears on".
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::AppearsOn(want)) => {
+            (!*want).into()
         }
         _ => default_eval_leaf(matcher),
     })
@@ -513,20 +482,25 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
 
                 // Source 1: playlists owned by the channel (Release)
                 let channel_id_for_ytmusic = channel_id.clone();
-                let playlists_source =
-                    PaginatedChildSource::new(Box::new(ChannelPlaylistsPageFetcher {
+                let playlists_source = listing_source(
+                    client.listings.as_ref(),
+                    ListingKey::new(CHANNEL_PLAYLISTS_KIND, channel_id.clone()),
+                    ListingOrder::Unordered,
+                    Box::new(ChannelPlaylistsPageFetcher {
                         client: client.clone(),
                         channel_id,
-                    }))
-                    .with_static_eval(release_eval);
+                    }),
+                )
+                .with_static_eval(release_eval);
 
                 // Source 2: long-form videos uploaded by the channel (Track)
-                let uploads_source =
-                    PaginatedChildSource::new(Box::new(ChannelUploadsPageFetcher {
-                        client: client.clone(),
-                        uploads_playlist_id,
-                    }))
-                    .with_static_eval(track_eval);
+                let uploads_source = listing_source(
+                    client.listings.as_ref(),
+                    ListingKey::new(UPLOADS_KIND, uploads_playlist_id.clone()),
+                    ListingOrder::NewestFirst,
+                    uploads_fetcher(&client, &uploads_playlist_id),
+                )
+                .with_static_eval(track_eval);
 
                 // Source 3 (optional): YouTube Music discography via ytmusicapi server.
                 // Only added when YTMUSICAPI_SERVER_URL is configured on the client.
@@ -535,11 +509,17 @@ pub async fn get_channel(client: &YoutubeClient, url: &str) -> Result<EntityResu
                     Arc::new(CachedChildSource::new(Box::new(uploads_source))),
                 ];
                 if let Some(ytmusicapi_url) = &client.ytmusicapi_url {
-                    let ytmusic_source = YtmusicDiscographySource::new(
-                        client.client.clone(),
-                        ytmusicapi_url.clone(),
-                        channel_id_for_ytmusic,
-                    );
+                    let ytmusic_source = listing_source(
+                        client.listings.as_ref(),
+                        ListingKey::new(YTMUSIC_DISCOGRAPHY_KIND, channel_id_for_ytmusic.clone()),
+                        ListingOrder::Unordered,
+                        Box::new(YtmusicDiscographyPageFetcher {
+                            http: client.client.clone(),
+                            server_url: ytmusicapi_url.clone(),
+                            channel_id: channel_id_for_ytmusic,
+                        }),
+                    )
+                    .with_static_eval(release_eval);
                     children.push(Arc::new(CachedChildSource::new(Box::new(ytmusic_source))));
                 }
 
@@ -798,6 +778,25 @@ mod tests {
         test_utils::MockHttpClient,
     };
 
+    /// A channel's listings declare that nothing on them is an "appears on",
+    /// so an `appears_on` rule ahead of a playlist/video rule (as in the
+    /// utaite options) doesn't force the listing to be read.
+    #[test]
+    fn channel_listings_declare_no_appears_on() {
+        use crate::providers::types::{
+            CompiledChildMatcher, CompiledEntryDataMatcher, CompiledMatcherExpr, Tribool,
+        };
+        let appears_on = |want| {
+            CompiledMatcherExpr::Matcher(CompiledChildMatcher::EntryData(
+                CompiledEntryDataMatcher::AppearsOn(want),
+            ))
+        };
+        for eval in [super::release_eval, super::track_eval] {
+            assert!(eval(&appears_on(true)) == Tribool::False);
+            assert!(eval(&appears_on(false)) == Tribool::True);
+        }
+    }
+
     fn channel_api_url(id: &str) -> String {
         YoutubeClient::build_url("channels", &[("part", CHANNEL_PARTS), ("id", id)])
     }
@@ -822,6 +821,34 @@ mod tests {
                 ("maxResults", UPLOADS_MAX_RESULTS),
             ],
         )
+    }
+
+    /// A handle that matches no channel gets a response without `items`.
+    #[tokio::test]
+    async fn unknown_handle_is_not_found() -> anyhow::Result<()> {
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route(
+            Method::GET,
+            &YoutubeClient::build_url(
+                "channels",
+                &[("part", CHANNEL_PARTS), ("forHandle", "nosuchhandle")],
+            ),
+            ResponseStatus::OK,
+            Bytes::from_static(
+                br#"{"kind": "youtube#channelListResponse", "etag": "x",
+                    "pageInfo": {"totalResults": 0, "resultsPerPage": 5}}"#,
+            ),
+        );
+        let client = YoutubeClient::new_with_client(Arc::new(http_client), "key".to_string())?;
+
+        let err = get_channel(&client, "https://www.youtube.com/@nosuchhandle")
+            .await
+            .err();
+        assert!(
+            matches!(err, Some(crate::providers::Error::NotFound(_))),
+            "{err:?}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -913,6 +940,114 @@ mod tests {
             "じゃあ！尻相撲しようよ！【ギリギリわるくないわため】 #ギリわる"
         );
 
+        Ok(())
+    }
+
+    /// The uploads listing as snapshots: the first run builds one, a refresh
+    /// after two new uploads reads the new first page plus one known page and
+    /// stops, and a cached run serves the merged listing without a request.
+    #[tokio::test]
+    async fn uploads_snapshot_refreshes_incrementally() -> anyhow::Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::providers::listing::{ListingMode, ListingStore};
+
+        let channel_id = "UCqm3BQLlJfvkTsX_hvm0UmA";
+        let uploads_playlist_id = "UULFqm3BQLlJfvkTsX_hvm0UmA";
+        let uploads_url = channel_uploads_api_url(uploads_playlist_id);
+
+        // The recorded first page, as the whole listing.
+        let mut known: serde_json::Value =
+            serde_json::from_str(include_str!("./channel_watame_uploads_page1.json"))?;
+        known.as_object_mut().unwrap().remove("nextPageToken");
+        let known_ids: Vec<String> = known["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                i["snippet"]["resourceId"]["videoId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        // Two new uploads on a first page, the old listing behind them.
+        let mut new_page = known.clone();
+        let template = known["items"][0].clone();
+        let new_items: Vec<serde_json::Value> = ["NEWVIDEO001", "NEWVIDEO002"]
+            .iter()
+            .map(|id| {
+                let mut item = template.clone();
+                item["snippet"]["resourceId"]["videoId"] = (*id).into();
+                item
+            })
+            .collect();
+        new_page["items"] = new_items.into();
+        new_page["nextPageToken"] = "PAGE2".into();
+        let page2_url = YoutubeClient::build_url(
+            "playlistItems",
+            &[
+                ("part", UPLOADS_PARTS),
+                ("playlistId", uploads_playlist_id),
+                ("maxResults", UPLOADS_MAX_RESULTS),
+                ("pageToken", "PAGE2"),
+            ],
+        );
+
+        let mut http_client = MockHttpClient::new();
+        http_client.add_route_json::<ChannelListResponse>(
+            Method::GET,
+            &channel_api_url(channel_id),
+            include_str!("./channel_watame.json"),
+        );
+        let json = |v: &serde_json::Value| Bytes::from(serde_json::to_vec(v).unwrap());
+        // First call (the build) sees the old listing, later ones the new.
+        http_client.add_route(Method::GET, &uploads_url, ResponseStatus::OK, json(&known));
+        http_client.add_route(
+            Method::GET,
+            &uploads_url,
+            ResponseStatus::OK,
+            json(&new_page),
+        );
+        http_client.add_route(Method::GET, &page2_url, ResponseStatus::OK, json(&known));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        http_client.set_on_route_callback(move |_, url| {
+            if url.contains("playlistItems") {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let http: Arc<dyn crate::http::HttpClient> = Arc::new(http_client);
+        let db = crate::httpcache::db::connect("sqlite::memory:".into()).await?;
+
+        let uploads = |mode| {
+            let http = Arc::clone(&http);
+            let db = db.clone();
+            async move {
+                let mut client = YoutubeClient::new_with_client(http, "key".into())?;
+                client.listings = Some(Arc::new(ListingStore::new(db, mode).await?));
+                let url = format!("https://www.youtube.com/channel/{channel_id}");
+                let channel = get_channel(&client, &url).await?;
+                let mut cursor = channel.children[1].cursor();
+                let mut ids = Vec::new();
+                while let Some((child, _)) = child_next(&mut cursor).await? {
+                    let url = child.sources.get(SOURCE).unwrap().iter().next().unwrap();
+                    ids.push(url.trim_start_matches("https://youtu.be/").to_owned());
+                }
+                anyhow::Ok(ids)
+            }
+        };
+
+        assert_eq!(uploads(ListingMode::Cached).await?, known_ids);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let refreshed = uploads(ListingMode::Auto).await?;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(refreshed[..2], ["NEWVIDEO001", "NEWVIDEO002"]);
+        assert_eq!(refreshed[2..], known_ids[..]);
+
+        assert_eq!(uploads(ListingMode::Cached).await?, refreshed);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         Ok(())
     }
 

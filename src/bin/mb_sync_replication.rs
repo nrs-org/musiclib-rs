@@ -9,20 +9,25 @@
 //! Reads `METABRAINZ_ACCESS_TOKEN` from the environment (or `.env`). Get one
 //! at https://metabrainz.org/profile/applications.
 //!
+//! The mirror never gets ahead of the MusicBrainz server the backend queries
+//! (`musiclib_rs::mb_freshness`): with a self-hosted server, syncing stops at
+//! the server's own replication sequence. The loop is `musiclib_rs::mb_sync`,
+//! which the library update runs too.
+//!
 //! Usage:
 //!   cargo run --bin mb_sync_replication
 //!   cargo run --bin mb_sync_replication -- -d mb_mirror.db
+//!   cargo run --bin mb_sync_replication -- --max-server-lag 36
 
-use std::{io::BufReader, path::PathBuf, time::Instant};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
-use bzip2::read::MultiBzDecoder;
+use anyhow::{Context, Result};
 use clap::Parser;
-use musiclib_rs::replication;
-use rusqlite::Connection;
-use tracing::info;
-
-const DEFAULT_BASE_URL: &str = "https://metabrainz.org/api/musicbrainz";
+use musiclib_rs::{
+    mb_freshness::PACKETS_BASE_URL,
+    mb_sync::{self, SyncOptions},
+    providers::registry::RegistryConfig,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -30,13 +35,30 @@ const DEFAULT_BASE_URL: &str = "https://metabrainz.org/api/musicbrainz";
 )]
 struct Cli {
     /// SQLite database file (must already be bootstrapped via mb_extract_urls).
-    /// Defaults to <data_dir>/mb_mirror.db.
+    /// Defaults to the mirror the MusicBrainz backend uses (`mirror_db`, else
+    /// <data_dir>/mb_mirror.db).
     #[arg(short, long)]
     db: Option<PathBuf>,
 
     /// Base URL for the replication-packets endpoint.
-    #[arg(long, default_value = DEFAULT_BASE_URL)]
+    #[arg(long, default_value = PACKETS_BASE_URL)]
     base_url: String,
+
+    /// providers.yaml with the MusicBrainz server settings. Defaults to
+    /// <config_dir>/providers.yaml.
+    #[arg(long)]
+    registry_config: Option<PathBuf>,
+
+    /// Apply packets up to this sequence instead of stopping at a self-hosted
+    /// server's own.
+    #[arg(long)]
+    until: Option<i64>,
+
+    /// Fail if a self-hosted server is more than this many packets (about one
+    /// an hour) behind the newest published one: its own replication has
+    /// likely stopped.
+    #[arg(long)]
+    max_server_lag: Option<i64>,
     #[command(flatten)]
     dirs: musiclib_rs::app_dirs::DirArgs,
 }
@@ -45,124 +67,27 @@ fn main() -> Result<()> {
     dotenv::dotenv().ok();
     let cli = Cli::parse();
     cli.dirs.apply();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
 
     let token = std::env::var("METABRAINZ_ACCESS_TOKEN").context(
         "METABRAINZ_ACCESS_TOKEN is not set — add it to .env \
          (get one at https://metabrainz.org/profile/applications)",
     )?;
-
-    let db = cli
-        .db
-        .unwrap_or_else(|| musiclib_rs::app_dirs::data_dir().join("mb_mirror.db"));
-    if let Some(parent) = db.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut conn = Connection::open(&db).with_context(|| format!("opening {}", db.display()))?;
-
-    let (mut current_seq, db_schema) = read_db_state(&conn)?;
-    info!("db: replication_sequence={current_seq}, schema_sequence={db_schema}");
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!(
-            "musiclib-rs/",
-            env!("CARGO_PKG_VERSION"),
-            " (replication-sync)"
-        ))
-        .build()
-        .context("building HTTP client")?;
-
-    let mut packets_applied = 0u64;
-    let sync_start = Instant::now();
-
-    loop {
-        let next_seq = current_seq + 1;
-        let url = format!(
-            "{}/replication-{}-v2.tar.bz2",
-            cli.base_url.trim_end_matches('/'),
-            next_seq
-        );
-        let authed_url = format!("{url}?token={}", urlencoding::encode(&token));
-
-        eprint!("[{next_seq}] fetching...");
-
-        let pkt_start = Instant::now();
-        let resp = client
-            .get(&authed_url)
-            .send()
-            .with_context(|| format!("requesting {url}"))?;
-
-        match resp.status().as_u16() {
-            200 => {}
-            404 => {
-                info!("[{next_seq}] up to date at {current_seq}");
-                break;
-            }
-            401 | 403 => bail!(
-                "auth failed (HTTP {}); check METABRAINZ_ACCESS_TOKEN",
-                resp.status()
-            ),
-            s => bail!("HTTP {s} fetching packet {next_seq}"),
-        }
-
-        eprint!("\r[{next_seq}] parsing... ");
-
-        let decompressed = MultiBzDecoder::new(BufReader::with_capacity(1 << 20, resp));
-        let pkt = replication::stream_packet(decompressed)
-            .with_context(|| format!("parsing packet {next_seq}"))?;
-
-        if pkt.replication_sequence != next_seq {
-            bail!(
-                "sequence mismatch: expected packet {next_seq}, got {}",
-                pkt.replication_sequence
-            );
-        }
-        if pkt.schema_sequence != db_schema {
-            bail!(
-                "schema mismatch at packet {}: db has schema_sequence={db_schema}, \
-                 packet has {} — re-bootstrap from a fresh full dump",
-                pkt.replication_sequence,
-                pkt.schema_sequence
-            );
-        }
-
-        let (n_i, n_u, n_d) = replication::count_ops(&pkt.ops);
-        let ts = pkt.timestamp.as_deref().unwrap_or("?");
-
-        eprint!("\r[{next_seq}] applying ({ts})...");
-
-        replication::exec_ops(
-            &mut conn,
-            &pkt.ops,
-            false,
-            pkt.replication_sequence,
-            pkt.schema_sequence,
-        )
-        .with_context(|| format!("applying packet {}", pkt.replication_sequence))?;
-
-        let elapsed = pkt_start.elapsed();
-        info!(
-            "[{next_seq}] {ts} | {n_i}i {n_u}u {n_d}d | {:.1}s",
-            elapsed.as_secs_f64()
-        );
-
-        current_seq = pkt.replication_sequence;
-        packets_applied += 1;
-    }
-
-    let total = sync_start.elapsed();
-    info!(
-        "{packets_applied} packet(s) applied in {:.1}s, mirror at {current_seq}",
-        total.as_secs_f64()
-    );
+    let registry = RegistryConfig::load(cli.registry_config.as_deref())?;
+    mb_sync::sync(
+        registry.musicbrainz.as_ref(),
+        &token,
+        &SyncOptions {
+            db: cli.db,
+            base_url: cli.base_url,
+            until: cli.until,
+            max_server_lag: cli.max_server_lag,
+            on_packet: None,
+        },
+    )?;
     Ok(())
-}
-
-fn read_db_state(conn: &Connection) -> Result<(i64, i64)> {
-    conn.query_row(
-        "SELECT replication_sequence, schema_sequence FROM mb_state",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .context("reading mb_state — has the database been bootstrapped with mb_extract_urls?")
 }

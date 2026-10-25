@@ -11,12 +11,13 @@ use crate::providers::{
             EXTERNAL_TYPE_ARTIST, EXTERNAL_TYPE_TRACK, Image, Paging, SimpleArtist, pick_image,
         },
     },
+    listing::{ListingKey, ListingOrder, listing_source},
     std_values::StandardRoleNames,
     types::{
         Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
         CompiledEntryDataMatcher, CompiledMatcherExpr, Contribution, EntityResult,
-        EntrySpecificData, EntryType, Error, PageFetcher, PaginatedChildSource, TrackPosition,
-        Tribool, default_eval_leaf, static_eval_expr,
+        EntrySpecificData, EntryType, Error, PageFetcher, TrackPosition, Tribool,
+        default_eval_leaf, static_eval_expr,
     },
 };
 
@@ -204,20 +205,28 @@ pub async fn get_playlist(client: &SpotifyClient, url: &str) -> Result<EntityRes
             ..Default::default()
         };
 
-        // Inline first page of tracks; paginate rest.
+        // Inline first page of tracks; paginate rest. With a listing store
+        // the inline page isn't used: it comes from the playlist's own
+        // (cached) response, so it would never pick up added tracks.
         let inline_count = p.tracks.items.len() as u32;
-        let tracks_child: Arc<CachedChildSource<()>> = if inline_count >= p.tracks.total {
-            Arc::new(CachedChildSource::from_children(
-                playlist_items_to_child_refs(&p.tracks.items),
-            ))
-        } else {
-            let paginator = PaginatedChildSource::new(Box::new(PlaylistItemsPageFetcher {
-                client: client.clone(),
-                playlist_id: id.to_string(),
-            }))
-            .with_static_eval(track_eval);
-            Arc::new(CachedChildSource::new(Box::new(paginator)))
-        };
+        let tracks_child: Arc<CachedChildSource<()>> =
+            if inline_count >= p.tracks.total && client.listings.is_none() {
+                Arc::new(CachedChildSource::from_children(
+                    playlist_items_to_child_refs(&p.tracks.items),
+                ))
+            } else {
+                let paginator = listing_source(
+                    client.listings.as_ref(),
+                    ListingKey::new("spotify:playlist_tracks", id),
+                    ListingOrder::Unordered,
+                    Box::new(PlaylistItemsPageFetcher {
+                        client: client.clone(),
+                        playlist_id: id.to_string(),
+                    }),
+                )
+                .with_static_eval(track_eval);
+                Arc::new(CachedChildSource::new(Box::new(paginator)))
+            };
 
         let result = Ok(EntityResult {
             privacy: None,

@@ -58,6 +58,12 @@ impl Provider {
             client: SpotifyClient::new_with_client(http_client, client_id, client_secret),
         }
     }
+
+    /// Serve growing listings (artist albums, playlists) as snapshots.
+    pub fn with_listings(mut self, store: Arc<crate::providers::listing::ListingStore>) -> Self {
+        self.client.listings = Some(store);
+        self
+    }
 }
 
 impl TryDefault for Provider {

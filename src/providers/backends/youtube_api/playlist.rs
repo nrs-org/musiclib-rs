@@ -14,12 +14,23 @@ use crate::providers::{
             types::EXTERNAL_TYPE_VIDEO,
         },
     },
+    listing::{ListingKey, ListingOrder, listing_source},
     types::{
         Alias, CachedChildSource, ChildPage, ChildRef, CompiledChildMatcher,
         CompiledEntryDataMatcher, EntityResult, EntrySpecificData, EntryType, Error, PageFetcher,
         PaginatedChildSource, default_eval_leaf, static_eval_expr,
     },
 };
+
+/// Listing kind of a playlist's items (`providers::listing`).
+pub(crate) const PLAYLIST_ITEMS_KIND: &str = "youtube:playlist_items";
+
+/// A YouTube Music album or single (`OLAK5uy_…`): a tracklist, which doesn't
+/// grow, so it stays on the per-page HTTP cache like other tracklists rather
+/// than being refetched by every `--refresh`.
+fn is_album_playlist(id: &str) -> bool {
+    id.starts_with("OLAK5uy_")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PlaylistListResponse {
@@ -183,10 +194,22 @@ impl PageFetcher for PlaylistItemsPageFetcher {
 pub async fn get_playlist(client: &YoutubeClient, url: &str) -> Result<EntityResult<()>, Error> {
     let id = match_playlist_url(url).expect("Invalid YouTube playlist URL");
     let url = playlist_url(id);
-    let children_source = PaginatedChildSource::new(Box::new(PlaylistItemsPageFetcher {
+    let fetcher: Box<dyn PageFetcher> = Box::new(PlaylistItemsPageFetcher {
         client: client.clone(),
         playlist_id: id.to_string(),
-    }))
+    });
+    let children_source = if is_album_playlist(id) {
+        PaginatedChildSource::new(fetcher)
+    } else {
+        // A playlist's order is whatever its owner made it, so a refresh
+        // refetches it whole.
+        listing_source(
+            client.listings.as_ref(),
+            ListingKey::new(PLAYLIST_ITEMS_KIND, id),
+            ListingOrder::Unordered,
+            fetcher,
+        )
+    }
     .with_static_eval(|expr| {
         static_eval_expr(expr, &|matcher| match matcher {
             CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::EntryType(t)) => {
@@ -340,6 +363,59 @@ mod tests {
             "ぼくらのなぞなぞ／角巻わため【original】"
         );
 
+        Ok(())
+    }
+
+    /// A YouTube Music album (`OLAK5uy_…`) is a fixed tracklist: it gets no
+    /// listing snapshot, so `--refresh` never refetches it. An ordinary
+    /// playlist does.
+    #[tokio::test]
+    async fn album_playlists_get_no_snapshot() -> anyhow::Result<()> {
+        use crate::providers::listing::{ListingMode, ListingStore};
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let db = crate::httpcache::db::connect("sqlite::memory:".into()).await?;
+        let store = Arc::new(ListingStore::new(db.clone(), ListingMode::Full).await?);
+        let ordinary = "PLZ34fLWik_iBK39rTWRAs_G93pnUW3K-7";
+        for id in [ordinary, "OLAK5uy_lOizyx1uJ3ZXUYLvkQV7tAodOXrN19Fwo"] {
+            let mut http_client = MockHttpClient::new();
+            http_client.add_route_json::<PlaylistListResponse>(
+                Method::GET,
+                &playlist_api_url(id),
+                include_str!("./playlist_watame_original_song.json"),
+            );
+            http_client.add_route_json::<PlaylistItemsResponse>(
+                Method::GET,
+                &playlist_items_api_url(id),
+                include_str!("./playlist_watame_original_song_items_page1.json"),
+            );
+            let mut client =
+                YoutubeClient::new_with_client(Arc::new(http_client), "key".to_string())?;
+            client.listings = Some(Arc::clone(&store));
+            let playlist = get_playlist(
+                &client,
+                &format!("https://www.youtube.com/playlist?list={id}"),
+            )
+            .await?;
+            let mut cursor = playlist.children[0].cursor();
+            let mut n = 0;
+            while child_next(&mut cursor).await?.is_some() {
+                n += 1;
+            }
+            assert_eq!(n, 32);
+        }
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT key FROM listing_snapshot",
+            ))
+            .await?;
+        let keys: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get("", "key"))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(keys, [format!("youtube:playlist_items:{ordinary}")]);
         Ok(())
     }
 }

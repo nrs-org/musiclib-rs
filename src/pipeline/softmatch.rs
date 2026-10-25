@@ -2477,10 +2477,20 @@ async fn load_script(
         .run_ast_with_scope(&mut base_scope, &ast)
         .map_err(|e| anyhow::anyhow!("Script init error in {path}: {e}"))?;
     // Call optional init() hook; its return value is the opaque context object
-    // threaded into every entry point. Missing/erroring init → unit context.
-    let user_ctx = engine
-        .call_fn::<Dynamic>(&mut base_scope, &ast, "init", ())
-        .unwrap_or(Dynamic::UNIT);
+    // threaded into every entry point. A missing init → unit context; a
+    // failing one fails the load, so a script that can't run (its matcher
+    // library missing, say) stops softmatch instead of scoring every pair
+    // without it.
+    let has_init = ast
+        .iter_functions()
+        .any(|f| f.name == "init" && f.params.is_empty());
+    let user_ctx = if has_init {
+        engine
+            .call_fn::<Dynamic>(&mut base_scope, &ast, "init", ())
+            .map_err(|e| anyhow::anyhow!("init() failed in {path}: {e}"))?
+    } else {
+        Dynamic::UNIT
+    };
     Ok(ScriptCtx {
         engine,
         ast,
@@ -4079,6 +4089,29 @@ mod tests {
                 assert!(criteria[c].is_string(), "{t} criterion {c}");
             }
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A script without `init()` gets a unit context; one whose `init()`
+    /// throws (its matcher library missing) doesn't load at all.
+    #[tokio::test]
+    async fn failing_init_fails_the_load() {
+        let dir = std::env::temp_dir().join(format!("init-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let load = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            async move { load_script(path.to_str().unwrap(), None, None, None, None).await }
+        };
+        let ctx = load("none.rhai", "fn decide(a, b) { () }").await.unwrap();
+        assert!(ctx.user_ctx.is_unit());
+        let ctx = load("ok.rhai", "fn init() { #{ h: 1 } }").await.unwrap();
+        assert!(ctx.user_ctx.is_map());
+        let err = load("bad.rhai", r#"fn init() { throw "needs --features ffi"; }"#)
+            .await
+            .err()
+            .expect("a throwing init() fails the load");
+        assert!(err.to_string().contains("init() failed"), "{err}");
         std::fs::remove_dir_all(dir).ok();
     }
 
