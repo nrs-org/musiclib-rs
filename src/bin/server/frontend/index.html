@@ -146,7 +146,7 @@
   /* Two rows of three: six labels don't fit the rail's width in one. */
   .mode-switcher {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 6px;
     margin: 0 0 12px;
   }
@@ -653,6 +653,49 @@
   .import-jobs .ingest-job-detail,
   .import-jobs .ingest-job-link {
     font-size: 12px;
+  }
+
+  /* ---------- jobs mode: running jobs, history (see the `Jobs` module) ---------- */
+
+  .mode-badge {
+    display: inline-block;
+    min-width: 1.4em;
+    margin-left: 4px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--brass);
+    color: var(--paper);
+    font-family: var(--mono);
+    font-size: 10px;
+    line-height: 1.5;
+  }
+
+  .job-history { list-style: none; margin: 0 0 12px; padding: 0; }
+  .job-history-item { border-top: 1px solid var(--rail); }
+  .job-history-item:first-child { border-top: none; }
+  .job-row {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    width: 100%;
+    padding: 8px 0;
+    border: none;
+    background: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .job-row:hover .job-row-label { color: var(--brass); }
+  .job-mark { flex: none; width: 1.2em; font-family: var(--mono); font-size: 13px; }
+  .job-mark.done { color: var(--verdigris); }
+  .job-mark.error { color: var(--danger); }
+  .job-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .job-row-label { font-size: 14px; overflow-wrap: anywhere; }
+  .job-row-meta, .job-row-summary {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    overflow-wrap: anywhere;
   }
 
   /* ---------- update roots: the URLs the library update walks, and the
@@ -4023,6 +4066,7 @@
           <button type="button" data-mode="player" aria-pressed="false">Player</button>
           <button type="button" data-mode="playlists" aria-pressed="false">Playlists</button>
           <button type="button" data-mode="import" aria-pressed="false">Import</button>
+          <button type="button" data-mode="jobs" aria-pressed="false">Jobs<span id="jobs-badge" class="mode-badge" hidden></span></button>
           <button type="button" data-mode="settings" aria-pressed="false">Settings</button>
         </nav>
         <div class="search-slot">
@@ -4056,6 +4100,7 @@
       </div>
       <div id="view-playlists" hidden></div>
       <div id="view-import" hidden></div>
+      <div id="view-jobs" hidden></div>
       <div id="view-settings" hidden></div>
     </main>
   </div>
@@ -4144,6 +4189,7 @@
   const viewGraphEl = document.getElementById("view-graph");
   const viewPlayerEl = document.getElementById("view-player");
   const viewImportEl = document.getElementById("view-import");
+  const viewJobsEl = document.getElementById("view-jobs");
   const viewSettingsEl = document.getElementById("view-settings");
   const viewPlaylistsEl = document.getElementById("view-playlists");
   const playerStageWrapEl = document.getElementById("player-stage-wrap");
@@ -4249,6 +4295,8 @@
     viewGraphEl.hidden = mode !== "graph";
     viewPlayerEl.hidden = mode !== "player";
     viewImportEl.hidden = mode !== "import";
+    viewJobsEl.hidden = mode !== "jobs";
+    if (mode === "jobs") Jobs.render();
     viewSettingsEl.hidden = mode !== "settings";
     viewPlaylistsEl.hidden = mode !== "playlists";
     for (const btn of modeSwitcherEl.querySelectorAll("button[data-mode]")) {
@@ -4286,6 +4334,9 @@
     } else if (mode === "import") {
       history.pushState({}, "", "/import");
       setMode("import");
+    } else if (mode === "jobs") {
+      history.pushState({}, "", "/jobs");
+      setMode("jobs");
     } else if (mode === "settings") {
       history.pushState({}, "", "/settings");
       setMode("settings");
@@ -4398,50 +4449,75 @@
   // section above) precisely so that polling keeps running while you're
   // looking at Library/Graph/Player instead — mirrors how Player's dock
   // survives a mode switch.
-  const Ingest = (() => {
-    const viewEl = document.getElementById("view-import");
-    const POLL_MS = 1000;
-    const MAX_SHOWN = 30;
+  // ---------- jobs: every server job, live — GET /api/jobs and the
+  // /api/jobs/events SSE feed (see jobs_api.rs) ----------
+  //
+  // The one record of what the server is doing or has done: imports from
+  // this page or anywhere else, library updates, the source finder's attach
+  // jobs, NRS's store-protocol ingests. Running jobs arrive over the event
+  // feed (a snapshot first, then each change, at most about once a second
+  // per job); finished ones come from the server's history, newest first, a
+  // page at a time. The Jobs mode shows all of it; the import page shows its
+  // own kinds through `recent` and `renderCard`.
+  const Jobs = (() => {
+    const viewEl = document.getElementById("view-jobs");
+    const badgeEl = document.getElementById("jobs-badge");
+    const HISTORY_PAGE = 50;
 
-    // Built-in fallback so the form works even before (or if)
-    // GET /api/fetch-options/files responds — matches the server's own
-    // always-present `__shallow__` choice (see fetch_options.rs `shallow`).
-    // `<config_dir>/fetch_options/` is otherwise entirely user-managed: no
-    // file here is bundled or assumed, the list is whatever `files` gets
-    // replaced with once the request above resolves.
-    let files = [{ id: "__shallow__", label: "Quick (1 level deep, no config file)" }];
-    let selectedFile = "__shallow__";
-    // Entry-point names the currently selected file offers (its YAML
-    // document's own top-level keys — see fetch_options.rs's module doc on
-    // why one file can define more than one). Empty for `__shallow__` (not
-    // a real file) and for any file that only defines `main` — the picker
-    // below only renders when this has more than one name.
-    let entryPoints = [];
-    let selectedEntryPoint = "main";
+    const running = new Map(); // job_id -> JobView
+    let finished = []; // JobView, newest first
+    let historyLoaded = false;
+    let moreHistory = true;
+    let loadingHistory = false;
+    let historyError = null;
+    let connected = false;
+    const canceling = new Set();
+    const expanded = new Set();
+    const listeners = new Set();
+    let renderQueued = false;
 
-    // { id, kind, query, status, stage, message, detail, entryId, result,
-    //   errorMessage, canceling }; `kind` is "ingest" or "update".
-    let jobs = [];
-    let inputValue = "";
-    let submitError = null;
+    const isRunningView = (v) => v.status === "pending" || v.status === "running";
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-    // Update roots (GET /api/roots): the URLs the library update walks.
-    let roots = [];
-    let rootsError = null;
-    // The filtering preview of the URL in the form:
-    // { url, loading } | { url, data } | { url, error }.
-    let preview = null;
-    // The root whose Remove was clicked once (a second click removes it).
-    let armedRemove = null;
-    // The root whose fetch options are being edited:
-    // { id, file, entryPoint, entryPoints }.
-    let editing = null;
+    // A JobView in the shape the job card renders.
+    function toCard(v) {
+      return {
+        id: v.job_id,
+        kind: v.op,
+        query: v.label || v.op,
+        status: v.status,
+        stage: v.progress?.stage || null,
+        message: v.progress?.message || null,
+        detail: v.progress?.detail || null,
+        entryId: v.result?.entry_id ?? null,
+        result: v.result || null,
+        errorMessage: v.error?.message || null,
+        createdAt: v.created_at,
+        updatedAt: v.updated_at,
+        canceling: canceling.has(v.job_id),
+      };
+    }
 
-    function findJob(id) {
-      return jobs.find((j) => j.id === id);
+    function updateSummary(r) {
+      if (!r) return "done";
+      const all = r.roots || [];
+      const failed = all.filter((x) => x.error).length;
+      const newItems = Object.values(r.listings || {}).reduce((n, k) => n + (k.new_items || 0), 0);
+      const parts = [plural(all.length, "root")];
+      if (failed) parts.push(`${failed} failed`);
+      parts.push(plural(newItems, "new listing item"));
+      parts.push(
+        plural(r.youtube_units ?? 0, "YouTube unit") +
+          (r.youtube_units_today != null ? ` (${r.youtube_units_today} today)` : "")
+      );
+      if (r.mirror && r.mirror.to !== r.mirror.from) {
+        parts.push(`MusicBrainz mirror ${r.mirror.from} → ${r.mirror.to}`);
+      }
+      return parts.join(" · ");
     }
 
     const RUNNING = (job) => job.status === "pending" || job.status === "running";
+    const FAILED = (job) => ["failed", "canceled", "interrupted"].includes(job.status);
 
     // Renders `job.detail` (see `ingest_progress::JobProgressSink` on the
     // server) as a CLI-import-style panel: fetched/failed counters, the
@@ -4527,13 +4603,13 @@
       return el("div", { className: "ingest-job-activity" }, [counters, failures, recent, domains]);
     }
 
-    function renderJob(job) {
+    function renderJob(job, { onDismiss } = {}) {
       let statusEl;
       if (job.status === "succeeded" && job.kind === "update" && (job.result?.roots || []).some((r) => r.error)) {
         statusEl = el("span", { className: "ingest-job-status error", text: "!", title: "Some roots failed" });
       } else if (job.status === "succeeded") {
         statusEl = el("span", { className: "ingest-job-status done", text: "✓" });
-      } else if (job.status === "failed" || job.status === "canceled") {
+      } else if (FAILED(job)) {
         statusEl = el("span", { className: "ingest-job-status error", text: "✕" });
       } else {
         statusEl = el("span", { className: "ingest-job-status" }, [
@@ -4571,11 +4647,11 @@
         );
         const summary = renderActivity(job.detail, { compact: true });
         if (summary) body.appendChild(summary);
-      } else if (job.status === "failed" || job.status === "canceled") {
+      } else if (FAILED(job)) {
         body.appendChild(
           el("p", {
             className: "ingest-job-detail error",
-            text: job.errorMessage || (job.status === "canceled" ? "canceled" : "import failed"),
+            text: job.errorMessage || (job.status === "interrupted" ? "cut off by a server restart" : job.status),
           })
         );
         // A canceled/failed job can still carry a `detail` snapshot from its
@@ -4599,7 +4675,7 @@
             type: "button",
             text: job.canceling ? "Canceling…" : "Cancel",
             disabled: job.canceling,
-            onclick: () => cancelJob(job.id),
+            onclick: () => cancel(job.id),
           })
         );
       }
@@ -4614,18 +4690,17 @@
           })
         );
       }
-      actions.push(
-        el("button", {
-          className: "ingest-job-dismiss",
-          type: "button",
-          "aria-label": "Dismiss",
-          text: "×",
-          onclick: () => {
-            jobs = jobs.filter((j) => j.id !== job.id);
-            render();
-          },
-        })
-      );
+      if (onDismiss) {
+        actions.push(
+          el("button", {
+            className: "ingest-job-dismiss",
+            type: "button",
+            "aria-label": "Dismiss",
+            text: "×",
+            onclick: onDismiss,
+          })
+        );
+      }
 
       return el("li", { className: "ingest-job" }, [statusEl, body, ...actions]);
     }
@@ -4639,8 +4714,9 @@
     // far more than the 6-line activity log shows) — it's finally readable.
     function jobLogText(job) {
       const lines = [];
-      lines.push(`musiclib-rs import log`);
-      lines.push(`query: ${job.query}`);
+      lines.push(`musiclib-rs job log`);
+      lines.push(`job: ${job.query}`);
+      lines.push(`kind: ${job.kind}`);
       lines.push(`job id: ${job.id}`);
       lines.push(`status: ${job.status}`);
       if (job.createdAt) lines.push(`started: ${job.createdAt}`);
@@ -4693,32 +4769,281 @@
     function downloadJobLog(job) {
       const blob = new Blob([jobLogText(job)], { type: "text/plain" });
       const url = URL.createObjectURL(blob);
-      const a = el("a", { href: url, download: `musiclib-import-${job.id}.log.txt` });
+      const a = el("a", { href: url, download: `musiclib-job-${job.id}.log.txt` });
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
     }
 
-    async function cancelJob(id) {
-      const job = findJob(id);
-      if (!job || job.canceling) return;
-      job.canceling = true;
-      render();
+    function renderCard(view, opts) {
+      return renderJob(toCard(view), opts);
+    }
+
+    function upsert(view) {
+      const id = view.job_id;
+      if (isRunningView(view)) {
+        running.set(id, view);
+        return;
+      }
+      const wasRunning = running.delete(id);
+      canceling.delete(id);
+      finished = [view, ...finished.filter((f) => f.job_id !== id)];
+      if (wasRunning && view.op === "update" && view.status === "succeeded") LibraryChanges.changed();
+    }
+
+    function changed(view) {
+      const n = running.size;
+      badgeEl.hidden = n === 0;
+      badgeEl.textContent = n ? String(n) : "";
+      badgeEl.title = n ? `${plural(n, "job")} running` : "";
+      for (const fn of listeners) fn(view || null);
+      if (!viewEl.hidden && !renderQueued) {
+        renderQueued = true;
+        requestAnimationFrame(() => {
+          renderQueued = false;
+          render();
+        });
+      }
+    }
+
+    function connect() {
+      const source = new EventSource("/api/jobs/events");
+      source.onopen = () => {
+        connected = true;
+        changed(null);
+      };
+      source.onerror = () => {
+        connected = false;
+        changed(null);
+      };
+      source.onmessage = (e) => {
+        let msg;
+        try {
+          msg = JSON.parse(e.data);
+        } catch {
+          return;
+        }
+        if (msg.type === "snapshot") {
+          // Jobs that ended while the feed was down: their final state is
+          // in history.
+          const gone = [...running.keys()].filter((id) => !msg.running.some((v) => v.job_id === id));
+          running.clear();
+          for (const v of msg.running) running.set(v.job_id, v);
+          if (gone.length) loadHistory(false);
+          changed(null);
+        } else if (msg.type === "job") {
+          upsert(msg.job);
+          changed(msg.job);
+        }
+      };
+    }
+
+    // The first page of history, or (`more`) the page after what's loaded.
+    async function loadHistory(more) {
+      if (loadingHistory) return;
+      loadingHistory = true;
+      const last = finished[finished.length - 1];
+      const before = more && last ? `&before=${Math.floor(Date.parse(last.created_at) / 1000)}` : "";
+      try {
+        const data = await api(`/api/jobs?limit=${HISTORY_PAGE}${before}`);
+        const page = data.finished || [];
+        if (more) {
+          const have = new Set(finished.map((f) => f.job_id));
+          finished = [...finished, ...page.filter((v) => !have.has(v.job_id))];
+        } else {
+          // Keep any job the feed finished meanwhile that the page predates.
+          const inPage = new Set(page.map((v) => v.job_id));
+          const newer = finished.filter((f) => !inPage.has(f.job_id) && (!page[0] || f.created_at >= page[0].created_at));
+          finished = [...newer, ...page];
+        }
+        moreHistory = page.length === HISTORY_PAGE;
+        historyLoaded = true;
+        historyError = null;
+      } catch (e) {
+        historyError = e.message;
+      }
+      loadingHistory = false;
+      changed(null);
+    }
+
+    async function cancel(id) {
+      if (canceling.has(id)) return;
+      canceling.add(id);
+      changed(null);
       try {
         await del(`/api/jobs/${id}`);
       } catch (e) {
-        job.canceling = false;
-        submitError = e.message;
-        render();
-        return;
+        canceling.delete(id);
+        historyError = e.message;
+        changed(null);
       }
-      // Don't wait for the next scheduled poll tick (up to POLL_MS away) —
-      // fetch the now-canceled status right away for snappier feedback. The
-      // tick already in flight from the original `poll()` call still fires
-      // too, but by then the status is terminal, so it's a no-op re-render.
-      poll(id);
     }
+
+    // The newest `n` jobs of the kinds `ops`, running ones first.
+    function recent(ops, n) {
+      const mine = (v) => ops.includes(v.op);
+      const live = [...running.values()].filter(mine).reverse();
+      return [...live, ...finished.filter(mine)].slice(0, n);
+    }
+
+    const isUpdating = () => [...running.values()].some((v) => v.op === "update");
+
+    function subscribe(fn) {
+      listeners.add(fn);
+    }
+
+    const OP_LABEL = { ingest: "Import", update: "Update", attach_source: "Attach source" };
+    const TRIGGER_LABEL = { manual: "", schedule: "scheduled", store_protocol: "from NRS" };
+
+    function duration(v) {
+      const start = Date.parse(v.started_at || v.created_at);
+      const end = v.finished_at ? Date.parse(v.finished_at) : Date.now();
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
+      const s = Math.max(0, Math.round((end - start) / 1000));
+      if (s < 60) return `${s}s`;
+      if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+      return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    }
+
+    function summary(v) {
+      if (v.error?.message) return v.error.message;
+      if (v.status === "interrupted") return "cut off by a server restart";
+      if (v.status === "canceled") return "canceled";
+      if (v.op === "update" && v.result) return updateSummary(v.result);
+      const d = v.progress?.detail;
+      if (d && d.entries_fetched != null) {
+        return `${d.entries_fetched} fetched` + (d.entries_failed ? ` · ${d.entries_failed} failed` : "");
+      }
+      return v.progress?.message || "";
+    }
+
+    function statusMark(v) {
+      if (v.status === "succeeded") {
+        const partial = v.op === "update" && (v.result?.roots || []).some((r) => r.error);
+        return el("span", {
+          className: `job-mark ${partial ? "error" : "done"}`,
+          text: partial ? "!" : "✓",
+          title: partial ? "Some roots failed" : "Succeeded",
+        });
+      }
+      return el("span", { className: "job-mark error", text: "✕", title: v.status });
+    }
+
+    function renderHistoryRow(v) {
+      const open = expanded.has(v.job_id);
+      const when = new Date(v.created_at).toLocaleString();
+      const tags = [OP_LABEL[v.op] || v.op, TRIGGER_LABEL[v.trigger] || ""].filter(Boolean).join(" · ");
+      const row = el(
+        "button",
+        {
+          className: "job-row",
+          type: "button",
+          "aria-expanded": open,
+          onclick: () => {
+            if (open) expanded.delete(v.job_id);
+            else expanded.add(v.job_id);
+            render();
+          },
+        },
+        [
+          statusMark(v),
+          el("span", { className: "job-row-main" }, [
+            el("span", { className: "job-row-label", text: v.label || v.op }),
+            el("span", { className: "job-row-meta", text: `${tags} · ${when} · ${duration(v)}` }),
+            el("span", { className: "job-row-summary", text: summary(v) }),
+          ]),
+        ]
+      );
+      return el("li", { className: "job-history-item" }, [
+        row,
+        open ? el("ul", { className: "ingest-jobs" }, [renderCard(v)]) : null,
+      ]);
+    }
+
+    function render() {
+      viewEl.innerHTML = "";
+      const live = [...running.values()];
+      viewEl.appendChild(
+        el("div", { className: "import-view jobs-view" }, [
+          el("p", { className: "card-kicker", text: "Jobs" }),
+          el("h1", { className: "card-title", text: "What the server is doing" }),
+          el("p", {
+            className: "card-meta",
+            text: connected
+              ? "Imports, library updates and source attaches, started from any tab, by NRS or by the scheduler. Updated live."
+              : "Connecting to the server…",
+          }),
+          el("p", { className: "manifest-label", text: live.length ? `Running · ${live.length}` : "Nothing running" }),
+          live.length ? el("ul", { className: "ingest-jobs" }, live.map((v) => renderCard(v))) : null,
+          el("p", { className: "manifest-label", text: "Scheduled" }),
+          el("p", { className: "preview-note", text: "No scheduled jobs yet." }),
+          el("p", {
+            className: "manifest-label",
+            text: historyLoaded && !finished.length ? "No finished jobs yet" : "History",
+          }),
+          historyError ? el("p", { className: "rail-foot-error", text: historyError }) : null,
+          finished.length ? el("ul", { className: "job-history" }, finished.map(renderHistoryRow)) : null,
+          historyLoaded && moreHistory
+            ? el("button", {
+                className: "root-btn",
+                type: "button",
+                text: loadingHistory ? "Loading…" : "Load older",
+                disabled: loadingHistory,
+                onclick: () => loadHistory(true),
+              })
+            : null,
+        ])
+      );
+    }
+
+    function init() {
+      connect();
+      loadHistory(false);
+    }
+
+    return { init, render, renderCard, recent, isUpdating, subscribe, cancel };
+  })();
+
+  const Ingest = (() => {
+    const viewEl = document.getElementById("view-import");
+
+    // Built-in fallback so the form works even before (or if)
+    // GET /api/fetch-options/files responds — matches the server's own
+    // always-present `__shallow__` choice (see fetch_options.rs `shallow`).
+    // `<config_dir>/fetch_options/` is otherwise entirely user-managed: no
+    // file here is bundled or assumed, the list is whatever `files` gets
+    // replaced with once the request above resolves.
+    let files = [{ id: "__shallow__", label: "Quick (1 level deep, no config file)" }];
+    let selectedFile = "__shallow__";
+    // Entry-point names the currently selected file offers (its YAML
+    // document's own top-level keys — see fetch_options.rs's module doc on
+    // why one file can define more than one). Empty for `__shallow__` (not
+    // a real file) and for any file that only defines `main` — the picker
+    // below only renders when this has more than one name.
+    let entryPoints = [];
+    let selectedEntryPoint = "main";
+
+    // Job records this page hid with ×; the record itself stays in Jobs.
+    const dismissed = new Set();
+    const RECENT_SHOWN = 8;
+    // Where the recent-jobs list is drawn, so job updates redraw only it
+    // (a full render would take focus from the URL field mid-typing).
+    let jobsHost = null;
+    let inputValue = "";
+    let submitError = null;
+
+    // Update roots (GET /api/roots): the URLs the library update walks.
+    let roots = [];
+    let rootsError = null;
+    // The filtering preview of the URL in the form:
+    // { url, loading } | { url, data } | { url, error }.
+    let preview = null;
+    // The root whose Remove was clicked once (a second click removes it).
+    let armedRemove = null;
+    // The root whose fetch options are being edited:
+    // { id, file, entryPoint, entryPoints }.
+    let editing = null;
 
     function render() {
       viewEl.innerHTML = "";
@@ -4789,13 +5114,8 @@
         onclick: addRoot,
       });
 
-      const jobsList = jobs.length
-        ? el(
-            "ul",
-            { className: "ingest-jobs import-jobs" },
-            jobs.slice(0, MAX_SHOWN).map(renderJob)
-          )
-        : null;
+      jobsHost = el("div", { className: "import-recent-jobs" });
+      renderRecentJobs();
 
       viewEl.appendChild(
         el("div", { className: "import-view" }, [
@@ -4815,12 +5135,47 @@
           ]),
           submitError ? el("p", { className: "rail-foot-error", text: submitError }) : null,
           renderPreview(),
-          el("p", { className: "manifest-label", text: jobs.length ? "Recent jobs" : "No imports yet" }),
-          jobsList,
+          jobsHost,
           ...renderRoots(),
         ])
       );
     }
+
+    function renderRecentJobs() {
+      if (!jobsHost) return;
+      const shown = Jobs.recent(["ingest", "update"], RECENT_SHOWN + dismissed.size)
+        .filter((v) => !dismissed.has(v.job_id))
+        .slice(0, RECENT_SHOWN);
+      jobsHost.innerHTML = "";
+      jobsHost.appendChild(
+        el("div", { className: "roots-head" }, [
+          el("p", { className: "manifest-label", text: shown.length ? "Recent jobs" : "No imports yet" }),
+          el("button", { className: "root-btn", type: "button", text: "All jobs →", onclick: () => goToMode("jobs") }),
+        ])
+      );
+      if (shown.length) {
+        jobsHost.appendChild(
+          el(
+            "ul",
+            { className: "ingest-jobs import-jobs" },
+            shown.map((v) =>
+              Jobs.renderCard(v, {
+                onDismiss: () => {
+                  dismissed.add(v.job_id);
+                  renderRecentJobs();
+                },
+              })
+            )
+          )
+        );
+      }
+    }
+
+    // An update ending changes the roots' last-run columns.
+    Jobs.subscribe((view) => {
+      renderRecentJobs();
+      if (view && view.op === "update" && !["pending", "running"].includes(view.status)) loadRoots();
+    });
 
     const fetchOptions = () => ({ file: selectedFile, entry_point: selectedEntryPoint || "main" });
 
@@ -4831,24 +5186,6 @@
 
     const rootName = (r) => r.label || r.title || r.url;
     const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-    function updateSummary(r) {
-      if (!r) return "done";
-      const all = r.roots || [];
-      const failed = all.filter((x) => x.error).length;
-      const newItems = Object.values(r.listings || {}).reduce((n, k) => n + (k.new_items || 0), 0);
-      const parts = [plural(all.length, "root")];
-      if (failed) parts.push(`${failed} failed`);
-      parts.push(plural(newItems, "new listing item"));
-      parts.push(
-        plural(r.youtube_units ?? 0, "YouTube unit") +
-          (r.youtube_units_today != null ? ` (${r.youtube_units_today} today)` : "")
-      );
-      if (r.mirror && r.mirror.to !== r.mirror.from) {
-        parts.push(`MusicBrainz mirror ${r.mirror.from} → ${r.mirror.to}`);
-      }
-      return parts.join(" · ");
-    }
 
     async function loadRoots() {
       try {
@@ -4897,23 +5234,12 @@
     // Every enabled root, or just `root` (even a disabled one).
     async function startUpdate(root) {
       submitError = null;
-      let res;
       try {
-        res = await postJson("/api/update", root ? { root_ids: [root.id] } : {});
+        await postJson("/api/update", root ? { root_ids: [root.id] } : {});
       } catch (e) {
         submitError = e.message;
-        render();
-        return;
       }
-      const query = root
-        ? `Update: ${rootName(root)}`
-        : `Library update: ${plural(roots.filter((r) => r.enabled).length, "root")}`;
-      jobs = [
-        { id: res.job_id, kind: "update", query, status: "pending", stage: null, message: null, detail: null },
-        ...jobs,
-      ];
       render();
-      poll(res.job_id);
     }
 
     async function editRoot(root, change) {
@@ -5071,7 +5397,7 @@
 
     function renderRoots() {
       const enabled = roots.filter((r) => r.enabled).length;
-      const updating = jobs.some((j) => j.kind === "update" && RUNNING(j));
+      const updating = Jobs.isUpdating();
       return [
         el("div", { className: "roots-head" }, [
           el("p", {
@@ -5230,66 +5556,20 @@
       return el("div", { className: "preview" }, body);
     }
 
-    // Polls one job until it reaches a terminal status. Stops silently if the
-    // job was dismissed from `jobs` while in flight — nothing left to update.
-    async function poll(id) {
-      let view;
-      try {
-        view = await api(`/api/jobs/${id}`);
-      } catch (e) {
-        const job = findJob(id);
-        if (job) {
-          job.status = "failed";
-          job.errorMessage = e.message;
-          render();
-        }
-        return;
-      }
-      const job = findJob(id);
-      if (!job) return;
-      job.status = view.status;
-      job.stage = view.progress?.stage || null;
-      job.message = view.progress?.message || null;
-      job.detail = view.progress?.detail || null;
-      job.createdAt = job.createdAt || view.created_at || null;
-      job.updatedAt = view.updated_at || null;
-      if (view.status === "succeeded") {
-        job.entryId = view.result?.entry_id ?? null;
-        job.result = view.result || null;
-      } else if (view.status === "failed" || view.status === "canceled") {
-        job.errorMessage = view.error?.message || null;
-      }
-      render();
-      if (view.status === "pending" || view.status === "running") {
-        setTimeout(() => poll(id), POLL_MS);
-      } else if (job.kind === "update") {
-        if (view.status === "succeeded") LibraryChanges.changed();
-        loadRoots();
-      }
-    }
-
     async function submit() {
       const query = inputValue.trim();
       if (!query) return;
       inputValue = "";
       submitError = null;
-      let res;
       try {
-        res = await postJson("/api/ingest", {
+        await postJson("/api/ingest", {
           query,
           fetch_options: { file: selectedFile, entry_point: selectedEntryPoint || "main" },
         });
       } catch (e) {
         submitError = e.message;
-        render();
-        return;
       }
-      jobs = [
-        { id: res.job_id, kind: "ingest", query, status: "pending", stage: null, message: null, detail: null },
-        ...jobs,
-      ];
       render();
-      poll(res.job_id);
     }
 
     // Fetched once at startup; `render()` above already works off the
@@ -15527,6 +15807,8 @@
       Playlists.showIndex({ push });
     } else if (path === "/import") {
       setMode("import");
+    } else if (path === "/jobs") {
+      setMode("jobs");
     } else if (path === "/settings") {
       setMode("settings");
     } else {
@@ -15537,6 +15819,7 @@
   window.addEventListener("popstate", () => routeFromUrl(false));
   routeFromUrl(false);
 
+  Jobs.init();
   Ingest.render();
   Settings.render();
   Spotify.render();

@@ -179,6 +179,7 @@ Each backend ships checked-in JSON fixtures next to its source (e.g. `youtube_ap
 
 - `scripts/import.sh` is a convenience wrapper — it re-runs the importer against a fixed example URL with vtuber fetch options, relying on the default config directory for `http.yaml` and `providers.yaml`.
 - `scripts/dedup.sh` and `scripts/clear_yt_cache.sh` are similar convenience wrappers.
+- Server jobs (`src/bin/server/jobs.rs`) carry a label/trigger/params, are recorded in `job_run` and streamed on `GET /api/jobs/events`; the player's Jobs mode shows running jobs and history (`docs/plan-jobs-ui.md`).
 - The library update walks the update roots the player keeps (`update_root`, `/api/roots`), as `POST /api/update` or `import --update` (`pipeline::update`; `docs/CONFIG_REFERENCE.md`, "Library updates").
 - The DB HTTP cache records TTLs but never expires entries on read; updates come from listing refreshes, not TTLs.
 - Edition: 2024.

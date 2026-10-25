@@ -83,13 +83,18 @@ with the scheduler.
   short view of the same records (this page's kinds, newest first) linking
   to the Jobs view, instead of its own client-side tracking.
 
-## Phases
+## Phases (all done, 2026-10-26)
 
 1. Job records: label/trigger/params/timestamps at every `spawn` site;
-   `job_run` table, `interrupted` on startup; `GET /api/jobs`.
-2. SSE stream.
-3. Update job stages.
-4. Jobs view + indicator; the import page switched over.
+   `job_run` (`musicdb::jobs`), written by one writer task at start, every
+   10 s of progress and at the end; `interrupted` on startup;
+   `GET /api/jobs` (`jobs_api.rs`).
+2. SSE stream: `GET /api/jobs/events`, progress throttled to 1/s per job.
+3. Update job stages: `pipeline::update::UpdateStep` (mirror packets,
+   preset *i* of *n*, each root's outcome, the full-refresh pass), shown
+   through the ingest progress sink's stage.
+4. The Jobs mode (`Jobs` module in the frontend) with a running count on
+   its mode button; the import page draws its recent jobs from it.
 
 ## Decisions (2026-10-26)
 

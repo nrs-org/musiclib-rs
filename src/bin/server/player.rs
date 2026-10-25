@@ -56,6 +56,7 @@ pub fn handles(path: &str) -> bool {
         || path == "/graph"
         || path == "/player"
         || path == "/import"
+        || path == "/jobs"
         || path == "/settings"
         || path == "/playlists"
         || path.starts_with("/playlists/")
@@ -83,6 +84,7 @@ pub async fn route(
             || p.starts_with("/graph/")
             || p == "/player"
             || p == "/import"
+            || p == "/jobs"
             || p == "/settings"
             || p == "/playlists"
             || p.starts_with("/playlists/") =>

@@ -153,6 +153,10 @@ struct JobEntry {
     /// `EVENT_INTERVAL`).
     announced_at: Option<Instant>,
     unannounced: bool,
+    /// When progress was last written to history: a running job's progress
+    /// is recorded every `RECORD_INTERVAL`, so one cut off by a restart
+    /// shows how far it got.
+    recorded_at: Instant,
 }
 
 #[derive(Clone, Serialize)]
@@ -174,6 +178,8 @@ pub struct JobView {
 
 /// Progress is announced at most this often per job.
 const EVENT_INTERVAL: Duration = Duration::from_secs(1);
+/// A running job's progress is recorded at most this often.
+const RECORD_INTERVAL: Duration = Duration::from_secs(10);
 /// Finished jobs kept in memory besides the running ones; older ones are
 /// read back from `job_run`.
 const KEEP_FINISHED: usize = 50;
@@ -309,6 +315,7 @@ impl JobManager {
                 handle: None,
                 announced_at: None,
                 unannounced: false,
+                recorded_at: Instant::now(),
             },
         );
         self.changed(&id, true);
@@ -367,6 +374,9 @@ impl JobManager {
         let Some((view, terminal, row)) = self.jobs.get_mut(id).map(|mut entry| {
             entry.announced_at = Some(Instant::now());
             entry.unannounced = false;
+            if record {
+                entry.recorded_at = Instant::now();
+            }
             let view = Self::view_of(id, &entry);
             (view, entry.status.is_terminal(), Self::row_of(id, &entry))
         }) else {
@@ -607,10 +617,10 @@ impl JobHandle {
                 .announced_at
                 .is_none_or(|t| t.elapsed() >= EVENT_INTERVAL);
             entry.unannounced = !due;
-            due
+            (due, entry.recorded_at.elapsed() >= RECORD_INTERVAL)
         };
-        if announce {
-            self.manager.changed(&self.id, false);
+        if let (true, record) = announce {
+            self.manager.changed(&self.id, record);
         }
     }
 
