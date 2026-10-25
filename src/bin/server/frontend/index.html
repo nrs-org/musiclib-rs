@@ -8220,7 +8220,7 @@
 
     // ---- volume: two 0..100 dials whose product is the effective volume,
     // applied to whichever provider is mounted in its own scale (YouTube:
-    // 0..100, Spotify SDK: 0..1) ----
+    // 0..100, Spotify SDK and NicoNico: 0..1) ----
     //
     // - "global" scales everything together.
     // - "player" is per-provider — a separate value for each provider, and
@@ -8281,15 +8281,12 @@
       return isActive() ? provider : snap?.mounted?.provider || null;
     }
 
+    // A bare "other" embed has no programmatic control at all.
+    const VOLUME_PROVIDERS = ["youtube", "spotify", "soundcloud", "nicovideo"];
+
     function volumeControllable() {
-      // NicoNico has no volume branch in `applyVolume` — `volumeChange`/
-      // `mute` commands were tried against a live embed (0..1 scale, 0..100
-      // scale, and a plain `mute` boolean) and none of them moved the
-      // `volume`/`muted` fields `playerMetadataChange` reports back, unlike
-      // `play`/`pause`/`seek`, which all took effect. Same as a bare "other"
-      // embed: no programmatic control at all.
-      if (isActive()) return ["youtube", "spotify", "soundcloud"].includes(provider);
-      return snap?.mounted?.controllable !== false && ["youtube", "spotify", "soundcloud"].includes(volumeProvider());
+      if (isActive()) return VOLUME_PROVIDERS.includes(provider);
+      return snap?.mounted?.controllable !== false && VOLUME_PROVIDERS.includes(volumeProvider());
     }
 
     function playerVolume() {
@@ -8324,6 +8321,7 @@
       if (provider === "youtube" && ytPlayer?.setVolume) ytPlayer.setVolume(effective);
       else if (provider === "spotify") Spotify.setVolume(effective / 100).catch(() => {});
       else if (provider === "soundcloud" && scWidget) scWidget.setVolume(effective);
+      else if (provider === "nicovideo") nicoPostMessage({ eventName: "volumeChange", data: { volume: effective / 100 } });
     }
 
     setVolumeUI();
@@ -8759,7 +8757,9 @@
     // `currentTime`/`duration`/`seek`'s `time` are all **milliseconds** —
     // confirmed by watching a live embed's messages, not documented anywhere
     // (the gist above, and plst4, only ever pass/observe `time: 0`, which is
-    // unit-ambiguous).
+    // unit-ambiguous). `volumeChange`'s `volume` is 0..1 and does change the
+    // audio, but the `volume`/`muted` fields `playerMetadataChange` reports
+    // don't follow it — so don't read those back as the embed's state.
     const NICONICO_ORIGIN = "https://embed.nicovideo.jp";
 
     window.addEventListener("message", (e) => {
@@ -8767,7 +8767,11 @@
       const msg = e.data;
       if (!msg || String(msg.playerId) !== String(nicoPlayerId)) return;
       const token = mountToken;
-      if (msg.eventName === "playerStatusChange") {
+      if (msg.eventName === "loadComplete") {
+        // The player is only ready now, possibly after the iframe's `load`
+        // — re-send the volume in case the earlier one was dropped.
+        applyVolume();
+      } else if (msg.eventName === "playerStatusChange") {
         const status = msg.data?.playerStatus;
         if (status === 2) {
           nicoPlaying = true;
@@ -8816,6 +8820,7 @@
         nicoIframe = iframe;
         localControllable = true;
         renderPlayPause();
+        applyVolume();
         if (autoplay) nicoPostMessage({ eventName: "play" });
         if (startAt > 0) nicoPostMessage({ eventName: "seek", data: { time: startAt * 1000 } });
         if (!autoplay) engineState(false, true);
@@ -9047,9 +9052,9 @@
     // video is just a view — every other screen shows a muted copy of the
     // active device's video, steered to the session position ----
     //
-    // YouTube only: it's the one video provider that can be muted (NicoNico
-    // ignores volume/mute, see `volumeControllable`) — a mirror that can't
-    // be silenced would just be a second audio device. Anything else shows
+    // YouTube only: a mirror must be muted, or it would just be a second
+    // audio device (NicoNico could be, via `volumeChange` 0, but isn't
+    // mirrored yet). Anything else shows
     // `renderRemoteCard` instead. Only loaded while this tab is visible and
     // its dock is showing; a hidden or collapsed one doesn't need to stream.
     const MIRROR_DRIFT = 0.75; // seconds off before re-seeking while playing
