@@ -360,23 +360,32 @@ catches videos that appeared below the page an incremental refresh stopped
 at. `--no-full-refresh-pass` skips that step. Manual runs normally pass no
 budget.
 
-**MusicBrainz first.** `scripts/update.sh` starts with `mb_sync_replication
---max-server-lag 36`: it stops the update if a self-hosted server is more than
-36 packets (about 36 hours) behind the newest published one, its replication
-having likely stopped, and otherwise catches the mirror up to the server.
-`MB_MAX_LAG` changes the limit; `MB_ALLOW_STALE=1` skips the check.
+**The update.** The library update walks the **update roots** the player
+keeps (`/api/roots`: a URL plus a fetch-options preset each; design:
+`docs/plan-update-roots.md`). It runs as a player job (`POST /api/update`) or
+from cron with `import --update`:
 
-**Daily cron.** `scripts/update.sh` runs every roots file in
-`<config_dir>/update_roots/`: `NAME.txt` lists root URLs and is imported with
-fetch options `NAME.yaml`, with `--refresh --quota-budget 8000` (override with
-`QUOTA_BUDGET`). Only the last run does the full-refresh pass. For example:
+1. It catches the MusicBrainz URL mirror up to the MusicBrainz server, never
+   past it (`mb_sync_replication`'s code; needs `METABRAINZ_ACCESS_TOKEN`,
+   without which the mirror is only checked not to be ahead). It refuses to
+   go on if a self-hosted server is more than 36 packets (about 36 hours)
+   behind the newest published one, its replication having likely stopped
+   (`--mb-max-server-lag`).
+2. It imports the roots, one run per preset, refreshing listings within the
+   day's budget (`--quota-budget`, default 8000). A listing several roots
+   reach is refreshed once.
+3. It spends the rest of the budget on the full-refresh pass.
+4. Each root's row records the outcome. A root that fails doesn't stop the
+   others; `import --update` then exits non-zero.
 
 ```cron
-0 6 * * *  cd ~/dev/nrs-org/musiclib-rs && nix develop -c scripts/update.sh >> ~/.cache/musiclib-rs/update.log 2>&1
+0 6 * * *  cd ~/dev/nrs-org/musiclib-rs && nix develop -c cargo run --release --bin import -- --update >> ~/.cache/musiclib-rs/update.log 2>&1
 ```
 
 To pick up a release right away, refresh just that root:
-`import --refresh 'https://www.youtube.com/channel/…' --fetch-options vtuber_fetch_discography.yaml`.
+`import --refresh 'https://www.youtube.com/channel/…' --fetch-options vtuber_fetch_discography.yaml`,
+or ingest it in the player with `"refresh": true`. A player ingest otherwise
+serves listings from their snapshots.
 
 ---
 

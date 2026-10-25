@@ -1,15 +1,21 @@
 #[cfg(feature = "nrs")]
 use std::sync::Mutex;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64},
+};
 
 use musiclib_rs::{
+    http::quota::QuotaLedger,
     musicdb::MusicDb,
     pipeline::{progress::HttpActivityClient, softmatch::SoftMatchConfig},
     providers::{
         FetchProvider,
+        registry::RegistryConfig,
         types::{EntryFetchOptionsPool, OptionsId},
     },
 };
+use sea_orm::DatabaseConnection;
 
 use crate::jobs::JobManager;
 #[cfg(feature = "player")]
@@ -21,7 +27,17 @@ use crate::playback::PlaybackHub;
 /// `musiclib.db`.
 pub struct AppState {
     pub db: MusicDb,
+    /// Built over a listing store that serves snapshots (`ListingMode::Cached`):
+    /// an ingest sees what the last update saw. A job that refreshes
+    /// listings (an update, an ingest asking to) builds its own from
+    /// `registry` and `activity`, over a store in refresh mode.
     pub providers: Arc<Vec<Arc<dyn FetchProvider>>>,
+    pub registry: Arc<RegistryConfig>,
+    /// The HTTP cache DB: listing snapshots and the YouTube quota ledger.
+    pub listing_db: DatabaseConnection,
+    pub ledger: Arc<QuotaLedger>,
+    /// Set while the library update runs; only one runs at a time.
+    pub updating: AtomicBool,
     /// Fetch options used by the store-protocol `ingest` job, and by the
     /// player UI's `/api/ingest` when the request doesn't name a preset.
     /// Named presets the import form can choose *instead* are resolved

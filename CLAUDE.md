@@ -22,7 +22,7 @@ RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url>... [--url-
 # Update: refresh growing listings (uploads, discographies) instead of
 # serving their snapshots; --refresh=full refetches everything
 cargo run --bin import -- --refresh <url> --fetch-options <name>
-scripts/update.sh    # daily cron: every <config_dir>/update_roots/NAME.txt, budgeted
+cargo run --release --bin import -- --update   # daily cron: the player's update roots (docs/plan-update-roots.md)
 
 # Record every identity link on an existing DB, then let re-imports split
 # entries a removed link disconnects (docs/plan-identity-retraction.md)
@@ -179,7 +179,7 @@ Each backend ships checked-in JSON fixtures next to its source (e.g. `youtube_ap
 
 - `scripts/import.sh` is a convenience wrapper — it re-runs the importer against a fixed example URL with vtuber fetch options, relying on the default config directory for `http.yaml` and `providers.yaml`.
 - `scripts/dedup.sh` and `scripts/clear_yt_cache.sh` are similar convenience wrappers.
-- `scripts/update.sh` is the daily cron update (see `docs/CONFIG_REFERENCE.md`, "Library updates").
+- The library update walks the update roots the player keeps (`update_root`, `/api/roots`), as `POST /api/update` or `import --update` (`pipeline::update`; `docs/CONFIG_REFERENCE.md`, "Library updates").
 - The DB HTTP cache records TTLs but never expires entries on read; updates come from listing refreshes, not TTLs.
 - Edition: 2024.
 - `docs/BATCHING_PROVIDERS.md` is the original design doc for the coalescer; its firing rule section is superseded (see the status note at its top).

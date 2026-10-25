@@ -101,12 +101,14 @@ the job meanwhile.
 1. **Roots table + API** (done): `musicdb::roots`, `/api/roots`
    (`src/bin/server/roots.rs`), and `scripts/import_update_roots.py` for the
    one-off import of `update_roots/*.txt` through the API.
-2. **Server listing store**: build a `ListingStore` and quota ledger in
-   `AppState` (shared with the HTTP cache DB, as in `import`); ingest uses
-   `Cached` mode, plus the refresh checkbox.
-3. **Update job**: the steps as a library function (MB sync, walk, pass,
-   per-root results), run by `POST /api/update` and by `import --update`;
-   `update.sh` and the roots files are removed.
+2. **Server listing store** (done): `AppState` has the HTTP cache DB, the
+   quota ledger (flushed every 30 s) and the registry config; ingest's
+   providers serve snapshots, and `/api/ingest` `"refresh": true` builds
+   providers over a refreshing store.
+3. **Update job** (done): `pipeline::update::run_update` (MB sync via
+   `mb_sync`, walk, pass, per-root results), run by `POST /api/update`
+   (`src/bin/server/update.rs`) and `import --update`; `update.sh` is
+   removed.
 4. **Preview**: the filtering report above.
 5. **UI**: a Roots panel next to the ingest form: list with last-run status,
    add (with preview), edit options, enable/disable, remove, "update now",

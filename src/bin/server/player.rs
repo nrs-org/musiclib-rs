@@ -23,7 +23,6 @@ use bytes::Bytes;
 use futures::future::join_all;
 use hyper::{Method, StatusCode};
 use musiclib_rs::{
-    app_dirs,
     musicdb::{
         DERIVED_FROM, Error as DbError, IdentityJudgment, MusicDb, NewDedupFeedback, RowImage,
         SongEdit,
@@ -47,7 +46,7 @@ use crate::{
 /// `<config_dir>/fetch_options/` — where the import form's depth presets are
 /// read from, fresh on every request (see `fetch_options`'s module doc).
 pub(crate) fn fetch_options_dir() -> std::path::PathBuf {
-    app_dirs::config_dir().join("fetch_options")
+    fetch_options::dir()
 }
 
 const FRONTEND_INDEX: &str = include_str!("frontend/index.html");
@@ -670,6 +669,12 @@ struct IngestRequest {
     /// before this field existed.
     #[serde(default)]
     fetch_options: Option<IngestFetchOptions>,
+    /// Refresh the growing listings the ingest reaches (uploads, playlists,
+    /// discographies) instead of serving their snapshots, like `import
+    /// --refresh <url>`: see new items now rather than after the next
+    /// update. Not counted against the update's budget.
+    #[serde(default)]
+    refresh: bool,
 }
 
 /// `POST /api/ingest` — the webapp's "add a song" affordance: runs
@@ -712,6 +717,21 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
         None => (Arc::clone(&state.pool), state.root_id),
     };
 
+    let providers = if req.refresh {
+        match crate::update::refreshing_providers(state).await {
+            Ok(providers) => providers,
+            Err(e) => {
+                return respond::error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    &format!("{e:#}"),
+                );
+            }
+        }
+    } else {
+        Arc::clone(&state.providers)
+    };
+
     let job_state = Arc::clone(state);
     let job_id = state.jobs.spawn("ingest", move |handle| async move {
         handle.progress("fetching", "running import pipeline");
@@ -722,7 +742,7 @@ async fn ingest(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
         );
         let result = ingest_entry(
             &job_state.db,
-            &job_state.providers,
+            &providers,
             &pool,
             options_id,
             job_state.soft_cfg.as_ref(),

@@ -34,7 +34,7 @@ use dashmap::DashMap;
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use futures::{StreamExt, stream};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
@@ -105,7 +105,7 @@ const PASS_MAX_IDLE_SECS: i64 = 14 * 24 * 60 * 60;
 /// this: the daily budget no longer covers a weekly cycle.
 const STALE_WARN_SECS: i64 = 7 * 24 * 60 * 60;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct KindStats {
     /// Served from the snapshot without a request.
     pub served: usize,

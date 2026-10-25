@@ -9,13 +9,16 @@ use std::{
 use anyhow::Context as _;
 use clap::Parser;
 use musiclib_rs::{
-    app_dirs,
+    app_dirs, fetch_presets,
     http::{HttpClientConfig, quota::QuotaLedger},
     httpcache,
     musicdb::{LINKS_COMPLETE, MusicDb},
     pipeline::{
-        dedup::enforce_barriers, ingest::ingest_entries, progress,
+        dedup::enforce_barriers,
+        ingest::ingest_entries,
+        progress,
         softmatch::default_soft_match_config,
+        update::{UpdateContext, UpdateOptions, run_update},
     },
     providers::{
         fetch_options_yaml::load_from_file,
@@ -33,7 +36,7 @@ use tracing::{info, warn};
 struct Args {
     /// URL(s) to import. All are traversed together in one run, so their
     /// fetches share API batches.
-    #[arg(required_unless_present_any = ["url_file", "backfill_links"])]
+    #[arg(required_unless_present_any = ["url_file", "backfill_links", "update"])]
     urls: Vec<String>,
     /// File with more URLs to import, one per line (blank lines and lines
     /// starting with `#` are ignored).
@@ -58,6 +61,20 @@ struct Args {
     /// re-imports can split entries (docs/plan-identity-retraction.md).
     #[arg(long, conflicts_with_all = ["urls", "url_file", "fetch_options"])]
     backfill_links: bool,
+    /// Instead of importing URLs, run the library update over the update
+    /// roots the player keeps (every enabled one): sync the MusicBrainz
+    /// mirror, walk the roots refreshing their listings within
+    /// `--quota-budget` (default 8000), then full-refresh the oldest
+    /// snapshots with what's left (docs/plan-update-roots.md). For cron.
+    #[arg(
+        long,
+        conflicts_with_all = ["urls", "url_file", "fetch_options", "backfill_links", "refresh"]
+    )]
+    update: bool,
+    /// With `--update`: packets a self-hosted MusicBrainz server may be
+    /// behind the newest published one before the update refuses to run.
+    #[arg(long, default_value_t = 36, requires = "update")]
+    mb_max_server_lag: i64,
     /// Skip the pre-import pass that re-applies violated barriers.
     #[arg(long)]
     skip_dedup: bool,
@@ -227,6 +244,7 @@ async fn run() -> anyhow::Result<()> {
         .map_or_else(|| "sqlite::memory:".to_owned(), |c| c.path.clone());
     let cache_db = httpcache::db::connect(cache_db_url).await?;
     let ledger = Arc::new(QuotaLedger::new(cache_db.clone(), Arc::clone(&youtube_quota)).await?);
+    let listing_db = cache_db.clone();
     let mode = match args.refresh {
         None => ListingMode::Cached,
         Some(RefreshArg::Auto) => ListingMode::Auto,
@@ -286,13 +304,19 @@ async fn run() -> anyhow::Result<()> {
 
     // A MusicBrainz URL mirror ahead of its self-hosted server would send
     // lookups for links the server doesn't have yet, and cache the 404s.
-    if let Some(mb) = registry_config.musicbrainz.clone() {
+    // (`--update` syncs the mirror itself, which checks the same.)
+    if !args.update
+        && let Some(mb) = registry_config.musicbrainz.clone()
+    {
         tokio::task::spawn_blocking(move || musiclib_rs::mb_freshness::check_before_import(&mb))
             .await??;
     }
 
-    let providers =
-        build_providers_with_listings(&registry_config, http, Some(Arc::clone(&listings)))?;
+    let providers = build_providers_with_listings(
+        &registry_config,
+        Arc::clone(&http) as Arc<dyn musiclib_rs::http::HttpClient>,
+        Some(Arc::clone(&listings)),
+    )?;
     if providers.is_empty() {
         anyhow::bail!("No providers available -- check your credential env vars");
     }
@@ -319,6 +343,62 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let mut soft_cfg = (!args.skip_softmatch)
+        .then(default_soft_match_config)
+        .flatten();
+    if let Some(cfg) = soft_cfg.as_mut() {
+        cfg.http_client = Some(Arc::clone(&http_for_script));
+    }
+
+    if args.update {
+        let roots: Vec<_> = db
+            .update_roots()
+            .await?
+            .into_iter()
+            .filter(|r| r.enabled)
+            .collect();
+        if roots.is_empty() {
+            anyhow::bail!("no enabled update roots; add some in the player");
+        }
+        info!("Updating {} root(s)", roots.len());
+        let report = run_update(
+            UpdateContext {
+                db: &db,
+                registry: &registry_config,
+                http,
+                listing_db,
+                ledger: Arc::clone(&ledger),
+                youtube_quota: Arc::clone(&youtube_quota),
+                soft_cfg: soft_cfg.as_ref(),
+                progress: None,
+                fetch_options_dir: fetch_presets::dir(),
+            },
+            &roots,
+            &UpdateOptions {
+                quota_budget: Some(args.quota_budget.unwrap_or(8000)),
+                mb_max_server_lag: Some(args.mb_max_server_lag),
+            },
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs() as i64,
+        )
+        .await?;
+        let failed: Vec<_> = report.roots.iter().filter(|r| r.error.is_some()).collect();
+        for root in &failed {
+            warn!(
+                "root {} ({}) failed: {}",
+                root.id,
+                root.url,
+                root.error.as_deref().unwrap_or_default()
+            );
+        }
+        if !failed.is_empty() {
+            anyhow::bail!("{} of {} root(s) failed", failed.len(), report.roots.len());
+        }
+        info!("Done.");
+        return Ok(());
+    }
+
     let (pool, root_id) = match args.fetch_options.as_deref() {
         Some(s) => {
             let path = resolve_fetch_options(s);
@@ -339,12 +419,6 @@ async fn run() -> anyhow::Result<()> {
         }
     };
 
-    let mut soft_cfg = (!args.skip_softmatch)
-        .then(default_soft_match_config)
-        .flatten();
-    if let Some(cfg) = soft_cfg.as_mut() {
-        cfg.http_client = Some(Arc::clone(&http_for_script));
-    }
     let mut urls = args.urls;
     if let Some(path) = &args.url_file {
         let text = tokio::fs::read_to_string(path)
