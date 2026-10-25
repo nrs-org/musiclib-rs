@@ -37,7 +37,7 @@ The library update is driven from the web UI:
 | column | |
 |---|---|
 | `id` | |
-| `url` | as entered; canonicalized on save, the canonical pair stored too and unique: one root per pair, with one set of fetch options |
+| `url` | as entered; canonicalized on save, the canonical pair stored too and unique: one root per pair, with one set of fetch options. Roots may share a library entry (an artist's two channels both need walking), so a channel's `@handle` and `/channel/` URLs, which canonicalize apart without an API call, can both be added |
 | `fetch_options_file`, `entry_point` | the ids the ingest form already uses |
 | `label` | optional; defaults to the root entry's display name after its first run |
 | `enabled` | disabled roots are kept but skipped by updates |
@@ -98,9 +98,9 @@ the job meanwhile.
 
 ## Phases
 
-1. **Roots table + API**: migration, `GET/POST/PATCH/DELETE /api/roots`,
-   canonicalize on save. A one-off import of the existing
-   `update_roots/*.txt` files.
+1. **Roots table + API** (done): `musicdb::roots`, `/api/roots`
+   (`src/bin/server/roots.rs`), and `scripts/import_update_roots.py` for the
+   one-off import of `update_roots/*.txt` through the API.
 2. **Server listing store**: build a `ListingStore` and quota ledger in
    `AppState` (shared with the HTTP cache DB, as in `import`); ingest uses
    `Cached` mode, plus the refresh checkbox.

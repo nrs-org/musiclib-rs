@@ -55,6 +55,8 @@ mod preferences;
 mod privacy;
 mod respond;
 #[cfg(feature = "player")]
+mod roots;
+#[cfg(feature = "player")]
 mod spotify_auth;
 mod state;
 #[cfg(feature = "store_protocol")]
@@ -187,6 +189,10 @@ async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Result<HyperRes
     #[cfg(feature = "player")]
     if playlists::handles(&path) {
         return Ok(playlists::route(&state, &method, &path, body).await);
+    }
+    #[cfg(feature = "player")]
+    if roots::handles(&path) {
+        return Ok(roots::route(&state, &method, &path, body).await);
     }
     #[cfg(feature = "player")]
     if plays::handles(&path) {

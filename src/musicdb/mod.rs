@@ -487,8 +487,10 @@ mod dedup_block_key {
 // triple regardless of which side was passed first. Disabling a row (enabled=0)
 // tombstones the decision without losing history.
 mod playlists;
+mod roots;
 mod songs;
 pub use playlists::{NewPlaylistItem, PlaylistItemRow, PlaylistRow};
+pub use roots::{NewUpdateRoot, UpdateRootEdit, UpdateRootRow};
 pub use songs::{RowImage, RowState, SongEdit};
 
 mod entry_relation {
@@ -2005,7 +2007,8 @@ impl MusicDb {
              CREATE INDEX IF NOT EXISTS idx_pair_link_asserted ON pair_link(asserted_source, asserted_identifier, via);
              CREATE INDEX IF NOT EXISTS idx_pair_link_run_id ON pair_link(run_id);
              CREATE INDEX IF NOT EXISTS idx_import_run_status ON import_run(status);
-             CREATE INDEX IF NOT EXISTS idx_entry_relation_entry_b ON entry_relation(entry_b);",
+             CREATE INDEX IF NOT EXISTS idx_entry_relation_entry_b ON entry_relation(entry_b);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_update_root_pair ON update_root(source, identifier);",
         )
         .await?;
         // Full-text index over alias names backing the player's library

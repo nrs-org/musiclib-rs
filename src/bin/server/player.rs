@@ -46,7 +46,7 @@ use crate::{
 
 /// `<config_dir>/fetch_options/` — where the import form's depth presets are
 /// read from, fresh on every request (see `fetch_options`'s module doc).
-fn fetch_options_dir() -> std::path::PathBuf {
+pub(crate) fn fetch_options_dir() -> std::path::PathBuf {
     app_dirs::config_dir().join("fetch_options")
 }
 
