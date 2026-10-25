@@ -412,6 +412,10 @@ fn release_eval(expr: &CompiledMatcherExpr) -> Tribool {
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
             (t == EXTERNAL_TYPE_PLAYLIST).into()
         }
+        // A channel's own listing: nothing on it is an "appears on".
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::AppearsOn(want)) => {
+            (!*want).into()
+        }
         _ => default_eval_leaf(matcher),
     })
 }
@@ -423,6 +427,10 @@ fn track_eval(expr: &CompiledMatcherExpr) -> Tribool {
         }
         CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::ExternalType(t)) => {
             (t == EXTERNAL_TYPE_VIDEO).into()
+        }
+        // A channel's own listing: nothing on it is an "appears on".
+        CompiledChildMatcher::EntryData(CompiledEntryDataMatcher::AppearsOn(want)) => {
+            (!*want).into()
         }
         _ => default_eval_leaf(matcher),
     })
@@ -767,6 +775,25 @@ mod tests {
         },
         test_utils::MockHttpClient,
     };
+
+    /// A channel's listings declare that nothing on them is an "appears on",
+    /// so an `appears_on` rule ahead of a playlist/video rule (as in the
+    /// utaite options) doesn't force the listing to be read.
+    #[test]
+    fn channel_listings_declare_no_appears_on() {
+        use crate::providers::types::{
+            CompiledChildMatcher, CompiledEntryDataMatcher, CompiledMatcherExpr, Tribool,
+        };
+        let appears_on = |want| {
+            CompiledMatcherExpr::Matcher(CompiledChildMatcher::EntryData(
+                CompiledEntryDataMatcher::AppearsOn(want),
+            ))
+        };
+        for eval in [super::release_eval, super::track_eval] {
+            assert!(eval(&appears_on(true)) == Tribool::False);
+            assert!(eval(&appears_on(false)) == Tribool::True);
+        }
+    }
 
     fn channel_api_url(id: &str) -> String {
         YoutubeClient::build_url("channels", &[("part", CHANNEL_PARTS), ("id", id)])
