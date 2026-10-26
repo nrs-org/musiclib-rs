@@ -20,6 +20,10 @@ Usage:
 
 HOST picks the address to bind (default 0.0.0.0, every interface).
 
+Requests are served concurrently, one thread each (ytmusicapi has no async
+client; its calls block on YouTube Music). Each thread keeps its own YTMusic
+client, since one client's requests session isn't meant to be shared.
+
 The musiclib-rs youtube_api channel provider reads YTMUSICAPI_SERVER_URL and calls
 this server to supplement the Data API v3 channel fetch with YTMusic discography
 (albums and singles) that the official API does not expose.
@@ -28,12 +32,27 @@ this server to supplement the Data API v3 channel fetch with YTMusic discography
 import json
 import os
 import sys
+import threading
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import ytmusicapi
 
-yt = ytmusicapi.YTMusic()
+_local = threading.local()
+
+
+def client() -> ytmusicapi.YTMusic:
+    """This thread's YTMusic client."""
+    if not hasattr(_local, "yt"):
+        _local.yt = ytmusicapi.YTMusic()
+    return _local.yt
+
+
+class Server(ThreadingHTTPServer):
+    # Room for the import's burst of requests; the default backlog (5)
+    # refused connections once a few were waiting.
+    request_queue_size = 64
+    daemon_threads = True
 
 # A channel without a YouTube Music artist page gets a plain channel page
 # (musicVisualHeaderRenderer: Videos and Playlists shelves only), and
@@ -47,6 +66,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[ytmusicapi_server] {self.address_string()} - {format % args}", file=sys.stderr)
 
     def do_GET(self):
+        yt = client()
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
@@ -160,7 +180,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", 9001))
-    server = HTTPServer((host, port), Handler)
+    server = Server((host, port), Handler)
     print(f"[ytmusicapi_server] listening on http://{host}:{port}", file=sys.stderr)
     try:
         server.serve_forever()

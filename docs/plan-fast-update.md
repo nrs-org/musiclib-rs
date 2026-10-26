@@ -80,24 +80,105 @@ left is spread over the steps, much of it debug-build CPU (canonicalizing
 26k pairs is 2.8 s). A row-value `IN (VALUES …)` for the bulk lookups saved
 only ~1 s, so `pair_condition` stays as it was.
 
-## Phase 3, maybe: don't re-walk what can't have changed
+## Phase 3: don't re-walk what can't have changed
 
-With Phases 1–2, an update with nothing new should take roughly 15–20 s, most
-of it the walk. Skipping unchanged parts of the walk could cut that further,
-but the walk is also how an update notices changes that don't come from a
-listing:
+Status: proposed.
 
-- The MusicBrainz mirror: replication changes URL lookups with no HTTP
-  request involved.
-- Fetches that failed last time (dead links, 5xx) are retried.
-- Edited fetch options, new code that reads cached responses differently, new
-  roots.
+### Where an update's time goes now
 
-A listing-driven update (walk only the new items of refreshed listings, plus
-pairs whose mirror URLs changed, plus a periodic full walk) handles these, but
-it's a different importer mode with its own failure modes. Decide after
-measuring Phases 1–2.
+After Phases 1–2, an update with nothing new takes 1:12. The vtuber preset is
+most of it: walk 34 s, save 21 s, commit 5 s. Timing every listing refresh in
+that walk (an `import --update` on a copy of the library):
 
-## Order
+| Listing kind | Refreshes | Last one done |
+|---|---|---|
+| ytmusic:discography | 65 | 29.5 s |
+| discogs:artist_releases | 33 | 9.8 s |
+| youtube:playlist_items | 124 | 7.4 s |
+| everything else | 324 | ≤ 6.1 s |
 
-Phase 1, measure, Phase 2, measure, then decide on Phase 3.
+So the walk is two things running side by side: listing refreshes over the
+network, and re-walking ~26,000 entries from the HTTP cache (9 s on its own,
+measured with snapshots served). The save and commit then handle all 25,860
+pairs again.
+
+The ytmusicapi server ran a build from before 280307a/94e320b, and 36 of the
+65 YouTube Music refreshes failed with a 500. It was restarted on
+2026-10-26; all 65 now succeed. They still end last: the server is
+single-threaded, so `http.yaml` caps it at 2 requests, at about 0.9 s each.
+
+### 3a. A threaded ytmusicapi server
+
+`ytmusicapi_server.py` uses `HTTPServer`. With `ThreadingHTTPServer` and one
+`YTMusic` client per thread, the cap for `localhost:9001` can go to 6–8. The
+YouTube Music refreshes would then finish in ~5–10 s instead of 30 s,
+alongside the others. Watch for YouTube Music throttling at the higher cap.
+
+Done: ytmusicapi has no async client, so it's threads. 8 discography
+requests at once take 1.7 s, against 10.6 s one at a time; the example cap
+is now 8.
+
+### 3b. Prune known entries from the walk
+
+An update's walk only needs to reach (1) the roots, (2) every entity that owns
+a growing listing, so the listing gets refreshed, and (3) whatever is new. An
+entity fetched in an earlier run that owns no growing listing comes back from
+the HTTP cache exactly as before, and so does everything under it. Re-walking
+it changes nothing, so a pruned walk skips it.
+
+**The rule.** In `importer::import`, after canonicalizing and claiming, a
+pair is skipped (not fetched, nothing below it walked) when all of these
+hold:
+
+- The run is a pruned walk (see "When to walk in full").
+- The pair is stored as fetched and not gone (`entry_source.fetched_at` set,
+  `gone_at` null). That's the library's own record, so a run that was rolled
+  back or cancelled leaves nothing marked as done.
+- The pair owns no growing listing. Owners: artists of every source, and
+  playlists (YouTube and Spotify playlists are `Release`s, so this goes by
+  the provider's `external_type`, not entry type). A YouTube album playlist
+  counts as an owner too; it's only re-read from the cache, which is cheap.
+- It isn't a root.
+
+The parent still records its edge and stub for the skipped child, as now, so
+a re-fetched playlist keeps its full child list at commit. The skip check
+runs against an in-memory set of fetched pairs loaded once per run, not one
+query per pair.
+
+**What a pruned walk misses**, and how each is covered:
+
+| Change | Covered by |
+|---|---|
+| Fetches that failed last time (dead links, 5xx) | Never fetched, so never pruned: retried as now |
+| New MusicBrainz links for a known pair (mirror replication) | The next full walk |
+| A growing listing below a pruned entity (a collab's channel reached through a known video) | The next full walk |
+| Edited fetch options | Full walk when the preset file changes |
+| Code that reads cached responses differently | Full walk on demand |
+
+**When to walk in full.** Per root, store the time and preset-file hash of
+its last full walk (`update_root`). A root is walked in full when it has
+never been, when its preset file changed, or when its last full walk is
+older than 7 days (configurable). `POST /api/update {"full": true}` and
+`import --update --full` force it. Presets are one run each, so a preset
+with any root due for a full walk runs in full.
+
+**Expected effect** with nothing new: the walk drops from 26k fetches to the
+roots, the listing owners and the albums under them, roughly 1–3k from the
+cache; the save and commit shrink with it. The listing refreshes then set
+the pace: ~10 s with 3a.
+
+### Alternatives considered
+
+- Skip items already in a listing's previous snapshot. Snapshots are written
+  when a refresh succeeds, not when the run commits, so items found by a run
+  that was then cancelled or rolled back would never be imported.
+- Refresh some listing kinds less often (e.g. YouTube Music discographies
+  weekly). Simpler than 3a, but new releases show up later. Could still be
+  added per kind later if refreshes stay slow.
+
+### Order
+
+3a first: small, independent, and it removes the floor 3b would hit. Then
+3b, verified like Phase 2: run a pruned and a full update on copies of the
+library and compare. With nothing new upstream they must leave the same rows
+(timestamps aside).
