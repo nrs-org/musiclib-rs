@@ -215,23 +215,27 @@ async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        let result = run_update(
-            UpdateContext {
-                db: &job_state.db,
-                registry: &job_state.registry,
-                http: job_state.activity.clone(),
-                listing_db: job_state.listing_db.clone(),
-                ledger: Arc::clone(&job_state.ledger),
-                youtube_quota: Arc::clone(&job_state.youtube_quota),
-                soft_cfg: job_state.soft_cfg.as_ref(),
-                progress: Some(sink),
-                on_step: Some(on_step),
-                fetch_options_dir: fetch_presets::dir(),
-            },
-            &roots,
-            &opts,
-            now,
-        )
+        // Off the main thread: see `offload`.
+        let result = crate::offload::run(async move {
+            run_update(
+                UpdateContext {
+                    db: &job_state.db,
+                    registry: &job_state.registry,
+                    http: job_state.activity.clone(),
+                    listing_db: job_state.listing_db.clone(),
+                    ledger: Arc::clone(&job_state.ledger),
+                    youtube_quota: Arc::clone(&job_state.youtube_quota),
+                    soft_cfg: job_state.soft_cfg.as_ref(),
+                    progress: Some(sink),
+                    on_step: Some(on_step),
+                    fetch_options_dir: fetch_presets::dir(),
+                },
+                &roots,
+                &opts,
+                now,
+            )
+            .await
+        })
         .await;
         match result {
             Ok(report) => handle.succeed(serde_json::to_value(&report).unwrap_or_default()),

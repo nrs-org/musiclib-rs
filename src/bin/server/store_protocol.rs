@@ -812,15 +812,18 @@ async fn ingest(state: &Arc<AppState>, body: Bytes) -> HyperResponse {
             Arc::clone(&job_state.activity),
             Arc::clone(&job_state.youtube_quota),
         );
-        let result = ingest_entry(
-            &job_state.db,
-            &job_state.providers,
-            &job_state.pool,
-            job_state.root_id,
-            job_state.soft_cfg.as_ref(),
-            req.query,
-            Some(sink),
-        )
+        let result = crate::offload::run(async move {
+            ingest_entry(
+                &job_state.db,
+                &job_state.providers,
+                &job_state.pool,
+                job_state.root_id,
+                job_state.soft_cfg.as_ref(),
+                req.query,
+                Some(sink),
+            )
+            .await
+        })
         .await;
         match result {
             Ok(outcome) => match outcome.entry_id {

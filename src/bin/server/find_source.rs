@@ -318,15 +318,20 @@ pub async fn attach(state: &Arc<AppState>, entry_id: i64, body: &[u8]) -> HyperR
                         Arc::clone(&state.activity),
                         Arc::clone(&state.youtube_quota),
                     );
-                    match ingest_entry(
-                        &state.db,
-                        &state.providers,
-                        &state.pool,
-                        state.root_id,
-                        state.soft_cfg.as_ref(),
-                        url.clone(),
-                        Some(sink),
-                    )
+                    let (ingest_state, ingest_url) = (Arc::clone(&state), url.clone());
+                    match crate::offload::run(async move {
+                        let state = ingest_state;
+                        ingest_entry(
+                            &state.db,
+                            &state.providers,
+                            &state.pool,
+                            state.root_id,
+                            state.soft_cfg.as_ref(),
+                            ingest_url,
+                            Some(sink),
+                        )
+                        .await
+                    })
                     .await
                     {
                         Ok(outcome) => match outcome.entry_id {

@@ -43,6 +43,7 @@ mod media_controls;
 mod nrs_bridge;
 #[cfg(feature = "nrs")]
 mod nrs_pool;
+mod offload;
 #[cfg(feature = "player")]
 mod playback;
 #[cfg(feature = "player")]
