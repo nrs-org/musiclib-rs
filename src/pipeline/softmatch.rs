@@ -24,6 +24,7 @@ use crate::musicdb::{
     SoftIdentityProjection, SourceRow, extra_derivations, merge_songs,
 };
 use crate::pipeline::dedup::DedupConfig;
+use crate::pipeline::state::{ImportPhase, ImportProgress};
 use crate::providers::FetchProvider;
 
 type Pair = (String, String);
@@ -146,7 +147,19 @@ pub struct SoftMatchConfig {
     /// `DomainScheduler`/`HttpCache` stack as every other backend; the script
     /// alone decides what, if anything, to call with it.
     pub http_client: Option<Arc<dyn HttpClient>>,
+    /// Told each step of an online scan (`ImportPhase`), e.g. a server job's
+    /// progress.
+    pub progress: Option<Arc<dyn ImportProgress>>,
 }
+
+fn report(progress: Option<&dyn ImportProgress>, phase: ImportPhase) {
+    if let Some(progress) = progress {
+        progress.phase(&phase);
+    }
+}
+
+/// Verdicts written between two `ImportPhase::Applying` reports.
+const APPLY_REPORT_EVERY: usize = 100;
 
 /// The `SoftMatchConfig` shared by every caller that runs online soft-dedup
 /// after an ingest (the `import` CLI, the `server` binary's ingest job):
@@ -177,6 +190,7 @@ pub fn default_soft_match_config() -> Option<SoftMatchConfig> {
         candidate_ngram_k: 30,
         verbose_decisions: false,
         http_client: None,
+        progress: None,
     })
 }
 
@@ -977,7 +991,11 @@ const PREPARE_BATCH: usize = 512;
 /// `a.prepared` in later `decide` calls. Entries are immutable for the run,
 /// so the values never go stale. A missing hook is a no-op; a failing batch
 /// leaves its entries unprepared (scripts fall back to their unprepared path).
-fn prepare_entries(ctx: &ScriptCtx, entries: &[&Arc<EntryInfo>]) {
+fn prepare_entries(
+    ctx: &ScriptCtx,
+    entries: &[&Arc<EntryInfo>],
+    progress: Option<&dyn ImportProgress>,
+) {
     let todo: Vec<&Arc<EntryInfo>> = {
         let done = ctx.prepared.read().unwrap();
         let mut seen = HashSet::new();
@@ -992,7 +1010,14 @@ fn prepare_entries(ctx: &ScriptCtx, entries: &[&Arc<EntryInfo>]) {
     }
     let started = Instant::now();
     let mut prepared = 0usize;
-    for chunk in todo.chunks(PREPARE_BATCH) {
+    for (i, chunk) in todo.chunks(PREPARE_BATCH).enumerate() {
+        report(
+            progress,
+            ImportPhase::Preparing {
+                done: i * PREPARE_BATCH,
+                total: todo.len(),
+            },
+        );
         let batch: rhai::Array = chunk
             .iter()
             .map(|e| Dynamic::from(ScriptEntry(Arc::clone(e), Dynamic::UNIT)))
@@ -1209,6 +1234,7 @@ fn refine_verdicts<T>(
     ctx: &ScriptCtx,
     pairs: &[(Arc<EntryInfo>, Arc<EntryInfo>, T)],
     verdicts: &mut [anyhow::Result<Scored>],
+    progress: Option<&dyn ImportProgress>,
 ) {
     if !ctx.ast.iter_functions().any(|f| f.name == "refine") {
         return;
@@ -1224,7 +1250,14 @@ fn refine_verdicts<T>(
     }
     let started = Instant::now();
     let mut changed: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
-    for chunk in todo.chunks(REFINE_CHUNK) {
+    for (n, chunk) in todo.chunks(REFINE_CHUNK).enumerate() {
+        report(
+            progress,
+            ImportPhase::Refining {
+                done: n * REFINE_CHUNK,
+                total: todo.len(),
+            },
+        );
         let items: rhai::Array = chunk
             .iter()
             .map(|&i| {
@@ -2788,10 +2821,17 @@ async fn score_candidates(
     let total_scored = to_score.len();
     let scored_entries: Vec<&Arc<EntryInfo>> =
         to_score.iter().flat_map(|(a, b, _)| [a, b]).collect();
-    prepare_entries(ctx, &scored_entries);
+    let progress = config.progress.as_deref();
+    prepare_entries(ctx, &scored_entries, progress);
     // The script's verdicts, then its optional `refine` pass.
+    report(
+        progress,
+        ImportPhase::Scoring {
+            total: total_scored,
+        },
+    );
     let mut verdicts = script_verdicts(ctx, &to_score);
-    refine_verdicts(ctx, &to_score, &mut verdicts);
+    refine_verdicts(ctx, &to_score, &mut verdicts, progress);
 
     // Apply identity merges first, then edition verdicts that involve a
     // song's original, strongest first: a new version then joins its song
@@ -2814,7 +2854,16 @@ async fn score_candidates(
     });
     let mut songs = known.editions.song_groups();
     let (mut repeated, mut blocked) = (0usize, 0usize);
-    for ((ea, eb, channels), scored) in decided {
+    for (i, ((ea, eb, channels), scored)) in decided.into_iter().enumerate() {
+        if i % APPLY_REPORT_EVERY == 0 {
+            report(
+                progress,
+                ImportPhase::Applying {
+                    done: i,
+                    total: total_scored,
+                },
+            );
+        }
         let scored = scored?;
         let (a, b) = (known.canon(ea.entry_id), known.canon(eb.entry_id));
         let edition = matches!(&scored.verdict,
@@ -3194,6 +3243,8 @@ pub async fn match_entries(
     let (barrier, _) = dedup.compile(providers).await;
     let entries_slice: Vec<EntryInfo> = focus_entries.values().cloned().collect();
     let facts = pair_facts_source(db).await;
+    let progress = config.progress.as_deref();
+    report(progress, ImportPhase::Embedding);
     let embed_cache: Option<Arc<EmbeddingCache>> =
         open_embed_cache(config, &entries_slice, facts.clone(), false).await;
     let known = Arc::new(KnownRelations::load(db).await?);
@@ -3205,6 +3256,7 @@ pub async fn match_entries(
         Some(Arc::clone(&known)),
     )
     .await?;
+    report(progress, ImportPhase::Candidates);
     let (candidate_channels, entries) = generate_focused_candidates(
         db,
         &focus_entries,
@@ -3840,6 +3892,7 @@ mod tests {
             candidate_ngram_k: 30,
             verbose_decisions: false,
             http_client: None,
+            progress: None,
         };
         let focus: HashSet<i64> = [new, detached].into();
         score_candidates(
@@ -3918,8 +3971,21 @@ mod tests {
             )
         };
         let pairs = vec![pair("x"), pair("m"), pair("d1"), pair("d2")];
+        #[derive(Default)]
+        struct Phases(Mutex<Vec<ImportPhase>>);
+        impl ImportProgress for Phases {
+            fn phase(&self, phase: &ImportPhase) {
+                self.0.lock().unwrap().push(phase.clone());
+            }
+        }
+        let phases = Phases::default();
         let mut verdicts = script_verdicts(&ctx, &pairs);
-        refine_verdicts(&ctx, &pairs, &mut verdicts);
+        refine_verdicts(&ctx, &pairs, &mut verdicts, Some(&phases));
+        // The three non-DISTINCT pairs, in one chunk.
+        assert_eq!(
+            *phases.0.lock().unwrap(),
+            [ImportPhase::Refining { done: 0, total: 3 }]
+        );
         let got: Vec<(&str, String, Option<String>)> = verdicts
             .iter()
             .map(|v| {

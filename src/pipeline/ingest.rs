@@ -22,7 +22,7 @@ use super::{
     flush::flush,
     importer::import,
     softmatch::{SoftMatchConfig, match_new_entries_offloaded},
-    state::{ImportProgress, State},
+    state::{ImportPhase, ImportProgress, State},
 };
 
 /// Once `State`'s estimated buffered size (`State::approx_bytes`) crosses
@@ -189,12 +189,17 @@ pub async fn ingest_entries(
     .await;
     // A failed commit leaves nothing applied, so it rolls back like any
     // other failure.
+    let progress = state.progress().cloned();
     let result = match result {
-        Ok(touched_ids) => db
-            .commit_import_run(run_id, &state.take_replacements())
-            .await
-            .map(|()| touched_ids)
-            .map_err(anyhow::Error::from),
+        Ok(touched_ids) => {
+            if let Some(progress) = &progress {
+                progress.phase(&ImportPhase::Committing);
+            }
+            db.commit_import_run(run_id, &state.take_replacements())
+                .await
+                .map(|()| touched_ids)
+                .map_err(anyhow::Error::from)
+        }
         Err(e) => Err(e),
     };
 
@@ -209,12 +214,14 @@ pub async fn ingest_entries(
     };
 
     if let Some(cfg) = soft_cfg {
+        let mut cfg = cfg.clone();
+        cfg.progress = progress;
         match_new_entries_offloaded(
             db.clone(),
             touched_ids.clone(),
             merged_dedup.clone(),
             Arc::clone(providers),
-            cfg.clone(),
+            cfg,
         )
         .await?;
     }
@@ -311,6 +318,9 @@ async fn run_traversal_with_watchdog(
         );
     }
 
+    if let Some(progress) = state.progress() {
+        progress.phase(&ImportPhase::Saving);
+    }
     flush(
         state,
         providers.as_slice(),

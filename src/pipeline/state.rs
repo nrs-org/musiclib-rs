@@ -105,6 +105,32 @@ pub trait ImportProgress: Send + Sync {
     fn fetching(&self, _pair: &Pair) {}
     fn fetched(&self, _pair: &Pair) {}
     fn fetch_failed(&self, _pair: &Pair, _error: &str) {}
+    /// A step after the walk began (see `ImportPhase`).
+    fn phase(&self, _phase: &ImportPhase) {}
+}
+
+/// What an import does once its walk is over: save, commit, then online
+/// soft-dedup (`pipeline::softmatch`). Steps that count something report
+/// `done` of `total` as they go.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum ImportPhase {
+    /// The final flush: writing what the walk found to the library.
+    Saving,
+    /// `MusicDb::commit_import_run`.
+    Committing,
+    /// Soft-dedup: embedding new or retitled entries' titles.
+    Embedding,
+    /// Soft-dedup: looking up candidate pairs for the new entries.
+    Candidates,
+    /// The match script's `prepare` hook over the scored entries.
+    Preparing { done: usize, total: usize },
+    /// The match script's `decide` over every candidate pair (all cores).
+    Scoring { total: usize },
+    /// The match script's `refine` hook (e.g. asking Jev).
+    Refining { done: usize, total: usize },
+    /// Writing the verdicts.
+    Applying { done: usize, total: usize },
 }
 
 /// Shared import state. All fields are append-only from the importer's
