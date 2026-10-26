@@ -82,7 +82,7 @@ only ~1 s, so `pair_condition` stays as it was.
 
 ## Phase 3: don't re-walk what can't have changed
 
-Status: proposed.
+Status: done, 2026-10-26.
 
 ### Where an update's time goes now
 
@@ -119,6 +119,12 @@ requests at once take 1.7 s, against 10.6 s one at a time; the example cap
 is now 8.
 
 ### 3b. Prune known entries from the walk
+
+Done (`State::prunes`, `pipeline::update`). On copies of the library after
+one full update: a pruned update fetched 817 pairs and skipped 15,558 (the
+full one fetched 26,349), saved 808 pairs instead of 25,860 (save + commit
+~3 s instead of ~22 s), and both left identical tables (timestamps aside).
+Its walk is then as fast as the listing refreshes.
 
 An update's walk only needs to reach (1) the roots, (2) every entity that owns
 a growing listing, so the listing gets refreshed, and (3) whatever is new. An

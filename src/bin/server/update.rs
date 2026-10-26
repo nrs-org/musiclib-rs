@@ -5,7 +5,9 @@
 //!   `202` with a `job_id`, polled at `GET /api/jobs/:id` like an ingest.
 //!   Without `root_ids` it runs every enabled root; with them, those roots
 //!   (disabled ones too). `quota_budget` defaults to 8000 YouTube units for
-//!   the day. Only one update runs at a time: `409` while one is running.
+//!   the day. `full: true` walks every root in full instead of pruning what
+//!   earlier runs fetched (`pipeline::update`). Only one update runs at a
+//!   time: `409` while one is running.
 //!   The job's result is `pipeline::update::UpdateReport`.
 
 use std::{
@@ -71,6 +73,8 @@ struct UpdateBody {
     root_ids: Option<Vec<i64>>,
     #[serde(default)]
     quota_budget: Option<u64>,
+    #[serde(default)]
+    full: bool,
 }
 
 /// Clears `AppState::updating` however the job ends (including a cancel,
@@ -191,10 +195,12 @@ async fn start(state: &Arc<AppState>, body: &[u8]) -> HyperResponse {
         params: json!({
             "root_ids": roots.iter().map(|r| r.id).collect::<Vec<_>>(),
             "quota_budget": req.quota_budget,
+            "full": req.full,
         }),
     };
     let opts = UpdateOptions {
         quota_budget: Some(req.quota_budget.unwrap_or(8000)),
+        full: req.full,
         ..UpdateOptions::default()
     };
     let job_id = state.jobs.spawn("update", meta, move |handle| async move {

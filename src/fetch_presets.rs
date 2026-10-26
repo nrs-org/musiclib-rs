@@ -151,8 +151,29 @@ pub async fn resolve(
     file_id: &str,
     entry_point: &str,
 ) -> Option<(Arc<EntryFetchOptionsPool>, OptionsId)> {
+    resolve_with_hash(dir, file_id, entry_point)
+        .await
+        .map(|(pool, root_id, _)| (pool, root_id))
+}
+
+/// [`resolve`], plus a hex hash of the preset's content: every file it
+/// reads (cross-file references included) and the entry point, so a library
+/// update can tell when a preset changed since a root's last full walk.
+pub async fn resolve_with_hash(
+    dir: &Path,
+    file_id: &str,
+    entry_point: &str,
+) -> Option<(Arc<EntryFetchOptionsPool>, OptionsId, String)> {
+    use sha2::{Digest, Sha256};
+    let hex = |files: &[u8]| {
+        let mut hash = Sha256::new();
+        hash.update(files);
+        hash.update(entry_point.as_bytes());
+        format!("{:x}", hash.finalize())
+    };
     if file_id == SHALLOW_ID {
-        return Some(shallow());
+        let (pool, root_id) = shallow();
+        return Some((pool, root_id, hex(SHALLOW_ID.as_bytes())));
     }
     if !valid_file_id(file_id) {
         return None;
@@ -162,7 +183,7 @@ pub async fn resolve(
         return None;
     }
     match load_from_file_with_root(&path, entry_point).await {
-        Ok((pool, root_id, _hash)) => Some((pool, root_id)),
+        Ok((pool, root_id, files)) => Some((pool, root_id, hex(&files))),
         Err(e) => {
             tracing::warn!("Failed to load fetch-options file {}: {e}", path.display());
             None

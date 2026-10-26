@@ -79,6 +79,7 @@ pub async fn ingest_entry(
         vec![url],
         progress,
         None,
+        false,
     )
     .await?;
     Ok(IngestOutcome {
@@ -99,6 +100,10 @@ pub async fn ingest_entry(
 /// `progress`, if given, is wired straight into the `State` driving this
 /// run's `import()` traversal — see `state::ImportProgress`. The CLI passes
 /// `None`; the `server` binary uses it to feed its job progress display.
+///
+/// `prune` makes the walk skip what an earlier run already fetched, except
+/// the `urls` themselves and owners of growing listings (`State::prunes`):
+/// the library update's walk between full walks.
 ///
 /// The whole run is wrapped in an `import_run` (see `MusicDb::start_import_run`):
 /// while the traversal is in flight, a background watchdog periodically
@@ -122,6 +127,7 @@ pub async fn ingest_entries(
     urls: Vec<String>,
     progress: Option<Arc<dyn ImportProgress>>,
     max_fetches: Option<usize>,
+    prune: bool,
 ) -> anyhow::Result<MultiIngestOutcome> {
     // A run abandoned by a crash in some earlier invocation (this process or
     // another one that has since died) is only safe to clean up before new
@@ -176,6 +182,10 @@ pub async fn ingest_entries(
 
     let state = Arc::new(State::with_progress(progress));
     state.set_fetch_budget(max_fetches);
+    if prune {
+        let fetched = db.live_fetched_pairs(None).await?.into_iter().collect();
+        state.set_prune(fetched, lookup_pairs.iter().cloned().collect());
+    }
     let result = run_traversal_with_watchdog(
         Arc::clone(&state),
         providers,
@@ -310,7 +320,10 @@ async fn run_traversal_with_watchdog(
     // it collected is incomplete. Fail instead of flushing; the caller rolls
     // the run back (including anything periodic flushes already wrote).
     let (fetches, over_budget) = state.fetch_count();
-    tracing::info!("run {run_id}: {fetches} fetch(es)");
+    tracing::info!(
+        "run {run_id}: {fetches} fetch(es), {} skipped as known",
+        state.pruned_count()
+    );
     if over_budget {
         anyhow::bail!(
             "fetch budget exceeded ({fetches} fetches attempted); run {run_id} rolled back"

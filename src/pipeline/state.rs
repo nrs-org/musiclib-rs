@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::musicdb::{
     AliasKey, LINK_VIA_FETCH, LINK_VIA_LISTING, LinkKey, ParentEdges, Replacements, alias_key,
@@ -172,7 +172,29 @@ pub struct State {
     /// to the thing actually being bounded.
     approx_bytes: AtomicUsize,
     progress: Option<Arc<dyn ImportProgress>>,
+    /// Set for a pruned walk (`set_prune`).
+    prune: OnceLock<Prune>,
+    pruned: AtomicUsize,
 }
+
+/// What a pruned walk skips: pairs an earlier run fetched, except the roots
+/// and owners of growing listings (docs/plan-fast-update.md, Phase 3b).
+struct Prune {
+    fetched: HashSet<Pair>,
+    roots: HashSet<Pair>,
+}
+
+/// External types that own a growing listing besides artists (see the
+/// `listing_source` call sites; YouTube and Spotify playlists are
+/// `Release`s). A pruned walk still fetches them, so their listings are
+/// refreshed and new items found.
+const LISTING_OWNER_TYPES: &[&str] = &[
+    "youtube:playlist",
+    "spotify:playlist",
+    "soundcloud:playlist",
+    "nicovideo:mylist",
+    "nicovideo:series",
+];
 
 impl Default for State {
     fn default() -> Self {
@@ -198,7 +220,37 @@ impl State {
             fetches: AtomicUsize::new(0),
             approx_bytes: AtomicUsize::new(0),
             progress,
+            prune: OnceLock::new(),
+            pruned: AtomicUsize::new(0),
         }
+    }
+
+    /// Make this run a pruned walk: `fetched` pairs (an earlier run fetched
+    /// them) are skipped, except `roots` and listing owners. See `prunes`.
+    pub fn set_prune(&self, fetched: HashSet<Pair>, roots: HashSet<Pair>) {
+        let _ = self.prune.set(Prune { fetched, roots });
+    }
+
+    /// Whether a pruned walk skips `pair`: it comes back from the HTTP cache
+    /// as an earlier run stored it, and so does everything under it, unless
+    /// it owns a listing that may have grown.
+    pub(super) fn prunes(&self, pair: &Pair, entry_type: EntryType, external_type: &str) -> bool {
+        let Some(prune) = self.prune.get() else {
+            return false;
+        };
+        let skip = entry_type != EntryType::Artist
+            && !LISTING_OWNER_TYPES.contains(&external_type)
+            && !prune.roots.contains(pair)
+            && prune.fetched.contains(pair);
+        if skip {
+            self.pruned.fetch_add(1, Ordering::Relaxed);
+        }
+        skip
+    }
+
+    /// Pairs a pruned walk has skipped so far.
+    pub fn pruned_count(&self) -> usize {
+        self.pruned.load(Ordering::Relaxed)
     }
 
     /// Returns `true` if the caller should process `pair` under `options`:
