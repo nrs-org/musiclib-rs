@@ -13,14 +13,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter,
-    TransactionTrait, sea_query,
+    ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, sea_query,
 };
 use serde::{Deserialize, Serialize};
 
 use super::{
     DERIVED_FROM, DIFFERENT_IDENTITY, DIFFERENT_SONG, EDITION_KINDS, EditionProjection, Error,
-    MusicDb, PROVIDER_ORIGIN, SAME_IDENTITY, SoftIdentityProjection, entry_relation,
+    MusicDb, PROVIDER_ORIGIN, SAME_IDENTITY, SoftIdentityProjection, begin_write, entry_relation,
     extra_derived_entry, ordered_pair, write_derivation,
 };
 
@@ -190,7 +189,7 @@ impl MusicDb {
             .collect();
 
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let before = rows_among(&txn, &nodes).await?;
         match edit {
             SongEdit::Detach { entries } => detach(&txn, &songs, &entries).await?,
@@ -284,7 +283,7 @@ impl MusicDb {
         images: Vec<RowImage>,
     ) -> Result<Vec<RowImage>, Error> {
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let mut replaced = Vec::with_capacity(images.len());
         for image in images {
             let (a, b) = ordered_pair(image.entry_a, image.entry_b);

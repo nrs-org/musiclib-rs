@@ -845,6 +845,20 @@ where
     unreachable!("the loop above always returns on its final attempt")
 }
 
+/// Starts a write transaction. `BEGIN IMMEDIATE` takes SQLite's write lock
+/// up front, waiting out other writers through `busy_timeout`. A plain
+/// (deferred) `begin()` starts on a read snapshot instead, so a transaction
+/// that reads before it writes fails with `SQLITE_BUSY_SNAPSHOT` whenever
+/// any other connection commits in between -- the server's job writer, NRS
+/// exports, another process -- and no timeout can wait that out.
+async fn begin_write<C: TransactionTrait>(db: &C) -> Result<C::Transaction, DbErr> {
+    db.begin_with_options(sea_orm::TransactionOptions {
+        sqlite_transaction_mode: Some(sea_orm::SqliteTransactionMode::Immediate),
+        ..Default::default()
+    })
+    .await
+}
+
 /// Groups identity-canonical ids (i.e. `SoftIdentityProjection::component_of`
 /// outputs) that are linked by an `EDITION_KINDS` relation into one
 /// switchable "edition group" — distinct from identity itself, which
@@ -2132,7 +2146,7 @@ impl MusicDb {
             .await?;
         }
         if user_version < 11 {
-            let txn = db.begin().await?;
+            let txn = begin_write(&db).await?;
             txn.execute_unprepared(NON_ARTIST_CONTRIBUTION_MIGRATION)
                 .await?;
             txn.commit().await?;
@@ -2420,7 +2434,7 @@ impl MusicDb {
         if loser == winner {
             return Ok(());
         }
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
 
         // Re-point all of the loser's source rows to the winner.
         entry_source::Entity::update_many()
@@ -2646,7 +2660,7 @@ impl MusicDb {
         origin: &str,
         anchors: &BTreeMap<String, Vec<(String, String)>>,
     ) -> Result<i64, Error> {
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
@@ -2695,7 +2709,7 @@ impl MusicDb {
         else {
             return Ok(None);
         };
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         barrier_member::Entity::delete_many()
             .filter(barrier_member::Column::GroupId.eq(id))
             .exec(&txn)
@@ -2838,7 +2852,7 @@ impl MusicDb {
         run_id: i64,
         replaced: &Replacements,
     ) -> Result<(), Error> {
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let (mut stale_children, mut stale_contributions) = (0usize, 0usize);
         let mut lost_children: Vec<i64> = Vec::new();
         for ((source, identifier), current) in &replaced.parents {
@@ -3865,7 +3879,7 @@ impl MusicDb {
             ));
         }
         let (entry_a, entry_b) = ordered_pair(feedback.entry_a, feedback.entry_b);
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let left = entry::Entity::find_by_id(entry_a).one(&txn).await?;
         let right = entry::Entity::find_by_id(entry_b).one(&txn).await?;
         let (Some(left), Some(right)) = (left, right) else {
@@ -4182,7 +4196,7 @@ impl MusicDb {
         members: &[i64],
         name: Option<&str>,
     ) -> Result<(), Error> {
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         entry_display_name::Entity::delete_many()
             .filter(
                 entry_display_name::Column::EntryId
@@ -4233,7 +4247,7 @@ impl MusicDb {
         artist_members: &[i64],
         name: Option<&str>,
     ) -> Result<(), Error> {
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         credit_display_name::Entity::delete_many()
             .filter(
                 credit_display_name::Column::EntryId
@@ -4286,7 +4300,7 @@ impl MusicDb {
         members: &[i64],
         weight: u32,
     ) -> Result<(), Error> {
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         preferred_edition::Entity::delete_many()
             .filter(
                 preferred_edition::Column::EntryId.is_in(members.iter().copied().chain([entry_id])),
@@ -4339,7 +4353,7 @@ impl MusicDb {
         identifier: &str,
         weight: u32,
     ) -> Result<(), Error> {
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         preferred_source::Entity::delete_by_id((source.to_owned(), identifier.to_owned()))
             .exec(&txn)
             .await?;
@@ -4476,7 +4490,7 @@ impl MusicDb {
     /// safe to call again after an entry's aliases/credits/tracklist change —
     /// re-derive the keys and call this again to keep the index current.
     pub async fn replace_block_keys(&self, entry_id: i64, keys: &[String]) -> Result<(), Error> {
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         dedup_block_key::Entity::delete_many()
             .filter(dedup_block_key::Column::EntryId.eq(entry_id))
             .exec(&txn)
@@ -4678,7 +4692,7 @@ impl MusicDb {
             ));
         }
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         write_derivation(
             &txn,
             (original, &originals),
@@ -4808,7 +4822,7 @@ impl MusicDb {
             return Ok(());
         }
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         for &(play_id, seconds) in exports {
             txn.execute_raw(Statement::from_sql_and_values(
                 txn.get_database_backend(),
@@ -5261,7 +5275,7 @@ async fn migrate_stub_fetched_at(db: &DatabaseConnection) -> Result<(), Error> {
         .expect("entry_source exists after schema sync")
         .try_get("", "sql")?;
 
-    let txn = db.begin().await?;
+    let txn = begin_write(db).await?;
     if table_sql.contains(OLD_COLUMN) {
         // Through `txn`, not `db`: a `:memory:` pool has one connection,
         // which the open transaction already holds.
@@ -5321,6 +5335,33 @@ mod tests {
 
     async fn mem_db() -> MusicDb {
         MusicDb::new("sqlite::memory:").await.unwrap()
+    }
+
+    /// A transaction that reads before it writes survives another
+    /// connection committing in between (it used to fail with
+    /// `SQLITE_BUSY_SNAPSHOT`, as `commit_import_run` did beside the job
+    /// writer's progress saves).
+    #[tokio::test]
+    async fn write_transaction_outlasts_a_concurrent_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("w.db").display());
+        let a = MusicDb::new(&db_url).await.unwrap();
+        let b = MusicDb::new(&db_url).await.unwrap();
+
+        let txn = begin_write(&a.db).await.unwrap();
+        entry::Entity::find().all(&txn).await.unwrap();
+        let other = tokio::spawn(async move { b.insert_entry(Some(EntryType::Track)).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        entry::Entity::insert(entry::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            entry_type: Set("track".to_string()),
+        })
+        .exec(&txn)
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        other.await.unwrap().unwrap();
+        assert_eq!(entry::Entity::find().all(&a.db).await.unwrap().len(), 2);
     }
 
     #[tokio::test]

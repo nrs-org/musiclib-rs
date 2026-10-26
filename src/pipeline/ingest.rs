@@ -187,13 +187,19 @@ pub async fn ingest_entries(
         run_id,
     )
     .await;
+    // A failed commit leaves nothing applied, so it rolls back like any
+    // other failure.
+    let result = match result {
+        Ok(touched_ids) => db
+            .commit_import_run(run_id, &state.take_replacements())
+            .await
+            .map(|()| touched_ids)
+            .map_err(anyhow::Error::from),
+        Err(e) => Err(e),
+    };
 
     let touched_ids = match result {
-        Ok(touched_ids) => {
-            db.commit_import_run(run_id, &state.take_replacements())
-                .await?;
-            touched_ids
-        }
+        Ok(touched_ids) => touched_ids,
         Err(e) => {
             if let Err(rollback_err) = db.rollback_import_run(run_id).await {
                 warn!("failed to roll back import run {run_id}: {rollback_err}");
