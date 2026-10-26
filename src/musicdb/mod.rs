@@ -431,6 +431,61 @@ impl ImageOrigin {
     }
 }
 
+/// The `entry_source` columns a fetch's `EntrySpecificData` fills.
+#[derive(PartialEq)]
+pub(crate) struct PairColumns {
+    pub duration_ms: Option<i64>,
+    pub duration_ms_all: Option<String>,
+    pub track_extra: Option<String>,
+    pub release_type: Option<String>,
+    pub num_discs: Option<i32>,
+    pub num_tracks: Option<i32>,
+    pub primary_type: Option<String>,
+}
+
+impl PairColumns {
+    pub fn of(specific_data: &EntrySpecificData) -> Self {
+        let (durations, release_type, num_discs, num_tracks, primary_type) = match specific_data {
+            EntrySpecificData::Track {
+                duration_ms, songs, ..
+            } => {
+                let num_songs = (!songs.is_empty()).then_some(songs.len() as i32);
+                (duration_ms.as_slice(), None, None, num_songs, None)
+            }
+            EntrySpecificData::Release {
+                release_type,
+                num_discs,
+                num_tracks,
+            } => (&[][..], release_type.clone(), *num_discs, *num_tracks, None),
+            EntrySpecificData::ReleaseGroup { primary_type } => {
+                (&[][..], None, None, None, primary_type.clone())
+            }
+            EntrySpecificData::Artist => (&[][..], None, None, None, None),
+        };
+        let track_extra = match specific_data {
+            EntrySpecificData::Track { songs, .. } if !songs.is_empty() => {
+                Some(serde_json::json!({ "songs": songs }).to_string())
+            }
+            _ => None,
+        };
+        let duration_ms = durations.first().copied();
+        let duration_ms_all = if durations.len() > 1 {
+            Some(serde_json::to_string(durations).unwrap_or_default())
+        } else {
+            None
+        };
+        Self {
+            duration_ms,
+            duration_ms_all,
+            track_extra,
+            release_type,
+            num_discs,
+            num_tracks,
+            primary_type,
+        }
+    }
+}
+
 /// One `pair_image` row.
 pub struct PairImageRow {
     pub source: String,
@@ -493,10 +548,12 @@ mod dedup_block_key {
 // at insertion time so there is at most one row per (entry_a, entry_b, kind)
 // triple regardless of which side was passed first. Disabling a row (enabled=0)
 // tombstones the decision without losing history.
+mod batch;
 mod jobs;
 mod playlists;
 mod roots;
 mod songs;
+pub use batch::{FetchedPair, NewChildEdge, StubPair};
 pub use jobs::JobRunRow;
 pub use playlists::{NewPlaylistItem, PlaylistItemRow, PlaylistRow};
 pub use roots::{NewUpdateRoot, UpdateRootEdit, UpdateRootRow};
@@ -2875,13 +2932,39 @@ impl MusicDb {
         let txn = begin_write(&self.db).await?;
         let (mut stale_children, mut stale_contributions) = (0usize, 0usize);
         let mut lost_children: Vec<i64> = Vec::new();
+        let parents: Vec<(String, String)> = replaced.parents.keys().cloned().collect();
+        let mut children_of: HashMap<(String, String), Vec<entry_child::Model>> = HashMap::new();
+        for row in batch::find_by_pairs::<entry_child::Entity, _>(
+            &txn,
+            &parents,
+            entry_child::Column::ParentSource,
+            entry_child::Column::ParentIdentifier,
+        )
+        .await?
+        {
+            children_of
+                .entry((row.parent_source.clone(), row.parent_identifier.clone()))
+                .or_default()
+                .push(row);
+        }
+        let mut credits_of: HashMap<(String, String), Vec<contribution::Model>> = HashMap::new();
+        for row in batch::find_by_pairs::<contribution::Entity, _>(
+            &txn,
+            &parents,
+            contribution::Column::Source,
+            contribution::Column::Identifier,
+        )
+        .await?
+        {
+            credits_of
+                .entry((row.source.clone(), row.identifier.clone()))
+                .or_default()
+                .push(row);
+        }
+        let mut stale_credit_ids: Vec<i64> = Vec::new();
         for ((source, identifier), current) in &replaced.parents {
-            let children = entry_child::Entity::find()
-                .filter(entry_child::Column::ParentSource.eq(source.as_str()))
-                .filter(entry_child::Column::ParentIdentifier.eq(identifier.as_str()))
-                .all(&txn)
-                .await?;
-            for row in children {
+            let key = (source.clone(), identifier.clone());
+            for row in children_of.remove(&key).unwrap_or_default() {
                 if current
                     .children
                     .contains(&(row.child_source.clone(), row.child_identifier.clone()))
@@ -2905,30 +2988,29 @@ impl MusicDb {
                 }
             }
 
-            let stale_ids: Vec<i64> = contribution::Entity::find()
-                .filter(contribution::Column::Source.eq(source.as_str()))
-                .filter(contribution::Column::Identifier.eq(identifier.as_str()))
-                .all(&txn)
-                .await?
-                .into_iter()
-                .filter(|c| {
-                    let key: ContributionKey = (
-                        (c.artist_source.clone(), c.artist_identifier.clone()),
-                        c.role.clone(),
-                        c.main_artist,
-                        c.extra.clone().unwrap_or_else(|| "null".to_string()),
-                    );
-                    !current.contributions.contains(&key)
-                })
-                .map(|c| c.id)
-                .collect();
-            if !stale_ids.is_empty() {
-                stale_contributions += stale_ids.len();
-                contribution::Entity::delete_many()
-                    .filter(contribution::Column::Id.is_in(stale_ids))
-                    .exec(&txn)
-                    .await?;
-            }
+            stale_credit_ids.extend(
+                credits_of
+                    .remove(&key)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| {
+                        let key: ContributionKey = (
+                            (c.artist_source.clone(), c.artist_identifier.clone()),
+                            c.role.clone(),
+                            c.main_artist,
+                            c.extra.clone().unwrap_or_else(|| "null".to_string()),
+                        );
+                        !current.contributions.contains(&key)
+                    })
+                    .map(|c| c.id),
+            );
+        }
+        stale_contributions += stale_credit_ids.len();
+        for chunk in stale_credit_ids.chunks(ID_QUERY_CHUNK) {
+            contribution::Entity::delete_many()
+                .filter(contribution::Column::Id.is_in(chunk.iter().copied()))
+                .exec(&txn)
+                .await?;
         }
 
         // A provider cover/remix/arrangement relation rests on a child edge
@@ -2961,35 +3043,37 @@ impl MusicDb {
         let stale_links = stale_links_on(&txn, replaced).await?;
         delete_links_on(&txn, &stale_links).await?;
 
-        let mut stale_aliases = 0usize;
-        for ((source, identifier), current) in &replaced.aliases {
-            // A fetch that reported no aliases says nothing about them.
-            if current.is_empty() {
-                continue;
-            }
-            let stale_ids: Vec<i64> = entry_alias::Entity::find()
-                .filter(entry_alias::Column::Source.eq(source.as_str()))
-                .filter(entry_alias::Column::Identifier.eq(identifier.as_str()))
-                .all(&txn)
-                .await?
-                .into_iter()
-                .filter(|a| {
-                    !current.contains(&alias_key(
-                        &a.name,
-                        a.locale.as_deref(),
-                        a.extra.as_deref().unwrap_or("null"),
-                        a.primary,
-                    ))
-                })
-                .map(|a| a.id)
-                .collect();
-            if !stale_ids.is_empty() {
-                stale_aliases += stale_ids.len();
-                entry_alias::Entity::delete_many()
-                    .filter(entry_alias::Column::Id.is_in(stale_ids))
-                    .exec(&txn)
-                    .await?;
-            }
+        // A fetch that reported no aliases says nothing about them.
+        let renamed: Vec<(String, String)> = replaced
+            .aliases
+            .iter()
+            .filter(|(_, current)| !current.is_empty())
+            .map(|(pair, _)| pair.clone())
+            .collect();
+        let stale_alias_ids: Vec<i64> = batch::find_by_pairs::<entry_alias::Entity, _>(
+            &txn,
+            &renamed,
+            entry_alias::Column::Source,
+            entry_alias::Column::Identifier,
+        )
+        .await?
+        .into_iter()
+        .filter(|a| {
+            !replaced.aliases[&(a.source.clone(), a.identifier.clone())].contains(&alias_key(
+                &a.name,
+                a.locale.as_deref(),
+                a.extra.as_deref().unwrap_or("null"),
+                a.primary,
+            ))
+        })
+        .map(|a| a.id)
+        .collect();
+        let stale_aliases = stale_alias_ids.len();
+        for chunk in stale_alias_ids.chunks(ID_QUERY_CHUNK) {
+            entry_alias::Entity::delete_many()
+                .filter(entry_alias::Column::Id.is_in(chunk.iter().copied()))
+                .exec(&txn)
+                .await?;
         }
 
         let now = std::time::SystemTime::now()
@@ -3151,35 +3235,15 @@ impl MusicDb {
             .unwrap()
             .as_secs() as i64;
 
-        let (durations, release_type, num_discs, num_tracks, primary_type) = match specific_data {
-            EntrySpecificData::Track {
-                duration_ms, songs, ..
-            } => {
-                let num_songs = (!songs.is_empty()).then_some(songs.len() as i32);
-                (duration_ms.as_slice(), None, None, num_songs, None)
-            }
-            EntrySpecificData::Release {
-                release_type,
-                num_discs,
-                num_tracks,
-            } => (&[][..], release_type.clone(), *num_discs, *num_tracks, None),
-            EntrySpecificData::ReleaseGroup { primary_type } => {
-                (&[][..], None, None, None, primary_type.clone())
-            }
-            EntrySpecificData::Artist => (&[][..], None, None, None, None),
-        };
-        let track_extra = match specific_data {
-            EntrySpecificData::Track { songs, .. } if !songs.is_empty() => {
-                Some(serde_json::json!({ "songs": songs }).to_string())
-            }
-            _ => None,
-        };
-        let duration_ms = durations.first().copied();
-        let duration_ms_all = if durations.len() > 1 {
-            Some(serde_json::to_string(durations).unwrap_or_default())
-        } else {
-            None
-        };
+        let PairColumns {
+            duration_ms,
+            duration_ms_all,
+            track_extra,
+            release_type,
+            num_discs,
+            num_tracks,
+            primary_type,
+        } = PairColumns::of(specific_data);
 
         entry_source::Entity::insert(entry_source::ActiveModel {
             source: Set(source.to_string()),
@@ -5131,19 +5195,37 @@ async fn stale_links_on<C: ConnectionTrait>(
     db: &C,
     replaced: &Replacements,
 ) -> Result<Vec<LinkRow>, Error> {
-    let mut out = Vec::new();
-    for ((asserted, via), current) in replaced.link_asserters() {
-        let rows = pair_link::Entity::find()
-            .filter(pair_link::Column::AssertedSource.eq(asserted.0.as_str()))
-            .filter(pair_link::Column::AssertedIdentifier.eq(asserted.1.as_str()))
-            .filter(pair_link::Column::Via.eq(via))
-            .all(db)
-            .await?;
-        for row in rows {
-            let link = (
+    let asserted: Vec<(String, String)> = replaced
+        .link_asserters()
+        .map(|((pair, _), _)| pair.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut stored: HashMap<((String, String), &'static str), Vec<LinkKey>> = HashMap::new();
+    for row in batch::find_by_pairs::<pair_link::Entity, _>(
+        db,
+        &asserted,
+        pair_link::Column::AssertedSource,
+        pair_link::Column::AssertedIdentifier,
+    )
+    .await?
+    {
+        let via = match row.via.as_str() {
+            LINK_VIA_FETCH => LINK_VIA_FETCH,
+            LINK_VIA_LISTING => LINK_VIA_LISTING,
+            _ => continue,
+        };
+        stored
+            .entry(((row.asserted_source, row.asserted_identifier), via))
+            .or_default()
+            .push((
                 (row.source_a, row.identifier_a),
                 (row.source_b, row.identifier_b),
-            );
+            ));
+    }
+    let mut out = Vec::new();
+    for ((asserted, via), current) in replaced.link_asserters() {
+        for link in stored.remove(&(asserted.clone(), via)).unwrap_or_default() {
             if current.is_none_or(|c| !c.contains(&link)) {
                 out.push(LinkRow {
                     link,
