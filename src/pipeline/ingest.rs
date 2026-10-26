@@ -21,7 +21,7 @@ use super::{
     dedup::DedupConfig,
     flush::flush,
     importer::import,
-    softmatch::{SoftMatchConfig, match_new_entries_offloaded},
+    softmatch::{SoftMatchConfig, match_changed_entries_offloaded},
     state::{ImportPhase, ImportProgress, State},
 };
 
@@ -89,8 +89,8 @@ pub async fn ingest_entry(
 
 /// Ingest every URL in `urls` as one run: fetch via `providers`/`pool` starting at `options_id`, flush
 /// into `db` under its stored barriers (`DedupConfig::load`), and (if
-/// `soft_cfg` is given) run online soft-dedup against the newly touched
-/// entries.
+/// `soft_cfg` is given) run online soft-dedup against every new or changed
+/// entry (`softmatch::match_changed_entries`).
 ///
 /// All URLs are traversed concurrently against one shared `State`, so their
 /// fetches land in the same coalescer batches and an entity reachable from
@@ -216,9 +216,8 @@ pub async fn ingest_entries(
     if let Some(cfg) = soft_cfg {
         let mut cfg = cfg.clone();
         cfg.progress = progress;
-        match_new_entries_offloaded(
+        match_changed_entries_offloaded(
             db.clone(),
-            touched_ids.clone(),
             merged_dedup.clone(),
             Arc::clone(providers),
             cfg,
