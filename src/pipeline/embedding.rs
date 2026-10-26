@@ -384,8 +384,16 @@ impl EmbeddingCache {
                 "INSERT OR REPLACE INTO entry_embedding_meta (entry_id, title) VALUES (?, ?)",
             )?
             .execute(params![entry_id, title])?;
+            // vec0 tables don't honour OR REPLACE: drop the old vector, from
+            // every type's table in case the entry's type changed.
+            for t in KNOWN_TYPES {
+                tx.prepare_cached(&format!(
+                    "DELETE FROM vec_embeddings_{t} WHERE entry_id = ?"
+                ))?
+                .execute(params![entry_id])?;
+            }
             tx.prepare_cached(&format!(
-                "INSERT OR REPLACE INTO {table} (entry_id, embedding) VALUES (?, ?)"
+                "INSERT INTO {table} (entry_id, embedding) VALUES (?, ?)"
             ))?
             .execute(params![entry_id, blob])?;
         }
@@ -940,5 +948,22 @@ mod tests {
         assert_eq!(neighbors.len(), 1);
         assert_eq!(neighbors[0].0, 2);
         assert!(neighbors[0].1 < 0.02);
+    }
+
+    #[test]
+    fn upsert_replaces_a_stored_vector() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("embeddings.db");
+        let cache = EmbeddingCache::open(path.to_str().unwrap(), 2).unwrap();
+        cache.upsert(1, "one", "track", &[1.0, 0.0]).unwrap();
+        cache.upsert(2, "two", "track", &[0.0, 1.0]).unwrap();
+        // A retitled entry, and one whose type changed.
+        cache.upsert(1, "uno", "track", &[0.0, 1.0]).unwrap();
+        cache.upsert(2, "two", "release", &[0.0, 1.0]).unwrap();
+
+        assert_eq!(cache.all_vectors("track").unwrap().len(), 1);
+        assert_eq!(cache.all_vectors("release").unwrap().len(), 1);
+        let (_, v) = &cache.all_vectors("track").unwrap()[0];
+        assert!(v[1] > 0.99);
     }
 }
