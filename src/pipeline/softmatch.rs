@@ -3213,6 +3213,11 @@ pub fn print_summary(stats: &HashMap<String, [usize; 4]>, config: &SoftMatchConf
 /// persisted block-key index / embedding KNN turn up for them (see
 /// `generate_focused_candidates`), so cost scales with candidates found, not
 /// library size.
+///
+/// An import hands over every entry it saved, and an update re-saves
+/// everything it walks, so entries already checked as they are now (same
+/// `EntryInfo`, same script: [`check_fingerprints`]) are left out. A new or
+/// changed entry still meets the unchanged ones as candidates.
 pub async fn match_new_entries(
     db: &MusicDb,
     new_entry_ids: &HashSet<i64>,
@@ -3220,14 +3225,63 @@ pub async fn match_new_entries(
     providers: &[Arc<dyn FetchProvider>],
     config: &SoftMatchConfig,
 ) -> anyhow::Result<()> {
-    match_entries(db, new_entry_ids, dedup, providers, config).await?;
+    if new_entry_ids.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<i64> = new_entry_ids.iter().copied().collect();
+    let mut focus_entries = entry_infos_by_ids(db, &ids).await?;
+    let script = tokio::fs::read(&config.script_path)
+        .await
+        .with_context(|| format!("reading {}", config.script_path))?;
+    let fingerprints = check_fingerprints(&script, focus_entries.values());
+    let checked = db.softmatch_fingerprints(&ids).await?;
+    focus_entries.retain(|id, _| checked.get(id) != fingerprints.get(id));
+    info!(
+        "Soft-dedup: {} of {} entries are new or changed since they were last checked",
+        focus_entries.len(),
+        ids.len()
+    );
+    if focus_entries.is_empty() {
+        return Ok(());
+    }
+    let checks: Vec<(i64, String)> = focus_entries
+        .keys()
+        .map(|id| (*id, fingerprints[id].clone()))
+        .collect();
+    match_focus(db, focus_entries, dedup, providers, config).await?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    db.record_softmatch_checks(&checks, now).await?;
     Ok(())
 }
 
-/// [`match_new_entries`], returning the per-type `[merge, relate, distinct,
-/// defer]` counts. The `softmatch --entries` batch path uses it to re-score a
-/// chosen set of existing entries (e.g. ones ingested while the matcher was
-/// unavailable) without a full-library scan.
+/// What soft-dedup sees of each entry: its `EntryInfo` under the match
+/// `script`, as hex SHA-256. `EntryInfo` is canonical except for
+/// `track_positions`, which is in DB row order, so that is sorted first.
+fn check_fingerprints<'a>(
+    script: &[u8],
+    entries: impl Iterator<Item = &'a EntryInfo>,
+) -> HashMap<i64, String> {
+    use sha2::{Digest, Sha256};
+    let script = Sha256::digest(script);
+    entries
+        .map(|e| {
+            let mut e = e.clone();
+            e.track_positions.sort_unstable();
+            let mut hash = Sha256::new();
+            hash.update(script);
+            hash.update(serde_json::to_vec(&e).unwrap_or_default());
+            (e.entry_id, format!("{:x}", hash.finalize()))
+        })
+        .collect()
+}
+
+/// Soft-dedup `new_entry_ids` whether or not they changed, returning the
+/// per-type `[merge, relate, distinct, defer]` counts. The `softmatch
+/// --entries` batch path uses it to re-score a chosen set of existing entries
+/// (e.g. ones ingested while the matcher was unavailable) without a
+/// full-library scan.
 pub async fn match_entries(
     db: &MusicDb,
     new_entry_ids: &HashSet<i64>,
@@ -3240,6 +3294,18 @@ pub async fn match_entries(
     }
     let focus_ids: Vec<i64> = new_entry_ids.iter().copied().collect();
     let focus_entries = entry_infos_by_ids(db, &focus_ids).await?;
+    match_focus(db, focus_entries, dedup, providers, config).await
+}
+
+/// Soft-dedup pairs involving one of `focus_entries`.
+async fn match_focus(
+    db: &MusicDb,
+    focus_entries: HashMap<i64, EntryInfo>,
+    dedup: &DedupConfig,
+    providers: &[Arc<dyn FetchProvider>],
+    config: &SoftMatchConfig,
+) -> anyhow::Result<HashMap<String, [usize; 4]>> {
+    let new_entry_ids: &HashSet<i64> = &focus_entries.keys().copied().collect();
     let (barrier, _) = dedup.compile(providers).await;
     let entries_slice: Vec<EntryInfo> = focus_entries.values().cloned().collect();
     let facts = pair_facts_source(db).await;
@@ -3925,6 +3991,82 @@ mod tests {
             edition_pairs(detached).await.is_empty(),
             "blocked by different_song"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Online soft-dedup checks an entry again only once what it sees of it
+    /// changed: a second pass over the same entries does nothing, and a new
+    /// alias brings back just that entry.
+    #[tokio::test]
+    async fn online_pass_skips_entries_checked_as_they_are() {
+        use crate::providers::types::Alias;
+
+        let db = MusicDb::new("sqlite::memory:").await.unwrap();
+        let a = insert_track(&db, "youtube", "a", "Song", 200_000).await;
+        let b = insert_track(&db, "spotify", "b", "Song", 200_000).await;
+
+        let dir = std::env::temp_dir().join(format!("check-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("match.rhai");
+        std::fs::write(&path, "fn decide(ctx, a, b) { distinct() }").unwrap();
+        #[derive(Default)]
+        struct Phases(Mutex<Vec<ImportPhase>>);
+        impl ImportProgress for Phases {
+            fn phase(&self, phase: &ImportPhase) {
+                self.0.lock().unwrap().push(phase.clone());
+            }
+        }
+        let phases = Arc::new(Phases::default());
+        let config = SoftMatchConfig {
+            script_path: path.display().to_string(),
+            apply_relates: true,
+            embed_db_path: None,
+            embed_dim: 256,
+            embed_k: 20,
+            embed_sim_threshold: 0.45,
+            embed_max_pages: 1,
+            candidate_max_block: 50,
+            candidate_ngram_k: 30,
+            verbose_decisions: false,
+            http_client: None,
+            progress: Some(phases.clone()),
+        };
+        let both: HashSet<i64> = [a, b].into();
+        let pass = || async {
+            phases.0.lock().unwrap().clear();
+            match_new_entries(&db, &both, &DedupConfig::default(), &[], &config)
+                .await
+                .unwrap();
+            let checked = phases.0.lock().unwrap().contains(&ImportPhase::Candidates);
+            (checked, db.softmatch_fingerprints(&[a, b]).await.unwrap())
+        };
+
+        let (checked, first) = pass().await;
+        assert!(checked);
+        assert_eq!(first.len(), 2);
+
+        let (checked, second) = pass().await;
+        assert!(!checked, "nothing changed, so nothing is checked");
+        assert_eq!(second, first);
+
+        db.insert_aliases_for_pair(
+            "spotify",
+            "b",
+            &[Alias {
+                name: "Song (Remastered)".to_string(),
+                source: "spotify".to_string(),
+                locale: None,
+                extra: serde_json::Value::Null,
+                primary: false,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+        let (checked, third) = pass().await;
+        assert!(checked);
+        assert_eq!(third[&a], first[&a]);
+        assert_ne!(third[&b], first[&b]);
         std::fs::remove_dir_all(dir).ok();
     }
 

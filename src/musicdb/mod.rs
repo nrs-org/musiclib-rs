@@ -481,6 +481,26 @@ mod dedup_block_key {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+// What online soft-dedup last checked each entry as: a hash of the entry's
+// `EntryInfo` and the match script. An import re-saves every entry it walks,
+// so this is how soft-dedup tells the ones that changed apart.
+mod softmatch_check {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "softmatch_check")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub entry_id: i64,
+        pub fingerprint: String,
+        /// Unix seconds.
+        pub checked_at: i64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 // Soft-dedup relation edges. Each row is a heuristic (or manual) assertion
 // that two entries are related in some way. `entry_a < entry_b` is enforced
 // at insertion time so there is at most one row per (entry_a, entry_b, kind)
@@ -4505,6 +4525,55 @@ impl MusicDb {
                     block_key: Set(key),
                 }
             }))
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
+    // ── softmatch_check: what online soft-dedup last checked ──────────────────
+
+    /// The stored soft-dedup fingerprint of each of `ids` that has one.
+    pub async fn softmatch_fingerprints(&self, ids: &[i64]) -> Result<HashMap<i64, String>, Error> {
+        let rows = chunked_id_query(ids, |chunk| {
+            softmatch_check::Entity::find()
+                .filter(softmatch_check::Column::EntryId.is_in(chunk.iter().copied()))
+                .all(&self.db)
+        })
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|m| (m.entry_id, m.fingerprint))
+            .collect())
+    }
+
+    /// Records that soft-dedup checked each entry as its fingerprint, at `now`.
+    pub async fn record_softmatch_checks(
+        &self,
+        checks: &[(i64, String)],
+        now: i64,
+    ) -> Result<(), Error> {
+        if checks.is_empty() {
+            return Ok(());
+        }
+        let txn = begin_write(&self.db).await?;
+        for chunk in checks.chunks(ID_QUERY_CHUNK / 3) {
+            softmatch_check::Entity::insert_many(chunk.iter().map(|(entry_id, fingerprint)| {
+                softmatch_check::ActiveModel {
+                    entry_id: Set(*entry_id),
+                    fingerprint: Set(fingerprint.clone()),
+                    checked_at: Set(now),
+                }
+            }))
+            .on_conflict(
+                sea_query::OnConflict::column(softmatch_check::Column::EntryId)
+                    .update_columns([
+                        softmatch_check::Column::Fingerprint,
+                        softmatch_check::Column::CheckedAt,
+                    ])
+                    .to_owned(),
+            )
             .exec(&txn)
             .await?;
         }
