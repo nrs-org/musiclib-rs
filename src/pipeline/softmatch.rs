@@ -2154,7 +2154,7 @@ async fn reindex_block_keys(db: &MusicDb, entries: &HashMap<i64, EntryInfo>) -> 
 /// library that predates this index, or one upgraded from before it existed.
 /// Pages through unindexed entries in bounded batches so peak memory stays
 /// flat regardless of library size. Safe to call repeatedly: it's a cheap
-/// no-op once caught up, since `match_new_entries` and the full-scan path
+/// no-op once caught up, since `match_changed_entries` and the full-scan path
 /// keep every entry they touch reindexed on their own from then on. Intended
 /// to be run once (e.g. from the `dedup` maintenance binary) after adopting
 /// the focused/online dedup path against an existing library.
@@ -3204,77 +3204,39 @@ pub fn print_summary(stats: &HashMap<String, [usize; 4]>, config: &SoftMatchConf
     }
 }
 
-/// Incremental scan: only compare pairs involving one of `new_entry_ids`.
-/// Called automatically by the `import` binary after each flush so new entries
-/// are soft-matched against the existing library online.
+/// Incremental scan: only compare pairs involving an entry whose pairs
+/// changed since soft-dedup last checked it (`entry.changed_at`), new
+/// entries included. Called automatically after each import so new and
+/// changed entries are soft-matched against the existing library online.
+/// Entries a canceled or failed pass left unchecked are picked up by the
+/// next one.
 ///
 /// Unlike the full-scan path, this never materializes the library: it loads
-/// `EntryInfo` for exactly `new_entry_ids` and whatever candidates the
+/// `EntryInfo` for exactly those entries and whatever candidates the
 /// persisted block-key index / embedding KNN turn up for them (see
 /// `generate_focused_candidates`), so cost scales with candidates found, not
-/// library size.
-///
-/// An import hands over every entry it saved, and an update re-saves
-/// everything it walks, so entries already checked as they are now (same
-/// `EntryInfo`, same script: [`check_fingerprints`]) are left out. A new or
-/// changed entry still meets the unchanged ones as candidates.
-pub async fn match_new_entries(
+/// library size. Unchanged entries still meet the changed ones as
+/// candidates.
+pub async fn match_changed_entries(
     db: &MusicDb,
-    new_entry_ids: &HashSet<i64>,
     dedup: &DedupConfig,
     providers: &[Arc<dyn FetchProvider>],
     config: &SoftMatchConfig,
 ) -> anyhow::Result<()> {
-    if new_entry_ids.is_empty() {
-        return Ok(());
-    }
-    let ids: Vec<i64> = new_entry_ids.iter().copied().collect();
-    let mut focus_entries = entry_infos_by_ids(db, &ids).await?;
-    let script = tokio::fs::read(&config.script_path)
-        .await
-        .with_context(|| format!("reading {}", config.script_path))?;
-    let fingerprints = check_fingerprints(&script, focus_entries.values());
-    let checked = db.softmatch_fingerprints(&ids).await?;
-    focus_entries.retain(|id, _| checked.get(id) != fingerprints.get(id));
-    info!(
-        "Soft-dedup: {} of {} entries are new or changed since they were last checked",
-        focus_entries.len(),
-        ids.len()
-    );
-    if focus_entries.is_empty() {
-        return Ok(());
-    }
-    let checks: Vec<(i64, String)> = focus_entries
-        .keys()
-        .map(|id| (*id, fingerprints[id].clone()))
-        .collect();
-    match_focus(db, focus_entries, dedup, providers, config).await?;
-    let now = std::time::SystemTime::now()
+    // Taken before reading the entries, so a change made while this pass
+    // runs leaves its entry to be checked again.
+    let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    db.record_softmatch_checks(&checks, now).await?;
+        .map_or(0, |d| d.as_millis() as i64);
+    let ids = db.entries_changed_since_softmatch().await?;
+    info!("Soft-dedup: {} new or changed entries", ids.len());
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let focus_entries = entry_infos_by_ids(db, &ids).await?;
+    match_focus(db, focus_entries, dedup, providers, config).await?;
+    db.mark_softmatch_checked(&ids, started).await?;
     Ok(())
-}
-
-/// What soft-dedup sees of each entry: its `EntryInfo` under the match
-/// `script`, as hex SHA-256. `EntryInfo` is canonical except for
-/// `track_positions`, which is in DB row order, so that is sorted first.
-fn check_fingerprints<'a>(
-    script: &[u8],
-    entries: impl Iterator<Item = &'a EntryInfo>,
-) -> HashMap<i64, String> {
-    use sha2::{Digest, Sha256};
-    let script = Sha256::digest(script);
-    entries
-        .map(|e| {
-            let mut e = e.clone();
-            e.track_positions.sort_unstable();
-            let mut hash = Sha256::new();
-            hash.update(script);
-            hash.update(serde_json::to_vec(&e).unwrap_or_default());
-            (e.entry_id, format!("{:x}", hash.finalize()))
-        })
-        .collect()
 }
 
 /// Soft-dedup `new_entry_ids` whether or not they changed, returning the
@@ -3349,26 +3311,25 @@ async fn match_focus(
     .await
 }
 
-/// Runs [`match_new_entries`] on a dedicated OS thread with its own
+/// Runs [`match_changed_entries`] on a dedicated OS thread with its own
 /// single-threaded Tokio runtime, so the synchronous Rhai/embedding work it
 /// does (see [`run_blocking`]) never stalls the *caller's* runtime.
 ///
 /// This matters most for the `server` binary, whose main runtime is
 /// `current_thread` (required elsewhere because `rhai::Engine` isn't
-/// `Send`/`Sync`): calling `match_new_entries` directly there froze HTTP
+/// `Send`/`Sync`): calling `match_changed_entries` directly there froze HTTP
 /// dispatch and `MusicDb` connection-pool acquisition for every other
 /// in-flight request for as long as scoring ran — for a large ingest, that
 /// starved queued pool waiters past `acquire_timeout` and failed the whole
 /// job. Offloading to its own thread fixes that without touching
-/// `match_new_entries` itself: `Engine`/`AST`/`Dynamic` values are built and
+/// `match_changed_entries` itself: `Engine`/`AST`/`Dynamic` values are built and
 /// consumed entirely inside the dedicated thread and never cross it, so
 /// rhai's `!Send` constraint is satisfied the same way `run_blocking`
 /// already satisfies it for the multi-thread case via `block_in_place` —
 /// just with a thread of our own instead of borrowing one from the runtime's
 /// pool, so it works uniformly regardless of the caller's runtime flavor.
-pub async fn match_new_entries_offloaded(
+pub async fn match_changed_entries_offloaded(
     db: MusicDb,
-    new_entry_ids: HashSet<i64>,
     dedup: DedupConfig,
     providers: Arc<Vec<Arc<dyn FetchProvider>>>,
     config: SoftMatchConfig,
@@ -3388,9 +3349,8 @@ pub async fn match_new_entries_offloaded(
                     return;
                 }
             };
-            let result = rt.block_on(match_new_entries(
+            let result = rt.block_on(match_changed_entries(
                 &db,
-                &new_entry_ids,
                 &dedup,
                 providers.as_slice(),
                 &config,
@@ -3994,18 +3954,15 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// Online soft-dedup checks an entry again only once what it sees of it
-    /// changed: a second pass over the same entries does nothing, and a new
-    /// alias brings back just that entry.
+    /// Online soft-dedup checks new entries, skips them once checked, and
+    /// checks one again when it gains a pair.
     #[tokio::test]
-    async fn online_pass_skips_entries_checked_as_they_are() {
-        use crate::providers::types::Alias;
-
+    async fn online_pass_checks_only_new_or_changed_entries() {
         let db = MusicDb::new("sqlite::memory:").await.unwrap();
-        let a = insert_track(&db, "youtube", "a", "Song", 200_000).await;
+        insert_track(&db, "youtube", "a", "Song", 200_000).await;
         let b = insert_track(&db, "spotify", "b", "Song", 200_000).await;
 
-        let dir = std::env::temp_dir().join(format!("check-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("changed-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("match.rhai");
         std::fs::write(&path, "fn decide(ctx, a, b) { distinct() }").unwrap();
@@ -4031,42 +3988,29 @@ mod tests {
             http_client: None,
             progress: Some(phases.clone()),
         };
-        let both: HashSet<i64> = [a, b].into();
+        // Whether the pass searched for candidates, and what's left to check.
         let pass = || async {
             phases.0.lock().unwrap().clear();
-            match_new_entries(&db, &both, &DedupConfig::default(), &[], &config)
+            // A change in the same ms as a pass starts is checked again.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            match_changed_entries(&db, &DedupConfig::default(), &[], &config)
                 .await
                 .unwrap();
-            let checked = phases.0.lock().unwrap().contains(&ImportPhase::Candidates);
-            (checked, db.softmatch_fingerprints(&[a, b]).await.unwrap())
+            let searched = phases.0.lock().unwrap().contains(&ImportPhase::Candidates);
+            (
+                searched,
+                db.entries_changed_since_softmatch().await.unwrap(),
+            )
         };
 
-        let (checked, first) = pass().await;
-        assert!(checked);
-        assert_eq!(first.len(), 2);
+        assert_eq!(pass().await, (true, vec![]));
+        assert_eq!(pass().await, (false, vec![]), "nothing changed");
 
-        let (checked, second) = pass().await;
-        assert!(!checked, "nothing changed, so nothing is checked");
-        assert_eq!(second, first);
-
-        db.insert_aliases_for_pair(
-            "spotify",
-            "b",
-            &[Alias {
-                name: "Song (Remastered)".to_string(),
-                source: "spotify".to_string(),
-                locale: None,
-                extra: serde_json::Value::Null,
-                primary: false,
-            }],
-            None,
-        )
-        .await
-        .unwrap();
-        let (checked, third) = pass().await;
-        assert!(checked);
-        assert_eq!(third[&a], first[&a]);
-        assert_ne!(third[&b], first[&b]);
+        db.upsert_stub_pair("musicbrainz", "b", b, None, None)
+            .await
+            .unwrap();
+        assert_eq!(db.entries_changed_since_softmatch().await.unwrap(), [b]);
+        assert_eq!(pass().await, (true, vec![]));
         std::fs::remove_dir_all(dir).ok();
     }
 

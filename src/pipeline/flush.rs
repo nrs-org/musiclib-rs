@@ -47,8 +47,6 @@ use super::state::{ChildEdge, IsRel, Pair, PairMetadata, State, StubInfo};
 /// crash mid-call), which is unchanged by this feature.
 ///
 /// Returns the set of entry_ids written or surviving after merges in this flush.
-/// The caller can pass this set to `softmatch::match_new_entries` for online
-/// soft-dedup without re-scanning previously compared pairs.
 pub async fn flush(
     state: Arc<State>,
     providers: &[Arc<dyn FetchProvider>],

@@ -38,6 +38,13 @@ mod entry {
         #[sea_orm(primary_key)]
         pub id: i64,
         pub entry_type: String,
+        /// Unix ms when the entry's set of pairs last changed: a pair was
+        /// added, moved in or out, or deleted. Kept by the `entry_changed_*`
+        /// triggers; NULL means no change since the column was added.
+        pub changed_at: Option<i64>,
+        /// Unix ms when online soft-dedup last started checking the entry.
+        /// It needs checking while `changed_at >= softmatch_checked_at`.
+        pub softmatch_checked_at: Option<i64>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -476,26 +483,6 @@ mod dedup_block_key {
         pub entry_id: i64,
         #[sea_orm(primary_key, auto_increment = false, indexed)]
         pub block_key: String,
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-// What online soft-dedup last checked each entry as: a hash of the entry's
-// `EntryInfo` and the match script. An import re-saves every entry it walks,
-// so this is how soft-dedup tells the ones that changed apart.
-mod softmatch_check {
-    use sea_orm::entity::prelude::*;
-
-    #[sea_orm::model]
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "softmatch_check")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub entry_id: i64,
-        pub fingerprint: String,
-        /// Unix seconds.
-        pub checked_at: i64,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -1982,7 +1969,7 @@ impl MusicDb {
         } else {
             // sqlx's bare default (10 connections, 30s acquire timeout) is
             // too small once online soft-dedup is running: its worker thread
-            // (see `pipeline::softmatch::match_new_entries_offloaded`) issues
+            // (see `pipeline::softmatch::match_changed_entries_offloaded`) issues
             // its own bursts of DB reads/writes concurrently with the
             // importer's `buffer_unordered`-driven fan-out, and both compete
             // for the same pool. `httpcache/db.rs` already learned this
@@ -2171,6 +2158,18 @@ impl MusicDb {
                 .await?;
             txn.commit().await?;
         }
+        if user_version < 12 {
+            // Soft-dedup's per-entry fingerprints, replaced by
+            // `entry.changed_at`/`softmatch_checked_at`.
+            sea_orm::ConnectionTrait::execute_unprepared(
+                &db,
+                "DROP TABLE IF EXISTS softmatch_check; PRAGMA user_version = 12;",
+            )
+            .await?;
+        }
+        // After the migrations: rebuilding `entry_source` (user_version 4)
+        // drops its triggers.
+        sea_orm::ConnectionTrait::execute_unprepared(&db, ENTRY_CHANGED_TRIGGERS).await?;
         Ok(Self {
             db,
             write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -2428,6 +2427,7 @@ impl MusicDb {
         let result = entry::Entity::insert(entry::ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
             entry_type: Set(entry_type_str(entry_type).to_string()),
+            ..Default::default()
         })
         .exec(&self.db)
         .await?;
@@ -4532,50 +4532,37 @@ impl MusicDb {
         Ok(())
     }
 
-    // ── softmatch_check: what online soft-dedup last checked ──────────────────
+    // ── entry.changed_at / softmatch_checked_at ───────────────────────────────
 
-    /// The stored soft-dedup fingerprint of each of `ids` that has one.
-    pub async fn softmatch_fingerprints(&self, ids: &[i64]) -> Result<HashMap<i64, String>, Error> {
-        let rows = chunked_id_query(ids, |chunk| {
-            softmatch_check::Entity::find()
-                .filter(softmatch_check::Column::EntryId.is_in(chunk.iter().copied()))
-                .all(&self.db)
-        })
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|m| (m.entry_id, m.fingerprint))
-            .collect())
+    /// Entries whose pairs changed since online soft-dedup last started
+    /// checking them (or that it never checked).
+    pub async fn entries_changed_since_softmatch(&self) -> Result<Vec<i64>, Error> {
+        Ok(entry::Entity::find()
+            .select_only()
+            .column(entry::Column::Id)
+            .filter(entry::Column::ChangedAt.is_not_null())
+            .filter(
+                Condition::any()
+                    .add(entry::Column::SoftmatchCheckedAt.is_null())
+                    .add(sea_query::Expr::cust("changed_at >= softmatch_checked_at")),
+            )
+            .into_tuple()
+            .all(&self.db)
+            .await?)
     }
 
-    /// Records that soft-dedup checked each entry as its fingerprint, at `now`.
-    pub async fn record_softmatch_checks(
-        &self,
-        checks: &[(i64, String)],
-        now: i64,
-    ) -> Result<(), Error> {
-        if checks.is_empty() {
-            return Ok(());
-        }
+    /// Records that soft-dedup started checking `ids` at `at` (unix ms).
+    pub async fn mark_softmatch_checked(&self, ids: &[i64], at: i64) -> Result<(), Error> {
         let txn = begin_write(&self.db).await?;
-        for chunk in checks.chunks(ID_QUERY_CHUNK / 3) {
-            softmatch_check::Entity::insert_many(chunk.iter().map(|(entry_id, fingerprint)| {
-                softmatch_check::ActiveModel {
-                    entry_id: Set(*entry_id),
-                    fingerprint: Set(fingerprint.clone()),
-                    checked_at: Set(now),
-                }
-            }))
-            .on_conflict(
-                sea_query::OnConflict::column(softmatch_check::Column::EntryId)
-                    .update_columns([
-                        softmatch_check::Column::Fingerprint,
-                        softmatch_check::Column::CheckedAt,
-                    ])
-                    .to_owned(),
-            )
-            .exec(&txn)
-            .await?;
+        for chunk in ids.chunks(ID_QUERY_CHUNK) {
+            entry::Entity::update_many()
+                .col_expr(
+                    entry::Column::SoftmatchCheckedAt,
+                    sea_query::Expr::value(at),
+                )
+                .filter(entry::Column::Id.is_in(chunk.iter().copied()))
+                .exec(&txn)
+                .await?;
         }
         txn.commit().await?;
         Ok(())
@@ -5278,6 +5265,24 @@ const CONTRIBUTION_DEDUP_MIGRATION: &str = "
     );
     PRAGMA user_version = 2;";
 
+/// Keep `entry.changed_at`: every write that adds, moves or deletes an
+/// `entry_source` row marks the entries it touches. Upserts that keep a
+/// pair's entry leave it alone.
+const ENTRY_CHANGED_TRIGGERS: &str = "
+    CREATE TRIGGER IF NOT EXISTS entry_changed_ai AFTER INSERT ON entry_source BEGIN
+        UPDATE entry SET changed_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+        WHERE id = new.entry_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS entry_changed_au AFTER UPDATE OF entry_id ON entry_source
+    WHEN old.entry_id IS NOT new.entry_id BEGIN
+        UPDATE entry SET changed_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+        WHERE id IN (old.entry_id, new.entry_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS entry_changed_ad AFTER DELETE ON entry_source BEGIN
+        UPDATE entry SET changed_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+        WHERE id = old.entry_id;
+    END;";
+
 /// Release tracklists once copied their tracks' credits onto the
 /// release-to-track edge, making recordings appear to be artists. Remove
 /// contributions whose target is a known musical object, across all roles
@@ -5424,6 +5429,7 @@ mod tests {
         entry::Entity::insert(entry::ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
             entry_type: Set("track".to_string()),
+            ..Default::default()
         })
         .exec(&txn)
         .await
@@ -5585,6 +5591,7 @@ mod tests {
         entry::Entity::insert(entry::ActiveModel {
             id: Set(id),
             entry_type: Set("track".to_string()),
+            ..Default::default()
         })
         .exec(db)
         .await
@@ -6820,6 +6827,7 @@ mod tests {
             entry::Entity::insert(entry::ActiveModel {
                 id: Set(1),
                 entry_type: Set("track".to_string()),
+                ..Default::default()
             })
             .exec(&db)
             .await
@@ -7147,7 +7155,7 @@ mod tests {
                 .unwrap()
                 .try_get("", "user_version")
                 .unwrap();
-            assert_eq!(version, 11);
+            assert_eq!(version, 12);
         }
     }
 
@@ -7389,6 +7397,72 @@ mod tests {
             assert_eq!(contribution_count(&mdb).await, 1);
             assert_eq!(alias_count(&mdb).await, 2);
         }
+    }
+
+    /// An entry needs soft-dedup once its pairs change: a pair added, moved
+    /// in or out, or merged in. Rewriting a pair's metadata in place doesn't
+    /// count, and neither does a change from before the check started.
+    #[tokio::test]
+    async fn pair_changes_mark_entries_for_softmatch() {
+        let mdb = &mem_db().await;
+        let track = || EntrySpecificData::Track {
+            duration_ms: vec![1000],
+            positions: Default::default(),
+            songs: vec![],
+        };
+        let changed = || async { mdb.entries_changed_since_softmatch().await.unwrap() };
+        // Checked now; the next change lands a few ms later.
+        let check = |ids: Vec<i64>| async move {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            mdb.mark_softmatch_checked(&ids, now + 1).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let a = mdb.insert_entry(Some(EntryType::Track)).await.unwrap();
+        let b = mdb.insert_entry(Some(EntryType::Track)).await.unwrap();
+        assert!(changed().await.is_empty(), "no pairs yet");
+
+        mdb.upsert_pair("youtube", "a", a, None, &track(), None)
+            .await
+            .unwrap();
+        mdb.upsert_stub_pair("spotify", "b", b, None, None)
+            .await
+            .unwrap();
+        let mut ids = changed().await;
+        ids.sort();
+        assert_eq!(ids, [a, b]);
+        check(ids).await;
+        assert!(changed().await.is_empty());
+
+        // Fetching a stub, or a pair again, keeps its entry.
+        mdb.upsert_pair("spotify", "b", b, Some("2020"), &track(), None)
+            .await
+            .unwrap();
+        mdb.upsert_pair("youtube", "a", a, None, &track(), None)
+            .await
+            .unwrap();
+        assert!(changed().await.is_empty());
+
+        // A check started after the change covers it; one started before
+        // doesn't.
+        mdb.upsert_stub_pair("musicbrainz", "a", a, None, None)
+            .await
+            .unwrap();
+        assert_eq!(changed().await, [a]);
+        mdb.mark_softmatch_checked(&[a], 0).await.unwrap();
+        assert_eq!(changed().await, [a]);
+        check(vec![a]).await;
+
+        mdb.set_pair_entry("musicbrainz", "a", b).await.unwrap();
+        let mut ids = changed().await;
+        ids.sort();
+        assert_eq!(ids, [a, b]);
+        check(ids).await;
+
+        mdb.merge_entries(a, b).await.unwrap();
+        assert_eq!(changed().await, [b]);
     }
 
     /// `display_projections_around` must agree with the global display
