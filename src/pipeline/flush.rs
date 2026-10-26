@@ -2,11 +2,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::musicdb::{
-    ImageOrigin, LINKS_COMPLETE, LinkKey, LinkRow, MusicDb, PROVIDER_ORIGIN, link_key,
+    FetchedPair, ImageOrigin, LINKS_COMPLETE, LinkKey, LinkRow, MusicDb, NewChildEdge,
+    PROVIDER_ORIGIN, StubPair, link_key,
 };
 use crate::providers::FetchProvider;
 use crate::providers::std_values::{StandardProviderKeys, normalize_isrc};
-use crate::providers::types::EntryType;
+use crate::providers::types::{Contribution, EntryType};
 use tracing::{debug, info, warn};
 
 use super::dedup::{AnchorId, DedupConfig};
@@ -190,11 +191,12 @@ pub async fn flush(
     }
 
     // 2. Look up existing entry_ids.
-    let mut existing: HashMap<Pair, Option<i64>> = HashMap::new();
-    for pair in &all_pairs {
-        let id = db.find_entry_id_by_pair(&pair.0, &pair.1).await?;
-        existing.insert(pair.clone(), id);
-    }
+    let lookup: Vec<Pair> = all_pairs.iter().cloned().collect();
+    let found = db.entry_ids_by_pairs(&lookup).await?;
+    let mut existing: HashMap<Pair, Option<i64>> = all_pairs
+        .iter()
+        .map(|pair| (pair.clone(), found.get(pair).copied()))
+        .collect();
 
     // 2b. Compile declared dedup barriers (entities that must never merge) into
     //     a map of canonical pair -> anchor id. Empty config => no-op.
@@ -204,12 +206,12 @@ pub async fn flush(
     //     flush whole. Otherwise a merge into or out of it (`merge_entries`
     //     re-points every pair of the losing entry) can carry an anchor pair
     //     the union-find never saw into another anchor's entry.
-    let mut barrier_entries: HashSet<i64> = HashSet::new();
-    for pair in barrier.keys() {
-        if let Some(id) = db.find_entry_id_by_pair(&pair.0, &pair.1).await? {
-            barrier_entries.insert(id);
-        }
-    }
+    let barrier_pairs: Vec<Pair> = barrier.keys().cloned().collect();
+    let barrier_entries: HashSet<i64> = db
+        .entry_ids_by_pairs(&barrier_pairs)
+        .await?
+        .into_values()
+        .collect();
     let touched_barrier_entries: BTreeSet<i64> = existing
         .values()
         .flatten()
@@ -476,9 +478,7 @@ pub async fn flush(
     for (loser, winner) in &merges {
         db.merge_entries(*loser, *winner).await?;
     }
-    for (winner, t) in existing_entry_types {
-        db.set_entry_type(winner, t).await?;
-    }
+    db.set_entry_types(&existing_entry_types).await?;
 
     let entry_id_of = |pair: &Pair| -> i64 { class_to_entry[&pair_to_repr[pair]] };
 
@@ -486,42 +486,58 @@ pub async fn flush(
     //    no prior DB row). Pairs that already exist in the DB without fresh
     //    metadata are left untouched — `merge_entries` already re-pointed
     //    their entry_id if needed.
+    //    Each kind of write goes as one batch, which skips what's stored
+    //    already (`musicdb::batch`).
+    let mut fetched: Vec<FetchedPair> = Vec::new();
+    let mut fetched_images = Vec::new();
+    let mut privacies = Vec::new();
+    let mut stub_rows: Vec<StubPair> = Vec::new();
+    let mut listing_images = Vec::new();
+    let mut moved: Vec<(&Pair, i64)> = Vec::new();
     for pair in &all_pairs {
         let entry_id = entry_id_of(pair);
         if let Some(meta) = metadata.get(pair) {
-            db.upsert_pair(
-                &pair.0,
-                &pair.1,
+            fetched.push(FetchedPair {
+                pair,
                 entry_id,
-                meta.release_date.as_deref(),
-                &meta.specific_data,
-                run_id,
-            )
-            .await?;
+                release_date: meta.release_date.as_deref(),
+                specific_data: &meta.specific_data,
+            });
             if let Some(image) = &meta.image {
-                db.set_pair_image(&pair.0, &pair.1, image, ImageOrigin::Fetch, run_id)
-                    .await?;
+                fetched_images.push((pair, image));
             }
             if let Some(privacy) = meta.privacy {
-                db.set_provider_privacy(&pair.0, &pair.1, privacy).await?;
+                privacies.push((pair, privacy));
             }
         } else {
             if let Some(image) = stubs.get(pair).and_then(|s| s.image.as_ref()) {
-                db.set_pair_image(&pair.0, &pair.1, image, ImageOrigin::Listing, run_id)
-                    .await?;
+                listing_images.push((pair, image));
             }
             let duration_ms = stubs.get(pair).and_then(|s| s.duration_ms);
             if existing[pair].is_none() || duration_ms.is_some() {
                 // New stub row, or a duration for an existing stub that had
                 // none; never touches a fetched row or its entry_id.
-                db.upsert_stub_pair(&pair.0, &pair.1, entry_id, duration_ms, run_id)
-                    .await?;
+                stub_rows.push(StubPair {
+                    pair,
+                    entry_id,
+                    duration_ms,
+                });
             }
             if existing[pair].is_some_and(|id| id != entry_id) {
                 // Existing stub pair that a split moved to a different entry.
-                db.set_pair_entry(&pair.0, &pair.1, entry_id).await?;
+                moved.push((pair, entry_id));
             }
         }
+    }
+    db.upsert_pairs(&fetched, run_id).await?;
+    db.set_pair_images(&fetched_images, ImageOrigin::Fetch, run_id)
+        .await?;
+    db.set_provider_privacies(&privacies).await?;
+    db.set_pair_images(&listing_images, ImageOrigin::Listing, run_id)
+        .await?;
+    db.upsert_stub_pairs(&stub_rows, run_id).await?;
+    for (pair, entry_id) in moved {
+        db.set_pair_entry(&pair.0, &pair.1, entry_id).await?;
     }
 
     // 7b. Listing names for pairs that are still stubs (no-op once fetched).
@@ -540,6 +556,7 @@ pub async fn flush(
     //    (name, source, locale, primary) repeats here — an entity referenced
     //    by many children (e.g. an artist credited on hundreds of tracks) can
     //    otherwise accumulate thousands of identical observations.
+    let mut alias_rows = Vec::new();
     for (pair, meta) in &metadata {
         if meta.aliases.is_empty() {
             continue;
@@ -561,23 +578,21 @@ pub async fn flush(
                 "pair accumulated a heavily duplicated alias list",
             );
         }
-        db.insert_aliases_for_pair(&pair.0, &pair.1, &deduped, run_id)
-            .await?;
+        alias_rows.push((pair, deduped));
     }
+    db.insert_aliases_for_pairs(&alias_rows, run_id).await?;
 
     // 9. Child edges: deduped on the composite PK by `insert_child_edge`.
-    for edge in &has_rel {
-        db.insert_child_edge(
-            &edge.parent.0,
-            &edge.parent.1,
-            &edge.child.0,
-            &edge.child.1,
-            edge.disc_no,
-            edge.track_no,
-            run_id,
-        )
-        .await?;
-    }
+    let child_edges: Vec<NewChildEdge> = has_rel
+        .iter()
+        .map(|edge| NewChildEdge {
+            parent: &edge.parent,
+            child: &edge.child,
+            disc_no: edge.disc_no,
+            track_no: edge.track_no,
+        })
+        .collect();
+    db.insert_child_edges(&child_edges, run_id).await?;
 
     // 9b. Identity links, with what stated them.
     let links: Vec<LinkRow> = is_rel
@@ -596,9 +611,15 @@ pub async fn flush(
     db.delete_links(&split_stale).await?;
 
     // 10. Contributions: one per (parent_pair, child_pair, role) observation.
-    for edge in &has_rel {
-        write_edge_contributions(db, edge, run_id).await?;
-    }
+    let credits: Vec<(&Pair, &Pair, &Contribution)> = has_rel
+        .iter()
+        .flat_map(|edge| {
+            edge.contributions
+                .iter()
+                .map(move |c| (&edge.parent, &edge.child, c))
+        })
+        .collect();
+    db.insert_contributions(&credits, run_id).await?;
 
     // 10b. Provider-asserted original->derived relations (cover/remix/
     // arrangement). Written directly from import data rather than the
@@ -811,25 +832,6 @@ async fn keep_unlinked_pairs(
     };
     for pair in &gone {
         links.push(link_key(pair, &target));
-    }
-    Ok(())
-}
-
-async fn write_edge_contributions(
-    db: &MusicDb,
-    edge: &ChildEdge,
-    run_id: Option<i64>,
-) -> anyhow::Result<()> {
-    for contrib in &edge.contributions {
-        db.insert_contribution(
-            &edge.parent.0,
-            &edge.parent.1,
-            &edge.child.0,
-            &edge.child.1,
-            contrib,
-            run_id,
-        )
-        .await?;
     }
     Ok(())
 }

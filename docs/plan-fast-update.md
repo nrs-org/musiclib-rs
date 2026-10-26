@@ -1,7 +1,8 @@
 # Plan: faster library updates
 
-Status: proposed, 2026-10-26. Follows `plan-update-roots.md` and the
-`entry.changed_at` soft-dedup change (f18e5e6).
+Status: Phases 1 and 2 done, 2026-10-26 (results under each). Follows
+`plan-update-roots.md` and the `entry.changed_at` soft-dedup change
+(f18e5e6).
 
 ## Where the time goes
 
@@ -45,6 +46,10 @@ The CLI runs `ingest_entries` on a multi-thread runtime, so the future is
 Expected: the walk drops to roughly the CLI's 9 s, and the player stays
 responsive during an update. Small change, low risk.
 
+Done (`server/offload.rs`). An update with nothing new: 2:40 → 2:01. The
+vtuber walk took 35 s, not 9 s: a real update re-reads listings over the
+network, which the CLI timing (snapshots served) didn't.
+
 ## Phase 2: batch the save, skip unchanged writes
 
 Same results, far fewer statements:
@@ -65,6 +70,15 @@ Expected: save + commit from ~60 s to a few seconds. Risk: `flush.rs` is the
 most delicate part of the importer (merges, splits, barriers, periodic
 flushes). Guard: the existing flush tests, plus a test that the old and new
 paths leave identical DBs for the same input.
+
+Done (`musicdb/batch.rs`): bulk loads, then only the writes that change a
+row, through the same single-row writers. Steps 1–3 and 5 as planned; 4
+(transactions) wasn't needed, since an unchanged save writes almost nothing.
+The vtuber preset on a copy of the library: save + commit 50 s → 18 s, and
+every table identical to the old save's result (timestamps aside). What's
+left is spread over the steps, much of it debug-build CPU (canonicalizing
+26k pairs is 2.8 s). A row-value `IN (VALUES …)` for the bulk lookups saved
+only ~1 s, so `pair_condition` stays as it was.
 
 ## Phase 3, maybe: don't re-walk what can't have changed
 
