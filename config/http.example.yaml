@@ -87,7 +87,7 @@ schedulers:
   localhost:3000:
     max_concurrent: 4
 
-  # ytmusicapi server (youtube_api.ytmusicapi_server_url): single-threaded
-  # with a listen backlog of 5, so more at once get connections refused.
+  # ytmusicapi server (youtube_api.ytmusicapi_server_url): a thread per
+  # request, each a YouTube Music call; more at once risks throttling.
   localhost:9001:
-    max_concurrent: 2
+    max_concurrent: 8
