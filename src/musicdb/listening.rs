@@ -80,7 +80,7 @@ impl MusicDb {
             return Err(Error::InvalidInput("invalid playback session key".into()));
         }
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         if let Some(session) = play_session::Entity::find_by_id(key.to_owned())
             .one(&txn)
             .await?
@@ -132,7 +132,7 @@ impl MusicDb {
             return Err(Error::InvalidInput("invalid listening report".into()));
         }
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         if play_event::Entity::find_by_id(play_id)
             .one(&txn)
             .await?

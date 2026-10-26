@@ -287,7 +287,7 @@ pub async fn regroup_entries(
             .await;
     }
     let run_id = db.start_import_run().await?;
-    match flush(
+    let result = match flush(
         Arc::clone(&state),
         providers,
         db,
@@ -297,11 +297,16 @@ pub async fn regroup_entries(
     )
     .await
     {
-        Ok(touched) => {
-            db.commit_import_run(run_id, &state.take_replacements())
-                .await?;
-            Ok(touched)
-        }
+        // A failed commit leaves nothing applied, so it rolls back too.
+        Ok(touched) => db
+            .commit_import_run(run_id, &state.take_replacements())
+            .await
+            .map(|()| touched)
+            .map_err(anyhow::Error::from),
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(touched) => Ok(touched),
         Err(e) => {
             if let Err(rollback_err) = db.rollback_import_run(run_id).await {
                 warn!("failed to roll back regroup run {run_id}: {rollback_err}");

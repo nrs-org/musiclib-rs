@@ -9,9 +9,9 @@
 //! exists keeps the title it was added with, so the list can still say
 //! what's missing.
 
-use sea_orm::{ActiveValue::Set, ConnectionTrait, EntityTrait, Statement, TransactionTrait, Value};
+use sea_orm::{ActiveValue::Set, ConnectionTrait, EntityTrait, Statement, Value};
 
-use super::{Error, MusicDb, entry_source};
+use super::{Error, MusicDb, begin_write, entry_source};
 
 mod playlist {
     use sea_orm::entity::prelude::*;
@@ -212,7 +212,7 @@ impl MusicDb {
     /// Deletes a playlist and its items. Returns false for an unknown one.
     pub async fn delete_playlist(&self, id: i64) -> Result<bool, Error> {
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let backend = txn.get_database_backend();
         txn.execute_raw(Statement::from_sql_and_values(
             backend,
@@ -268,7 +268,7 @@ impl MusicDb {
         now: i64,
     ) -> Result<Option<Vec<i64>>, Error> {
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let backend = txn.get_database_backend();
         let touched = txn
             .execute_raw(Statement::from_sql_and_values(
@@ -317,7 +317,7 @@ impl MusicDb {
         now: i64,
     ) -> Result<bool, Error> {
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let backend = txn.get_database_backend();
         let result = txn
             .execute_raw(Statement::from_sql_and_values(
@@ -349,7 +349,7 @@ impl MusicDb {
         now: i64,
     ) -> Result<bool, Error> {
         let _guard = self.write_lock.lock().await;
-        let txn = self.db.begin().await?;
+        let txn = begin_write(&self.db).await?;
         let backend = txn.get_database_backend();
         let touched = txn
             .execute_raw(Statement::from_sql_and_values(
