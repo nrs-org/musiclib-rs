@@ -373,7 +373,14 @@ from cron with `import --update`:
    (`--mb-max-server-lag`).
 2. It imports the roots, one run per preset, refreshing listings within the
    day's budget (`--quota-budget`, default 8000). A listing several roots
-   reach is refreshed once.
+   reach is refreshed once. The walk is pruned: a pair an earlier run
+   fetched is skipped (it would come back from the HTTP cache unchanged),
+   except roots, artists and playlists, whose listings may have grown. A
+   preset is walked in full instead when one of its roots never was, its
+   fetch options changed since, or its last full walk is a week old; a full
+   walk also picks up new MusicBrainz links on known pairs and listings
+   below them. `--full` (or `"full": true` on `POST /api/update`) walks
+   everything in full.
 3. It spends the rest of the budget on the full-refresh pass.
 4. Each root's row records the outcome. A root that fails doesn't stop the
    others; `import --update` then exits non-zero.

@@ -50,7 +50,7 @@ pub fn import(
 ) -> BoxFuture<()> {
     Box::pin(async move {
         // 1. Canonicalize the input URL via the first provider that recognises it.
-        let Some((canonical, provider, provider_idx)) =
+        let Some((canonical, kind, provider, provider_idx)) =
             canonicalize_first(&providers, &input.1).await
         else {
             debug!("no provider recognised {}:{}", input.0, input.1);
@@ -66,6 +66,13 @@ pub fn import(
                 canonical.clone(),
                 LinkVia::Fetch,
             );
+        }
+
+        // 2b. A pruned walk skips a pair an earlier run fetched: it would come
+        //     back from the HTTP cache unchanged (`State::prunes`). The
+        //     parent's edge to it is recorded by the parent either way.
+        if state.prunes(&canonical, kind.entry_type, &kind.external_type) {
+            return;
         }
 
         // 3. Claim (canonical pair, options). If this pair was already
@@ -360,10 +367,16 @@ async fn pair_entry_type(providers: &[Arc<dyn FetchProvider>], pair: &Pair) -> O
     None
 }
 
+/// What canonicalizing told about a pair besides its canonical form.
+struct PairKind {
+    entry_type: EntryType,
+    external_type: std::borrow::Cow<'static, str>,
+}
+
 async fn canonicalize_first(
     providers: &[Arc<dyn FetchProvider>],
     url: &str,
-) -> Option<(Pair, Arc<dyn FetchProvider>, usize)> {
+) -> Option<(Pair, PairKind, Arc<dyn FetchProvider>, usize)> {
     for (i, provider) in providers.iter().enumerate() {
         if let Some(canon) = provider
             .canonicalize(StandardProviderKeys::UNKNOWN_URL, url)
@@ -374,6 +387,10 @@ async fn canonicalize_first(
                     canon.canonical_source_key.into_owned(),
                     canon.canonical_identifier,
                 ),
+                PairKind {
+                    entry_type: canon.entry_type,
+                    external_type: canon.external_type,
+                },
                 Arc::clone(provider),
                 i,
             ));
@@ -770,6 +787,49 @@ mod tests {
             a.0.contains(&pair("t2")),
             "the album's other track is fetched"
         );
+    }
+
+    /// A pruned walk skips what an earlier run fetched, but keeps the
+    /// parent's edge to it, and still walks what's new below the root.
+    #[tokio::test]
+    async fn pruned_walk_skips_known_pairs() {
+        let (pool, main, _) = catalogue_pool();
+        let walk = |fetched: &[&str]| {
+            let state = Arc::new(State::new());
+            state.set_prune(
+                fetched.iter().map(|id| pair(id)).collect(),
+                HashSet::from([pair("artist")]),
+            );
+            let providers: Arc<Vec<Arc<dyn FetchProvider>>> =
+                Arc::new(vec![Arc::new(CatalogueProvider)]);
+            let pool = Arc::clone(&pool);
+            async move {
+                import(
+                    Arc::clone(&state),
+                    providers,
+                    pool,
+                    (
+                        StandardProviderKeys::UNKNOWN_URL.to_string(),
+                        "artist".to_string(),
+                    ),
+                    main,
+                )
+                .await;
+                state
+            }
+        };
+
+        // The root is walked though known; its known track is skipped.
+        let state = walk(&["artist", "t1", "album"]).await;
+        let (fetched, edges) = snapshot(&state);
+        assert_eq!(fetched, vec![pair("artist")]);
+        assert_eq!(edges, vec![(pair("artist"), pair("t1"))]);
+        assert_eq!(state.pruned_count(), 1);
+
+        // A new track is walked; the known album under it isn't.
+        let state = walk(&["artist", "album"]).await;
+        let (fetched, _) = snapshot(&state);
+        assert_eq!(fetched, vec![pair("artist"), pair("t1")]);
     }
 
     /// Past the fetch budget nothing more is fetched, and the run reports

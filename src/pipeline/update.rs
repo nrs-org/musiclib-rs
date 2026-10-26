@@ -6,7 +6,10 @@
 //!    refuse to go on if the server's own replication has fallen behind.
 //! 2. Import the roots, one run per fetch-options preset, with one listing
 //!    store in refresh mode for the whole update: a listing two roots reach
-//!    is refreshed once.
+//!    is refreshed once. A preset's walk is pruned (what earlier runs
+//!    fetched is skipped, `State::prunes`) unless one of its roots is due a
+//!    full walk: never walked in full, preset changed since, or the last
+//!    full walk is older than `UpdateOptions::full_walk_every`.
 //! 3. Full-refresh the oldest snapshots with the budget left.
 //! 4. Record each root's outcome on its row.
 
@@ -87,6 +90,11 @@ pub struct UpdateOptions {
     /// published one; `None` skips the check (the mirror still stops at the
     /// server).
     pub mb_max_server_lag: Option<i64>,
+    /// Walk every root in full.
+    pub full: bool,
+    /// A root is walked in full again once its last full walk is this old
+    /// (seconds).
+    pub full_walk_every: i64,
 }
 
 impl Default for UpdateOptions {
@@ -95,6 +103,8 @@ impl Default for UpdateOptions {
             quota_budget: Some(8000),
             // About a packet an hour, and the server replicates daily.
             mb_max_server_lag: Some(36),
+            full: false,
+            full_walk_every: 7 * 24 * 60 * 60,
         }
     }
 }
@@ -106,6 +116,8 @@ pub struct RootOutcome {
     /// The entry the root's URL belongs to now.
     pub entry_id: Option<i64>,
     pub error: Option<String>,
+    /// Walked in full, not pruned.
+    pub full_walk: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,23 +192,45 @@ pub async fn run_update(
             entry_point: entry_point.to_owned(),
             roots: members.len(),
         });
-        let result = match fetch_presets::resolve(&ctx.fetch_options_dir, file, entry_point).await {
+        let preset =
+            fetch_presets::resolve_with_hash(&ctx.fetch_options_dir, file, entry_point).await;
+        let full = opts.full
+            || preset.as_ref().is_none_or(|(_, _, hash)| {
+                members
+                    .iter()
+                    .any(|r| full_walk_due(r, hash, now, opts.full_walk_every))
+            });
+        info!(
+            "{file}::{entry_point}: {} walk",
+            if full { "full" } else { "pruned" }
+        );
+        let result = match preset {
             None => Err(format!(
                 "fetch options {file}/{entry_point} don't load (missing or invalid)"
             )),
-            Some((pool, root_id)) => ingest_entries(
-                ctx.db,
-                &providers,
-                &pool,
-                root_id,
-                ctx.soft_cfg,
-                members.iter().map(|r| r.url.clone()).collect(),
-                ctx.progress.clone(),
-                None,
-            )
-            .await
-            .map(|outcome| outcome.entry_ids)
-            .map_err(|e| format!("{e:#}")),
+            Some((pool, root_id, hash)) => {
+                let result = ingest_entries(
+                    ctx.db,
+                    &providers,
+                    &pool,
+                    root_id,
+                    ctx.soft_cfg,
+                    members.iter().map(|r| r.url.clone()).collect(),
+                    ctx.progress.clone(),
+                    None,
+                    !full,
+                )
+                .await
+                .map(|outcome| outcome.entry_ids)
+                .map_err(|e| format!("{e:#}"));
+                if full && result.is_ok() {
+                    let ids: Vec<i64> = members.iter().map(|r| r.id).collect();
+                    if let Err(e) = ctx.db.record_full_walk(&ids, now, &hash).await {
+                        warn!("recording {file}::{entry_point}'s full walk failed: {e}");
+                    }
+                }
+                result
+            }
         };
         if let Err(e) = &result {
             warn!("{file}::{entry_point} failed: {e}");
@@ -208,12 +242,14 @@ pub async fn run_update(
                     url: root.url.clone(),
                     entry_id: entry_ids.get(i).copied().flatten(),
                     error: None,
+                    full_walk: full,
                 },
                 Err(e) => RootOutcome {
                     id: root.id,
                     url: root.url.clone(),
                     entry_id: None,
                     error: Some(e.clone()),
+                    full_walk: full,
                 },
             };
             let stats = serde_json::json!({ "entry_id": outcome.entry_id }).to_string();
@@ -261,6 +297,14 @@ pub async fn run_update(
         youtube_units,
         youtube_units_today,
     })
+}
+
+/// Whether `root` is due a full walk with the preset hashing to `hash`.
+fn full_walk_due(root: &UpdateRootRow, hash: &str, now: i64, every: i64) -> bool {
+    match (root.full_walk_at, &root.full_walk_hash) {
+        (Some(at), Some(last)) => last != hash || now - at >= every,
+        _ => true,
+    }
 }
 
 /// Step 1. Without `METABRAINZ_ACCESS_TOKEN` the mirror can't be synced; it
@@ -373,4 +417,40 @@ pub async fn preview_root(
         listings,
         errors,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root(full_walk_at: Option<i64>, full_walk_hash: Option<&str>) -> UpdateRootRow {
+        UpdateRootRow {
+            id: 1,
+            url: "u".into(),
+            source: "youtube".into(),
+            identifier: "u".into(),
+            fetch_options_file: "f".into(),
+            entry_point: "main".into(),
+            label: None,
+            enabled: true,
+            added_at: 0,
+            last_run_at: None,
+            last_status: None,
+            last_error: None,
+            last_stats: None,
+            full_walk_at,
+            full_walk_hash: full_walk_hash.map(str::to_owned),
+            entry_id: None,
+        }
+    }
+
+    /// Due when never walked in full, when the preset changed, and once
+    /// the last full walk is `every` old.
+    #[test]
+    fn full_walk_due_when_new_changed_or_old() {
+        assert!(full_walk_due(&root(None, None), "h", 100, 50));
+        assert!(full_walk_due(&root(Some(90), Some("old")), "h", 100, 50));
+        assert!(!full_walk_due(&root(Some(90), Some("h")), "h", 100, 50));
+        assert!(full_walk_due(&root(Some(50), Some("h")), "h", 100, 50));
+    }
 }

@@ -37,6 +37,11 @@ pub(super) mod update_root {
         pub last_status: Option<String>,
         pub last_error: Option<String>,
         pub last_stats: Option<String>,
+        /// The last full walk of this root (unix seconds), and the hash of
+        /// its fetch options then. Between full walks, updates prune what
+        /// earlier runs fetched (docs/plan-fast-update.md, Phase 3b).
+        pub full_walk_at: Option<i64>,
+        pub full_walk_hash: Option<String>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -61,6 +66,8 @@ pub struct UpdateRootRow {
     pub last_status: Option<String>,
     pub last_error: Option<String>,
     pub last_stats: Option<String>,
+    pub full_walk_at: Option<i64>,
+    pub full_walk_hash: Option<String>,
     pub entry_id: Option<i64>,
 }
 
@@ -98,7 +105,7 @@ fn clean_label(label: Option<&str>) -> Result<Option<String>, Error> {
 
 const ROOT_COLUMNS: &str = "r.id, r.url, r.source, r.identifier, r.fetch_options_file, \
      r.entry_point, r.label, r.enabled, r.added_at, r.last_run_at, r.last_status, \
-     r.last_error, r.last_stats, s.entry_id";
+     r.last_error, r.last_stats, r.full_walk_at, r.full_walk_hash, s.entry_id";
 
 const ROOT_FROM: &str = "update_root r \
      LEFT JOIN entry_source s ON s.source = r.source AND s.identifier = r.identifier";
@@ -118,6 +125,8 @@ fn root_row(row: &sea_orm::QueryResult) -> Result<UpdateRootRow, Error> {
         last_status: row.try_get("", "last_status")?,
         last_error: row.try_get("", "last_error")?,
         last_stats: row.try_get("", "last_stats")?,
+        full_walk_at: row.try_get("", "full_walk_at")?,
+        full_walk_hash: row.try_get("", "full_walk_hash")?,
         entry_id: row.try_get("", "entry_id")?,
     })
 }
@@ -182,6 +191,8 @@ impl MusicDb {
             last_status: Set(None),
             last_error: Set(None),
             last_stats: Set(None),
+            full_walk_at: Set(None),
+            full_walk_hash: Set(None),
         })
         .exec(&self.db)
         .await?;
@@ -236,6 +247,22 @@ impl MusicDb {
     }
 
     /// Records the outcome of an update run on a root.
+    /// Records that `ids` were walked in full at `at` with fetch options
+    /// hashing to `hash`.
+    pub async fn record_full_walk(&self, ids: &[i64], at: i64, hash: &str) -> Result<(), Error> {
+        let _guard = self.write_lock.lock().await;
+        for id in ids {
+            self.db
+                .execute_raw(Statement::from_sql_and_values(
+                    self.db.get_database_backend(),
+                    "UPDATE update_root SET full_walk_at = ?, full_walk_hash = ? WHERE id = ?",
+                    [at.into(), hash.into(), (*id).into()],
+                ))
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn record_update_root_run(
         &self,
         id: i64,

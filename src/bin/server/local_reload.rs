@@ -143,6 +143,7 @@ impl Reloader {
             candidates.iter().map(|(id, _, _)| id.clone()).collect(),
             Some(progress.clone()),
             None,
+            false,
         )
         .await?;
         let fetched = progress.0.lock().unwrap();

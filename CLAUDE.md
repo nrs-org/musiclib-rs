@@ -23,6 +23,7 @@ RUST_LOG=musiclib_rs=info,import=info cargo run --bin import -- <url>... [--url-
 # serving their snapshots; --refresh=full refetches everything
 cargo run --bin import -- --refresh <url> --fetch-options <name>
 cargo run --release --bin import -- --update   # daily cron: the player's update roots (docs/plan-update-roots.md)
+cargo run --release --bin import -- --update --full   # walk every root in full instead of pruning known pairs (docs/plan-fast-update.md)
 
 # Record every identity link on an existing DB, then let re-imports split
 # entries a removed link disconnects (docs/plan-identity-retraction.md)

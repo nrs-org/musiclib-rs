@@ -75,6 +75,12 @@ struct Args {
     /// behind the newest published one before the update refuses to run.
     #[arg(long, default_value_t = 36, requires = "update")]
     mb_max_server_lag: i64,
+    /// With `--update`: walk every root in full. Otherwise a root is walked
+    /// in full only when it never was, its fetch options changed, or its
+    /// last full walk is a week old; between those, what earlier runs
+    /// fetched is skipped (docs/plan-fast-update.md, Phase 3b).
+    #[arg(long, requires = "update")]
+    full: bool,
     /// Skip the pre-import pass that re-applies violated barriers.
     #[arg(long)]
     skip_dedup: bool,
@@ -182,6 +188,7 @@ async fn backfill_links(
                 chunk.to_vec(),
                 None,
                 None,
+                false,
             )
             .await?;
         }
@@ -378,6 +385,8 @@ async fn run() -> anyhow::Result<()> {
             &UpdateOptions {
                 quota_budget: Some(args.quota_budget.unwrap_or(8000)),
                 mb_max_server_lag: Some(args.mb_max_server_lag),
+                full: args.full,
+                ..UpdateOptions::default()
             },
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
@@ -446,6 +455,7 @@ async fn run() -> anyhow::Result<()> {
         urls.clone(),
         None,
         args.max_fetches,
+        false,
     )
     .await?;
     for (url, entry_id) in urls.iter().zip(&outcome.entry_ids) {
