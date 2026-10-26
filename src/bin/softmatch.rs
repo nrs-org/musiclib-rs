@@ -175,6 +175,7 @@ async fn run() -> anyhow::Result<()> {
         candidate_ngram_k: args.candidate_ngram_k,
         verbose_decisions: args.verbose_decisions,
         http_client: Some(http_for_script),
+        progress: None,
     };
 
     match args.entries {

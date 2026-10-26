@@ -14,7 +14,10 @@ use std::{
     },
 };
 
-use musiclib_rs::pipeline::{progress::HttpActivityClient, state::ImportProgress};
+use musiclib_rs::pipeline::{
+    progress::HttpActivityClient,
+    state::{ImportPhase, ImportProgress},
+};
 use serde_json::json;
 
 use crate::jobs::JobHandle;
@@ -116,6 +119,8 @@ impl JobProgressSink {
 
 impl ImportProgress for JobProgressSink {
     fn fetching(&self, pair: &Pair) {
+        // The next import of an update is walking again.
+        self.extra.lock().unwrap().remove("phase");
         let line = format!("fetching {}:{}", pair.0, pair.1);
         self.push_line(line.clone());
         self.report(line);
@@ -141,5 +146,39 @@ impl ImportProgress for JobProgressSink {
         }
         self.push_line(format!("✕ {line}"));
         self.report(format!("✕ {line}"));
+    }
+
+    /// The step becomes the job's message, and `detail.phase`.
+    fn phase(&self, phase: &ImportPhase) {
+        self.extra
+            .lock()
+            .unwrap()
+            .insert("phase".to_string(), json!(phase));
+        self.report(phase_message(phase));
+    }
+}
+
+fn phase_message(phase: &ImportPhase) -> String {
+    let of = |done: usize, total: usize| format!("{done} of {total}");
+    match *phase {
+        ImportPhase::Saving => "saving to the library".to_string(),
+        ImportPhase::Committing => "committing the import".to_string(),
+        ImportPhase::Embedding => "soft-dedup: embedding titles".to_string(),
+        ImportPhase::Candidates => "soft-dedup: finding candidate pairs".to_string(),
+        ImportPhase::Preparing { done, total } => {
+            format!("soft-dedup: preparing entries, {}", of(done, total))
+        }
+        ImportPhase::Scoring { total } => {
+            format!("soft-dedup: scoring {total} candidate pair(s)")
+        }
+        ImportPhase::Refining { done, total } => {
+            format!(
+                "soft-dedup: refining verdicts (Jev), {} pairs",
+                of(done, total)
+            )
+        }
+        ImportPhase::Applying { done, total } => {
+            format!("soft-dedup: writing verdicts, {}", of(done, total))
+        }
     }
 }
